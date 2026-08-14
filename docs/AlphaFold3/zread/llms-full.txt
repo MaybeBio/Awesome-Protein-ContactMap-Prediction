@@ -1,0 +1,2779 @@
+# google-deepmind/alphafold3
+
+Source: https://zread.ai/google-deepmind/alphafold3
+
+# 开始使用
+
+- [开始使用/概述](https://zread.ai/google-deepmind/alphafold3/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+AlphaFold 3 是谷歌 DeepMind 开发的用于生物分子结构预测的最新 AI 系统。这一革命性工具在计算结构生物学领域取得了重大突破，使研究人员能够以前所未有的精度预测复杂生物分子的三维结构及其相互作用。本概述将向您介绍 AlphaFold 3 的功能、工作流程和需求。
+
+## 什么是 AlphaFold 3？
+
+AlphaFold 3 是一个深度学习系统，旨在根据生物分子复合物的序列预测其三维结构。它在 AlphaFold 2 的基础上进行了扩展，极大地增加了其可以建模的分子和相互作用的范围。
+
+与之前的版本不同，AlphaFold 3 不仅可以预测蛋白质结构，还可以预测 RNA 和 DNA 结构、配体结合、翻译后修饰以及多个链和分子之间的复杂相互作用。这一能力使研究人员能够以前所未有的细节水平研究生物过程，从而可能加速从基础科学到药物设计等领域的发现。
+
+## 关键特性与能力
+
+### 多样化的生物分子预测
+
+AlphaFold 3 可以准确预测以下类型的结构：
+
+| 生物分子类型 | 特性 |
+|--------------|------|
+| 蛋白质 | 天然序列，翻译后修饰 |
+| RNA | 天然序列，修饰碱基 |
+| DNA | 天然序列，修饰碱基 |
+| 配体 | CCD 码，SMILES 字符串，自定义定义 |
+| 复合物 | 具有定义相互作用的多个链 |
+
+AlphaFold 3 支持指定实体之间的共价键，使得建模复杂结构（如糖基化蛋白质或共价结合的药物分子）成为可能。
+
+### 灵活的输入选项
+
+系统接受自定义 JSON 输入格式，提供了对预测过程的广泛控制：
+
+- 指定蛋白质、RNA 和 DNA 链，包括修饰残基
+- 使用化学成分字典码或 SMILES 表示法定义配体
+- 提供自定义多序列比对（MSA）或结构模板
+- 在实体之间创建共价键
+- 定义具有多个链和相互作用的复杂结构
+
+<CgxTip>
+对于大多数用例，您只需在 JSON 文件中提供生物分子的序列，AlphaFold 3 将处理其余部分。高级选项（如自定义 MSA 和模板）适用于希望对预测过程有更多控制的专家用户。
+</CgxTip>
+
+### 全面输出
+
+AlphaFold 3 生成详细的输出，包括：
+
+- mmCIF 格式的 3D 结构预测
+- 整个结构和特定相互作用的置信度指标
+- 详细的原子和残基置信度评分
+- 可选的距阵图和嵌入，用于进一步分析
+
+置信度指标帮助研究人员评估预测结构中哪些部分最为可靠，从而指导实验验证和解释。
+
+## AlphaFold 3 的工作原理
+
+AlphaFold 3 的工作流程包括两个主要阶段：
+
+```mermaid
+flowchart TD
+    A[输入 JSON] --> B[数据管道]
+    B --> C[模型推理]
+    C --> D[结构预测]
+    
+    subgraph "CPU 密集型"
+    B --> B1[遗传搜索]
+    B --> B2[模板搜索]
+    end
+    
+    subgraph "GPU 密集型"
+    C --> C1[特征化]
+    C --> C2[结构预测]
+    end
+    
+    D --> E[mmCIF 格式的 3D 结构]
+    D --> F[置信度指标]
+```
+
+1. **数据管道（CPU 密集型）**
+   - 执行遗传搜索以构建多序列比对（MSA）
+   - 搜索蛋白质的结构模板
+   - 可以在仅支持 CPU 的机器上单独运行
+
+2. **模型推理（GPU 密集型）**
+   - 处理特征以预测 3D 结构
+   - 生成预测的置信度指标
+   - 需要兼容的 NVIDIA GPU
+
+这些阶段可以一起运行，也可以单独运行，从而在不同的计算环境中实现灵活部署。
+
+## 系统需求
+
+### 硬件
+
+AlphaFold 3 有显著的硬件需求：
+
+- **GPU**：NVIDIA GPU，计算能力 8.0 或更高（推荐 A100 或 H100）
+- **内存**：至少 64GB RAM 用于数据管道
+- **存储**：最多 1TB 用于遗传数据库（推荐 SSD 以提高性能）
+- **操作系统**：Linux（不支持其他操作系统）
+
+为了获得最佳性能，推荐使用 NVIDIA A100（80GB）或 H100（80GB），可以处理最多 5,120 个标记的输入。对于更大的输入或内存较小的 GPU，需要额外的配置。
+
+### 软件 & 数据
+
+- **容器运行时**：Docker 或 Singularity
+- **遗传数据库**：需要多个数据库（BFD、MGnify、PDB 等）
+- **模型参数**：通过请求表单获得批准后访问
+- **CUDA 驱动程序**：与安装的 GPU 兼容
+
+数据库的总下载大小约为 252GB，解压后扩展到 630GB。
+
+## 实际考虑
+
+### 性能
+
+AlphaFold 3 的性能根据输入大小而变化：
+
+| 标记数 | A100 80GB（秒） | H100 80GB（秒） |
+|--------|-----------------|-----------------|
+| 1024   | 62              | 34              |
+| 2048   | 275             | 144             |
+| 3072   | 703             | 367             |
+| 4096   | 1434            | 774             |
+| 5120   | 2547            | 1416            |
+
+数据管道的运行时间取决于输入大小、找到的同源序列数量和硬件能力。为了获得最佳性能，推荐使用 SSD 或 RAM 支持的文件系统。
+
+### 模型参数访问
+
+要使用 AlphaFold 3，您必须通过谷歌 DeepMind 提供的表单请求访问模型参数。访问权限由谷歌 DeepMind 自行决定，模型参数的使用受特定条款和条件的约束。
+
+## 下一步？
+
+现在您已经对 AlphaFold 3 有了高层次的了解，您可以：
+
+1. 按照快速入门指南运行您的首次预测
+2. 了解详细的安装步骤
+3. 设置所需的数据库
+4. 了解如何准备输入文件
+
+对于希望深入了解的开发者，可以探索架构概述和模型组件及算法部分。
+
+---
+
+- [开始使用/快速入门](https://zread.ai/google-deepmind/alphafold3/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+AlphaFold 3 是 Google DeepMind 在结构预测领域的最新突破，能够预测蛋白质、RNA、DNA 和配体的结构及其相互作用。本指南将帮助您在几分钟内完成首次 AlphaFold 3 预测。
+
+## 前置条件
+
+在开始之前，请确保您具备以下条件：
+
+- **硬件**：一台配备 NVIDIA GPU（计算能力 8.0+，例如 A100、H100）、64GB+ RAM 和约 1TB 存储空间的 Linux 机器
+- **软件**：Docker 或 Singularity
+- **访问权限**：从 Google 获取模型参数（您需要单独请求这些参数）
+
+参考资料：[README.md](README.md)，[docs/installation.md](docs/installation.md)
+
+## 五步完成首次预测
+
+### 1. 克隆仓库
+
+```bash
+git clone https://github.com/google-deepmind/alphafold3.git
+cd alphafold3
+```
+
+### 2. 下载遗传数据库
+
+AlphaFold 3 需要多个遗传数据库进行搜索。仓库中包含一个脚本，用于下载所有数据库：
+
+```bash
+./fetch_databases.sh $HOME/public_databases
+```
+
+<CgxTip>此步骤将下载约 252GB 数据并解压至约 630GB。考虑到下载时间约为 45 分钟（在良好网络速度下），建议在 screen/tmux 会话中运行。</CgxTip>
+
+参考资料：[docs/installation.md](docs/installation.md)，[fetch_databases.sh](fetch_databases.sh)
+
+### 3. 构建 Docker 容器
+
+```bash
+docker build -t alphafold3 -f docker/Dockerfile .
+```
+
+### 4. 创建简单的输入文件
+
+为您的输入和输出创建目录：
+
+```bash
+mkdir -p $HOME/af_input $HOME/af_output
+```
+
+创建一个名为 `$HOME/af_input/fold_input.json` 的文件，内容如下：
+
+```json
+{
+  "name": "我的首次预测",
+  "sequences": [
+    {
+      "protein": {
+        "id": ["A", "B"],
+        "sequence": "GMRESYANENQFGFKTINSDIHKIVIVGGYGKLGGLFARYLRASGYPISILDREDWAVAESILANADVVIVSVPINLTLETIERLKPYLTENMLLADLTSVKREPLAKMLEVHTGAVLGLHPMFGADIASMAKQVVVRCDGRFPERYEWLLEQIQIWGAKIYQTNATEHDHNMTYIQALRHFSTFANGLHLSKQPINLANLLALSSPIYRLELAMIGRLFAQDAELYADIIMDKSENLAVIETLKQTYDEALTFFENNDRQGFIDAFHKVRDWFGDYSEQFLKESRQLLQQANDLKQG"
+      }
+    }
+  ],
+  "modelSeeds": [1],
+  "dialect": "alphafold3",
+  "version": 1
+}
+```
+
+此示例预测一个同源二聚体（同一蛋白质链的两个副本）。
+
+参考资料：[README.md](README.md)，[docs/input.md](docs/input.md)
+
+### 5. 运行 AlphaFold 3
+
+```bash
+docker run -it \
+    --volume $HOME/af_input:/root/af_input \
+    --volume $HOME/af_output:/root/af_output \
+    --volume <MODEL_PARAMETERS_DIR>:/root/models \
+    --volume $HOME/public_databases:/root/public_databases \
+    --gpus all \
+    alphafold3 \
+    python run_alphafold.py \
+    --json_path=/root/af_input/fold_input.json \
+    --model_dir=/root/models \
+    --output_dir=/root/af_output
+```
+
+将 `<MODEL_PARAMETERS_DIR>` 替换为您存储 AlphaFold 3 模型参数的路径。
+
+参考资料：[README.md](README.md)，[run_alphafold.py](run_alphafold.py)
+
+## 理解输出结果
+
+运行成功后，您将在输出目录中找到一个名为 `my_first_prediction` 的目录，其中包含：
+
+- `my_first_prediction_model.cif`：最高排名的预测结构，以 mmCIF 格式保存（可在 PyMOL、ChimeraX 或 VMD 等分子查看器中查看）
+- `my_first_prediction_confidences.json`：详细的置信度指标
+- `my_first_prediction_summary_confidences.json`：摘要置信度指标
+- 每个种子和样本的子目录，包含额外的预测结果
+
+关键置信度指标包括：
+
+- **pLDDT**（0-100）：每个原子的置信度评分，越高越好
+- **pTM**（0-1）：整个结构的预测 TM 评分，>0.5 表示折叠正确
+- **ipTM**（0-1）：预测的界面 TM 评分，>0.8 表示对界面有高置信度
+
+参考资料：[docs/output.md](docs/output.md)
+
+## 灵活选项
+
+### 仅运行数据管道或仅运行推理
+
+AlphaFold 3 的过程有两个主要阶段，可以分别运行：
+
+```bash
+# 仅运行数据管道（MSA 搜索，模板搜索 - CPU 密集型）
+python run_alphafold.py --run_data_pipeline=true --run_inference=false ...
+
+# 仅运行推理（需要数据管道结果 - GPU 密集型）
+python run_alphafold.py --run_data_pipeline=false --run_inference=true ...
+```
+
+这种分离允许您在一台机器上运行 CPU 密集型搜索，在另一台机器上运行 GPU 密集型预测。
+
+### 处理不同类型的分子
+
+AlphaFold 3 可以预测以下结构的结构：
+
+- **蛋白质**：使用 `"protein": {"id": "A", "sequence": "..."}` 指定
+- **RNA**：使用 `"rna": {"id": "B", "sequence": "..."}` 指定
+- **DNA**：使用 `"dna": {"id": "C", "sequence": "..."}` 指定
+- **配体**：使用 CCD 码或 SMILES 字符串指定
+
+### 探索高级功能
+
+对于更复杂的预测，您可以指定：
+
+- 具有不同序列的多条链
+- 使用 CCD 码或 SMILES 字符串指定的配体
+- 翻译后修饰
+- 自定义 MSA 和模板
+- 实体间的共价键
+
+参考资料：[docs/input.md](docs/input.md)
+
+## 故障排除技巧
+
+- **"Failed to construct RDKit reference structure"**：尝试增加构象迭代次数，使用 `--conformer_max_iterations=1000`
+- **MSA 工具错误**：确保数据库具有正确的权限（`chmod 755 -R public_databases`）
+- **内存错误**：对于大型蛋白质/复合物，考虑使用更多 RAM 的机器
+
+参考资料：[docs/known_issues.md](docs/known_issues.md)
+
+## 下一步
+
+- **探索输入选项**：查看 [输入文档](docs/input.md) 了解更复杂的示例
+- **分析置信度指标**：学习如何解读 [输出数据](docs/output.md) 以评估预测质量
+- **运行多个种子**：在 `modelSeeds` 中设置多个值以生成多样化的预测
+
+AlphaFold 3 通过准确预测复杂生物分子结构，为结构生物学开辟了新的可能性。使用这一强大工具推进您在蛋白质-蛋白质、蛋白质-RNA/DNA 和蛋白质-配体相互作用领域的研究。
+
+---
+
+- [开始使用/安装](https://zread.ai/google-deepmind/alphafold3/3-installation)
+
+---
+slug:3-installation
+blog_type:normal
+---
+
+
+本指南将指导您安装和设置AlphaFold 3，DeepMind的强大蛋白质结构预测系统。我们将涵盖系统要求、安装选项以及如何运行您的首次预测。
+
+## 系统要求
+
+在开始安装之前，请确保您的系统满足以下要求：
+
+| 组件 | 最低要求 | 推荐配置 |
+|------|----------|----------|
+| 操作系统 | Linux（已验证Ubuntu 22.04 LTS） | Linux（Ubuntu 22.04 LTS） |
+| 存储 | 1 TB用于数据库 | 1 TB SSD以提高性能 |
+| GPU | NVIDIA，计算能力8.0+ | NVIDIA A100 80GB或H100 80GB |
+| 内存（RAM） | 64 GB | 170 GB用于大型结构 |
+| CUDA | 12.6 | 12.6 |
+
+<CgxTip>
+AlphaFold 3已验证，最多包含5,120个token的输入可以在单个NVIDIA A100 80GB或H100 80GB GPU上运行。更大内存的GPU可以预测更大的蛋白质结构。
+</CgxTip>
+
+## 安装选项
+
+您可以使用以下两种容器选项之一来安装AlphaFold 3：
+
+1. **Docker**（主要方法） - 对大多数用户来说最简单
+2. **Singularity** - 在不适合使用Docker的环境中作为替代
+
+本指南将涵盖这两种方法的逐步说明。
+
+## 安装概述
+
+完整的安装过程涉及几个关键步骤：
+
+```mermaid
+flowchart TD
+    A[准备Linux机器] --> B[安装Docker/Singularity]
+    B --> C[安装NVIDIA驱动]
+    C --> D[下载AlphaFold 3代码]
+    D --> E[获取遗传数据库]
+    D --> F[请求模型参数]
+    E & F --> G[构建容器]
+    G --> H[运行首次预测]
+```
+
+让我们详细讲解每个步骤。
+
+## 步骤1：准备机器
+
+如果您需要设置新机器，可以使用Google Cloud、AWS或Azure等云服务提供商，并选择Ubuntu 22.04 LTS。
+
+对于Google Cloud，文档建议：
+
+```sh
+gcloud compute instances create alphafold3 \
+    --machine-type a2-ultragpu-1g \
+    --zone us-central1-a \
+    --image-family ubuntu-2204-lts \
+    --image-project ubuntu-os-cloud \
+    --maintenance-policy TERMINATE \
+    --boot-disk-size 1000 \
+    --boot-disk-type pd-balanced
+```
+
+这将创建一个A2 Ultra机器，配备12个CPU、170 GB RAM、1 TB磁盘和NVIDIA A100 80GB GPU。
+
+## 步骤2：安装Docker
+
+AlphaFold 3使用Docker容器来管理其依赖项。以下是在Ubuntu 22.04上安装Docker的方法：
+
+1. 添加Docker的官方GPG密钥：
+   ```sh
+   sudo apt-get update
+   sudo apt-get install ca-certificates curl
+   sudo install -m 0755 -d /etc/apt/keyrings
+   sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+   sudo chmod a+r /etc/apt/keyrings/docker.asc
+   ```
+
+2. 添加Docker仓库并安装Docker：
+   ```sh
+   echo \
+     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+     $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+     sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+   sudo apt-get update
+   sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+   sudo docker run hello-world
+   ```
+
+3. 启用无根Docker（可选但推荐）：
+   ```sh
+   sudo apt-get install -y uidmap systemd-container
+   
+   sudo machinectl shell $(whoami)@ /bin/bash -c 'dockerd-rootless-setuptool.sh install && sudo loginctl enable-linger $(whoami) && DOCKER_HOST=unix:///run/user/1001/docker.sock docker context use rootless'
+   ```
+
+## 步骤3：安装GPU支持
+
+要使用Docker中的GPU，您需要安装NVIDIA驱动并配置Docker以访问GPU：
+
+1. 安装NVIDIA驱动：
+   ```sh
+   sudo apt-get -y install alsa-utils ubuntu-drivers-common
+   sudo ubuntu-drivers install
+   
+   sudo nvidia-smi --gpu-reset
+   
+   nvidia-smi  # 检查驱动是否已安装。
+   ```
+
+   如果`nvidia-smi`因通信错误失败，请使用`sudo reboot now`重启机器。
+
+2. 为Docker安装NVIDIA支持：
+   ```sh
+   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+     && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+       sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+       sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+   sudo apt-get update
+   sudo apt-get install -y nvidia-container-toolkit
+   nvidia-ctk runtime configure --runtime=docker --config=$HOME/.config/docker/daemon.json
+   systemctl --user restart docker
+   sudo nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place
+   ```
+
+3. 验证Docker对GPU的访问：
+   ```sh
+   docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
+   ```
+
+您应该看到输出中显示您的GPU信息。
+
+## 步骤4：下载AlphaFold 3代码
+
+从GitHub克隆AlphaFold 3仓库：
+
+```sh
+git clone https://github.com/google-deepmind/alphafold3.git
+```
+
+## 步骤5：获取遗传数据库
+
+AlphaFold 3需要多个遗传数据库来进行预测。您需要大约**252 GB**的下载带宽和**630 GB**的存储空间来存放未压缩的数据库。
+
+1. 安装必备软件：
+   ```sh
+   sudo apt install wget zstd
+   ```
+
+2. 运行提供的脚本以下载所有数据库：
+   ```sh
+   cd alphafold3  # 导航到克隆的仓库
+   ./fetch_databases.sh [<DB_DIR>]
+   ```
+
+   如果未指定`<DB_DIR>`，数据库将下载到`$HOME/public_databases`。
+
+<CgxTip>
+**重要提示：** 不要将数据库放置在AlphaFold 3仓库的子目录中，因为这会使Docker构建非常缓慢。同时，确保数据库目录具有适当的权限，使用`sudo chmod 755 --recursive <DB_DIR>`。
+
+下载完成后，您的数据库目录中应包含以下文件：
+```
+mmcif_files/  # 包含PDB mmCIF文件的目录
+bfd-first_non_consensus_sequences.fasta
+mgy_clusters_2022_05.fa
+nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta
+pdb_seqres_2022_09_28.fasta
+rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta
+rnacentral_active_seq_id_90_cov_80_linclust.fasta
+uniprot_all_2021_04.fa
+uniref90_2022_05.fa
+```
+
+为了提高性能，您可以使用提供的脚本将数据库移动到SSD：
+- `src/scripts/gcp_mount_ssd.sh [<SSD_MOUNT_PATH>]` - 挂载并格式化GCP SSD
+- `src/scripts/copy_to_ssd.sh [<DB_DIR>] [<SSD_DB_DIR>]` - 将数据库复制到SSD
+
+## 步骤6：获取模型参数
+
+AlphaFold 3的模型参数需要特殊访问权限：
+
+1. 完成[此表单](https://forms.gle/svvpY4u2jsHEwWYS6)以请求访问权限
+2. 等待批准（通常需要2-3个工作日）
+3. 一旦批准，将参数下载到您选择的目录（`<MODEL_PARAMETERS_DIR>`）
+
+<CgxTip>
+模型参数**不应**放置在AlphaFold 3仓库的子目录中。使用需遵守[使用条款](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)。
+
+## 步骤7：构建AlphaFold 3容器
+
+### 选项A：Docker容器（推荐）
+
+构建包含所有必需依赖项的Docker容器：
+
+```sh
+cd alphafold3  # 如果您不在仓库目录中
+docker build -t alphafold3 -f docker/Dockerfile .
+```
+
+这将构建一个基于Ubuntu 24.04、CUDA 12.6.3、Python 3.12以及所有必要工具（包括用于序列搜索的HMMER）的容器。构建过程自动：
+
+1. 设置Python环境
+2. 下载并构建带有序列限制补丁的HMMER
+3. 安装所有Python依赖项
+4. 配置内存设置以优化性能
+
+### 选项B：Singularity容器
+
+如果您更喜欢使用Singularity而不是Docker，请按照以下步骤操作：
+
+1. 安装Singularity：
+   ```sh
+   wget https://github.com/sylabs/singularity/releases/download/v4.2.1/singularity-ce_4.2.1-jammy_amd64.deb
+   sudo dpkg --install singularity-ce_4.2.1-jammy_amd64.deb
+   sudo apt-get install -f
+   ```
+
+2. 如上所述构建Docker容器，然后创建本地Docker注册表：
+   ```sh
+   docker run -d -p 5000:5000 --restart=always --name registry registry:2
+   docker tag alphafold3 localhost:5000/alphafold3
+   docker push localhost:5000/alphafold3
+   ```
+
+3. 构建Singularity容器：
+   ```sh
+   SINGULARITY_NOHTTPS=1 singularity build alphafold3.sif docker://localhost:5000/alphafold3:latest
+   ```
+
+4. 验证构建：
+   ```sh
+   singularity exec --nv alphafold3.sif sh -c 'nvidia-smi'
+   ```
+
+## 运行您的首次预测
+
+现在AlphaFold 3已安装，您可以运行您的首次预测：
+
+1. 创建输入目录并准备输入JSON文件：
+   ```sh
+   mkdir -p $HOME/af_input
+   mkdir -p $HOME/af_output
+   chmod 755 $HOME/af_input $HOME/af_output
+   ```
+
+2. 在`$HOME/af_input/fold_input.json`中创建输入JSON文件，使用README中的示例或遵循[输入文档](https://github.com/google-deepmind/alphafold3/blob/main/docs/input.md)。
+
+3. 使用Docker运行AlphaFold 3：
+
+   ```sh
+   docker run -it \
+       --volume $HOME/af_input:/root/af_input \
+       --volume $HOME/af_output:/root/af_output \
+       --volume <MODEL_PARAMETERS_DIR>:/root/models \
+       --volume <DB_DIR>:/root/public_databases \
+       --gpus all \
+       alphafold3 \
+       python run_alphafold.py \
+       --json_path=/root/af_input/fold_input.json \
+       --model_dir=/root/models \
+       --output_dir=/root/af_output
+   ```
+
+   或者如果使用Singularity：
+
+   ```sh
+   singularity exec \
+        --nv \
+        --bind $HOME/af_input:/root/af_input \
+        --bind $HOME/af_output:/root/af_output \
+        --bind <MODEL_PARAMETERS_DIR>:/root/models \
+        --bind <DB_DIR>:/root/public_databases \
+        alphafold3.sif \
+        python run_alphafold.py \
+        --json_path=/root/af_input/fold_input.json \
+        --model_dir=/root/models \
+        --db_dir=/root/public_databases \
+        --output_dir=/root/af_output
+   ```
+
+4. 为了提高数据库部分在SSD上的性能：
+
+   ```sh
+   docker run -it \
+       --volume $HOME/af_input:/root/af_input \
+       --volume $HOME/af_output:/root/af_output \
+       --volume <MODEL_PARAMETERS_DIR>:/root/models \
+       --volume <SSD_DB_DIR>:/root/public_databases \
+       --volume <DB_DIR>:/root/public_databases_fallback \
+       --gpus all \
+       alphafold3 \
+       python run_alphafold.py \
+       --json_path=/root/af_input/fold_input.json \
+       --model_dir=/root/models \
+       --db_dir=/root/public_databases \
+       --db_dir=/root/public_databases_fallback \
+       --output_dir=/root/af_output
+   ```
+
+5. 查看所有可用选项：
+
+   ```sh
+   docker run alphafold3 python run_alphafold.py --help
+   ```
+
+## 故障排除
+
+- **挂载源路径错误**：如果看到“权限拒绝”之类的错误，请确保模型和数据库目录存在并具有适当的权限。
+- **NVIDIA驱动问题**：如果安装后`nvidia-smi`失败，尝试使用`sudo reboot now`重启。
+- **缺失数据库文件**：仔细检查所有数据库文件是否已成功下载，并确保在Docker/Singularity命令中使用正确的路径。
+- **内存问题**：对于大型蛋白质结构，通过修改Docker容器中的环境变量或通过`run_alphafold.py`的命令行参数调整内存设置。
+
+---
+
+## 数据处理
+
+- [开始使用/数据处理/数据库设置](https://zread.ai/google-deepmind/alphafold3/4-database-setup)
+
+---
+slug:4-database-setup
+blog_type:normal
+---
+
+
+设置所需的数据库是成功运行AlphaFold 3的关键步骤。本指南将指导您了解数据库需求、下载过程、优化技术以及这些数据库在预测工作流程中的使用方式。
+
+## AlphaFold 3需要哪些数据库？
+
+AlphaFold 3需要多个遗传和结构数据库来有效进行预测。这些数据库对于以下方面至关重要：
+
+1. **生成蛋白质和RNA序列的多序列比对（MSA）**
+2. **寻找蛋白质链的结构模板**
+3. **支持配体构象生成**
+
+以下是所需数据库的详细列表：
+
+| 数据库 | 用途 | 压缩大小 | 未压缩大小 |
+|--------|------|-----------|-------------|
+| PDB mmCIF文件 | 结构信息 | ~50 GB | ~150 GB |
+| BFD（小型） | 蛋白质序列数据库 | ~65 GB | ~185 GB |
+| MGnify | 元基因组序列 | ~35 GB | ~95 GB |
+| UniRef90 | 非冗余蛋白质簇 | ~25 GB | ~65 GB |
+| UniProt | 综合蛋白质数据库 | ~50 GB | ~85 GB |
+| PDB seqres | PDB序列 | ~0.1 GB | ~0.3 GB |
+| RNACentral | 非编码RNA数据库 | ~10 GB | ~20 GB |
+| NT | 核苷酸数据库 | ~15 GB | ~25 GB |
+| RFam | RNA家族数据库 | ~2 GB | ~5 GB |
+
+**总大小：** ~252 GB（压缩），~630 GB（未压缩）
+
+<CgxTip>
+💡 强烈建议使用SSD存储数据库，因为这可以显著提高遗传搜索阶段的搜索性能。
+</CgxTip>
+
+来源：[fetch_databases.sh](fetch_databases.sh), [docs/installation.md#obtaining-genetic-databases](docs/installation.md)
+
+## 下载数据库
+
+AlphaFold 3提供了一个便捷的脚本，自动化下载和设置所有所需数据库。以下是使用方法：
+
+1. 确保已安装必要的工具：
+```bash
+# 对于基于Debian的系统
+sudo apt install wget zstd
+```
+
+2. 运行数据库下载脚本：
+```bash
+cd alphafold3  # 导航到AlphaFold 3存储库目录
+./fetch_databases.sh [<DB_DIR>]
+```
+
+如果未指定`<DB_DIR>`，默认位置为`$HOME/public_databases`。
+
+<CgxTip>
+⚠️ 下载目录不应是AlphaFold 3存储库的子目录。这会导致Docker构建变慢，因为它会在镜像创建过程中复制大型数据库。
+</CgxTip>
+
+该脚本从托管在Google Cloud Storage上的镜像下载数据库，所有版本与AlphaFold 3论文中使用的版本相同。由于总下载量较大（~252 GB），建议在`screen`或`tmux`会话中运行。
+
+来源：[fetch_databases.sh](fetch_databases.sh), [docs/installation.md#obtaining-genetic-databases](docs/installation.md)
+
+## 数据库目录结构
+
+成功运行fetch脚本后，您的数据库目录应具有以下结构：
+
+```
+<DB_DIR>/
+├── mmcif_files/          # 包含~200k PDB mmCIF文件的目录
+├── bfd-first_non_consensus_sequences.fasta
+├── mgy_clusters_2022_05.fa
+├── nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta
+├── pdb_seqres_2022_09_28.fasta
+├── rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta
+├── rnacentral_active_seq_id_90_cov_80_linclust.fasta
+├── uniprot_all_2021_04.fa
+└── uniref90_2022_05.fa
+```
+
+验证所有文件是否存在并具有适当的读取权限。如果遇到权限问题，您可能需要运行：
+
+```bash
+sudo chmod 755 --recursive <DB_DIR>
+```
+
+来源：[docs/installation.md#obtaining-genetic-databases](docs/installation.md)
+
+## 使用SSD优化数据库性能
+
+为了获得最佳性能，强烈建议使用SSD存储数据库，特别是在遗传搜索阶段。AlphaFold 3提供了两个辅助脚本用于此目的：
+
+### 1. 挂载SSD（适用于云环境）
+
+如果您使用的是带有附加SSD的云实例，需要挂载：
+
+```bash
+src/scripts/gcp_mount_ssd.sh [<SSD_MOUNT_PATH>]
+```
+
+该脚本将未挂载的驱动器挂载并格式化为指定路径。默认挂载路径为`/mnt/disks/ssd`。
+
+### 2. 将数据库复制到SSD
+
+要将数据库从原始位置复制到SSD：
+
+```bash
+src/scripts/copy_to_ssd.sh [<DB_DIR>] [<SSD_DB_DIR>]
+```
+
+该脚本尽可能多地将数据库文件复制到SSD。默认源目录为`$HOME/public_databases`，默认目标目录为`/mnt/disks/ssd/public_databases`。
+
+如果您的SSD不足以容纳所有数据库，您仍可以通过将最频繁访问的数据库复制到SSD，并将其余数据库保留在较慢的存储上受益。AlphaFold 3支持指定多个数据库目录。
+
+来源：[docs/installation.md#obtaining-genetic-databases](docs/installation.md)
+
+## 在Docker或Singularity中使用数据库
+
+在容器中运行AlphaFold 3时，您需要通过卷挂载使数据库对容器可访问。
+
+### Docker示例：
+
+```bash
+docker run -it \
+    --volume $HOME/af_input:/root/af_input \
+    --volume $HOME/af_output:/root/af_output \
+    --volume <MODEL_PARAMETERS_DIR>:/root/models \
+    --volume <DB_DIR>:/root/public_databases \
+    --gpus all \
+    alphafold3 \
+    python run_alphafold.py \
+    --json_path=/root/af_input/fold_input.json \
+    --model_dir=/root/models \
+    --output_dir=/root/af_output
+```
+
+### 使用多个数据库目录：
+
+如果您有一些数据库在SSD上，而其他数据库在较慢的磁盘上，可以同时挂载并指定多个数据库目录：
+
+```bash
+docker run -it \
+    # ... 其他卷 ...
+    --volume <SSD_DB_DIR>:/root/public_databases \
+    --volume <DB_DIR>:/root/public_databases_fallback \
+    --gpus all \
+    alphafold3 \
+    python run_alphafold.py \
+    # ... 其他参数 ...
+    --db_dir=/root/public_databases \
+    --db_dir=/root/public_databases_fallback \
+    --output_dir=/root/af_output
+```
+
+对于Singularity，使用`--bind`标志代替`--volume`即可。
+
+来源：[docs/installation.md#building-the-docker-container-that-will-run-alphafold-3](docs/installation.md)
+
+## AlphaFold 3如何使用数据库
+
+了解AlphaFold 3如何利用这些数据库可以帮助您优化设置：
+
+### 1. 多序列比对（MSA）构建
+
+对于蛋白质和RNA链，AlphaFold 3通过搜索遗传数据库构建MSA：
+
+- **蛋白质MSA**：使用Jackhmmer在UniRef90、BFD、MGnify、UniProt和PDB序列上进行搜索生成
+- **RNA MSA**：使用Nhmmer在RNACentral、NT和RFam数据库上进行搜索生成
+
+这些搜索识别出进化上相关的序列，为模型提供重要的共进化信息。
+
+### 2. 模板搜索
+
+对于蛋白质链，AlphaFold 3搜索PDB mmCIF文件以找到可能指导预测的结构模板。
+
+### 3. 自定义输入与数据库搜索
+
+用户可以选择：
+
+- **自动生成MSA**：AlphaFold 3执行数据库搜索以构建MSA（默认）
+- **自定义MSA输入**：用户提供预计算的MSA，跳过数据库搜索
+- **无MSA模式**：不使用任何MSA信息运行
+
+同样对于模板，用户可以：
+- **使用自动模板搜索**：AlphaFold 3搜索PDB以找到模板
+- **提供自定义模板**：跳过数据库搜索模板
+- **无模板运行**：完全禁用模板使用
+
+### 4. 数据库搜索过程
+
+在自动生成MSA的情况下，过程如下：
+
+1. 对于每个蛋白质链，Jackhmmer搜索每个蛋白质数据库
+2. 对于每个RNA链，Nhmmer搜索每个RNA数据库
+3. 结果被过滤和处理以构建MSA
+4. 对于蛋白质链，HHsearch在PDB中查找匹配模板
+5. 所有这些信息被输入模型进行预测
+
+来源：[docs/input.md#multiple-sequence-alignment](docs/input.md), [docs/input.md#structural-templates](docs/input.md)
+
+## 数据库问题排查
+
+以下是一些常见的数据库相关问题和解决方案：
+
+### 1. 磁盘空间不足
+
+**问题**：由于磁盘空间不足，下载失败。
+**解决方案**：确保在开始下载前至少有700 GB的空闲空间。
+
+### 2. 遗传搜索缓慢
+
+**问题**：MSA生成步骤耗时过长。
+**解决方案**：使用提供的脚本将数据库移动到SSD。
+
+### 3. 数据库文件缺失或损坏
+
+**问题**：AlphaFold 3报告文件缺失或在数据库访问时失败。
+**解决方案**：验证数据库结构并重新下载任何缺失或损坏的文件。
+
+### 4. 权限错误
+
+**问题**：出现关于访问或权限被拒绝的错误消息。
+**解决方案**：确保所有数据库文件具有适当的读取权限：
+```bash
+sudo chmod 755 --recursive <DB_DIR>
+```
+
+### 5. 数据库路径配置
+
+**问题**：AlphaFold 3找不到数据库。
+**解决方案**：仔细检查Docker/Singularity命令中的路径，并确保卷挂载正确。
+
+## 结论
+
+正确设置数据库对AlphaFold 3的性能至关重要。尽管下载和设置过程需要大量的磁盘空间和时间，但提供的脚本使其相对简单。使用SSD存储数据库以获得最佳性能，特别是在遗传搜索阶段，是强烈推荐的。
+
+通过了解AlphaFold 3如何使用这些数据库，您可以根据具体需求和可用资源做出明智的设置决策。
+
+---
+
+# 热议
+
+- [热议/热议内容](https://zread.ai/google-deepmind/alphafold3/6-whats-the-buzz)
+
+---
+slug:6-whats-the-buzz
+blog_type:buzz
+---
+
+
+## AlphaFold3：结构生物学的一场革命，如今更加触手可及
+
+自2024年5月以来，结构生物学界一直热议不断，当时谷歌DeepMind和Isomorphic Labs发布了[AlphaFold3](https://blog.google/technology/ai/google-deepmind-isomorphic-alphafold-3-ai-model)——这一突破性的AI模型，标志着我们在预测生命分子如何相互作用的能力上实现了巨大飞跃。2024年11月，DeepMind将模型[向学术界开放](https://www.nature.com/articles/d41586-024-03708-4)，此前他们曾一度保留代码，这一举动在科学界引发了争议，但此举也让人们的兴奋之情愈发高涨。
+
+### 从蛋白质到整个生物宇宙
+
+AlphaFold3之所以成为变革性技术，在于其扩展了功能，不再局限于蛋白质结构预测。尽管其前身仅专注于蛋白质，AF3现在可以模拟蛋白质与DNA、RNA、配体以及化学修饰的结构和相互作用——基本上涵盖了细胞机制的所有关键构建块。
+
+性能提升令人瞩目：在预测蛋白质与其他分子相互作用方面，**准确性至少提高了50%**，在某些类别中，准确性甚至翻倍。对于药物设计应用，AlphaFold3在预测类药物相互作用方面达到了前所未有的准确性，成为首个超越传统基于物理的分子结构预测工具的AI系统。
+
+### 积极开发以提升可访问性和性能
+
+[代码库活动](https://github.com/google-deepmind/alphafold3)显示了团队致力于使AlphaFold3更加易用和高效。最近的提交反映了优化内存使用的强烈关注，其中一项更改将峰值RAM消耗从75.6 GB降至仅13.6 GB——这对于计算资源有限的研究人员来说是一项关键改进。
+
+[最近的3.0.1版本](https://github.com/google-deepmind/alphafold3/releases)带来了诸多改进：
+
+- 新功能允许更灵活的工作流程（无模板预测配合MSA搜索，自定义MSA的模板搜索）
+- 可以将MSA和模板指定为外部文件，而非JSON输入中
+- 数据库处理和模板搜索的性能优化
+- 更新了与新环境的兼容性（Ubuntu 24.04, Python 3.12）
+- 整个流程中的内存使用优化
+
+### 实际影响与挑战
+
+尽管潜在应用广泛——从药物发现到理解基本生物过程——用户仍在应对一些挑战。[开放问题](https://github.com/google-deepmind/alphafold3/issues)突显了在不同硬件配置上提升性能的持续工作，尤其是对于极其庞大的分子系统。
+
+问题[#432](https://github.com/google-deepmind/alphafold3/issues/432)讨论了超过5000个残基的超大系统的统一内存挑战，而问题[#463](https://github.com/google-deepmind/alphafold3/issues/463)则聚焦于A100 GPU的性能优化。这些努力显示了DeepMind让AlphaFold3适用于拥有多样化计算资源的研究人员的承诺。
+
+### 内存优化：关键开发重点
+
+一个特别值得注意的近期改进是增加了对Jackhmmer的`--seq_limit`支持（[提交751a4b8](https://github.com/google-deepmind/alphafold3/commit/751a4b8612d0d53de8f6e1830c8f726e873a55cf)），显著降低了峰值RAM使用。这解决了HMMER GitHub仓库中提出的一个长期问题，显示了团队对实用性的承诺。
+
+如问题[#62](https://github.com/google-deepmind/alphafold3/issues/62)（现已关闭）所示，大型对齐的内存优化一直是关键关注领域，建立在AlphaFold2之前开发的解决方案之上。
+
+### 展望未来
+
+随着更多研究人员获得AlphaFold3的访问权限，我们可以期待一波跨越多个领域的新科学发现——从对细胞过程的基础研究到药物开发的应用工作等。Isomorphic Labs已经在制药合作中利用这项技术加速药物发现。
+
+AlphaFold3所代表的结构生物学与AI的交汇点，刚刚开始改变我们对分子世界的理解。随着性能、可访问性和可用性的持续改进，AlphaFold3正将自己定位为现代科学家工具箱中的必备工具。
+
+请继续关注，我们将持续追踪这一快速发展的领域的进展，并观察AlphaFold3在未来几个月和几年中将如何改变结构生物学和药物发现。
+
+---
+
+- [热议/大家都在说](https://zread.ai/google-deepmind/alphafold3/7-what-people-are-saying)
+
+---
+slug:7-what-people-are-saying
+blog_type:buzz
+---
+
+
+## 科学界对AlphaFold3的回应
+
+AlphaFold3的发布在科学界引发了广泛讨论。从学术研究者到计算生物学家，每个人都对谷歌DeepMind在蛋白质结构预测领域的最新贡献有话要说。AlphaFold3不仅能预测蛋白质结构，还能预测它们与DNA、RNA和其他分子的相互作用，因此既受到了赞誉也受到了审视。
+
+## 充满争议的开端
+
+AlphaFold3走向更广泛研究社区的历程并非一帆风顺。当DeepMind在2024年5月8日的《自然》杂志上宣布这一工具时，研究人员对其技术能力表示赞赏，但对其初始发布方式提出了批评。与完整代码发布的AlphaFold2不同，AlphaFold3最初只提供了“伪代码”，并且只能通过在线门户有限访问。
+
+这一决定促使数百名研究人员签署了一封公开信，指出这种方式违背了开放性、可重复性和同行评审的公认标准。斯德哥尔摩大学的生物物理学家埃里克·林达尔在DeepMind最终于11月11日发布代码时表示：
+
+> “我很高兴[DeepMind团队]信守承诺发布了代码，因为这意味着对这篇重要论文的深入审查终于可以开始了。”
+
+范德比尔特大学的计算结构生物学家斯蒂芬妮·万科维奇组织了这封公开信，她补充道：
+
+> “发布模型和权重对于评估和在此基础上开展工作至关重要。[然而]延迟6个月是不可接受的。”
+
+## 技术挑战与社区支持
+
+随着代码的发布，GitHub仓库已成为研究活动的中心，研究人员深入探讨实现细节并分享经验。该仓库目前拥有超过6.8k星标和882次分支，显示出社区的浓厚兴趣。
+
+在[GitHub问题](https://github.com/google-deepmind/alphafold3/issues)中，一个反复出现的主题是管理大型蛋白质复合物的内存需求。正如一位用户在[问题#432](https://github.com/google-deepmind/alphafold3/issues/432)中关于超大型系统的统一内存所指出的：
+
+> “我正在尝试计算超大型系统（超过5,120个残基），按照#31的建议，我尝试使用统一内存……我在计算化学方面完全是新手，感到力不从心。”
+
+最近的提交显示开发团队对这些关切做出了回应，例如在Jackhmmer中添加了对`--seq_limit`的支持，显著减少了峰值RAM使用。根据一条提交信息，这导致“75.6 GB -> 13.6 GB峰值RAM减少，针对我们的一个查询。”
+
+## 本地与服务器结果差异
+
+在[问题#385](https://github.com/google-deepmind/alphafold3/issues/385)中，关于本地安装与AlphaFold服务器之间差异的有趣讨论浮现。一位研究人员观察到：
+
+> “我在本地运行AlphaFold3，发现分数与AF3服务器上的分数显著不同。例如，服务器预测的ipTM分数为0.27，而我本地获得的最低分数为0.73（使用4个种子，生成20个模型），最佳模型的分数为0.92。”
+
+AlphaFold团队的奥古斯丁·齐德克回应调查后发现，不同的种子可能会产生显著不同的结果，突显了模型的随机性以及运行多次预测的重要性。
+
+## 与现有工具的比较
+
+AlphaFold3的能力也促使人们将其与其他领域的成熟工具进行比较。在[AutoDock-Vina的GitHub页面](https://github.com/ccsb-scripps/AutoDock-Vina/issues/411)上的讨论中，用户们辩论了AlphaFold3和AutoDock-Vina在分子对接中的性能比较。
+
+AutoDock-Vina的一位贡献者解释了重要区别：
+
+> “Vina和AF3属于两种非常不同的分子对接应用类别。AF3不仅预测配体结合，还预测受体结构（因此是一个协同折叠模型），这意味着在无用户定义约束的情况下受体模型具有灵活性。相比之下，Vina使用预定义的受体结构和用户定义的搜索空间。”
+
+这突显了在评估计算生物学生态系统中的不同工具时进行适当比较的必要性。
+
+## 实际应用逐步成形
+
+尽管面临挑战，研究人员正在积极将AlphaFold3纳入现有工作流程。法国国家科学研究中心的研究工程师纪尧姆·布里斯贝尔特正在努力将AlphaFold3集成到MassiveFold中，这是一个帮助用户利用并行计算进行蛋白质结构预测的工具：
+
+> “用户将能够通过这种方法获得AlphaFold2或AlphaFold3的最佳预测。”
+
+## 持续开发与优化
+
+开发团队继续优化AlphaFold3，最近的提交重点包括：
+- 改进MSA工具和内存效率
+- 添加模板JSON键的验证
+- 更新到更现代的环境（Ubuntu 24.04, CUDA 12.6.3, Python 3.12）
+- 解决特定用例，如RNA MSA处理
+
+在[最近的提交](https://github.com/google-deepmind/alphafold3/commit/751a4b8612d0d53de8f6e1830c8f726e873a55cf)中，团队在Jackhmmer中添加了对`--seq_limit`的支持，指出：“我们观察到75.6 GB -> 13.6 GB峰值RAM减少，针对我们的一个查询。”
+
+## 展望未来
+
+DeepMind的约翰·贾姆珀对AlphaFold3的未来应用表示兴奋：
+
+> “在AlphaFold2中，我们看到了如此多的创造力。我真的很期待看到社区发现AlphaFold3如何工作——它如何应用于新问题。”
+
+随着研究人员继续探索AlphaFold3的能力和局限性，科学社区无疑将开发出基于这一基础的新应用和方法。从药物发现到基础生物学研究，围绕AlphaFold3的讨论既反映了使用尖端AI工具的挑战，也反映了它们在推进我们对生命分子机制理解方面的巨大潜力。
+
+无论你是处理复杂蛋白质结构的计算生物学家，还是探索药物-蛋白质相互作用的研究人员，社区对AlphaFold3的集体经验为充分利用这一强大工具提供了宝贵见解。
+
+---
+
+- [热议/关于团队](https://zread.ai/google-deepmind/alphafold3/8-about-the-team)
+
+---
+slug:8-about-the-team
+blog_type:buzz
+---
+
+
+在突破性的AlphaFold3推理管道背后，是一支卓越的科学家和工程师团队，他们不断推动计算生物学的边界。从预测复杂的蛋白质结构到为药物发现开辟新可能，代码背后的人与这项技术本身一样令人印象深刻。
+
+## 跨学科智囊团
+
+AlphaFold3真正汇聚了多个学科的人才，汇集了来自**Google DeepMind**和**Isomorphic Labs**的专家。该项目由八位共同第一作者的核心团队牵头——Josh Abramson、Jonas Adler、Jack Dunger、Richard Evans、Tim Green、Alexander Pritzel、Olaf Ronneberger和Lindsay Willmore——并在资深研究领导Victor Bapst、Pushmeet Kohli、Max Jaderberg、Demis Hassabis和John M. Jumper的共同指导下进行。
+
+在这个复杂系统的工程掌舵人是**Augustin Žídek**，他加入DeepMind的历程与他所参与构建的技术一样引人入胜。Žídek在剑桥大学学习计算机科学，于2017年加入DeepMind的蛋白质折叠团队。根据2022年一次演讲活动的介绍，他“喜欢在研究和工程的边界工作，徒步旅行，演奏乐器和修理东西”——这恰如其分地描述了这位在计算生物学和机器学习之间架起桥梁的人。
+
+另一位关键贡献者是**Jacob Kelly**，他是Google DeepMind的研究工程师，曾在Vector Institute和DeepGenomics工作。Kelly在多伦多大学完成了计算机科学、数学和统计学的本科学习，为团队带来了坚实的计算基础。
+
+## 工程卓越实践
+
+团队对卓越的承诺在他们不断改进和优化AlphaFold3的工作中显而易见。最近在GitHub仓库的提交展示了他们对研究人员关心的实际问题的关注。例如，在2025年7月，团队在Jackhmmer中实现了对`--seq_limit`参数的支持，显著降低了RAM使用量（某些查询从75.6GB降至13.6GB）。这种优化不仅在技术上令人印象深刻，还使得该技术对计算资源有限的研究人员更加可及。
+
+同样，专注于改进错误消息和验证的提交展示了团队以用户为中心的方法。当一位研究人员在issue [#459](https://github.com/google-deepmind/alphafold3/issues/459)中报告了一个令人困惑的错误时，团队迅速回应，提交了一个添加模板JSON键验证的补丁，提升了用户体验。
+
+正如研究工程师**Lindsay Willmore**在谷歌博客中所解释的：“这就像分子复合物的谷歌地图。任何不懂编程的用户只需复制粘贴他们的蛋白质、DNA、RNA序列或小分子的名称，按一下按钮，等待几分钟即可。”
+
+## 桥接研究与应用
+
+Google DeepMind和Isomorphic Labs的双重机构支持反映了团队推进基础研究和实际应用的使命。虽然AlphaFold服务器免费供非商业研究使用，但Isomorphic Labs正在探索其在药物发现中的商业应用。
+
+**Adrian Stecula**，Isomorphic Labs的研究负责人，强调了这一潜力：“在Isomorphic Labs，我们看到AlphaFold 3在理性药物设计中的巨大潜力，并且我们已经在日常工作中使用它。研究新型小分子与新型药物靶点的结合，回答诸如‘蛋白质如何与DNA和RNA相互作用？’的问题，探讨化学修饰对蛋白质结构的影响——新模型解锁了所有这些能力。”
+
+## 持续承诺
+
+真正使AlphaFold3团队与众不同的是他们在初始宣传之后对项目的持续投入。仓库的提交历史揭示了一个积极回应用户反馈、提升性能和扩展兼容性的团队。最近的更新包括迁移到Ubuntu 24.04和CUDA 12.6.3，升级到Python 3.12，以及优化容器大小——所有这些实际改进都直接惠及研究社区。
+
+研究科学家**Jonas Adler**完美地捕捉到了团队的观点：“曾经非常困难的事情变得非常容易。曾经不可能的事情变得可能——尽管这里仍然有许多难题需要解决，但我们对AlphaFold 3帮助解决这些问题的潜力感到兴奋。”
+
+## 展望未来
+
+AlphaFold3团队的科学研究严谨性、工程卓越性和以用户为中心的开发理念确保了这项革命性技术将继续演进。通过他们的工作，曾经不可见的复杂分子相互作用现在逐渐清晰，为生物学和医学开辟了新前沿。
+
+正如团队在致谢中所言，AlphaFold3的发布“得益于多个组织中数十位才华横溢人士的宝贵贡献”。他们的集体专长正在逐步改变我们对分子世界的理解，每一次提交都在见证这一变革。
+
+---
+
+# 深度探索
+
+- [深度探索/架构概览](https://zread.ai/google-deepmind/alphafold3/9-architecture-overview)
+
+---
+slug:9-architecture-overview
+blog_type:normal
+---
+
+
+AlphaFold3在蛋白质结构预测方面取得了显著进展，其功能超越了前代产品，能够处理更广泛的生物分子及其复合物。本文档提供了AlphaFold3架构的全面技术概述，解释了其各个组件如何协同工作以生成准确的3D结构预测。
+
+## 系统架构概览
+
+AlphaFold3采用模块化架构，其数据处理、表示学习和结构生成组件清晰分离。系统可分为三个主要阶段：
+
+```mermaid
+flowchart TD
+    A[输入数据] --> B[数据管道]
+    B --> C[嵌入生成]
+    C --> D[结构预测]
+    D --> E[置信度评估]
+    E --> F[输出结构]
+    
+    subgraph "阶段1: 数据处理"
+    A
+    B
+    end
+    
+    subgraph "阶段2: 表示学习"
+    C
+    end
+    
+    subgraph "阶段3: 结构生成与优化"
+    D
+    E
+    F
+    end
+```
+
+来源：[run_alphafold.py](run_alphafold.py), [model.py](src/alphafold3/model/model.py)
+
+## 核心组件
+
+### 数据管道
+
+数据管道处理输入序列和结构，执行MSA生成、模板匹配和特征提取等基本操作。其负责将原始输入数据转换为模型可处理的特征。
+
+```mermaid
+flowchart LR
+    A[输入JSON] --> B[数据管道]
+    B --> C[MSA搜索]
+    B --> D[模板匹配]
+    C --> E[特征提取]
+    D --> E
+    E --> F[模型特征]
+```
+
+管道包含多个关键组件：
+- **MSA搜索**：使用Jackhmmer和Nhmmer等工具在UniRef90、MGnify和BFD等数据库中查找进化相关的序列
+- **模板匹配**：从PDB数据库中识别结构模板
+- **特征提取**：将原始数据转换为模型的数值特征
+
+来源：[run_alphafold.py#L704-L708](run_alphafold.py), [pipeline.py](src/alphafold3/data/pipeline.py)
+
+### 使用Evoformer进行表示学习
+
+Evoformer模块是AlphaFold3表示学习系统的核心。它处理序列和进化信息，创建丰富的嵌入，捕捉局部和全局关系。
+
+```mermaid
+flowchart TD
+    A[输入特征] --> B[序列对嵌入]
+    A --> C[目标特征嵌入]
+    B --> D[相对位置编码]
+    D --> E[键嵌入]
+    E --> F[模板嵌入]
+    F --> G[MSA处理]
+    G --> H[PairFormer堆栈]
+    C --> H
+    H --> I[单序列和双序列嵌入]
+```
+
+Evoformer的关键组件包括：
+- **序列嵌入**：将序列信息转换为初始表示
+- **MSA处理**：从多序列比对中提取进化信息
+- **模板整合**：在可用时纳入结构模板
+- **PairFormer**：通过多次基于注意力的迭代优化表示
+
+Evoformer模块通过多次循环迭代（默认：10次），逐步优化每一步的表示。
+
+来源：[evoformer.py](src/alphafold3/model/network/evoformer.py), [model.py#L267-L306](src/alphafold3/model/model.py)
+
+### 基于扩散的结构生成
+
+AlphaFold3使用扩散模型生成3D原子坐标。这种方法与之前版本有显著不同，能够更准确地预测多种分子类型的结构。
+
+```mermaid
+flowchart TD
+    A[嵌入] --> B[条件化]
+    A --> C[初始噪声位置]
+    B --> D[去噪网络]
+    C --> D
+    D --> E[优化位置]
+    E --> F["样本优化（多步骤）"]
+    F --> G[最终3D结构]
+```
+
+扩散过程包括：
+- **条件化**：为去噪网络准备嵌入
+- **噪声调度**：控制逐步去噪过程
+- **基于Transformer的去噪**：根据当前噪声位置预测结构更新
+- **迭代优化**：通过多次去噪步骤逐步优化结构
+
+默认情况下，AlphaFold3生成**5个扩散样本**，每个样本进行**200步去噪**，根据置信度指标选择最佳样本。
+
+来源：[diffusion_head.py](src/alphafold3/model/network/diffusion_head.py), [model.py#L308-L313](src/alphafold3/model/model.py)
+
+### 置信度评估
+
+AlphaFold3包含全面的置信度指标，评估预测质量：
+
+- **预测TM分数（pTM）**：估计与天然结构的相似度
+- **预测界面TM分数（ipTM）**：关注链间界面区域
+- **预测对齐误差（PAE）**：估计残基对间的位置误差
+- **预测距离误差（PDE）**：估计原子间距离误差
+- **排名分数**：结合多个指标选择最佳样本
+
+这些置信度指标帮助用户解读预测可靠性，是样本选择的关键。
+
+来源：[confidences.py](src/alphafold3/model/confidences.py), [model.py#L377-L408](src/alphafold3/model/model.py)
+
+## 组件间交互
+
+### 循环机制
+
+AlphaFold3采用循环机制，将一次迭代的输出嵌入作为下一次迭代的输入。这允许模型通过多次步骤优化其预测：
+
+```mermaid
+flowchart LR
+    A[初始嵌入] --> B[Evoformer]
+    B --> C[更新嵌入]
+    C -->|下一次循环| B
+    C --> D[扩散头]
+```
+
+循环次数可配置（默认：10次），更多循环可能提高预测质量，但会增加计算时间。
+
+来源：[model.py#L276-L306](src/alphafold3/model/model.py)
+
+### 多模态注意力
+
+AlphaFold3的一个重要创新是原子-令牌交叉注意力机制，使序列（令牌）和结构（原子）表示之间的信息流动成为可能：
+
+```mermaid
+flowchart TD
+    A[令牌表示] --> B[原子-令牌交叉注意力]
+    C[原子位置] --> B
+    B --> D[更新令牌表示]
+    B --> E[更新原子位置]
+```
+
+这种多模态注意力使模型能够联合推理序列和结构，提高预测准确性，尤其在复杂分子系统中。
+
+来源：[atom_cross_attention.py](src/alphafold3/model/network/atom_cross_attention.py), [diffusion_head.py#L228-L236](src/alphafold3/model/network/diffusion_head.py)
+
+## 模型执行流程
+
+AlphaFold3的执行流程可总结如下：
+
+1. **输入处理**：
+   - 解析输入JSON文件
+   - 运行数据管道生成MSA并查找模板
+   - 为模型消费特征化输入
+
+2. **模型初始化**：
+   - 加载模型参数
+   - 配置模型设置（循环次数、扩散样本等）
+
+3. **前向传播**：
+   - 运行Evoformer进行多次循环迭代
+   - 为扩散过程生成嵌入
+
+4. **结构生成**：
+   - 采样初始噪声结构
+   - 运行扩散过程去噪和优化结构
+   - 为每个输入生成多个样本
+
+5. **置信度评估和输出**：
+   - 计算每个样本的置信度指标
+   - 根据排名分数选择最佳样本
+   - 输出预测结构和置信度指标
+
+来源：[run_alphafold.py#L436-L508](run_alphafold.py)
+
+## 技术实现细节
+
+### 性能优化
+
+AlphaFold3包含多项优化以提高推理性能：
+
+- **Flash注意力**：优化注意力实现，提高GPU利用率
+- **令牌分桶**：按大小分组输入，减少重新编译开销
+- **Bfloat16支持**：可选使用低精度以加快计算
+- **JAX编译缓存**：缓存编译函数，加速重复运行
+
+这些优化对于使模型适用于实际应用场景至关重要。
+
+来源：[run_alphafold.py#L222-L256](run_alphafold.py)
+
+### GPU要求
+
+AlphaFold3有显著的计算需求：
+- 需要支持CUDA的GPU，至少具备计算能力6.0
+- 对计算能力7.x设备进行特殊处理
+- 使用Flash注意力时优化于Ampere或更新型号的GPU
+
+来源：[run_alphafold.py#L776-L802](run_alphafold.py)
+
+## 与前代架构的改进
+
+AlphaFold3引入了多项关键架构改进：
+
+1. **基于扩散的结构生成**：用扩散方法替换前代的结构模块，以更准确地预测坐标
+2. **扩展分子支持**：架构设计用于处理蛋白质、核酸和小分子及其组合
+3. **令牌-原子表示**：统一的表示系统能处理不同分子实体
+4. **多模态注意力**：增强序列和结构空间之间的交叉注意力机制
+5. **改进的置信度评估**：更全面的置信度指标，以更好地评估模型输出
+
+这些改进共同使AlphaFold3能够更准确地解决更广泛的生物结构预测问题。
+
+## 结论
+
+AlphaFold3的架构代表了序列处理、进化信息分析和基于扩散的结构生成的复杂集成。系统的模块化设计，清晰划分数据处理、表示学习和结构生成，允许灵活配置和未来改进。
+
+通过多次循环、多模态注意力和基于扩散的采样，AlphaFold3在预测多种生物分子及其复合物的结构方面实现了业界领先性能。
+
+---
+
+- [深度探索/模型组件与算法](https://zread.ai/google-deepmind/alphafold3/10-model-components-and-algorithms)
+
+---
+slug:10-model-components-and-algorithms
+blog_type:normal
+---
+
+
+AlphaFold 3 通过其新颖的架构，结合进化信息处理和去噪扩散模型，在蛋白质结构预测方面取得了显著进展。本文档详细介绍了模型的核心组件和支撑其预测的算法。
+
+## 架构概述
+
+AlphaFold 3 使用基于扩散的架构生成高质量的3D蛋白质结构。该模型处理输入序列和可选的进化信息，以创建指导去噪扩散过程的表示。
+
+```mermaid
+flowchart TD
+    Input[输入序列 & MSA 数据] --> Evoformer
+    Evoformer --> |单序列 & 成对嵌入| DiffusionHead
+    DiffusionHead --> |噪声结构| DiffTrans[扩散Transformer]
+    DiffTrans --> |去噪步骤| DiffusionHead
+    DiffusionHead --> |采样| FinalStructure[最终预测结构]
+    DiffusionHead --> |置信度指标| Confidence[置信度评分]
+```
+
+来源：[model.py](src/alphafold3/model/model.py)
+
+## 核心组件
+
+### Evoformer
+
+Evoformer 从序列和进化数据中创建信息丰富的嵌入。它处理输入序列、MSA、模板和共价键信息，生成两种主要类型的嵌入：
+
+- **单序列嵌入**：标记级别（残基级别）的表示
+- **成对嵌入**：标记之间的成对关系
+
+```mermaid
+flowchart LR
+    subgraph Evoformer
+        Target[目标特征] --> SingleEmbed[单序列嵌入]
+        Target --> PairEmbed[成对嵌入]
+        RelPos[相对位置编码] --> PairEmbed
+        Bonds[键特征] --> PairEmbed
+        Template[模板特征] --> PairEmbed
+        MSA[MSA 栈] --> PairEmbed
+        PairEmbed --> PairformerBlock[Pairformer 块]
+        SingleEmbed --> PairformerBlock
+    end
+    PairformerBlock --> |单序列嵌入| Output1[至扩散头]
+    PairformerBlock --> |成对嵌入| Output2[至扩散头]
+```
+
+Evoformer 的关键特性：
+
+1. **序列成对嵌入**：从序列中创建初始成对嵌入。
+2. **相对位置编码**：使用相对位置编码添加位置信息。
+3. **键特征嵌入**：整合标记之间的共价键信息。
+4. **模板嵌入**：在可用时整合模板信息。
+5. **MSA 处理**：处理多序列比对以获取进化信息。
+6. **Pairformer 块**：通过注意力机制迭代优化表示。
+
+来源：[evoformer.py](src/alphafold3/model/network/evoformer.py)
+
+### 扩散头
+
+扩散头负责实现生成3D蛋白质结构的去噪扩散过程。它使用一个条件扩散模型，其中条件来自 Evoformer 的嵌入。
+
+```mermaid
+flowchart TD
+    NoisyPos[噪声原子位置] --> Denoiser
+    NoiseLevel[噪声级别] --> Denoiser
+    Embeddings[Evoformer 嵌入] --> Conditioning[条件模块]
+    Conditioning --> |trunk_single_cond| Denoiser
+    Conditioning --> |trunk_pair_cond| Denoiser
+    Denoiser --> |去噪位置| Output
+```
+
+关键组件：
+
+1. **条件模块**：处理 Evoformer 嵌入以创建去噪网络的条件信号。
+2. **原子交叉注意力**：在标记级别特征和原子级别结构之间实现注意力机制。
+3. **去噪网络**：给定噪声输入和噪声级别，预测去噪结构。
+
+来源：[diffusion_head.py](src/alphafold3/model/network/diffusion_head.py)
+
+### 扩散Transformer
+
+扩散Transformer在去噪步骤中处理信息。它由专门用于扩散过程的Transformer块组成：
+
+```mermaid
+flowchart LR
+    subgraph "扩散Transformer"
+        Input --> AdaLN[自适应层归一化]
+        AdaLN --> SelfAttention[自注意力]
+        SelfAttention --> TransitionBlock[转换块]
+    end
+    Input --> Output
+    SelfAttention --> Output
+    TransitionBlock --> Output
+```
+
+关键组件：
+
+1. **自适应层归一化**：条件感知归一化。
+2. **自注意力**：带可选成对信息的多头注意力机制。
+3. **转换块**：带有swish激活和门控线性单元的非线性变换。
+
+来源：[diffusion_transformer.py](src/alphafold3/model/network/diffusion_transformer.py)
+
+## 扩散过程
+
+AlphaFold 3 使用条件去噪扩散模型生成蛋白质结构。该过程包括：
+
+### 噪声调度
+
+模型使用精心设计的噪声调度来控制扩散过程：
+
+```python
+def noise_schedule(t, smin=0.0004, smax=160.0, p=7):
+  return (
+      SIGMA_DATA
+      * (smax ** (1 / p) + t * (smin ** (1 / p) - smax ** (1 / p))) ** p
+  )
+```
+
+该调度逐渐将噪声从最大值（`smax`）减少到最小值（`smin`），随着采样的进行。
+
+来源：[diffusion_head.py](src/alphafold3/model/network/diffusion_head.py)
+
+### 采样过程
+
+采样过程迭代去噪蛋白质结构：
+
+1. **初始化**：从随机噪声开始
+2. **迭代去噪**：应用去噪网络逐步去除噪声
+3. **随机增强**：在去噪过程中应用旋转和平移以保持不变性
+4. **噪声添加**：在采样过程中添加受控噪声以改进探索
+
+```mermaid
+sequenceDiagram
+    participant Random as 随机噪声
+    participant Denoiser as 去噪网络
+    participant Model as 最终结构
+    
+    Random->>Random: 初始化随机位置
+    loop 去噪步骤
+        Random->>Random: 应用随机增强
+        Random->>Denoiser: 传递噪声结构和噪声级别
+        Denoiser->>Random: 预测去噪结构
+        Random->>Random: 用预测更新结构
+    end
+    Random->>Model: 输出最终结构
+```
+
+来源：[diffusion_head.py](src/alphafold3/model/network/diffusion_head.py)
+
+## 置信度度量
+
+AlphaFold 3 提供多种置信度指标以评估预测质量：
+
+1. **pTM（预测TM评分）**：预测模型的TM评分，评估整体结构质量。
+2. **ipTM（接口预测TM评分）**：专注于多链复合物中的接口质量。
+3. **pDME（预测距离误差）**：预测每个残基的预期距离误差。
+4. **PAE（预测对齐误差）**：估计残基对之间定位的错误。
+
+<CgxTip>
+在使用AlphaFold 3的置信度指标时，ranking_confidence评分（结合多个指标）通常是评估整体预测质量的最佳单一指标。
+</CgxTip>
+
+来源：[model.py](src/alphafold3/model/model.py), [confidences.py](src/alphafold3/model/confidences.py)
+
+## 关键创新
+
+### 原子级交叉注意力
+
+AlphaFold 3 使用原子级交叉注意力机制来模拟蛋白质结构中原子之间的相互作用：
+
+```python
+def atom_cross_att_encoder(
+    token_atoms_act, trunk_single_cond, trunk_pair_cond,
+    config, global_config, batch, name
+)
+```
+
+这使模型能够在保持标记级别表示的同时推理原子间的相互作用。
+
+来源：[atom_cross_attention.py](src/alphafold3/model/network/atom_cross_attention.py)
+
+### AdaLN-Zero条件化
+
+模型采用自适应层归一化与零初始化（AdaLN-Zero）以实现有效条件化：
+
+```python
+def adaptive_zero_init(
+    x, num_channels, single_cond, global_config, name
+):
+  if single_cond is None:
+    output = hm.Linear(
+        num_channels,
+        initializer=global_config.final_init,
+        name=f'{name}transition2',
+    )(x)
+  else:
+    output = hm.Linear(num_channels, name=f'{name}transition2')(x)
+    cond = hm.Linear(
+        output.shape[-1],
+        initializer='zeros',
+        use_bias=True,
+        bias_init=-2.0,
+        name=f'{name}adaptive_zero_cond',
+    )(single_cond)
+    output = jax.nn.sigmoid(cond) * output
+  return output
+```
+
+这种方法为条件信息通过模型提供了一个信号控制的路径。
+
+来源：[diffusion_transformer.py](src/alphafold3/model/network/diffusion_transformer.py)
+
+## 模型训练与推理
+
+### 训练过程
+
+虽然训练代码不包含在此存储库中，但模型架构表明AlphaFold 3是通过以下方式训练的：
+
+1. 结合去噪评分匹配和变分扩散目标
+2. 随机增强（旋转和平移）以实现旋转/平移不变性
+3. 条件dropout以在输入信息不同水平下进行灵活推理
+
+### 推理流程
+
+在推理过程中，模型：
+
+1. 通过Evoformer处理输入序列和可选MSA数据
+2. 运行多次循环以优化嵌入
+3. 使用扩散过程采样蛋白质结构
+4. 计算预测结构的置信度指标
+
+```python
+def __call__(self, batch: features.BatchDict, key: jax.Array | None = None) -> ModelResult:
+    # 通过Evoformer处理批次
+    embedding_module = evoformer_network.Evoformer(self.config.evoformer, self.global_config)
+    target_feat = create_target_feat_embedding(batch=batch, config=embedding_module.config, global_config=self.global_config)
+    
+    # 运行循环
+    num_iter = self.config.num_recycles + 1
+    embeddings, _ = hk.fori_loop(0, num_iter, recycle_body, (embeddings, key))
+    
+    # 从扩散模型采样
+    samples = self._sample_diffusion(batch, embeddings, sample_config=self.config.heads.diffusion.eval)
+    
+    # 计算置信度指标
+    confidence_output = mapping.sharded_map(...)(samples['atom_positions'])
+```
+
+来源：[model.py](src/alphafold3/model/model.py)
+
+## 结论
+
+AlphaFold 3的架构结合了进化信息处理和去噪扩散模型，以生成准确的蛋白质结构预测。模型的关键创新包括：
+
+1. 通过Evoformer实现标记级别和成对嵌入
+2. 条件去噪扩散用于结构生成
+3. 原子级交叉注意力机制
+4. 用于预测质量评估的高级置信度指标
+
+这一架构使AlphaFold 3能够处理广泛的蛋白质结构预测任务，包括多链复合物，且具有高准确性。
+
+---
+
+- [深度探索/性能基准](https://zread.ai/google-deepmind/alphafold3/11-performance-benchmarks)
+
+---
+slug:11-performance-benchmarks
+blog_type:normal
+---
+
+
+本指南提供了运行AlphaFold3的详细性能基准和优化策略。涵盖了硬件要求、推理时间、内存优化以及在不同设置下实现最佳性能的配置建议。
+
+## 硬件性能比较
+
+AlphaFold3已在特定的GPU配置上进行了广泛测试，以确保数值准确性和吞吐量效率。以下是不同硬件设置的基准测试结果比较。
+
+### 官方硬件支持
+
+AlphaFold3官方支持并已彻底测试以下配置：
+
+| GPU配置 | 内存 | 最大令牌数 | 特殊要求 |
+|----------|------|------------|----------|
+| NVIDIA A100 | 80 GB | 5,120 | 无 |
+| NVIDIA H100 | 80 GB | 5,120 | 无 |
+
+来源：[performance.md#L61-L67](docs/performance.md#L61-L67)
+
+### 推理时间比较
+
+在比较A100和H100的单GPU性能时：
+
+| 令牌数 | 1 A100 80 GB（秒） | 1 H100 80 GB（秒） | 加速（H100 vs A100） |
+|--------|-------------------|-------------------|----------------------|
+| 1024   | 62                | 34                | 1.82x                |
+| 2048   | 275               | 144               | 1.91x                |
+| 3072   | 703               | 367               | 1.92x                |
+| 4096   | 1434              | 774               | 1.85x                |
+| 5120   | 2547              | 1416              | 1.80x                |
+
+H100在所有输入大小上始终提供约**1.8-1.9倍的更快推理**。
+
+来源：[performance.md#L68-L77](docs/performance.md#L68-L77)
+
+### 分布式与单GPU效率
+
+存储库中的单A100（80GB）实现比AlphaFold3论文中描述的16x A100（40GB）设置显著更高效，以总GPU计算时间衡量：
+
+| 令牌数 | 1 A100 80 GB（GPU秒） | 16 A100 40 GB（GPU秒） | 改进 |
+|--------|----------------------|------------------------|------|
+| 1024   | 62                   | 352                    | 5.7× |
+| 2048   | 275                  | 1136                   | 4.1× |
+| 3072   | 703                  | 2016                   | 2.9× |
+| 4096   | 1434                 | 3648                   | 2.5× |
+| 5120   | 2547                 | 5552                   | 2.2× |
+
+这展示了**单GPU实现的高效率**，总GPU秒数减少了2.2-5.7倍。
+
+来源：[performance.md#L15-L33](docs/performance.md#L15-L33)
+
+## 硬件要求与配置
+
+### 不同GPU类型的内存要求
+
+不同GPU类型可以处理不同的最大输入大小：
+
+| GPU类型 | 内存 | 最大令牌数 | 所需配置 |
+|---------|------|------------|----------|
+| A100    | 80 GB | 5,120     | 默认设置 |
+| H100    | 80 GB | 5,120     | 默认设置 |
+| A100    | 40 GB | 4,352     | 统一内存 + 分片配置 |
+| V100    | 任意  | 1,280     | 统一内存 + XLA标志 |
+| P100    | 任意  | 1,024     | 默认设置 |
+
+来源：[performance.md#L79-L127](docs/performance.md#L79-L127)
+
+### CUDA能力要求
+
+AlphaFold3要求GPU具有**计算能力6.0或更高**。已知CUDA能力7.x设备存在数值问题，需要特定解决方法：
+
+```sh
+ENV XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
+```
+
+此解决方法对NVIDIA V100等设备至关重要。此外，对于7.x设备，闪存注意力实现必须设置为"xla"。
+
+来源：[run_alphafold.py#L783-L802](run_alphafold.py#L783-L802), [performance.md#L127-L131](docs/performance.md#L127-L131)
+
+<CgxTip>
+在使用V100 GPU或其他CUDA能力7.x设备时，始终设置适当的XLA标志并使用'xla'闪存注意力实现以避免数值问题。例如：`XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter" python run_alphafold.py --flash_attention_implementation=xla`
+</CgxTip>
+
+## 内存优化技术
+
+### 默认GPU内存配置
+
+处理高达5,120令牌的A100（80 GB）或H100（80 GB）的默认内存设置（在Dockerfile中设置）：
+
+```sh
+ENV XLA_PYTHON_CLIENT_PREALLOCATE=true
+ENV XLA_CLIENT_MEM_FRACTION=0.95
+```
+
+来源：[Dockerfile#L75-L77](docker/Dockerfile#L75-L77)
+
+### 大输入或小GPU的统一内存
+
+要在更大的输入（超过5,120令牌）或内存较小的GPU（如40GB的A100）上运行AlphaFold3，启用统一内存，使用以下设置：
+
+```sh
+ENV XLA_PYTHON_CLIENT_PREALLOCATE=false
+ENV TF_FORCE_UNIFIED_MEMORY=true
+ENV XLA_CLIENT_MEM_FRACTION=3.2
+```
+
+这允许GPU内存溢出到主机内存，防止OOM错误，但可能会减慢推理速度。
+
+来源：[performance.md#L202-L219](docs/performance.md#L202-L219)
+
+### 减少内存的配对转换分片
+
+对于内存受限的GPU（如40 GB的A100），可以调整`model_config.py`中的`pair_transition_shard_spec`：
+
+```python
+pair_transition_shard_spec: Sequence[_Shape2DType] = (
+    (2048, None),
+    (3072, 1024),
+    (None, 512),
+)
+```
+
+格式为`(num_tokens_upper_bound, shard_size)`，其中：
+- 对于高达2,048令牌的序列：不分片
+- 对于高达3,072令牌的序列：以1,024块分片
+- 对于更大的序列：以512块分片
+
+来源：[performance.md#L86-L105](docs/performance.md#L86-L105), [model_config.py#L25-L29](src/alphafold3/model/model_config.py#L25-L29)
+
+## 计算优化策略
+
+### 减少重新编译的编译桶
+
+AlphaFold3实现编译桶以避免模型的过度重新编译。处理输入时，将其填充到能包含它的最小桶中。
+
+默认桶大小：
+```
+[256, 512, 768, 1024, 1280, 1536, 2048, 2560, 3072, 3584, 4096, 4608, 5120]
+```
+
+例如，如果处理大小为5132、5280和5342令牌的输入，向命令添加`--buckets 5376`将确保只进行一次编译，而不是三次单独的编译。
+
+来源：[performance.md#L134-L166](docs/performance.md#L134-L166), [run_alphafold.py#L234-L243](run_alphafold.py#L234-L243)
+
+### 闪存注意力实现选项
+
+AlphaFold3支持三种闪存注意力实现，可通过`--flash_attention_implementation`标志配置：
+
+| 实现 | 描述 | 要求 | 最适合 |
+|------|------|------|--------|
+| `triton` | Triton闪存注意力 | Ampere GPU或更高 | 最快，经过良好测试 |
+| `cudnn` | cuDNN闪存注意力 | Ampere GPU或更高 | Triton的替代方案 |
+| `xla` | XLA注意力（无闪存） | 任意GPU | CUDA 7.x设备，兼容性 |
+
+默认的Triton实现在现代GPU上提供最佳性能。全局模型配置使用此设置：
+
+```python
+# model_config.py
+flash_attention_implementation: attention.Implementation = 'triton'
+```
+
+来源：[run_alphafold.py#L244-L256](run_alphafold.py#L244-L256), [model_config.py#L31](src/alphafold3/model/model_config.py#L31)
+
+### JAX持久编译缓存
+
+为避免运行间不必要的重新编译，启用JAX持久编译缓存：
+
+```
+--jax_compilation_cache_dir <YOUR_DIRECTORY>
+```
+
+这在运行多个相似输入大小的推理作业时特别有用。对于云部署（如Google Cloud Storage），需要在默认AlphaFold3依赖项之外安装`etils`。
+
+来源：[performance.md#L221-L235](docs/performance.md#L221-L235), [run_alphafold.py#L222-L226](run_alphafold.py#L222-L226)
+
+## 流程优化
+
+### 分阶段运行流程
+
+AlphaFold3流程可以分阶段执行，以优化资源利用：
+
+1. **仅数据流程**：生成MSA和模板，不运行推理
+   ```
+   python run_alphafold.py --norun_inference
+   ```
+
+2. **仅推理**：跳过数据流程，仅运行特征化和推理
+   ```
+   python run_alphafold.py --norun_data_pipeline
+   ```
+
+这种方法适用于：
+- 将CPU密集型操作（数据流程）与GPU密集型操作（推理）分开
+- 缓存MSA/模板搜索结果以在多个推理运行中重用
+- 通过在适当硬件上运行资源密集型部分来优化成本
+
+来源：[performance.md#L35-L58](docs/performance.md#L35-L58), [run_alphafold.py#L84-L93](run_alphafold.py#L84-L93)
+
+### 数据流程性能因素
+
+数据流程（遗传序列搜索和模板搜索）的运行时间显著受以下因素影响：
+
+1. **输入大小**：较大序列需要更多处理时间
+2. **同源序列数量**：更多匹配意味着更长的处理时间
+3. **硬件**：
+   - 磁盘速度严重影响遗传搜索性能
+   - CPU数量影响并行化能力
+   - 超过推荐64GB的可用RAM对于具有深层MSA的序列是必要的
+
+为提高数据流程性能：
+- 使用RAM支持的文件系统以加快磁盘访问
+- 增加可用CPU核心
+- 添加更多并行化
+- 确保为具有深层MSA的序列提供足够的RAM
+
+来源：[performance.md#L2-L11](docs/performance.md#L2-L11)
+
+## 性能调优工作流
+
+基于基准测试和优化技术，以下是性能调优的推荐工作流：
+
+```mermaid
+flowchart TD
+    A[评估硬件] --> B{内存充足？}
+    B -->|是| C[使用默认设置]
+    B -->|否| D[启用统一内存]
+    
+    C --> E{GPU类型？}
+    E -->|A100/H100| F[使用Triton闪存注意力]
+    E -->|V100/7.x| G[设置XLA标志 & 使用XLA闪存注意力]
+    E -->|P100| H[使用默认设置，输入大小≤1024]
+    
+    D --> I[配置配对转换分片]
+    
+    F & G & H & I --> J[配置编译桶]
+    J --> K[启用JAX编译缓存]
+    
+    K --> L{处理目标？}
+    L -->|吞吐量| M[运行完整流程]
+    L -->|资源优化| N[分阶段运行流程]
+```
+
+此工作流帮助您根据硬件能力和处理目标导航各种性能优化选项。
+
+## 性能推荐总结
+
+1. **最大化性能**：
+   - 使用NVIDIA H100（80GB）GPU
+   - 配置Triton闪存注意力实现
+   - 使用JAX编译缓存
+   - 设置适当的桶大小
+
+2. **内存有限**：
+   - 启用统一内存
+   - 配置配对转换分片
+   - 考虑使用更小的批量大小或更少的样本运行
+
+3. **成本优化**：
+   - 分阶段运行数据流程和推理
+   - 使用CPU优化实例进行数据流程
+   - 仅使用GPU实例进行推理
+   - 缓存并重用MSA/模板搜索结果
+
+4. **大输入**（超过5,120令牌）：
+   - 启用统一内存
+   - 配置自定义更大的桶大小
+   - 调整配对转换分片
+
+通过遵循这些基准测试和优化策略，您可以在各种硬件配置和使用案例中实现AlphaFold3的最佳性能。
+
+---
+
+- [深度探索/已知限制](https://zread.ai/google-deepmind/alphafold3/12-known-limitations)
+
+---
+slug:12-known-limitations
+blog_type:normal
+---
+
+
+本文档概述了AlphaFold3当前已知的局限性。了解这些限制将帮助您合理规划计算实验并解决常见问题。
+
+## 硬件要求与限制
+
+AlphaFold3有特定的硬件要求，必须满足以下条件才能正常运行：
+
+- **操作系统**：仅支持Linux - 其他操作系统未获官方支持
+- **内存要求**：建议最低64GB RAM，特别是对于具有深层MSA的序列，Jackhmmer/Nhmmer可能需要远超此阈值的内存
+- **存储要求**：遗传数据库可能需要高达1TB的磁盘空间（强烈推荐使用SSD）
+- **GPU兼容性与大小限制**：
+
+| GPU类型 | 最大输入大小 | 备注 |
+|--------|--------------|------|
+| A100 80GB / H100 80GB | 5,120 tokens | 官方支持并经过广泛测试 |
+| A100 40GB | 4,352 tokens | 需要统一内存和配置更改 |
+| V100 | 1,280 tokens | 需要统一内存和XLA标志 |
+| P100 | 1,024 tokens | 无需配置更改 |
+
+<CgxTip>
+对于CUDA能力7.x的GPU（例如V100），您必须设置环境变量XLA_FLAGS，包含`--xla_disable_hlo_passes=custom-kernel-fusion-rewriter`，以避免数值问题，这些问题会导致输出明显的错误结果，如残基冲突。
+</CgxTip>
+
+## 输入限制
+
+### 大小与复杂性限制
+
+- **最大输入大小**：在A100 80GB/H100 80GB GPU上为5,120 tokens
+- **糖基**：无法将AlphaFold服务器格式中指定的糖基转换为AlphaFold3格式
+
+### 配体指定限制
+
+- **SMILES配体问题**：
+  - 在提交[f8df1c7](https://github.com/google-deepmind/alphafold3/commit/f8df1c7)和[4e4023c](https://github.com/google-deepmind/alphafold3/commit/4e4023c)之间，SMILES字符串中的双字母原子（例如Cl, Br）处理不正确
+  - 由于缺乏原子命名，SMILES配体不支持与其他实体的共价键
+  - 对于某些配体和随机种子，RDKit可能无法生成构象
+
+- **共价键限制**：
+  - 共价键只能在非聚合物实体之间或内部指定
+  - 目前不支持在聚合物实体之间或内部定义共价键
+
+### 格式限制
+
+- **JSON格式转换**：从AlphaFold服务器转换为AlphaFold3格式时：
+  - 不支持糖基规格转换
+  - 如果未指定modelSeeds，将自动分配种子
+
+## 性能与资源限制
+
+### 数据管道性能
+
+数据管道（遗传序列和模板搜索）的运行时间可能因以下因素而有显著差异：
+
+- 输入大小
+- 找到的同源序列数量
+- 可用硬件（尤其是磁盘速度）
+
+可以通过以下方式提高性能：
+- 使用SSD存储，特别是RAM支持的文件系统
+- 增加可用CPU核心和并行化
+- 将仅CPU的数据管道与GPU所需的推理步骤分开
+
+### 模型推理性能
+
+```mermaid
+graph LR
+    A[输入大小] --> B[编译时间]
+    A --> C[内存使用]
+    A --> D[推理速度]
+    E[GPU类型] --> D
+    E --> C
+    F[桶配置] --> B
+```
+
+- **编译桶**：AlphaFold3使用编译桶以避免过度重编译，但存在重编译次数减少与填充增加之间的权衡
+- **默认最大桶大小**：5,120 tokens - 较大的输入将触发新的编译
+
+## 模型行为限制
+
+- **数值问题**：除非设置特定的XLA标志，否则CUDA能力7.x设备存在已知的数值问题
+- **小结构置信度**：对于少于20 tokens的结构或链，pTM评分非常严格，分配的值小于0.05
+- **编译时间**：已知的XLA问题会导致编译时间大幅增加，除非设置环境变量`XLA_FLAGS="--xla_gpu_enable_triton_gemm=false"`
+
+## 输出限制
+
+- **格式限制**：仅提供mmCIF格式的预测（不提供PDB格式）
+- **手性问题**：配体预测可能包含手性错误，需要额外验证
+- **构象生成失败**：如果构象生成失败且无理想坐标：
+  - 所有构象坐标均设置为零
+  - 模型将为配体输出NaN（输出JSON中的null）置信度
+
+## 法律与使用限制
+
+- **模型参数**：仅当直接从Google获得时，方可使用AlphaFold3模型参数
+- **许可证**：AlphaFold3源代码根据CC-BY-NC-SA 4.0许可证授权
+- **临床使用**：AlphaFold3及其输出不适用于、未验证或未批准用于临床使用
+
+## 常见问题排查
+
+### 大规模结构预测
+
+处理大于默认限制的结构时：
+
+1. 通过设置启用统一内存：
+   ```sh
+   XLA_PYTHON_CLIENT_PREALLOCATE=false
+   TF_FORCE_UNIFIED_MEMORY=true
+   XLA_CLIENT_MEM_FRACTION=3.2
+   ```
+
+2. 考虑针对您的特定硬件优化模型配置中的`pair_transition_shard_spec`
+
+### 构象生成失败
+
+当RDKit无法为配体生成构象时：
+
+1. 使用以下方式增加RDKit构象迭代次数：
+   ```
+   --conformer_max_iterations=<更高值>
+   ```
+
+2. 使用用户提供的CCD格式为配体提供参考结构
+
+---
+
+- [深度探索/法律考量](https://zread.ai/google-deepmind/alphafold3/15-legal-considerations)
+
+---
+slug:15-legal-considerations
+blog_type:normal
+---
+
+
+AlphaFold 3 受一个多层次的法律法规框架约束，该框架分别针对代码、模型权重和输出数据制定了不同的条款。本文档提供了这些法律考虑因素的全面概述，以帮助开发者了解在使用 AlphaFold 3 时可以和不可以做什么。
+
+## 许可证概览
+
+AlphaFold 3 的不同组件有不同的许可条款：
+
+| 组件 | 许可证 | 主要限制 |
+|------|--------|----------|
+| 源代码 | CC BY-NC-SA 4.0 | 仅限非商业用途，分享改编作品需遵循相同条款 |
+| 模型参数 | 自定义条款 | 仅限非商业组织使用，不得重新分发权重 |
+| 生成的输出 | 输出使用条款 | 仅限非商业用途，需正确署名 |
+
+来源：[LICENSE](LICENSE)，[WEIGHTS_TERMS_OF_USE.md](WEIGHTS_TERMS_OF_USE.md)，[OUTPUT_TERMS_OF_USE.md](OUTPUT_TERMS_OF_USE.md)
+
+## 源代码许可证
+
+AlphaFold 3 源代码根据 **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)** 许可证授权，该许可证的主要条款包括：
+
+- **署名**：您必须适当注明 Google DeepMind 的贡献，提供许可证链接，并指明是否进行了修改。
+- **非商业**：您不得将材料用于商业目的。
+- **相同方式分享**：如果您对材料进行混编、转换或在此基础上进行创作，必须按照与原始材料相同的许可证分发您的贡献。
+
+该许可证适用于代码本身，但不适用于模型权重或输出，它们有单独的条款。
+
+来源：[LICENSE](LICENSE)，[WEIGHTS_TERMS_OF_USE.md#L62-L66](WEIGHTS_TERMS_OF_USE.md#L62-L66)
+
+## 模型参数限制
+
+AlphaFold 3 模型参数（权重）受到更严格的条款约束：
+
+### 谁可以使用模型参数
+
+模型参数**仅**适用于以下对象：
+- 非商业组织（大学、非营利组织、研究机构、教育机构、新闻机构和政府机构）
+- 这些组织的研究人员（前提是他们不代表商业实体行事）
+
+商业组织**不得**在任何情况下使用模型参数。
+
+来源：[WEIGHTS_TERMS_OF_USE.md#L15-L21](WEIGHTS_TERMS_OF_USE.md#L15-L21)，[WEIGHTS_PROHIBITED_USE_POLICY.md#L13-L27](WEIGHTS_PROHIBITED_USE_POLICY.md#L13-L27)
+
+### 分享模型参数
+
+- 您**不得**在组织外部发布或分享 AlphaFold 3 模型参数。
+- 如果 Google 授予您组织授权代表访问权限，该代表可以与同一组织内的员工、顾问、承包商和代理人分享模型参数。
+- 您不得规避访问限制或使模型参数对未经授权的第三方可用。
+
+来源：[WEIGHTS_TERMS_OF_USE.md#L29-L30](WEIGHTS_TERMS_OF_USE.md#L29-L30)，[WEIGHTS_PROHIBITED_USE_POLICY.md#L119-L131](WEIGHTS_PROHIBITED_USE_POLICY.md#L119-L131)
+
+<CgxTip>
+**重要**：在请求访问模型参数时，Google 可能会验证您的信息，包括您的姓名、组织和其他身份信息。提供虚假信息违反使用条款。
+</CgxTip>
+
+## 输出使用限制
+
+由 AlphaFold 3 生成的输出（结构预测和相关信息）可以发布和分享，但有一定的限制：
+
+### 输出的允许用途
+
+- **科学文献发表**：您可以在科学出版物中包含 AlphaFold 3 输出。
+- **开源发布**：您可以通过开源发布使输出公开可用。
+- **新闻工作**：您可以使用输出支持新闻工作。
+
+来源：[WEIGHTS_TERMS_OF_USE.md#L31-L35](WEIGHTS_TERMS_OF_USE.md#L31-L35)，[OUTPUT_TERMS_OF_USE.md#L77-L81](OUTPUT_TERMS_OF_USE.md#L77-L81)
+
+### 输出的禁止用途
+
+您**不得**将 AlphaFold 3 输出用于：
+
+1. **商业目的**或代表商业组织
+2. **误导、虚假陈述或欺骗**，包括：
+   - 虚假陈述您与 Google 的关系
+   - 分发误导性的专业声明
+   - 做出医疗或其他关键决策
+3. **危险、非法或恶意活动**，包括：
+   - 促进非法物质或服务
+   - 生成侵犯他人权利的内容
+4. **训练类似的机器学习模型**进行生物分子结构预测
+
+来源：[OUTPUT_TERMS_OF_USE.md#L62-L123](OUTPUT_TERMS_OF_USE.md#L62-L123)，[WEIGHTS_PROHIBITED_USE_POLICY.md#L77-L83](WEIGHTS_PROHIBITED_USE_POLICY.md#L77-L83)
+
+## 署名和通知要求
+
+在分发 AlphaFold 3 输出时，您必须：
+
+1. **提供正确引用**：引用 AlphaFold 3 论文：[Abramson, J 等人. 使用 AlphaFold 3 准确预测生物分子相互作用的结构. *Nature* (2024)](https://www.nature.com/articles/s41586-024-07487-w)
+
+2. **包含条款通知**：提供明显通知，指出您分发的内容受 AlphaFold 3 输出使用条款约束。
+
+3. **注明任何修改**：指明您是否修改了原始输出。
+
+如果您移除或修改了原始通知，必须包含条款中指定的所需通知文本。
+
+来源：[OUTPUT_TERMS_OF_USE.md#L125-L149](OUTPUT_TERMS_OF_USE.md#L125-L149)，[WEIGHTS_PROHIBITED_USE_POLICY.md#L85-L110](WEIGHTS_PROHIBITED_USE_POLICY.md#L85-L110)，[WEIGHTS_PROHIBITED_USE_POLICY.md#L112-L117](WEIGHTS_PROHIBITED_USE_POLICY.md#L112-L117)
+
+## 免责声明和责任限制
+
+AlphaFold 3 及其输出附带几项重要免责声明：
+
+- **无保证**：模型和输出按“现状”提供，没有任何保证。
+- **非临床使用**：AlphaFold 3 仅用于理论建模，未经批准用于临床使用。
+- **置信度不同**：输出是预测，置信度不同，应谨慎解读。
+- **责任有限**：Google 对与 AlphaFold 3 相关的所有索赔的责任限于 500 美元。
+
+用户接受因非法使用或违反条款而产生的第三方索赔的赔偿义务。
+
+来源：[WEIGHTS_TERMS_OF_USE.md#L194-L218](WEIGHTS_TERMS_OF_USE.md#L194-L218)，[WEIGHTS_TERMS_OF_USE.md#L222-L238](WEIGHTS_TERMS_OF_USE.md#L222-L238)
+
+## 终止
+
+Google 可因以下原因暂停或终止您使用 AlphaFold 3 的权利：
+
+- 未遵守条款
+- Google 自行决定的其它原因
+
+如果您的权利被终止，您必须立即删除并停止使用您拥有的所有 AlphaFold 3 资产。
+
+来源：[WEIGHTS_TERMS_OF_USE.md#L161-L170](WEIGHTS_TERMS_OF_USE.md#L161-L170)
+
+## 管辖法律
+
+与 AlphaFold 3 相关的法律争议受以下法律管辖：
+
+- 加利福尼亚州法律
+- 美国加利福尼亚州圣克拉拉县联邦或州法院的专属管辖权
+
+但对于政府组织（除美国联邦政府外），可能适用特殊条款。
+
+来源：[WEIGHTS_TERMS_OF_USE.md#L253-L265](WEIGHTS_TERMS_OF_USE.md#L253-L265)
+
+## 法律文件的翻译
+
+为了方便国际用户，Google 提供了权重禁止使用政策和权重使用条款的多种语言翻译，包括：
+- 印尼语
+- 西班牙语（拉丁美洲）
+- 法语（加拿大）
+- 葡萄牙语（巴西）
+
+这些翻译可在仓库的“legal”目录中找到。
+
+来源：[legal/](legal/)
+
+## 摘要
+
+AlphaFold 3 的法律框架旨在确保其可用于非商业科学研究，同时防止商业开发和滥用。在使用 AlphaFold 3 时：
+
+1. 核实您是否有资格使用（非商业组织）
+2. 不得重新分发模型权重
+3. 分发输出时正确署名并提供通知
+4. 仅用于允许的非商业目的
+5. 了解其不提供任何保证，尤其是临床应用
+
+通过遵守这些法律考虑因素，您可以在尊重 Google DeepMind 设定的条款的同时，适当使用 AlphaFold 3。
+
+---
+
+## 高级应用
+
+- [深度探索/高级应用/API参考](https://zread.ai/google-deepmind/alphafold3/13-api-reference)
+
+---
+slug:13-api-reference
+blog_type:normal
+---
+
+
+本文档为使用AlphaFold3 API的开发人员提供了全面的参考。它涵盖了用于配置、运行和解释AlphaFold3结构预测结果的核心类和函数。
+
+## 核心API组件
+
+AlphaFold3的API围绕几个关键组件设计，这些组件处理蛋白质结构预测流程的不同部分。主要组件如下图所示：
+
+```mermaid
+graph TD
+    A[输入数据JSON] --> B[folding_input.Input]
+    B --> C[数据管道]
+    C --> D[特征提取]
+    D --> E[模型推理]
+    E --> F[结构预测]
+    F --> G[输出结果]
+    
+    style E fill:#f9f,stroke:#333,stroke-width:2px
+    style F fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+来源：[run_alphafold.py](run_alphafold.py)
+
+## 输入处理
+
+### folding_input.Input
+
+AlphaFold3预测的主要输入数据结构。
+
+```python
+# 加载折叠输入的示例
+fold_inputs = folding_input.load_fold_inputs_from_path(pathlib.Path("input.json"))
+# 或从包含多个输入的目录加载
+fold_inputs = folding_input.load_fold_inputs_from_dir(pathlib.Path("input_dir"))
+```
+
+**关键方法：**
+
+| 方法 | 描述 |
+|------|------|
+| `to_json()` | 将输入转换为JSON字符串以便存储或检查 |
+| `sanitised_name()` | 返回适合文件路径的名称的清理版本 |
+| `with_multiple_seeds(num_seeds)` | 创建具有多个随机种子的输入副本 |
+
+来源：[run_alphafold.py#L757-L767](run_alphafold.py#L757-L767)
+
+## 数据管道
+
+数据管道将原始输入数据处理为模型的特征。
+
+### pipeline.DataPipeline
+
+```python
+data_pipeline_config = pipeline.DataPipelineConfig(
+    jackhmmer_binary_path="path/to/jackhmmer",
+    nhmmer_binary_path="path/to/nhmmer",
+    hmmalign_binary_path="path/to/hmmalign",
+    hmmsearch_binary_path="path/to/hmmsearch",
+    hmmbuild_binary_path="path/to/hmmbuild",
+    small_bfd_database_path="path/to/small_bfd.fasta",
+    mgnify_database_path="path/to/mgy_clusters.fa",
+    # 其他数据库路径...
+)
+
+data_pipeline = pipeline.DataPipeline(data_pipeline_config)
+processed_fold_input = data_pipeline.process(fold_input)
+```
+
+数据管道执行几个关键步骤：
+- 多序列比对（MSA）生成
+- 模板检测和处理
+- 神经网络特征提取
+
+来源：[run_alphafold.py#L820-L840](run_alphafold.py#L820-L840)
+
+## 模型配置
+
+### make_model_config
+
+使用特定参数创建模型配置。
+
+```python
+config = make_model_config(
+    flash_attention_implementation="triton",
+    num_diffusion_samples=5,
+    num_recycles=10,
+    return_embeddings=False,
+    return_distogram=False,
+)
+```
+
+**参数：**
+
+| 参数 | 类型 | 描述 |
+|------|------|------|
+| flash_attention_implementation | str | 要使用的闪光注意力实现（"triton"、"cudnn"或"xla"） |
+| num_diffusion_samples | int | 要生成的扩散样本数量 |
+| num_recycles | int | 推理期间要使用的回收迭代次数 |
+| return_embeddings | bool | 是否返回主干嵌入 |
+| return_distogram | bool | 是否返回预测的距离图 |
+
+来源：[run_alphafold.py#L304-L321](run_alphafold.py#L304-L321)
+
+### Model.Config
+
+AlphaFold3模型的主要配置类。
+
+```python
+config = model.Model.Config()
+config.global_config.flash_attention_implementation = "triton"
+config.heads.diffusion.eval.num_samples = 5
+config.num_recycles = 10
+```
+
+**关键属性：**
+
+| 属性 | 描述 |
+|------|------|
+| evoformer | Evoformer模块的配置 |
+| global_config | 全局配置设置 |
+| heads | 模型预测头的配置 |
+| num_recycles | 要执行的回收迭代次数 |
+| return_embeddings | 是否返回嵌入 |
+| return_distogram | 是否返回距离图 |
+
+来源：[model.py#L221-L227](src/alphafold3/model/model.py#L221-L227)
+
+## 模型推理
+
+### ModelRunner
+
+管理结构预测推理的辅助类。
+
+```python
+model_runner = ModelRunner(
+    config=model_config,
+    device=jax.devices("gpu")[0],
+    model_dir=pathlib.Path("path/to/model_weights"),
+)
+
+# 运行推理
+result = model_runner.run_inference(featurised_example, rng_key)
+
+# 提取推理结果
+inference_results = model_runner.extract_inference_results(
+    batch=featurised_example, 
+    result=result, 
+    target_name="protein_name"
+)
+```
+
+**关键方法：**
+
+| 方法 | 描述 |
+|------|------|
+| `run_inference(featurised_example, rng_key)` | 在提供的特征上运行模型推理 |
+| `extract_inference_results(batch, result, target_name)` | 从模型输出中提取结构预测 |
+| `extract_embeddings(result, num_tokens)` | 从模型结果中提取嵌入 |
+| `extract_distogram(result, num_tokens)` | 从模型结果中提取距离图 |
+
+来源：[run_alphafold.py#L324-L414](run_alphafold.py#L324-L414)
+
+### Model
+
+实现AlphaFold3架构的核心模型类。
+
+```python
+model_instance = model.Model(config)
+result = model_instance(batch, key)
+```
+
+**关键方法：**
+
+| 方法 | 描述 |
+|------|------|
+| `__call__(batch, key)` | 运行模型的前向传递 |
+| `_sample_diffusion(batch, embeddings, sample_config)` | 运行扩散采样过程 |
+
+来源：[model.py#L213-L235](src/alphafold3/model/model.py#L213-L235), [model.py#L260-L265](src/alphafold3/model/model.py#L260-L265)
+
+## 结构预测
+
+### predict_structure
+
+运行完整预测流程的主要函数。
+
+```python
+results = predict_structure(
+    fold_input=fold_input,
+    model_runner=model_runner,
+    buckets=[256, 512, 1024, 2048],
+    ref_max_modified_date=datetime.date.fromisoformat("2021-09-30"),
+    conformer_max_iterations=None,
+    resolve_msa_overlaps=True,
+)
+```
+
+**参数：**
+
+| 参数 | 类型 | 描述 |
+|------|------|------|
+| fold_input | folding_input.Input | 预测的输入数据 |
+| model_runner | ModelRunner | 用于推理的ModelRunner实例 |
+| buckets | Sequence[int] 或 None | 用于缓存编译的令牌大小 |
+| ref_max_modified_date | datetime.date 或 None | 模板最大发布日期 |
+| conformer_max_iterations | int 或 None | RDKit构象搜索的最大迭代次数 |
+| resolve_msa_overlaps | bool | 是否对未配对的MSA进行去重以配对MSA |
+
+**返回：**
+
+包含每个种子预测的`ResultsForSeed`对象序列。
+
+来源：[run_alphafold.py#L436-L508](run_alphafold.py#L436-L508)
+
+### get_predicted_structure
+
+从模型输出创建预测结构。
+
+```python
+structure = get_predicted_structure(result, batch)
+```
+
+**参数：**
+
+| 参数 | 类型 | 描述 |
+|------|------|------|
+| result | ModelResult | 模型特定布局的模型输出 |
+| batch | feat_batch.Batch | 模型输入批次 |
+
+**返回：**
+
+表示预测蛋白质结构的`structure.Structure`对象。
+
+来源：[model.py#L67-L138](src/alphafold3/model/model.py#L67-L138)
+
+## 输出处理
+
+### InferenceResult
+
+表示模型推理的后期处理结果。
+
+```python
+@dataclasses.dataclass(frozen=True)
+class InferenceResult:
+    predicted_structure: structure.Structure
+    numerical_data: dict = dataclasses.field(default_factory=dict)
+    metadata: dict = dataclasses.field(default_factory=dict)
+    debug_outputs: dict = dataclasses.field(default_factory=dict)
+    model_id: bytes = b''
+```
+
+**属性：**
+
+| 属性 | 描述 |
+|------|------|
+| predicted_structure | 预测的蛋白质结构 |
+| numerical_data | 数值数据（标量或数组） |
+| metadata | 推理元数据的较小数值数据 |
+| debug_outputs | 用于调试的附加数据 |
+| model_id | 模型标识符 |
+
+来源：[model.py#L45-L64](src/alphafold3/model/model.py#L45-L64)
+
+### ResultsForSeed
+
+存储单个随机种子的推理结果。
+
+```python
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class ResultsForSeed:
+    seed: int
+    inference_results: Sequence[model.InferenceResult]
+    full_fold_input: folding_input.Input
+    embeddings: dict[str, np.ndarray] | None = None
+    distogram: np.ndarray | None = None
+```
+
+**属性：**
+
+| 属性 | 描述 |
+|------|------|
+| seed | 用于预测的随机种子 |
+| inference_results | 推理结果列表（每个扩散样本一个） |
+| full_fold_input | 包括MSA和模板的完整折叠输入 |
+| embeddings | 最终主干嵌入（可选） |
+| distogram | 预测的距离直方图（可选） |
+
+来源：[run_alphafold.py#L416-L434](run_alphafold.py#L416-L434)
+
+### write_outputs
+
+将预测输出写入指定目录。
+
+```python
+write_outputs(
+    all_inference_results=results,
+    output_dir="output_path",
+    job_name="job_name",
+)
+```
+
+**参数：**
+
+| 参数 | 类型 | 描述 |
+|------|------|------|
+| all_inference_results | Sequence[ResultsForSeed] | 要写入的结果 |
+| output_dir | str 或 PathLike | 输出目录路径 |
+| job_name | str | 作业名称 |
+
+来源：[run_alphafold.py#L523-L588](run_alphafold.py#L523-L588)
+
+## 完整预测工作流程
+
+整个预测工作流程可以通过`process_fold_input`函数执行，该函数处理数据管道执行和模型推理：
+
+```python
+results = process_fold_input(
+    fold_input=fold_input,
+    data_pipeline_config=data_pipeline_config,
+    model_runner=model_runner,
+    output_dir="output_path",
+    buckets=[256, 512, 1024, 2048],
+    ref_max_modified_date=max_template_date,
+    conformer_max_iterations=None,
+    resolve_msa_overlaps=True,
+    force_output_dir=False,
+)
+```
+
+<CgxTip>
+**提示：** 若只想运行数据管道或仅进行模型推理，将`data_pipeline_config`或`model_runner`设置为`None`。这允许你将计算分成独立步骤，这在计算资源有限时非常有用。
+</CgxTip>
+
+来源：[run_alphafold.py#L636-L736](run_alphafold.py#L636-L736)
+
+## 命令行界面
+
+AlphaFold3可以直接从命令行运行，使用`run_alphafold.py`。关键标志包括：
+
+```bash
+python run_alphafold.py \
+  --json_path=input.json \
+  --output_dir=output \
+  --model_dir=models \
+  --num_recycles=10 \
+  --num_diffusion_samples=5
+```
+
+有关命令行选项的完整列表，请参阅[run_alphafold.py](run_alphafold.py)顶部定义的标志。
+
+来源：[run_alphafold.py#L61-L301](run_alphafold.py#L61-L301)
+
+## 结论
+
+本API参考涵盖了使用AlphaFold3进行程序化工作的关键组件。有关特定组件的更多详细信息，请参阅存储库中的源代码和伴随文档。
+
+请记住，AlphaFold3模型参数受特定使用条款的约束，在使用此API时应遵守这些条款。
+
+---
+
+- [深度探索/高级应用/Docker部署](https://zread.ai/google-deepmind/alphafold3/14-docker-deployment)
+
+---
+slug:14-docker-deployment
+blog_type:normal
+---
+
+
+AlphaFold 3 提供了一个基于 Docker 的全面部署解决方案，简化了安装过程，并确保在不同环境中的执行一致性。本指南将引导您使用 Docker 部署 AlphaFold 3，从初始设置到运行您的第一个结构预测。
+
+## 前置条件
+
+在使用 Docker 部署 AlphaFold 3 之前，请确保您的系统满足以下要求：
+
+- Linux 操作系统（AlphaFold 3 不支持其他操作系统）
+- 具有计算能力 8.0 或更高的 NVIDIA GPU（推荐 A100 或 H100）
+- 至少 64GB RAM（更长的序列需要更多内存）
+- 最高 1TB 的磁盘空间用于遗传数据库（推荐使用 SSD 存储）
+- 主机机器上安装了 CUDA 12.6
+- 支持 NVIDIA 容器的 Docker
+
+**硬件推荐**：AlphaFold 3 已验证可在单个 NVIDIA A100 80GB 或 H100 80GB GPU 上处理最多 5,120 个标记的输入。遗传搜索阶段可能会消耗大量内存，因此拥有足够的内存对于最佳性能至关重要。
+
+## 设置支持 NVIDIA 的 Docker
+
+### 1. 安装 Docker
+
+对于 Ubuntu 22.04 LTS 或更高版本：
+
+```sh
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+测试您的 Docker 安装：
+
+```sh
+sudo docker run hello-world
+```
+
+### 2. 启用无根 Docker（推荐）
+
+```sh
+sudo apt-get install -y uidmap systemd-container
+
+sudo machinectl shell $(whoami)@ /bin/bash -c 'dockerd-rootless-setuptool.sh install && sudo loginctl enable-linger $(whoami) && DOCKER_HOST=unix:///run/user/1001/docker.sock docker context use rootless'
+```
+
+### 3. 安装 NVIDIA 驱动和 Docker 支持
+
+安装 NVIDIA 驱动：
+
+```sh
+sudo apt-get -y install alsa-utils ubuntu-drivers-common
+sudo ubuntu-drivers install
+
+sudo nvidia-smi --gpu-reset
+```
+
+使用 `nvidia-smi` 验证安装。如果遇到问题，您可能需要重启系统。
+
+安装 NVIDIA 容器工具包：
+
+```sh
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+  && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+nvidia-ctk runtime configure --runtime=docker --config=$HOME/.config/docker/daemon.json
+systemctl --user restart docker
+sudo nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place
+```
+
+验证 Docker 中的 GPU 访问：
+
+```sh
+docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu22.04 nvidia-smi
+```
+
+## 获取 AlphaFold 3 资源
+
+### 1. 克隆仓库
+
+```sh
+git clone https://github.com/google-deepmind/alphafold3.git
+```
+
+### 2. 下载遗传数据库
+
+AlphaFold 3 需要多个遗传数据库以实现最佳性能。使用提供的脚本：
+
+```sh
+cd alphafold3  # 导航到仓库目录
+./fetch_databases.sh [<DB_DIR>]
+```
+
+如果未指定，默认 `<DB_DIR>` 为 `$HOME/public_databases`。
+
+**重要**：数据库目录不应是 AlphaFold 3 仓库目录的子目录。总下载大小约为 252 GB，解压后大小约为 630 GB。请确保您有足够的磁盘空间、带宽和权限。
+
+为了提高性能，考虑将数据库移动到 SSD：
+
+```sh
+src/scripts/gcp_mount_ssd.sh [<SSD_MOUNT_PATH>]
+src/scripts/copy_to_ssd.sh [<DB_DIR>] [<SSD_DB_DIR>]
+```
+
+### 3. 获取模型参数
+
+要访问 AlphaFold 3 模型参数：
+1. 完成 [请求表单](https://forms.gle/svvpY4u2jsHEwWYS6)
+2. 等待批准（通常需要 2-3 个工作日）
+3. 将参数下载到您选择的目录（`<MODEL_PARAMETERS_DIR>`）
+
+与数据库一样，这个目录不应位于 AlphaFold 3 仓库目录内。
+
+## 构建和运行 Docker 容器
+
+### 1. 构建 Docker 镜像
+
+在 AlphaFold 3 仓库目录中：
+
+```sh
+docker build -t alphafold3 -f docker/Dockerfile .
+```
+
+这将构建一个包含所有必需的 Python 依赖项、HMMER（带有自定义序列限制补丁）和其他必要组件的容器。
+
+### 2. 准备输入文件
+
+根据 [输入文档](https://github.com/google-deepmind/alphafold3/blob/main/docs/input.md) 创建一个输入 JSON 文件，并将其放置在一个目录中（例如，`$HOME/af_input`）。
+
+### 3. 运行 AlphaFold 3
+
+```sh
+docker run -it \
+    --volume $HOME/af_input:/root/af_input \
+    --volume $HOME/af_output:/root/af_output \
+    --volume <MODEL_PARAMETERS_DIR>:/root/models \
+    --volume <DB_DIR>:/root/public_databases \
+    --gpus all \
+    alphafold3 \
+    python run_alphafold.py \
+    --json_path=/root/af_input/fold_input.json \
+    --model_dir=/root/models \
+    --output_dir=/root/af_output
+```
+
+其中：
+- `$HOME/af_input`：包含输入 JSON 文件的目录
+- `$HOME/af_output`：输出结果的目录
+- `<MODEL_PARAMETERS_DIR>`：包含下载的模型参数的目录
+- `<DB_DIR>`：包含遗传数据库的目录
+
+您可能需要创建输出目录并设置适当的权限：
+
+```sh
+mkdir -p $HOME/af_output
+chmod 755 $HOME/af_input $HOME/af_output
+```
+
+## 优化性能
+
+### 使用 SSD 存储数据库
+
+为了提高遗传搜索性能，将数据库放在 SSD 上。如果您有一些数据库在 SSD 上，而其他数据库在较慢的磁盘上：
+
+```sh
+docker run -it \
+    --volume $HOME/af_input:/root/af_input \
+    --volume $HOME/af_output:/root/af_output \
+    --volume <MODEL_PARAMETERS_DIR>:/root/models \
+    --volume <SSD_DB_DIR>:/root/public_databases \
+    --volume <DB_DIR>:/root/public_databases_fallback \
+    --gpus all \
+    alphafold3 \
+    python run_alphafold.py \
+    --json_path=/root/af_input/fold_input.json \
+    --model_dir=/root/models \
+    --db_dir=/root/public_databases \
+    --db_dir=/root/public_databases_fallback \
+    --output_dir=/root/af_output
+```
+
+此配置允许 AlphaFold 3 从 SSD 访问数据库，并在需要时回退到更大、更慢的磁盘。
+
+### 高级配置选项
+
+要查看所有可用的命令行选项：
+
+```sh
+docker run alphafold3 python run_alphafold.py --help
+```
+
+## 替代方案：使用 Singularity 而非 Docker
+
+对于不推荐或不可用 Docker 的环境（如某些 HPC 系统），您可以使用 Singularity：
+
+### 1. 安装 Singularity
+
+```sh
+wget https://github.com/sylabs/singularity/releases/download/v4.2.1/singularity-ce_4.2.1-jammy_amd64.deb
+sudo dpkg --install singularity-ce_4.2.1-jammy_amd64.deb
+sudo apt-get install -f
+```
+
+### 2. 从 Docker 镜像构建 Singularity 容器
+
+```sh
+docker run -d -p 5000:5000 --restart=always --name registry registry:2
+docker tag alphafold3 localhost:5000/alphafold3
+docker push localhost:5000/alphafold3
+
+SINGULARITY_NOHTTPS=1 singularity build alphafold3.sif docker://localhost:5000/alphafold3:latest
+```
+
+验证 GPU 访问：
+
+```sh
+singularity exec --nv alphafold3.sif sh -c 'nvidia-smi'
+```
+
+### 3. 使用 Singularity 运行 AlphaFold 3
+
+```sh
+singularity exec \
+     --nv \
+     --bind $HOME/af_input:/root/af_input \
+     --bind $HOME/af_output:/root/af_output \
+     --bind <MODEL_PARAMETERS_DIR>:/root/models \
+     --bind <DB_DIR>:/root/public_databases \
+     alphafold3.sif \
+     python run_alphafold.py \
+     --json_path=/root/af_input/fold_input.json \
+     --model_dir=/root/models \
+     --db_dir=/root/public_databases \
+     --output_dir=/root/af_output
+```
+
+## 故障排除
+
+- **挂载源路径错误**：如果看到类似“Error response from daemon: error while creating mount source path”的错误，请确保指定的目录存在并具有适当的权限。
+- **GPU 访问问题**：确保 NVIDIA 驱动正确安装，并且容器具有 GPU 访问权限。在主机和容器内都运行 `nvidia-smi` 以验证。
+- **数据库权限**：如果遇到 MSA 工具的错误，请确保您的数据库目录具有完全的读写权限（例如，`sudo chmod 755 --recursive <DB_DIR>`）。
+
+## 摘要
+
+使用 Docker 部署 AlphaFold 3 提供了一个一致、可复现的环境，用于蛋白质结构预测。按照本指南，您可以设置必要的依赖项，构建 Docker 容器，并运行您自己的数据预测。为了获得最佳性能，考虑使用 SSD 存储数据库，并确保您的 GPU 和 RAM 符合推荐规格。
+
+---

@@ -1,0 +1,53 @@
+# google-deepmind/alphafold
+
+Source: https://zread.ai/google-deepmind/alphafold
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+### 安装与配置
+
+- [入门指南/安装与配置/Docker 安装](3-docker-installation.md)
+- [入门指南/安装与配置/数据库配置](4-database-configuration.md)
+- [入门指南/安装与配置/GPU 设置要求](5-gpu-setup-requirements.md)
+
+
+## 动态资讯
+
+- [动态资讯/最新更新](6-latest-updates.md)
+- [动态资讯/问题与反馈](7-issues-and-feedbacks.md)
+- [动态资讯/关于贡献者](8-about-contributors.md)
+
+## 深度解析
+
+### 核心架构
+
+- [深度解析/核心架构/Evoformer 模块设计](9-evoformer-module-design.md)
+- [深度解析/核心架构/注意力机制](10-attention-mechanisms.md)
+- [深度解析/核心架构/模型架构概览](11-model-architecture-overview.md)
+
+### 数据处理流程
+
+- [深度解析/数据处理流程/MSA 生成与处理](12-msa-generation-and-processing.md)
+- [深度解析/数据处理流程/模板搜索集成](13-template-search-integration.md)
+- [深度解析/数据处理流程/特征工程](14-feature-engineering.md)
+
+### 预测与分析
+
+- [深度解析/预测与分析/结构预测工作流](15-structure-prediction-workflow.md)
+- [深度解析/预测与分析/置信度指标 (pLDDT, PAE)](16-confidence-metrics-plddt-pae.md)
+- [深度解析/预测与分析/Amber 松弛过程](17-amber-relaxation-process.md)
+
+### 多聚体功能
+
+- [深度解析/多聚体功能/AlphaFold-Multimer 架构](18-alphafold-multimer-architecture.md)
+- [深度解析/多聚体功能/蛋白质复合物预测](19-protein-complex-prediction.md)
+- [深度解析/多聚体功能/异聚体分析](20-heteromer-analysis.md)
+
+### 模型组件
+
+- [深度解析/模型组件/三角形注意力与乘法](21-triangle-attention-and-multiplication.md)
+- [深度解析/模型组件/模板嵌入系统](22-template-embedding-systems.md)
+- [深度解析/模型组件/循环机制](23-recycling-mechanisms.md)
+

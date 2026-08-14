@@ -1,0 +1,38 @@
+# lucidrains/alphafold2
+
+Source: https://zread.ai/lucidrains/alphafold2
+
+## 开始使用
+
+- [开始使用/概述](1-overview.md)
+- [开始使用/快速入门](2-quick-start.md)
+- [开始使用/安装选项](3-installation-options.md)
+### 教程
+
+- [开始使用/教程/预测蛋白质结构](4-predicting-protein-structure.md)
+- [开始使用/教程/使用Jupyter笔记本](5-working-with-jupyter-notebooks.md)
+
+
+## 热议
+
+- [热议/热议内容](6-whats-the-buzz.md)
+- [热议/大家都在说](7-what-people-are-saying.md)
+- [热议/关于团队](8-about-the-team.md)
+
+## 深度探索
+
+- [深度探索/AlphaFold2架构](9-alphafold2-architecture.md)
+- [深度探索/结构精修技术](16-structure-refinement-techniques.md)
+- [深度探索/API参考](17-api-reference.md)
+### 核心组件
+
+- [深度探索/核心组件/嵌入系统](10-embedding-system.md)
+- [深度探索/核心组件/旋转位置编码](11-rotary-position-encoding.md)
+- [深度探索/核心组件/可逆网络](12-reversible-networks.md)
+
+### 训练方法
+
+- [深度探索/训练方法/端到端训练流程](13-end-to-end-training-pipeline.md)
+- [深度探索/训练方法/预训练方法](14-pre-training-approaches.md)
+- [深度探索/训练方法/TrRosetta数据集使用](15-trrosetta-dataset-usage.md)
+

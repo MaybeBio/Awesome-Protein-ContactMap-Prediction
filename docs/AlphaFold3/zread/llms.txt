@@ -1,0 +1,32 @@
+# google-deepmind/alphafold3
+
+Source: https://zread.ai/google-deepmind/alphafold3
+
+## 开始使用
+
+- [开始使用/概述](1-overview.md)
+- [开始使用/快速入门](2-quick-start.md)
+- [开始使用/安装](3-installation.md)
+### 数据处理
+
+- [开始使用/数据处理/数据库设置](4-database-setup.md)
+
+
+## 热议
+
+- [热议/热议内容](6-whats-the-buzz.md)
+- [热议/大家都在说](7-what-people-are-saying.md)
+- [热议/关于团队](8-about-the-team.md)
+
+## 深度探索
+
+- [深度探索/架构概览](9-architecture-overview.md)
+- [深度探索/模型组件与算法](10-model-components-and-algorithms.md)
+- [深度探索/性能基准](11-performance-benchmarks.md)
+- [深度探索/已知限制](12-known-limitations.md)
+- [深度探索/法律考量](15-legal-considerations.md)
+### 高级应用
+
+- [深度探索/高级应用/API参考](13-api-reference.md)
+- [深度探索/高级应用/Docker部署](14-docker-deployment.md)
+

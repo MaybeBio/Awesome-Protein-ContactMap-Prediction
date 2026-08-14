@@ -1,0 +1,50 @@
+# aqlaboratory/openfold
+
+Source: https://zread.ai/aqlaboratory/openfold
+
+## 快速入门
+
+- [快速入门/概述](1-overview.md)
+- [快速入门/快速开始](2-quick-start.md)
+### 安装与配置
+
+- [快速入门/安装与配置/系统要求与依赖项](3-system-requirements-and-dependencies.md)
+- [快速入门/安装与配置/数据库设置与配置](4-database-setup-and-configuration.md)
+
+### 基础用法
+
+- [快速入门/基础用法/使用预训练模型进行推理](5-running-inference-with-pretrained-models.md)
+
+
+## 动态资讯
+
+- [动态资讯/最新更新](6-latest-updates.md)
+- [动态资讯/问题与反馈](7-issues-and-feedbacks.md)
+- [动态资讯/贡献者介绍](8-about-contributors.md)
+
+## 深度解析
+
+### 核心架构
+
+- [深度解析/核心架构/AlphaFold 2 模型实现](9-alphafold-2-model-implementation.md)
+- [深度解析/核心架构/Evoformer 与结构模块](10-evoformer-and-structure-module.md)
+- [深度解析/核心架构/内存优化技术](11-memory-optimization-techniques.md)
+
+### 数据处理管道
+
+- [深度解析/数据处理管道/特征提取与处理](12-feature-extraction-and-processing.md)
+- [深度解析/数据处理管道/多序列比对（MSA）处理](13-multiple-sequence-alignment-msa-handling.md)
+- [深度解析/数据处理管道/模板搜索与整合](14-template-search-and-integration.md)
+
+### 训练与优化
+
+- [深度解析/训练与优化/训练管道与配置](15-training-pipeline-and-configuration.md)
+- [深度解析/训练与优化/DeepSpeed 集成与性能](16-deepspeed-integration-and-performance.md)
+- [深度解析/训练与优化/自定义 CUDA 内核与 FlashAttention](17-custom-cuda-kernels-and-flashattention.md)
+
+### 专业功能
+
+- [深度解析/专业功能/多聚体蛋白质结构预测](18-multimer-protein-structure-prediction.md)
+- [深度解析/专业功能/长序列推理](19-long-sequence-inference.md)
+- [深度解析/专业功能/单序列模式与嵌入](20-single-sequence-mode-and-embeddings.md)
+

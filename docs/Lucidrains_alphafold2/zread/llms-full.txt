@@ -1,0 +1,3676 @@
+# lucidrains/alphafold2
+
+Source: https://zread.ai/lucidrains/alphafold2
+
+# 开始使用
+
+- [开始使用/概述](https://zread.ai/lucidrains/alphafold2/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**alphafold2-pytorch** 是 DeepMind 革命性 AlphaFold2 的非官方 PyTorch 实现，该深度学习模型在 CASP14 中实现了蛋白质结构预测的突破性性能。此存储库提供了一个基于 PyTorch 的框架，用于使用类似于 AlphaFold2 论文中描述的基于注意力机制的神经网络进行蛋白质结构预测。
+
+## 什么是 AlphaFold2？
+
+AlphaFold2 代表了计算生物学的一项里程碑式进步，它使用深度学习从未知氨基酸序列中预测蛋白质的 3D 结构，具有前所未有的准确性。此实现提供了：
+
+- **蛋白质结构预测**：从序列和多重序列比对（MSA）输入
+- **距离图和角度预测**：类似于 trRosetta，但具有改进的注意力机制
+- **端到端坐标预测**：使用先进的等变网络
+- **基于 PyTorch 的架构**：使其对 PyTorch 社区开放
+
+来源：[README.md](README.md)，[alphafold2.py#L469-L502](alphafold2_pytorch/alphafold2.py#L469-L502)
+
+## 主要特性
+
+该实现提供了一些显著特性：
+
+| 特性 | 描述 |
+|------|------|
+| **Evoformer 架构** | 核心注意力网络，处理 MSA 并生成成对表示 |
+| **坐标预测** | 可选的结构模块，用于预测 3D 坐标 |
+| **角度预测** | 可选的扭转角（θ, φ, ω）预测 |
+| **预训练嵌入** | 与 ESM、MSA 和 ProtTrans 嵌入集成 |
+| **结构细化** | 支持 SE3 Transformer 或 E(n)-Transformer 细化 |
+
+<CgxTip>
+尽管这是一个非官方实现，但据报道，它在类似任务上与 trRosetta 相比取得了有竞争力的结果。该存储库的重点已转向提供一个干净的 PyTorch 翻译，并在位置编码技术上进行改进。
+</CgxTip>
+
+来源：[README.md#Status](README.md)，[alphafold2.py#L556-L563](alphafold2_pytorch/alphafold2.py#L556-L563)
+
+## 架构概述
+
+该实现遵循模块化架构，类似于 AlphaFold2 论文中描述的设计：
+
+```mermaid
+graph TD
+    A[序列 + MSA 输入] --> B[标记嵌入]
+    B --> C[Evoformer]
+    C --> D[结构模块]
+    D --> E[3D 坐标/距离图]
+    
+    subgraph "Evoformer 块"
+    F[MSA 自注意力] --> G[MSA 过渡]
+    H[成对表示] --> I[三角自注意力]
+    I --> J[三角过渡]
+    F --> H
+    end
+    
+    subgraph "可选组件"
+    K[角度预测]
+    L[模板处理]
+    M[额外 MSA 处理]
+    end
+```
+
+该模型通过一系列基于注意力的模块处理**主要氨基酸序列**和**多重序列比对（MSA）**，提取进化信息以预测蛋白质结构。
+
+来源：[alphafold2.py#L469-L598](alphafold2_pytorch/alphafold2.py#L469-L598)，[alphafold2.py#L412-L467](alphafold2_pytorch/alphafold2.py#L412-L467)
+
+## 核心组件
+
+### Evoformer
+
+网络的核心是**Evoformer**，它由交替层组成：
+
+1. **MSA 注意力块**：使用行和列注意力处理多重序列比对
+2. **成对注意力块**：通过三角注意力（输入和输出）处理成对表示
+3. **前馈网络**：在注意力后转换表示
+
+Evoformer 生成了丰富的表示，捕捉残基之间的进化关系。
+
+来源：[alphafold2.py#L412-L467](alphafold2_pytorch/alphafold2.py#L412-L467)，[alphafold2.py#L387-L408](alphafold2_pytorch/alphafold2.py#L387-L408)
+
+### 结构模块
+
+对于坐标预测，该实现提供了以下集成：
+
+- **SE3 Transformer**：用于等变处理原子坐标
+- **E(n)-Transformer**：等变结构细化的替代方案
+- **图 Transformer**：基于 Baker 实验室最近的改进
+
+这些模块支持从序列信息进行蛋白质 3D 坐标的端到端预测。
+
+来源：[README.md#predicting-coordinates](README.md)，[alphafold2.py#L491-L512](alphafold2_pytorch/alphafold2.py#L491-L512)
+
+## 存储库结构
+
+该存储库组织为几个关键目录：
+
+- **alphafold2_pytorch/**：核心实现文件
+  - `alphafold2.py`：主要模型实现
+  - `embeds.py`：序列和 MSA 的嵌入系统
+  - `rotary.py`：旋转位置编码
+  - `reversible.py`：内存高效的可逆层
+  
+- **notebooks/**：使用模型的示例笔记本
+  - `egnn_esm_end2end.ipynb`：端到端蛋白质结构预测
+  - 示例蛋白质数据在 `notebooks/data/`
+  
+- **training_scripts/**：训练模型的资源
+  - `datasets/trrosetta.py`：trRosetta 数据集的接口
+
+来源：[__init__.py](alphafold2_pytorch/__init__.py)
+
+## 下一步
+
+要开始使用 alphafold2-pytorch，请查看[快速入门](2-quick-start)指南，了解安装说明和基本使用示例。有关架构的详细信息，请访问 Deep Dive 部分的[AlphaFold2 架构](9-alphafold2-architecture)页面。
+
+以下部分将指导您完成：
+- 安装和设置库
+- 进行您的首次蛋白质结构预测
+- 理解底层模型架构
+- 训练和微调方法
+
+---
+
+- [开始使用/快速入门](https://zread.ai/lucidrains/alphafold2/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+本指南将帮助您快速上手`alphafold2-pytorch`，这是DeepMind革命性的AlphaFold2蛋白质结构预测系统的非官方PyTorch实现。只需几分钟，您就能使用这个强大的深度学习框架进行蛋白质结构预测。
+
+## 安装
+
+使用pip安装包：
+
+```bash
+pip install alphafold2-pytorch
+```
+
+就这么多！核心功能现在已为您可用。
+
+来源：[README.md#L13-L17](README.md#L13-L17)
+
+<CgxTip>
+如果您计划使用预训练嵌入（如ESM或ProtTrans），您还需要安装Nvidia的apex库。可以通过以下命令安装：
+
+```bash
+git clone https://github.com/NVIDIA/apex
+cd apex
+pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
+```
+</CgxTip>
+
+## 基本用法
+
+让我们从最简单的用例开始——预测蛋白质序列的距离图（distogram）：
+
+```python
+import torch
+from alphafold2_pytorch import Alphafold2
+
+# 初始化模型
+model = Alphafold2(
+    dim = 256,           # 隐藏维度大小
+    depth = 2,           # Transformer层数
+    heads = 8,           # 注意力头数
+    dim_head = 64        # 每个注意力头的维度
+).cuda()
+
+# 创建样本输入
+seq = torch.randint(0, 21, (1, 128)).cuda()      # 主序列（batch_size, seq_length）
+msa = torch.randint(0, 21, (1, 5, 120)).cuda()   # 多序列比对（batch_size, num_alignments, msa_length）
+mask = torch.ones_like(seq).bool().cuda()        # 序列掩码
+msa_mask = torch.ones_like(msa).bool().cuda()    # MSA掩码
+
+# 获取预测
+distogram = model(
+    seq,
+    msa,
+    mask = mask,
+    msa_mask = msa_mask
+) # 输出形状：(1, 128, 128, 37) - 表示成对距离概率
+```
+
+来源：[README.md#L29-L54](README.md#L29-L54), [alphafold2.py#L32-L38](alphafold2_pytorch/alphafold2.py#L32-L38)
+
+## 预测角度
+
+对于需要更多信息而不仅仅是距离的应用，您可以通过设置`predict_angles = True`来预测角度（theta, phi, omega）：
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_angles = True   # 启用角度预测
+).cuda()
+
+# 输入准备与之前相同
+seq = torch.randint(0, 21, (1, 128)).cuda()
+msa = torch.randint(0, 21, (1, 5, 120)).cuda()
+mask = torch.ones_like(seq).bool().cuda()
+msa_mask = torch.ones_like(msa).bool().cuda()
+
+# 获取包括角度的预测
+distogram, theta, phi, omega = model(
+    seq,
+    msa,
+    mask = mask,
+    msa_mask = msa_mask
+)
+
+# 输出形状：
+# distogram - (1, 128, 128, 37) - 成对距离概率
+# theta     - (1, 128, 128, 25) - theta角概率  
+# phi       - (1, 128, 128, 13) - phi角概率
+# omega     - (1, 128, 128, 25) - omega角概率
+```
+
+来源：[README.md#L56-L86](README.md#L56-L86)
+
+## 预测3D坐标
+
+AlphaFold2最强大的功能是预测蛋白质结构的实际3D坐标。通过设置`predict_coords = True`来启用此功能：
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_coords = True,                  # 启用坐标预测
+    structure_module_type = 'se3',          # 使用SE3 Transformer进行结构细化
+    structure_module_dim = 4,               # 结构模块维度
+    structure_module_depth = 1,             # 结构细化层数
+    structure_module_heads = 1,             # 结构模块注意力头数
+    structure_module_dim_head = 16,         # 结构模块头维度
+    structure_module_refinement_iters = 2,  # 细化迭代次数
+    structure_num_global_nodes = 1          # 结构模块中的全局节点数
+).cuda()
+
+# 输入准备
+seq = torch.randint(0, 21, (2, 64)).cuda()
+msa = torch.randint(0, 21, (2, 5, 60)).cuda()
+mask = torch.ones_like(seq).bool().cuda()
+msa_mask = torch.ones_like(msa).bool().cuda()
+
+# 获取预测坐标
+coords = model(
+    seq,
+    msa,
+    mask = mask,
+    msa_mask = msa_mask
+) # 输出形状：(2, 64 * 3, 3) - 每个残基的3个原子的3D坐标
+```
+
+默认情况下，模型预测3个主链原子（C, Cα, N）的坐标。您可以使用`atoms`参数自定义要包括的原子：
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_coords = True,
+    atoms = 'backbone-with-cbeta'  # 在预测中包括C-beta原子
+).cuda()
+
+# 现在坐标将包括C-beta原子
+# 输出形状将为(batch_size, seq_length * 4, 3)
+```
+
+来源：[README.md#L88-L157](README.md#L88-L157), [README.md#L129-L166](README.md#L129-L166)
+
+## 使用预训练嵌入
+
+为了获得更好的性能，您可以使用来自ESM或MSA Transformer等模型的预训练蛋白质嵌入：
+
+```python
+import torch
+from alphafold2_pytorch import Alphafold2
+from alphafold2_pytorch.embeds import MSAEmbedWrapper
+
+# 创建AlphaFold2模型
+alphafold2 = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64
+)
+
+# 用MSA嵌入包装
+model = MSAEmbedWrapper(
+    alphafold2 = alphafold2
+).cuda()
+
+# 输入准备
+seq = torch.randint(0, 21, (2, 16)).cuda()
+mask = torch.ones_like(seq).bool().cuda()
+msa = torch.randint(0, 21, (2, 5, 16)).cuda()
+msa_mask = torch.ones_like(msa).bool().cuda()
+
+# 使用预训练嵌入获取预测
+distogram = model(
+    seq,
+    msa,
+    mask = mask,
+    msa_mask = msa_mask
+)
+```
+
+来源：[README.md#L177-L219](README.md#L177-L219)
+
+## 高级功能
+
+AlphaFold2-PyTorch提供了许多高级功能，您可以在熟悉库后进行探索：
+
+| 功能 | 描述 | 关键参数 |
+|------|------|----------|
+| 卷积块 | 为序列和MSA添加卷积层 | `use_conv = True` |
+| 线性注意力 | 使用线性注意力以提高交叉注意力的效率 | `cross_attn_linear = True` |
+| 实值距离预测 | 直接预测均值和标准差 | `predict_real_value_distances = True` |
+| 模板处理 | 在预测中包含模板信息 | 传入`templates_seq`、`templates_coors`、`templates_mask` |
+| 结构模块类型 | 选择不同的等变网络 | `structure_module_type = 'se3'`、`'egnn'`或`'en'` |
+
+来源：[README.md#L235-L269](README.md#L235-L269), [README.md#L420-L449](README.md#L420-L449), [README.md#L271-L354](README.md#L271-L354), [README.md#L507-L545](README.md#L507-L545), [README.md#L588-L600](README.md#L588-L600)
+
+## 下一步
+
+现在您已经基本了解了如何使用alphafold2-pytorch，您可以：
+
+1. 探索`notebooks/`目录中的Jupyter笔记本，获取实用示例
+2. 尝试不同的模型配置
+3. 使用您自己的蛋白质数据训练模型
+4. 查看`scripts/`目录中的结构细化脚本
+
+请记住，这是AlphaFold2的非官方实现，随着原架构更多细节的揭示，它将继续演进。
+
+---
+
+- [开始使用/安装选项](https://zread.ai/lucidrains/alphafold2/3-installation-options)
+
+---
+slug:3-installation-options
+blog_type:normal
+---
+
+
+<text>
+
+本指南涵盖了AlphaFold2 PyTorch实现的全部安装方法，从基本设置到包含可选组件的高级配置。
+
+## 基本安装
+
+安装AlphaFold2 PyTorch实现的最简单方式是通过pip：
+
+```bash
+pip install alphafold2-pytorch
+```
+
+此命令会自动安装包及其核心依赖项。对于大多数只想探索基本功能的用户来说，这已经足够了。
+
+来源：[README.md#L15-L17](README.md#L15-L17)
+
+## 核心依赖项
+
+通过pip安装包时，以下依赖项会自动安装：
+
+| 类别 | 依赖项 |
+|------|--------|
+| **核心PyTorch** | torch>=1.6 |
+| **AI/ML库** | einops>=0.3, En-transformer>=0.2.3, invariant-point-attention, transformers |
+| **蛋白质科学** | mdtraj>=1.8, proDy, sidechainnet, biopython, mp-nerf>=0.1.5 |
+| **3D处理** | pytorch3d |
+| **实用工具** | numpy, requests, tqdm |
+
+来源：[setup.py#L18-L33](setup.py#L18-L33)
+
+## 高级安装选项
+
+### 从源代码安装
+
+对于想要贡献或修改代码的开发者：
+
+```bash
+git clone https://github.com/lucidrains/alphafold2.git
+cd alphafold2
+pip install -e .
+```
+
+运行测试并验证安装：
+
+```bash
+python setup.py test
+```
+
+来源：[setup.py#L34-L39](setup.py#L34-L39)
+
+### 安装稀疏注意力支持
+
+为了使用Microsoft Deepspeed的稀疏注意力（可以显著加速长序列的自注意力操作），你需要：
+
+1. 使用提供的脚本安装Deepspeed：
+
+```bash
+sh install_deepspeed.sh
+```
+
+2. 安装Triton包：
+
+```bash
+pip install triton
+```
+
+<CgxTip>
+**注意：** 稀疏注意力仅支持自注意力，不支持交叉注意力。在初始化模型时需要指定`max_seq_len`参数。
+</CgxTip>
+
+来源：[README.md#L390-L416](README.md#L390-L416)
+
+### 预训练嵌入支持
+
+要使用预训练嵌入（ESM, MSA Transformer或ProtTrans），你需要安装NVIDIA的apex库以优化操作：
+
+```bash
+git clone https://github.com/NVIDIA/apex
+cd apex
+pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./
+```
+
+这使你能使用来自预训练模型（如Facebook AI的ESM）的嵌入，从而提高性能。
+
+来源：[README.md#L177-L187](README.md#L177-L187)
+
+## 可选外部包
+
+### 结构精修工具
+
+对于最终的结构精修步骤，推荐使用以下工具：
+
+1. **PyRosetta** - 用于快速放松协议：
+   - 从[http://www.pyrosetta.org](http://www.pyrosetta.org)下载PyRosetta轮文件（需要学术邮箱）
+   - 安装轮文件：
+     ```bash
+     cd downloads_folder
+     pip install pyrosetta_wheel_filename.whl
+     ```
+
+2. **OpenMM Amber** - 用于分子动力学模拟：
+   - 按照[ParmEd的OpenMM Amber文档](https://parmed.github.io/ParmEd/html/omm_amber.html)中的说明操作
+
+来源：[README.md#L640-L646](README.md#L640-L646)
+
+## 系统要求
+
+- **Python版本**：3.7（如分类器中指定）
+- **硬件**：虽然没有明确说明，但建议使用GPU加速，特别是对于较大的蛋白质结构
+
+来源：[setup.py#L45](setup.py#L45)
+
+## 安装故障排除
+
+### pytorch3d依赖项的常见问题
+
+pytorch3d依赖项有时难以安装。如果遇到问题：
+
+1. 首先尝试直接从PyTorch生态系统安装：
+   ```bash
+   pip install pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/$(python -c "import torch; print(torch.__version__)")/$(python -c "import torch; print(torch.version.cuda.replace('.', ''))")/index.html
+   ```
+
+2. 如果失败，你可能需要按照[pytorch3d的仓库](https://github.com/facebookresearch/pytorch3d/blob/main/INSTALL.md)中的说明从源代码安装
+
+### 其他依赖项
+
+某些依赖项可能需要额外的系统包。在Ubuntu/Debian上：
+
+```bash
+sudo apt-get install -y build-essential cmake
+```
+
+## 开发环境
+
+对于开发工作，建议设置虚拟环境：
+
+```bash
+python -m venv alphafold2-env
+source alphafold2-env/bin/activate  # 在Windows上：alphafold2-env\Scripts\activate
+pip install -e .
+```
+
+这为项目创建了一个隔离环境，并以可编辑模式安装。
+
+## Docker安装
+
+虽然仓库中没有正式提供，但你可以创建一个Docker容器以确保一致的环境：
+
+```dockerfile
+FROM pytorch/pytorch:1.9.0-cuda11.1-cudnn8-runtime
+
+# 安装系统依赖项
+RUN apt-get update && apt-get install -y git build-essential cmake
+
+# 克隆仓库
+RUN git clone https://github.com/lucidrains/alphafold2.git
+WORKDIR /alphafold2
+
+# 安装包及其依赖项
+RUN pip install -e .
+
+# 安装可选依赖项
+RUN pip install triton
+RUN sh install_deepspeed.sh
+
+# 添加任何其他自定义设置
+
+# 设置工作目录
+WORKDIR /workspace
+```
+
+保存为`Dockerfile`并构建：
+```bash
+docker build -t alphafold2-pytorch .
+```
+
+使用GPU支持运行：
+```bash
+docker run --gpus all -it alphafold2-pytorch
+```
+</text>
+
+---
+
+## 教程
+
+- [开始使用/教程/预测蛋白质结构](https://zread.ai/lucidrains/alphafold2/4-predicting-protein-structure)
+
+---
+slug:4-predicting-protein-structure
+blog_type:normal
+---
+
+
+蛋白质结构预测是计算生物学中最重要的挑战之一。本指南将指导您使用AlphaFold2 PyTorch实现，从氨基酸序列和多序列比对（MSA）中预测蛋白质结构。
+
+## 为什么预测蛋白质结构？
+
+蛋白质是生物系统中的主力军，其功能与其3D结构密切相关。能够准确预测蛋白质结构，将解锁无数可能性：
+
+- **药物发现**：设计能与特定蛋白质结合位点相互作用的分子
+- **酶工程**：创建或修改具有所需催化特性的蛋白质
+- **理解疾病机制**：分析突变如何影响蛋白质的结构和功能
+
+## 预测选项
+
+此实现支持三种级别的结构预测：
+
+| 预测类型 | 描述 | 用例 |
+|----------|------|------|
+| 距离图 | 残基对之间的距离矩阵 | 快速评估蛋白质折叠 |
+| 角度 | 残基之间的扭转角（θ, φ, ω） | 更详细的构象信息 |
+| 3D坐标 | 3D空间中的完整原子坐标 | 完整的结构模型 |
+
+来源：[alphafold2.py#L821-L824](alphafold2_pytorch/alphafold2.py#L821-L824), [alphafold2.py#L815-L818](alphafold2_pytorch/alphafold2.py#L815-L818)
+
+## 基本工作流程
+
+以下是蛋白质结构预测的典型工作流程：
+
+```mermaid
+flowchart LR
+    A[蛋白质序列] --> B[模型初始化]
+    C[MSA数据] --> B
+    B --> D[前向传播]
+    D --> E[距离图]
+    D --> F[角度]
+    D --> G[3D坐标]
+```
+
+## 开始距离图预测
+
+最简单的预测形式是距离图，类似于原始AlphaFold-1产生的结果，但通过注意力机制提高了准确性：
+
+```python
+import torch
+from alphafold2_pytorch import Alphafold2
+
+# 初始化模型
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64
+).cuda()
+
+# 准备输入数据
+seq = torch.randint(0, 21, (1, 128)).cuda()      # 主序列（128个氨基酸）
+msa = torch.randint(0, 21, (1, 5, 120)).cuda()   # 包含5个序列的MSA
+mask = torch.ones_like(seq).bool().cuda()
+msa_mask = torch.ones_like(msa).bool().cuda()
+
+# 生成距离图预测
+distogram = model(
+    seq,
+    msa,
+    mask = mask,
+    msa_mask = msa_mask
+) # 输出形状： (1, 128, 128, 37)
+```
+
+输出距离图的形状为 `(batch_size, seq_length, seq_length, num_distance_bins)`，其中每个值表示残基在特定距离范围内的概率。
+
+来源：[README.md#L29-L54](README.md#L29-L54)
+
+## 预测角度
+
+为了获得更详细的结构信息，您可以预测扭转角（类似于trRosetta），通过启用 `predict_angles` 选项：
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_angles = True   # 启用角度预测
+).cuda()
+
+# 进行预测
+distogram, theta, phi, omega = model(
+    seq,
+    msa,
+    mask = mask,
+    msa_mask = msa_mask
+)
+
+# 输出形状：
+# distogram - (1, 128, 128, 37) - 距离概率
+# theta     - (1, 128, 128, 25) - Theta角概率
+# phi       - (1, 128, 128, 13) - Phi角概率
+# omega     - (1, 128, 128, 25) - Omega角概率
+```
+
+角度预测包含离散角区间的概率分布，允许您重建蛋白质骨架。
+
+来源：[README.md#L56-L86](README.md#L56-L86), [alphafold2.py#L834-L836](alphafold2_pytorch/alphafold2.py#L834-L836)
+
+<CgxTip>
+**提示**：当您需要骨架构象但不要求完整原子细节时，角度预测特别有用。它们在计算效率和结构细节之间提供了良好的平衡。
+</CgxTip>
+
+## 预测完整的3D坐标
+
+为了进行完整的结构预测，您可以启用坐标预测，该预测使用不变点注意力（IPA）模块生成原子坐标：
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_coords = True,
+    structure_module_depth = 4,
+    structure_module_heads = 1,
+    structure_module_dim_head = 4
+).cuda()
+
+# 生成3D坐标
+coords = model(
+    seq,
+    msa,
+    mask = mask,
+    msa_mask = msa_mask
+) # 输出形状： (batch_size, seq_length * num_atoms, 3)
+```
+
+默认情况下，模型预测每个残基的3个骨架原子（N, Cα, C）的坐标。输出形状将为 `(batch_size, sequence_length * 3, 3)`，表示每个原子的 (x, y, z) 坐标。
+
+来源：[alphafold2.py#L853-L891](alphafold2_pytorch/alphafold2.py#L853-L891), [README.md#L88-L126](README.md#L88-L126)
+
+## 选择原子类型
+
+您可以自定义坐标预测中包含哪些原子：
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_coords = True,
+    atoms = 'backbone-with-cbeta'  # 包含C-beta原子
+).cuda()
+
+coords = model(seq, msa, mask=mask, msa_mask=msa_mask)
+# 输出现在包含每个残基的4个原子
+```
+
+可用的原子选项包括：
+- `backbone` - 3个骨架原子（N, Cα, C）[默认]
+- `backbone-with-cbeta` - 3个骨架原子加上Cβ
+- `backbone-with-oxygen` - 3个骨架原子加上羰基氧
+- `backbone-with-cbeta-and-oxygen` - 3个骨架原子加上Cβ和氧
+- `all` - 包括侧链的所有原子
+
+来源：[README.md#L128-L173](README.md#L128-L173)
+
+## 结构预测过程解析
+
+AlphaFold2中的结构预测过程涉及几个关键步骤：
+
+1. **嵌入**：将氨基酸序列和MSA转换为连续的向量表示
+2. **Evoformer处理**：通过多个Evoformer块处理嵌入，捕捉进化和空间关系
+3. **结构模块**：通过迭代精化将表示转换为3D结构
+
+```mermaid
+flowchart TD
+    A[序列和MSA输入] --> B[嵌入层]
+    B --> C[Evoformer]
+    C --> D[结构模块]
+    D --> E[3D坐标]
+    
+    subgraph "Evoformer块（重复）"
+    C1[MSA自注意力] --> C2[MSA转换]
+    C2 --> C3[成对自注意力]
+    C3 --> C4[成对转换]
+    end
+    
+    subgraph "结构模块"
+    D1[IPA块] --> D2[更新四元数]
+    D2 --> D3[转换为坐标]
+    end
+```
+
+结构模块使用迭代精化方法，其中每一层改进结构预测，应用一系列旋转和平移以产生最终的3D坐标。
+
+来源：[alphafold2.py#L412-L467](alphafold2_pytorch/alphafold2.py#L412-L467), [alphafold2.py#L853-L891](alphafold2_pytorch/alphafold2.py#L853-L891)
+
+## 使用预训练嵌入改进预测
+
+您可以通过结合来自ESM或ProtTrans等模型的预训练蛋白质语言模型嵌入，来提高预测质量：
+
+```python
+from alphafold2_pytorch import Alphafold2
+from alphafold2_pytorch.embeds import ESMEmbedWrapper
+
+# 创建基础AlphaFold2模型
+alphafold2 = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_coords = True
+)
+
+# 用嵌入模型包装
+model = ESMEmbedWrapper(
+    alphafold2,
+    esm_model = 'esm1b_t33_650M_UR50S'  # 预训练的ESM模型
+)
+
+# 现在您可以输入原始序列
+sequences = ['MKTVLIAGVLAVVALAASFLHPGGRSAIEDQEDFGLFQKLAKEQGVTQQ']
+coords = model(sequences)
+```
+
+这种方法自动处理嵌入生成，可以显著提高预测准确性，特别是对于同源性信息有限的蛋白质。
+
+## 使用循环精化预测
+
+为了提高准确性，您可以使用坐标循环，将前一次迭代的预测结果反馈到模型中：
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 2,
+    heads = 8,
+    dim_head = 64,
+    predict_coords = True
+).cuda()
+
+# 第一次传递以获取初始预测
+coords, recyclables = model(
+    seq, 
+    msa, 
+    mask=mask, 
+    msa_mask=msa_mask, 
+    return_recyclables=True
+)
+
+# 第二次传递使用循环信息
+refined_coords = model(
+    seq,
+    msa,
+    mask=mask,
+    msa_mask=msa_mask,
+    recyclables=recyclables
+)
+```
+
+循环允许模型基于初始结构估计细化其预测，通常会产生更准确的最终结构。
+
+来源：[alphafold2.py#L730-L739](alphafold2_pytorch/alphafold2.py#L730-L739), [alphafold2.py#L895-L897](alphafold2_pytorch/alphafold2.py#L895-L897)
+
+## 解释和可视化结果
+
+预测完成后，您将希望可视化和分析您的结构。以下是一个使用PyMOL的简单示例（您需要先将张量转换为坐标并保存为PDB文件）：
+
+```python
+import torch
+import numpy as np
+from alphafold2_pytorch import Alphafold2
+from alphafold2_pytorch.utils import coords_to_pdb_file
+
+# 进行预测
+model = Alphafold2(dim=256, depth=2, heads=8, predict_coords=True).cuda()
+coords = model(seq, msa, mask=mask, msa_mask=msa_mask)
+
+# 转换为numpy并保存为PDB
+coords_np = coords[0].cpu().detach().numpy()  # 批量中的第一个结构
+pdb_file = coords_to_pdb_file(coords_np, 'predicted_structure.pdb', seq[0])
+
+# 现在在PyMOL或其他分子可视化软件中打开
+```
+
+## 结论
+
+本指南已向您介绍了使用AlphaFold2 PyTorch实现预测蛋白质结构的过程。从基本的距离图预测到完整的3D坐标生成，您现在拥有了应用这一强大模型进行蛋白质结构预测任务的工具。
+
+请记住，尽管此实现提供了最先进的预测能力，但您的结果准确性将取决于输入数据的质量，特别是MSA。为了获得最佳结果，请为您的目标蛋白质创建多样化和信息丰富的MSA。
+
+在下一个教程中，我们将探讨使用提供的Jupyter笔记本进行更互动的蛋白质结构分析。
+
+---
+
+- [开始使用/教程/使用Jupyter笔记本](https://zread.ai/lucidrains/alphafold2/5-working-with-jupyter-notebooks)
+
+---
+slug:5-working-with-jupyter-notebooks
+blog_type:normal
+---
+
+
+Jupyter笔记本提供了一种交互式的方式来实验AlphaFold2 PyTorch实现。本指南将逐步介绍包含的笔记本，解释如何使用它们进行蛋白质结构分析和预测。
+
+## 仓库笔记本简介
+
+lucidrains/alphafold2仓库在`notebooks/`目录中包含两个Jupyter笔记本：
+
+1. **egnn_esm_end2end.ipynb**：一个端到端的实现，结合了AlphaFold2、EGNN（E(n)等变图神经网络）和ESM（进化尺度建模）嵌入，用于蛋白质结构预测
+2. **structure_utils_tests.ipynb**：用于处理蛋白质结构分析、比较和排列的实用工具测试
+
+这些笔记本展示了AlphaFold2实现的实际应用，同时为您自己的实验提供了基础。
+
+来源：[notebooks/egnn_esm_end2end.ipynb](notebooks/egnn_esm_end2end.ipynb), [notebooks/structure_utils_tests.ipynb](notebooks/structure_utils_tests.ipynb)
+
+## 开始使用笔记本
+
+### 前置条件
+
+在运行笔记本之前，请确保您已：
+
+1. 安装了alphafold2-pytorch包及其依赖项
+2. 能够访问GPU资源（推荐以提高性能）
+3. 对蛋白质结构概念有基本的了解
+
+### 环境设置
+
+这两个笔记本都需要特定的Python包。`egnn_esm_end2end.ipynb`笔记本包含环境设置单元格，用于安装所有必需的依赖项：
+
+```python
+# 安装基本依赖项
+!pip install sidechainnet proDy einops
+
+# 安装PyTorch Geometric依赖项
+!pip install torch-scatter -f https://pytorch-geometric.com/whl/torch-1.8.0+cu101.html
+!pip install torch-sparse -f https://pytorch-geometric.com/whl/torch-1.8.0+cu101.html
+!pip install torch-cluster -f https://pytorch-geometric.com/whl/torch-1.8.0+cu101.html
+!pip install torch-spline-conv -f https://pytorch-geometric.com/whl/torch-1.8.0+cu101.html
+!pip install torch-geometric
+
+# 安装alphafold2-pytorch
+!pip install alphafold2-pytorch
+```
+
+此设置在可用的情况下启用GPU加速，并配置所有必需的库。
+
+来源：[notebooks/egnn_esm_end2end.ipynb#L56-L64](notebooks/egnn_esm_end2end.ipynb#L56-L64), [notebooks/egnn_esm_end2end.ipynb#L286-L290](notebooks/egnn_esm_end2end.ipynb#L286-L290)
+
+## 使用结构工具测试笔记本
+
+`structure_utils_tests.ipynb`笔记本展示了`alphafold2_pytorch/utils.py`中的实用函数，用于分析和比较蛋白质结构。
+
+### 加载蛋白质结构
+
+笔记本首先从PDB文件加载蛋白质结构：
+
+```python
+import mdtraj
+import numpy as np
+import torch
+
+# 从PDB文件加载蛋白质结构
+prot = mdtraj.load_pdb("data/1h22_protein_chain_1.pdb").xyz[0].transpose()
+```
+
+仓库在`notebooks/data/`目录中包含示例PDB文件，您可以使用它们进行测试。
+
+来源：[notebooks/structure_utils_tests.ipynb#L44-L55](notebooks/structure_utils_tests.ipynb#L44-L55), [notebooks/structure_utils_tests.ipynb#L64-L65](notebooks/structure_utils_tests.ipynb#L64-L65)
+
+### 计算结构比较指标
+
+笔记本展示了用于比较蛋白质结构的各种指标，这些指标在NumPy和PyTorch版本中都有实现：
+
+```python
+# 创建一个轻微扰动的结构用于比较
+pred = prot + (2*np.random.rand(*prot.shape) - 1) * 1
+
+# 使用NumPy计算指标
+rmsd     = RMSD(prot, pred)
+gdt_ha   = GDT(prot, pred, mode="HA")
+gdt_ts   = GDT(prot, pred, mode="TS")
+tm_score = TMscore(prot, pred)
+
+# 转换为PyTorch张量并再次计算
+prot, pred = torch.tensor(prot), torch.tensor(pred)
+rmsd     = RMSD(prot, pred)
+gdt_ha   = GDT(prot, pred, mode="HA")
+gdt_ts   = GDT(prot, pred, mode="TS")
+tm_score = TMscore(prot, pred)
+```
+
+这些指标对于评估预测蛋白质结构的质量至关重要：
+- **RMSD（均方根偏差）**：较低值表示结构相似度更高
+- **GDT-TS（全局距离测试-总分）**：较高值（0-1）表示对齐更好
+- **GDT-HA（全局距离测试-高精度）**：GDT-TS的更严格版本
+- **TM-Score（模板建模评分）**：较高值（0-1）表示全局拓扑匹配更好
+
+来源：[notebooks/structure_utils_tests.ipynb#L81-L82](notebooks/structure_utils_tests.ipynb#L81-L82), [notebooks/structure_utils_tests.ipynb#L106-L127](notebooks/structure_utils_tests.ipynb#L106-L127)
+
+### 结构对齐和叠加
+
+笔记本展示了Kabsch算法用于蛋白质结构的最佳叠加：
+
+```python
+# 创建一个旋转和扰动的结构
+R = np.array([[0.25581, -0.77351, 0.57986],
+              [-0.85333, -0.46255, -0.24057],
+              [0.45429, -0.43327, -0.77839]])
+pred = prot + (2*np.random.rand(*prot.shape) - 1) * 1 
+pred = np.dot(R, pred)
+
+# 使用PyTorch对齐结构
+pred_mod_, prot_mod_ = kabsch_torch(torch.tensor(pred).double(), torch.tensor(prot).double())
+rmsd_torch(prot_mod_, pred_mod_), tmscore_torch(prot_mod_, pred_mod_)
+
+# 使用NumPy对齐结构
+pred_mod, prot_mod = kabsch_numpy(pred, prot)
+rmsd_numpy(prot_mod, pred_mod), tmscore_numpy(prot_mod, pred_mod)
+```
+
+Kabsch算法找到最优旋转矩阵，将一个结构叠加到另一个结构上，最小化RMSD。
+
+来源：[notebooks/structure_utils_tests.ipynb#L153-L211](notebooks/structure_utils_tests.ipynb#L153-L211)
+
+### 从距离矩阵重建3D结构
+
+笔记本还展示了使用多维尺度（MDS）将距离矩阵转换回3D坐标：
+
+```python
+# 从3D坐标创建距离矩阵
+dist_mat = torch.cdist(prot.t(), prot.t())
+
+# 选择骨干原子进行手性校正
+N_mask  = torch.tensor(prot_traj.topology.select("name == N and backbone")).unsqueeze(0)
+CA_mask = torch.tensor(prot_traj.topology.select("name == CA and backbone")).unsqueeze(0) 
+C_mask  = torch.tensor(prot_traj.topology.select("name == C and backbone")).unsqueeze(0)
+
+# 从距离矩阵重建3D坐标
+preds, stresses = MDScaling(dist_mat.cpu(), 
+                           iters=5, tol=1e-5, fix_mirror=1, eigen=True,
+                           N_mask=N_mask, CA_mask=CA_mask, C_mask=C_mask, verbose=2)
+pred, stress = preds[0], stresses[0]
+```
+
+此过程对于输出距离矩阵而不是直接3D坐标的结构预测模型非常重要。
+
+来源：[notebooks/structure_utils_tests.ipynb#L245-L247](notebooks/structure_utils_tests.ipynb#L245-L247), [notebooks/structure_utils_tests.ipynb#L276-L344](notebooks/structure_utils_tests.ipynb#L276-L344)
+
+## 使用端到端模型笔记本
+
+`egnn_esm_end2end.ipynb`笔记本展示了使用AlphaFold2结合EGNN和ESM嵌入进行蛋白质结构预测的完整工作流程。
+
+### 加载蛋白质数据
+
+笔记本使用SidechainNet库从CASP7数据集加载蛋白质数据：
+
+```python
+import sidechainnet
+from sidechainnet.utils.sequence import ProteinVocabulary as VOCAB
+VOCAB = VOCAB()
+
+# 从SidechainNet加载数据
+dataloaders_ = sidechainnet.load(casp_version=7, 
+                                with_pytorch="dataloaders", 
+                                batch_size=1, 
+                                dynamic_batching=False)
+
+# 根据长度过滤蛋白质
+MIN_LEN = 100
+MAX_LEN = 100000
+train_examples_storer = [get_prot(dataloader_=dataloaders_, vocab_=VOCAB,
+                                  min_len=MIN_LEN, max_len=MAX_LEN, verbose=0)
+                         for i in range(3)]
+```
+
+这从CASP7数据集加载蛋白质结构和序列，并根据长度标准进行过滤。
+
+来源：[notebooks/egnn_esm_end2end.ipynb#L511-L514](notebooks/egnn_esm_end2end.ipynb#L511-L514), [notebooks/egnn_esm_end2end.ipynb#L554-L560](notebooks/egnn_esm_end2end.ipynb#L554-L560)
+
+### 初始化AlphaFold2模型
+
+笔记本展示了如何初始化一个简化的AlphaFold2模型：
+
+```python
+from alphafold2_pytorch import Alphafold2
+import alphafold2_pytorch.constants as constants
+import alphafold2_pytorch.utils as af2utils
+
+# 设置设备和参数
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+constants.DEVICE = device
+DEVICE = constants.DEVICE
+
+# 使用自定义参数初始化模型
+model = Alphafold2(
+    dim = 128,
+    depth = 1,
+    heads = 1,
+    dim_head = 16,
+    predict_coords = False,
+    num_backbone_atoms = 4,
+).to(DEVICE)
+```
+
+这创建了一个适合实验的简化AlphaFold2模型。参数可以根据您的计算资源和需求进行调整。
+
+来源：[notebooks/egnn_esm_end2end.ipynb#L497-L500](notebooks/egnn_esm_end2end.ipynb#L497-L500), [notebooks/egnn_esm_end2end.ipynb#L678-L686](notebooks/egnn_esm_end2end.ipynb#L678-L686)
+
+### 自定义蛋白质编码
+
+笔记本实现了一个自定义蛋白质编码函数，将蛋白质序列和坐标转换为适合模型的特征：
+
+```python
+def encode_whole_protein(seq, true_coords, padding_seq, needed_info, free_mem=False):
+    """对整个蛋白质进行编码为点和向量。"""
+    device, precise = true_coords.device, true_coords.type()
+    
+    # 创建原子位置的掩码
+    cloud_mask = torch.tensor(scn_cloud_mask(seq[:-padding_seq or None])).bool().to(device)
+    flat_mask = rearrange(cloud_mask, 'l c -> (l c)')
+    coords_wrap = rearrange(true_coords, '(l c) d -> l c d', c=14)[:-padding_seq or None]
+    
+    # 编码位置和原子身份
+    # [编码原子位置和身份的代码]
+    
+    # 编码键
+    # [编码键的代码]
+    
+    # 合并特征
+    # [合并特征的代码]
+    
+    return whole_point_enc, whole_bond_idxs, whole_bond_enc, embedd_info
+```
+
+此函数将原始蛋白质数据转换为适合神经网络模型的结构化表示。
+
+来源：[notebooks/egnn_esm_end2end.ipynb#L706-L759](notebooks/egnn_esm_end2end.ipynb#L706-L759)
+
+## 使用笔记本的有效技巧
+
+<CgxTip>
+**性能提示**：对于大型蛋白质或复杂模型，考虑在配备强大GPU的机器上运行笔记本。AlphaFold2实现计算密集，GPU加速显著提高性能。笔记本会自动检测并使用可用的GPU。
+</CgxTip>
+
+### 管理内存
+
+在处理蛋白质结构数据时，内存管理至关重要：
+
+1. 在编码函数中使用`free_mem=True`选项以在可能的情况下释放内存
+2. 在处理大型蛋白质之间调用`gc.collect()`以强制垃圾回收
+3. 在内存有限时处理较小的批次或较小的蛋白质
+
+### 定制模型
+
+笔记本中的AlphaFold2模型可以通过调整各种参数进行定制：
+
+```python
+model = Alphafold2(
+    dim = 256,           # 增加以获得更复杂的表示
+    depth = 4,           # 增加以获得更深的网络
+    heads = 8,           # 增加以获得更多的注意力头
+    dim_head = 64,       # 调整注意力头的维度
+    predict_coords = True, # 设置为True以直接预测坐标
+    num_backbone_atoms = 4,
+).to(DEVICE)
+```
+
+通过调整这些参数，可以在模型性能和计算需求之间取得平衡。
+
+## 结论
+
+lucidrains/alphafold2仓库中的Jupyter笔记本提供了强大的蛋白质结构分析和预测工具。`structure_utils_tests.ipynb`笔记本提供了用于比较和排列蛋白质结构的实用工具，而`egnn_esm_end2end.ipynb`笔记本展示了蛋白质结构预测的完整工作流程。
+
+通过理解和扩展这些笔记本，您可以将AlphaFold2 PyTorch实现应用于自己的蛋白质结构预测任务，从学术研究到药物发现应用。
+
+要进一步扩展这些示例，可以考虑：
+- 结合来自多序列比对（MSAs）的进化信息等额外特征
+- 对特定蛋白质家族进行微调
+- 实现针对特定结构属性的定制损失函数
+- 使用领域特定知识扩展模型，以适应您感兴趣的蛋白质
+
+---
+
+# 热议
+
+- [热议/热议内容](https://zread.ai/lucidrains/alphafold2/6-whats-the-buzz)
+
+---
+slug:6-whats-the-buzz
+blog_type:buzz
+---
+
+
+## 社区驱动的AlphaFold2革命
+
+DeepMind的AlphaFold2在2020年基本上解决了长达50年的蛋白质折叠问题，震撼了科学界。然而，尽管DeepMind最终开源了他们的实现，许多研究人员却因TensorFlow代码库和复杂的设置要求而受限。这时，Phil Wang（lucidrains），一位高产的开源AI贡献者，推出了AlphaFold2的PyTorch重构版本，成为生物信息学社区的重要资源。
+
+## 用PyTorch打破壁垒
+
+拥有超过1600颗星标的lucidrains/alphafold2仓库，代表了社区为使前沿蛋白质结构预测技术更易于PyTorch生态系统中的研究人员使用而做出的重大努力。正如一位用户在讨论线程中所言：“我真的不想用TensorFlow来做这个”——这一观点在研究社区中广为共鸣。
+
+这一实现特别有价值之处在于其模块化方法。Phil将AlphaFold2架构中的关键组件分离成独立的包，可以重复使用和实验：
+
+- **不变点注意力**：用于坐标精炼的[独立模块](https://github.com/lucidrains/invariant-point-attention)
+- **三角乘法模块**：用于高效[特征图混合](https://github.com/lucidrains/triangle-multiplicative-module)
+- **SE3-Transformer**：实现[等变自注意力](https://github.com/lucidrains/se3-transformer-pytorch)
+
+这些模块化组件使研究人员能够更好地理解、修改和基于AlphaFold2的创新进行构建，而无需与整个系统纠缠。
+
+## 最新进展
+
+自创建以来，PyTorch实现不断得到优化，2022年7月的[最新版本（v0.4.32）](https://github.com/lucidrains/alphafold2/releases)主要关注数值稳定性改进。复制AlphaFold2能力的旅程并非一帆风顺，特别是在训练数据和权重方面，社区讨论中频繁出现关于“更新的入门指南”和预训练权重可用性的请求。
+
+与此同时，官方AlphaFold生态系统也在迅猛发展。2023年3月，AlphaFold数据库进行了重大更新，增加了TED域分配和批量文件下载功能。更具里程碑意义的是，2024年5月发布了**AlphaFold 3**，其预测范围扩展到所有生命分子的结构和相互作用，准确度前所未有。
+
+## 现实世界的影响
+
+通过lucidrains/alphafold2等实现，蛋白质结构预测的民主化加速了多个领域的研究：
+
+- **药物发现**：研究人员可以快速预测潜在药物目标的蛋白质结构
+- **疾病研究**：更好地理解导致疾病的蛋白质错误折叠
+- **可持续性**：支持研究能分解塑料污染的酶
+- **粮食安全**：深入了解植物蛋白质，开发抗病作物
+
+## 社区的声音
+
+这个项目特别引人注目的是它如何体现了开源协作的力量。尽管DeepMind的突破具有革命性，但像这样的社区驱动实现帮助更广泛地在学术界和工业界传播了这一创新。
+
+该仓库激发了专注于特定应用（如蛋白质-配体相互作用）的分支，并成为理解本十年最重大AI系统架构的宝贵教育资源。
+
+## 展望未来
+
+随着AlphaFold 3和其他进展的出现，蛋白质结构预测领域继续演变，像lucidrains/alphafold2这样的社区实现仍然是前沿研究与实际应用之间的关键桥梁。通过使这些强大工具更易获取和适应，它们确保了AI在生物学领域的革命潜力能为不同领域和技术背景的研究人员所实现。
+
+对于那些希望在PyTorch中尝试蛋白质结构预测的人来说，这个仓库继续作为一个无价的起点和学习资源——这是开放科学和社区贡献如何放大突破性创新影响的明证。
+
+---
+
+- [热议/大家都在说](https://zread.ai/lucidrains/alphafold2/7-what-people-are-saying)
+
+---
+slug:7-what-people-are-saying
+blog_type:buzz
+---
+
+
+围绕lucidrains/alphafold2 PyTorch实现的社区汇聚了众多研究人员、开发者和蛋白质结构爱好者。通过浏览GitHub上的讨论、问题和发布反馈，可以清晰地看到这一非官方实现如何在科学和开发者社区中被接受和利用。
+
+## 社区反响
+
+该仓库在GitHub上获得了超过1600个星标，显示出人们对PyTorch替代DeepMind官方实现的高度兴趣。用户们一致对项目的易用性和使用PyTorch而非TensorFlow的灵活性表示赞赏。
+
+> “感谢PyTorch实现，我真的不想在这个项目上使用TensorFlow。” - [aliutkus在GitHub讨论中](https://github.com/lucidrains/alphafold2/discussions/100)
+
+这种情绪在已经投入PyTorch生态系统的研究人员和开发者中较为普遍，他们更倾向于在项目中保持框架的一致性。
+
+## 技术讨论
+
+仓库的问题和讨论揭示了社区对AlphaFold2架构和实现的深入探讨。开发者们讨论了诸如BERT损失在多序列比对（MSA）中的应用、结构模块的正确掩码以及softmax操作的数值稳定性等高级问题。
+
+一个特别有趣的技术讨论围绕BERT损失在原始论文中的使用展开：
+
+> “在推理时使用.. 🤔” - [lucidrains评论BERT损失实现](https://github.com/lucidrains/alphafold2/issues/80)
+
+另一位贡献者回应道：
+
+> “是的，我也注意到了这部分，感觉真的很奇怪...” - [intersun在GitHub问题中](https://github.com/lucidrains/alphafold2/issues/80)
+
+这些交流突显了该项目既是实现，也是讨论AlphaFold2设计决策的技术平台。
+
+## 功能反响
+
+社区对特定功能和更新的反应提供了用户认为最有价值方面的洞察：
+
+1. **结构模块掩码**：结构模块掩码的正确实现（发布0.4.29）获得了7个庆祝性反馈，表明这是备受期待的功能。
+
+2. **内存优化**：与内存效率相关的更新，如“发布evoformer的检查点”（0.4.23），获得了积极反馈，突显了性能优化对大规模蛋白质结构预测的重要性。
+
+3. **数值稳定性**：softmax等函数数值稳定性的改进受到了处理复杂蛋白质结构用户的欢迎。
+
+## 社区需求
+
+从用户反馈中明显看出社区最希望从该实现中获得的两点：
+
+1. **预训练权重**：多个讨论提到了对与该PyTorch实现兼容的预训练权重的需求。
+
+   > “有人成功加载/重新训练了通过PyTorch的alphafold 2并可以分享权重吗？” - [aliutkus在GitHub讨论中](https://github.com/lucidrains/alphafold2/discussions/100)
+
+2. **入门资源**：用户对更新的入门材料表示兴趣，包括可工作的Colab笔记本和更清晰的初学者示例。
+
+## 报告的挑战
+
+用户在使用该实现时报告了具体的技术挑战：
+
+```python
+RuntimeError: 输入和目标批次或空间大小不匹配：
+目标 [1 x 52 x 52]，输入 [1 x 256 x 156 x 156]
+```
+
+这类问题突显了实现AlphaFold2架构的复杂性，以及确保与不同数据集和用例兼容所需的持续工作。
+
+## 总体情绪
+
+社区对lucidrains/alphafold2实现的总体情绪是积极和感激的。用户重视拥有一个易于访问的PyTorch替代官方实现，尤其是那些已经在PyTorch生态系统中工作的用户。尽管与一些其他机器学习项目相比，社区规模较小，但仍然保持活跃且技术精湛。
+
+最新发布在2022年7月（v0.4.32），开发仍在进行中，这给用户带来了信心，相信该实现将继续改进，满足从事蛋白质结构预测的研究人员和开发者的需求。
+
+---
+
+- [热议/关于团队](https://zread.ai/lucidrains/alphafold2/8-about-the-team)
+
+---
+slug:8-about-the-team
+blog_type:buzz
+---
+
+
+## lucidrains/alphafold2背后的架构师
+
+这个项目的核心人物是**Phil Wang**，他在GitHub上以[lucidrains](https://github.com/lucidrains)而闻名，是一位极其多产的开发者，被誉为开源AI领域最稳定的贡献者之一。Phil的与众不同之处在于他非凡的能力，能够迅速将前沿研究论文在PyTorch中实现，使得复杂的AI架构对更广泛的开发者社区变得触手可及。
+
+与那些可能需要数月才能在论文发表后成型的典型研究仓库不同，Phil通常在论文发表后的几天甚至几小时内就发布可工作的实现。这种“见论文，实现论文”的方法使他在AI研究圈中成为了一种传奇。
+
+## 个体力量与社区支持
+
+尽管核心的alphafold2-pytorch实现主要是Phil的作品，但该仓库也受益于其他人的贡献，包括与Phil在多个AI项目上合作的[Eric Alcaide](https://github.com/hypnopump)。该仓库在MIT许可下运作，强调了团队对开放科学和可访问AI工具的承诺。
+
+这一努力的非凡之处在于，它代表了一个个体开发者对普及突破性研究访问的执着追求。正如一位Twitter用户所言：
+
+> “我们爱你，lucidrains……还有你那可爱的狗狗，它肯定是你所有PyTorch实现背后的主谋。我记得我的PI在找到你的AlphaFold2实现后感到困惑，还以为这是来自DeepMind的。”
+
+这个轶事完美地展示了Phil工作的质量和影响力——他的实现如此精良，以至于会被误认为是原创研究实验室的官方发布。
+
+## 更广泛的生态系统
+
+alphafold2-pytorch仓库并非孤立存在。它是Phil开发的更广泛生态系统的一部分，包括：
+
+- [se3-transformer-pytorch](https://github.com/lucidrains/se3-transformer-pytorch)：SE3-Transformers用于等变自注意力机制的实现，特别针对与AlphaFold2复制的集成
+- [egnn-pytorch](https://github.com/lucidrains/egnn-pytorch)：E(n)-等变图神经网络的实现
+- [invariant-point-attention](https://github.com/lucidrains/invariant-point-attention)：用于AlphaFold2结构模块中不变点注意力机制的独立模块
+
+这一系列相互关联的仓库展示了一种将复杂的AlphaFold2架构分解为可管理、可重用组件的系统性方法。
+
+## 社区影响
+
+凭借超过**1,600个GitHub星标**和**267次fork**，这一实现显然在研究社区中引起了共鸣。该仓库服务于多个关键目的：
+
+1. **可访问性**：将DeepMind的JAX实现转换为PyTorch，这是学术研究人员最广泛使用的深度学习框架
+2. **教育**：提供清晰的实现，帮助研究人员和学生理解这些复杂架构的工作原理
+3. **创新催化剂**：通过使组件模块化和可适应，促进进一步的实验
+
+## 更大的图景
+
+这个项目存在于许多科学家认为的计算生物学革命性突破的背景下。正如Dr. John Tavis在关于AlphaFold的社区论坛讨论中所言：
+
+> “AlphaFold是几十年一遇的突破，正在对生物科学产生巨大影响。我怀疑其作者最终会获得诺贝尔奖，因为他们解决了一个70多年来难以攻克的大问题。”
+
+lucidrains/alphafold2实现代表了这场革命的重要一环——确保突破性研究不再局限于大型研究实验室，而是对全球的研究人员、学生和开发者开放。
+
+## 持续开发
+
+该仓库持续更新，最新版本为v0.4.32，显示了Phil对维护和改进实现的承诺。每个版本都解决了特定的技术挑战，从数值稳定性改进到结构模块的适当掩码处理。
+
+---
+
+秉承驱动这一项目的开放科学精神，如果您有兴趣贡献或有疑问，可以通过[GitHub Issues](https://github.com/lucidrains/alphafold2/issues)直接提交问题。
+
+---
+
+# 深度探索
+
+- [深度探索/AlphaFold2架构](https://zread.ai/lucidrains/alphafold2/9-alphafold2-architecture)
+
+---
+slug:9-alphafold2-architecture
+blog_type:normal
+---
+
+
+AlphaFold2代表了蛋白质结构预测领域的一次革命性突破。本文档全面概述了该PyTorch版本中实现的架构，解释了关键组件及其相互作用。
+
+## 架构概述
+
+本仓库中的AlphaFold2实现遵循DeepMind的AlphaFold2论文中描述的开创性模型，并适配了PyTorch。该模型通过复杂的神经网络架构将蛋白质序列信息转换为精确的3D结构预测。
+
+```mermaid
+flowchart TD
+    Input[输入序列 & MSA] --> Embed[嵌入]
+    Embed --> EvoBlock[Evoformer]
+    EvoBlock --> Structure[结构模块]
+    Structure --> Output[3D坐标]
+    
+    Templates[模板] -.-> Embed
+    Recycling[循环] -.-> EvoBlock
+```
+
+架构由三个主要阶段组成：
+1. **嵌入生成**：将序列和MSA转换为丰富的特征表示
+2. **Evoformer处理**：通过深度注意力机制转换这些表示
+3. **结构模块**：将学到的表示转换为3D坐标
+
+来源：[alphafold2.py#L469-L505](alphafold2_pytorch/alphafold2.py#L469-L505)
+
+## 核心组件
+
+### 1. 主AlphaFold2类
+
+`Alphafold2`类作为整合所有模型部分的中心组件。它处理输入（蛋白质序列、MSA、模板），通过神经网络层进行处理，并生成结构预测。
+
+关键参数包括：
+- `dim`：嵌入维度
+- `depth`：Evoformer块的数量
+- `heads`：注意力头的数量
+- `predict_coords`：是否预测3D坐标
+- `predict_angles`：是否预测扭转角
+
+来源：[alphafold2.py#L469-L627](alphafold2_pytorch/alphafold2.py#L469-L627)
+
+### 2. Evoformer
+
+Evoformer是模型表示学习的核心，由堆叠的EvoformerBlocks组成，用于转换和细化表示：
+
+```mermaid
+flowchart TD
+    MSA[MSA表示] --> MSA_Attn[MSA注意力块]
+    MSA_Attn --> MSA_FF[MSA前馈网络]
+    
+    Pair[成对表示] --> Pair_Attn[成对注意力块]
+    Pair_Attn --> Pair_FF[成对前馈网络]
+    
+    MSA_FF -.通信.-> Pair_Attn
+    Pair_Attn -.通信.-> MSA_Attn
+```
+
+Evoformer处理两个关键表示：
+- **MSA表示**：从多重序列比对中编码进化信息
+- **成对表示**：捕捉氨基酸残基之间的相互作用
+
+来源：[alphafold2.py#L412-L467](alphafold2_pytorch/alphafold2.py#L412-L467)
+
+### 3. EvoformerBlock
+
+每个EvoformerBlock包括：
+
+1. **成对注意力块**：处理成对表示
+   - 三角乘法（传出和传入）
+   - 三角注意力（传出和传入）
+   
+2. **MSA注意力块**：更新MSA表示
+   - 行注意力（沿序列）
+   - 列注意力（沿比对位置）
+
+3. **前馈网络**：用于成对和MSA表示
+
+这些组件共同作用，使MSA和成对表示之间的信息流动，捕捉残基之间的复杂关系。
+
+来源：[alphafold2.py#L412-L446](alphafold2_pytorch/alphafold2.py#L412-L446)
+
+### 4. 结构模块
+
+结构模块通过迭代细化将抽象表示转换为3D坐标：
+
+```mermaid
+flowchart LR
+    Input[单序列 & 成对表示] --> IPA[不变点注意力]
+    IPA --> UpdateQuat[更新四元数]
+    UpdateQuat --> UpdateTrans[更新平移]
+    UpdateTrans --> NextIter[下一迭代]
+    NextIter -.-> IPA
+    UpdateTrans --> Final[最终坐标]
+```
+
+关键组件：
+- **不变点注意力（IPA）**：尊重3D等变的注意力机制
+- **四元数更新**：旋转细化
+- **平移更新**：位置细化
+
+该模块通过`structure_module_depth`次迭代细化坐标，确保几何一致性。
+
+来源：[alphafold2.py#L853-L892](alphafold2_pytorch/alphafold2.py#L853-L892)
+
+## 特殊注意力机制
+
+### 1. 轴向注意力
+
+轴向注意力通过将2D特征图分离为行和列注意力操作，提供了一种高效的处理方式。这种方法用于MSA和成对表示处理。
+
+关键类：
+- `AxialAttention`：执行行或列注意力
+- 参数：`row_attn`、`col_attn`和`global_query_attn`
+
+来源：[alphafold2.py#L192-L255](alphafold2_pytorch/alphafold2.py#L192-L255)
+
+### 2. 三角乘法模块
+
+该模块在成对表示的三角形内实现乘法更新，具有两种混合模式：
+
+- **传出**：`i,k → i,j`混合残基对
+- **传入**：`k,j → i,j`混合残基对
+
+这些操作有助于捕捉氨基酸残基之间的高阶相互作用。
+
+来源：[alphafold2.py#L257-L317](alphafold2_pytorch/alphafold2.py#L257-L317)
+
+### 3. 成对和MSA注意力块
+
+这些专用块协调信息流动：
+
+- `PairwiseAttentionBlock`：处理成对表示更新，通过外积均值整合MSA信息
+- `MsaAttentionBlock`：使用行和列注意力处理MSA表示
+
+来源：[alphafold2.py#L353-L408](alphafold2_pytorch/alphafold2.py#L353-L408)
+
+## 输入处理
+
+### 1. 序列和MSA嵌入
+
+模型将输入序列和MSA嵌入到高维向量表示中：
+
+- **标记嵌入**：将氨基酸身份映射到向量
+- **位置嵌入**：编码残基之间的相对位置
+
+来源：[alphafold2.py#L507-L514](alphafold2_pytorch/alphafold2.py#L507-L514), [alphafold2.py#L676-L712](alphafold2_pytorch/alphafold2.py#L676-L712)
+
+### 2. 成对表示生成
+
+成对表示从单序列嵌入生成：
+
+```python
+x_left, x_right = self.to_pairwise_repr(x).chunk(2, dim = -1)
+x = rearrange(x_left, 'b i d -> b i () d') + rearrange(x_right, 'b j d-> b () j d')
+```
+
+这为序列中的每个位置对（i,j）创建一个表示。
+
+来源：[alphafold2.py#L715-L717](alphafold2_pytorch/alphafold2.py#L715-L717)
+
+### 3. 模板处理
+
+当模板可用时，模型会整合这些信息：
+
+1. **模板特征嵌入**：`self.to_template_embed`
+2. **模板成对处理**：通过`template_pairwise_embedder`
+3. **模板点注意力**：将模板信息与查询序列整合
+
+来源：[alphafold2.py#L743-L778](alphafold2_pytorch/alphafold2.py#L743-L778)
+
+## 输出预测
+
+### 1. 距离预测
+
+模型预测残基对之间的距离分布：
+
+```python
+trunk_embeds = (x + rearrange(x, 'b i j d -> b j i d')) * 0.5  # 对称化
+distance_pred = self.to_distogram_logits(trunk_embeds)
+```
+
+输出是跨距离桶的logit分布，形成距离图。
+
+来源：[alphafold2.py#L820-L823](alphafold2_pytorch/alphafold2.py#L820-L823)
+
+### 2. 角度预测（可选）
+
+当`predict_angles=True`时，模型预测扭转角：
+- `theta_logits`：用于theta角
+- `phi_logits`：用于phi角
+- `omega_logits`：用于omega角
+
+来源：[alphafold2.py#L815-L837](alphafold2_pytorch/alphafold2.py#L815-L837)
+
+### 3. 3D结构预测（可选）
+
+当`predict_coords=True`时，模型通过结构模块将表示转换为3D坐标：
+
+1. 推导单序列和成对表示
+2. 初始化四元数和平移
+3. 通过不变点注意力迭代细化
+4. 输出最终坐标
+
+来源：[alphafold2.py#L841-L905](alphafold2_pytorch/alphafold2.py#L841-L905)
+
+## 高级特性
+
+### 1. 循环机制
+
+模型支持循环预测以细化结果：
+
+```python
+if exists(recyclables):
+    m[:, 0] = m[:, 0] + self.recycling_msa_norm(recyclables.single_msa_repr_row)
+    x = x + self.recycling_pairwise_norm(recyclables.pairwise_repr)
+    # ... 距离嵌入 ...
+```
+
+这允许之前的预测信息改进后续迭代。
+
+来源：[alphafold2.py#L730-L739](alphafold2_pytorch/alphafold2.py#L730-L739)
+
+### 2. 掩码语言建模（MLM）
+
+用于训练时，模型支持在MSA上的掩码语言建模目标：
+
+```python
+if self.training and exists(msa):
+    original_msa = msa
+    msa_mask = default(msa_mask, lambda: torch.ones_like(msa).bool())
+    noised_msa, replaced_msa_mask = self.mlm.noise(msa, msa_mask)
+    msa = noised_msa
+```
+
+这有助于模型从可用的MSA数据中学习更好的表示。
+
+来源：[alphafold2.py#L683-L688](alphafold2_pytorch/alphafold2.py#L683-L688)
+
+<CgxTip>
+**性能提示**：实现中使用PyTorch的检查点机制（`checkpoint_sequential`）在Evoformer内，以计算换内存效率，使得在有限的GPU内存中训练更深的模型成为可能。
+</CgxTip>
+
+## 结论
+
+本仓库中的AlphaFold2架构全面实现了DeepMind的开创性蛋白质结构预测系统。通过其精心设计的组件——从专用注意力机制到结构模块——它能够从序列信息中实现极为精确的蛋白质结构预测。
+
+模块化设计在训练和推理中提供了灵活性，支持角度预测、坐标预测，并在模板可用时利用模板。理解这一架构为解决蛋白质折叠问题的最新方法提供了宝贵见解。
+
+---
+
+- [深度探索/结构精修技术](https://zread.ai/lucidrains/alphafold2/16-structure-refinement-techniques)
+
+---
+slug:16-structure-refinement-techniques
+blog_type:normal
+---
+
+
+蛋白质结构预测并不止步于原始输出。就像雕塑家精雕细琢一块大理石一样，预测出的结构通常需要进一步优化以达到最佳质量。本文档探讨了在此AlphaFold2实现中可用的结构优化技术，从内置的迭代坐标优化到与外部优化工具的集成。
+
+## 理解结构优化
+
+结构优化通过优化以下方面来解决初始预测的局限性：
+- 键长和键角
+- 空间冲突
+- 总体能量
+- 侧链排列
+
+在AlphaFold2实现中，优化分为两个层次：
+1. **内部优化** - 在结构预测过程中通过迭代结构模块进行
+2. **外部优化** - 使用PyRosetta等工具进行预测后处理
+
+参考资料：[alphafold2.py#L841-L893](alphafold2_pytorch/alphafold2.py#L841-L893), [refinement.py#L1-L14](scripts/refinement.py#L1-L14)
+
+## 内部结构优化
+
+核心AlphaFold2模型通过结构模块直接将结构优化集成到其预测流程中，该模块使用不变点注意力（IPA）进行迭代坐标优化。
+
+### 结构模块
+
+结构模块以分步方式生成坐标：
+
+```mermaid
+flowchart TD
+  A[单一和成对嵌入] --> B[初始化四元数和位移]
+  B --> C[转换为Float32精度]
+  C --> D[迭代结构优化]
+  D --> E[最终坐标]
+  
+  subgraph "迭代结构模块"
+    D1[将四元数转换为旋转矩阵] --> D2[应用IPA块]
+    D2 --> D3[更新四元数和位移]
+    D3 --> D1
+  end
+```
+
+1. 首先，模型从MSA中推导出**单一表示**，从主干网络中推导出**成对表示**
+2. 建立初始四元数旋转和位移
+3. 处理切换到float32精度以进行等变性操作
+4. 通过多次迭代优化坐标：
+   - 将四元数转换为旋转矩阵
+   - 应用不变点注意力（IPA）
+   - 更新四元数和位移
+
+参考资料：[alphafold2.py#L843-L893](alphafold2_pytorch/alphafold2.py#L843-L893)
+
+### 不变点注意力块
+
+IPA块是坐标优化的核心。它：
+1. 接收单一表示、掩码、成对表示、旋转和位移
+2. 等变性地操作（无论坐标框架如何，保持3D空间关系）
+3. 更新表示，同时保持几何一致性
+4. 输出优化的单一表示，然后更新四元数和位移
+
+参考资料：[alphafold2.py#L873-L879](alphafold2_pytorch/alphafold2.py#L873-L879)
+
+### 坐标更新机制
+
+坐标更新过程基于四元数，提供平滑的旋转更新：
+1. 模型从单一表示生成四元数和位移更新
+2. 通过四元数乘法应用四元数更新
+3. 位移通过旋转感知调整进行更新
+4. 局部坐标通过旋转和位移投影到全局空间
+5. 该过程重复`structure_module_depth`次迭代（默认为4次）
+
+<CgxTip>
+**技术说明：** 使用四元数而非欧拉角是为了避免万向锁问题，为3D旋转在优化过程中提供更稳定的表示。
+</CgxTip>
+
+参考资料：[alphafold2.py#L883-L891](alphafold2_pytorch/alphafold2.py#L883-L891)
+
+## 使用PyRosetta进行外部优化
+
+为了对初始预测进行更广泛的优化，该实现通过`refinement.py`脚本提供了与PyRosetta的FastRelax协议的集成。
+
+### FastRelax流程
+
+FastRelax是Rosetta的一个协议，它：
+1. 逐渐降低排斥力以解决冲突
+2. 执行侧链重排和最小化
+3. 迭代优化结构，使其趋向更低能量状态
+
+该实现提供了以下工具：
+- 在PDB文件和Rosetta姿态之间转换
+- 使用可配置参数运行FastRelax
+- 将优化后的结构保存回PDB格式
+
+参考资料：[refinement.py#L22-L74](scripts/refinement.py#L22-L74)
+
+### 使用PyRosetta优化
+
+尽管FastRelax实现尚未完成（标记为`NotImplementedError`），但框架已经就位，只需少量扩展：
+
+```python
+# 完成后优化的示例用法
+from scripts.refinement import run_fast_relax
+
+# 配置优化参数
+config_path = "path/to/config.json"
+
+# 优化预测结构
+refined_pose = run_fast_relax(config_path, pdb_route="predicted_structure.pdb")
+
+# 保存优化后的结构
+rosetta2pdb(refined_pose, "refined_structure.pdb")
+```
+
+参考资料：[refinement.py#L56-L74](scripts/refinement.py#L56-L74)
+
+## 结构质量评估
+
+评估优化结果需要定量指标。该实现提供了`utils.py`模块中的几个标准指标，并在笔记本中进行了演示。
+
+### 关键指标
+
+| 指标 | 描述 | 用途 |
+|------|------|------|
+| **RMSD** | 均方根偏差 | 衡量对应原子之间的平均距离 |
+| **GDT-TS** | 全局距离测试 - 总分 | 评估在1、2、4和8Å内的残基百分比 |
+| **GDT-HA** | 全局距离测试 - 高精度 | 评估在0.5、1、2和4Å内的残基百分比 |
+| **TM-Score** | 模板建模评分 | 结构相似度的长度归一化度量 |
+
+参考资料：[structure_utils_tests.ipynb#L73-L128](notebooks/structure_utils_tests.ipynb#L73-L128)
+
+### 结构对齐
+
+为了正确比较结构，对齐是必要的。该实现提供了：
+- **Kabsch算法** - 用于结构的最佳叠加
+- **镜像校正** - 处理手性问题
+
+笔记本中的示例用法：
+```python
+# 将预测结构与目标对齐
+pred_aligned, target_aligned = kabsch_torch(predicted, target)
+
+# 对齐后计算指标
+rmsd = RMSD(target_aligned, pred_aligned)
+gdt_ts = GDT(target_aligned, pred_aligned, mode="TS")
+```
+
+参考资料：[structure_utils_tests.ipynb#L134-L212](notebooks/structure_utils_tests.ipynb#L134-L212)
+
+## 坐标重建
+
+笔记本中展示的一个有趣技术是从距离矩阵使用多维尺度分析（MDS）重建坐标。这可以用于：
+1. 将预测的距离矩阵转换为3D坐标
+2. 基于改进的距离预测优化坐标
+3. 测试结构预测质量
+
+```python
+# 笔记本中的示例
+preds, stresses = MDScaling(
+    dist_mat,
+    iters=5,
+    tol=1e-5,
+    fix_mirror=1,
+    eigen=True,
+    N_mask=N_mask,
+    CA_mask=CA_mask,
+    C_mask=C_mask,
+    verbose=2
+)
+```
+
+参考资料：[structure_utils_tests.ipynb#L218-L345](notebooks/structure_utils_tests.ipynb#L218-L345)
+
+## 结构优化的最佳实践
+
+基于该实现和领域内的常见做法：
+
+1. **从高置信度区域开始** - 首先关注预测中高置信度部分的优化
+2. **评估优化影响** - 始终比较优化前后的指标
+3. **迭代优化** - 考虑多轮逐渐减少约束的优化
+4. **结合方法** - 使用内部（结构模块）和外部（PyRosetta）优化技术
+5. **领域特定优化** - 对于多域蛋白，考虑单独优化各个域
+6. **保持立体化学** - 确保优化不引入立体化学违规
+
+## 结论
+
+结构优化是获得高质量AlphaFold2预测蛋白结构的关键步骤。该实现提供了：
+
+1. 通过结构模块的迭代IPA机制进行内置坐标优化
+2. 通过PyRosetta的FastRelax进行外部优化的框架
+3. 评估优化质量的综合工具
+
+利用这些优化技术，您可以显著提高预测结构的质量和可靠性，特别是在初始预测可能存在不准确性的区域。
+
+---
+
+- [深度探索/API参考](https://zread.ai/lucidrains/alphafold2/17-api-reference)
+
+---
+slug:17-api-reference
+blog_type:normal
+---
+本API参考文档提供了lucidrains/alphafold2 PyTorch实现的全面文档。该实现遵循AlphaFold2论文中描述的架构，并针对PyTorch进行了特定调整。
+
+## 核心类
+
+### Alphafold2
+
+实现AlphaFold2架构的主要模型类。
+
+```python
+class Alphafold2(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        max_seq_len=2048,
+        depth=6,
+        heads=8,
+        dim_head=64,
+        max_rel_dist=32,
+        num_tokens=constants.NUM_AMINO_ACIDS,
+        num_embedds=constants.NUM_EMBEDDS_TR,
+        max_num_msas=constants.MAX_NUM_MSA,
+        max_num_templates=constants.MAX_NUM_TEMPLATES,
+        extra_msa_evoformer_layers=4,
+        attn_dropout=0.,
+        ff_dropout=0.,
+        templates_dim=32,
+        templates_embed_layers=4,
+        templates_angles_feats_dim=55,
+        predict_angles=False,
+        symmetrize_omega=False,
+        predict_coords=False,
+        structure_module_depth=4,
+        structure_module_heads=1,
+        structure_module_dim_head=4,
+        disable_token_embed=False,
+        mlm_mask_prob=0.15,
+        mlm_random_replace_token_prob=0.1,
+        mlm_keep_token_same_prob=0.1,
+        mlm_exclude_token_ids=(0,),
+        recycling_distance_buckets=32
+    )
+```
+
+**参数:**
+- `dim` (int): 整个网络的隐藏维度大小
+- `max_seq_len` (int, 可选): 最大序列长度。默认为2048。
+- `depth` (int, 可选): Evoformer块的数量。默认为6。
+- `heads` (int, 可选): 注意力头的数量。默认为8。
+- `dim_head` (int, 可选): 每个注意力头的维度。默认为64。
+- `max_rel_dist` (int, 可选): 位置嵌入的最大相对距离。默认为32。
+- `predict_angles` (bool, 可选): 是否预测二面角。默认为False。
+- `predict_coords` (bool, 可选): 是否预测坐标。默认为False。
+- `structure_module_depth` (int, 可选): 结构模块的深度。默认为4。
+
+**前向传播方法:**
+
+```python
+def forward(
+    self,
+    seq,
+    msa=None,
+    mask=None,
+    msa_mask=None,
+    extra_msa=None,
+    extra_msa_mask=None,
+    seq_index=None,
+    seq_embed=None,
+    msa_embed=None,
+    templates_feats=None,
+    templates_mask=None,
+    templates_angles=None,
+    embedds=None,
+    recyclables=None,
+    return_trunk=False,
+    return_confidence=False,
+    return_recyclables=False,
+    return_aux_logits=False
+)
+```
+
+**参数:**
+- `seq` (Tensor): 主要氨基酸序列 [batch, seq_len]
+- `msa` (Tensor, 可选): 多序列比对 [batch, num_alignments, seq_len]
+- `mask` (Tensor, 可选): 序列掩码 [batch, seq_len]
+- `msa_mask` (Tensor, 可选): MSA掩码 [batch, num_alignments, seq_len]
+- `seq_embed` (Tensor, 可选): 预计算的序列嵌入
+- `msa_embed` (Tensor, 可选): 预计算的MSA嵌入
+- `recyclables` (Recyclables, 可选): 来自前次迭代的回收信息
+
+**返回值:**
+- 如果 `predict_coords=False` 或 `return_trunk=True`: 返回包含预测距离、角度等的 `ReturnValues` 对象
+- 如果 `predict_coords=True` 且 `return_aux_logits=True`: 返回 (坐标, `ReturnValues`) 元组
+- 如果 `predict_coords=True` 且 `return_confidence=True`: 返回 (坐标, 置信度分数) 元组
+- 如果 `predict_coords=True` 且无其他标志: 返回坐标 [batch, seq_len, 3]
+
+来源: [alphafold2.py#L469-L905](alphafold2_pytorch/alphafold2.py#L469-L905)
+
+### Evoformer
+
+基于Transformer的核心模块，用于迭代处理MSA和成对表示。
+
+```python
+class Evoformer(nn.Module):
+    def __init__(
+        self,
+        *,
+        depth,
+        dim,
+        seq_len,
+        heads,
+        dim_head,
+        attn_dropout,
+        ff_dropout
+    )
+```
+
+**参数:**
+- `depth` (int): EvoformerBlock层的数量
+- `dim` (int): 隐藏维度大小
+- `seq_len` (int): 最大序列长度
+- `heads` (int): 注意力头的数量
+- `dim_head` (int): 每个注意力头的维度
+- `attn_dropout` (float): 注意力的dropout率
+- `ff_dropout` (float): 前馈网络的dropout率
+
+**前向传播方法:**
+
+```python
+def forward(
+    self,
+    x,
+    m,
+    mask=None,
+    msa_mask=None
+)
+```
+
+**参数:**
+- `x` (Tensor): 成对表示 [batch, seq_len, seq_len, dim]
+- `m` (Tensor): MSA表示 [batch, num_alignments, seq_len, dim]
+- `mask` (Tensor, 可选): 成对掩码 [batch, seq_len, seq_len]
+- `msa_mask` (Tensor, 可选): MSA掩码 [batch, num_alignments, seq_len]
+
+**返回值:**
+- (更新后的成对表示, 更新后的MSA表示) 元组
+
+来源: [alphafold2.py#L448-L467](alphafold2_pytorch/alphafold2.py#L448-L467)
+
+### EvoformerBlock
+
+Evoformer中的单个块，用于处理MSA和成对表示。
+
+```python
+class EvoformerBlock(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        seq_len,
+        heads,
+        dim_head,
+        attn_dropout,
+        ff_dropout,
+        global_column_attn=False
+    )
+```
+
+**参数:**
+- 与Evoformer相同，额外增加 `global_column_attn` 标志
+
+**前向传播方法:**
+
+```python
+def forward(self, inputs)
+```
+
+**参数:**
+- `inputs`: (成对表示, MSA表示, 成对掩码, MSA掩码) 元组
+
+**返回值:**
+- 包含更新后表示的相同元组
+
+来源: [alphafold2.py#L412-L446](alphafold2_pytorch/alphafold2.py#L412-L446)
+
+## 嵌入包装器
+
+### MSAEmbedWrapper
+
+使用预训练MSA Transformer进行嵌入的包装器。
+
+```python
+class MSAEmbedWrapper(nn.Module):
+    def __init__(self, *, alphafold2)
+```
+
+**参数:**
+- `alphafold2` (Alphafold2): Alphafold2模型的实例
+
+**前向传播方法:**
+
+```python
+def forward(self, seq, msa, msa_mask=None, **kwargs)
+```
+
+**参数:**
+- `seq` (Tensor): 主要序列
+- `msa` (Tensor): 多序列比对
+- `msa_mask` (Tensor, 可选): MSA掩码
+
+**返回值:**
+- 应用了嵌入的Alphafold2模型输出
+
+来源: [embeds.py#L33-L75](alphafold2_pytorch/embeds.py#L33-L75)
+
+### ESMEmbedWrapper
+
+使用预训练ESM模型进行嵌入的包装器。
+
+```python
+class ESMEmbedWrapper(nn.Module):
+    def __init__(self, *, alphafold2)
+```
+
+**参数:**
+- `alphafold2` (Alphafold2): Alphafold2模型的实例
+
+**前向传播方法:**
+
+```python
+def forward(self, seq, msa=None, **kwargs)
+```
+
+**参数:**
+- `seq` (Tensor): 主要序列
+- `msa` (Tensor, 可选): 多序列比对
+
+**返回值:**
+- 应用了嵌入的Alphafold2模型输出
+
+来源: [embeds.py#L77-L103](alphafold2_pytorch/embeds.py#L77-L103)
+
+### ProtTranEmbedWrapper
+
+使用ProtTran (BERT)进行嵌入的包装器。
+
+```python
+class ProtTranEmbedWrapper(nn.Module):
+    def __init__(self, *, alphafold2)
+```
+
+**参数:**
+- `alphafold2` (Alphafold2): Alphafold2模型的实例
+
+**前向传播方法:**
+
+```python
+def forward(self, seq, msa, msa_mask=None, **kwargs)
+```
+
+**参数:**
+- 与MSAEmbedWrapper相同
+
+**返回值:**
+- 应用了嵌入的Alphafold2模型输出
+
+来源: [embeds.py#L10-L31](alphafold2_pytorch/embeds.py#L10-L31)
+
+## 注意力机制
+
+### Attention
+
+模型中使用的基础注意力机制。
+
+```python
+class Attention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        seq_len=None,
+        heads=8,
+        dim_head=64,
+        dropout=0.,
+        gating=True
+    )
+```
+
+**参数:**
+- `dim` (int): 输入维度
+- `seq_len` (int, 可选): 序列长度
+- `heads` (int, 可选): 注意力头的数量。默认为8。
+- `dim_head` (int, 可选): 每个头的维度。默认为64。
+- `dropout` (float, 可选): Dropout率。默认为0。
+- `gating` (bool, 可选): 是否使用门控。默认为True。
+
+**前向传播方法:**
+
+```python
+def forward(self, x, mask=None, attn_bias=None, context=None, context_mask=None, tie_dim=None)
+```
+
+**参数:**
+- `x` (Tensor): 输入张量
+- `mask` (Tensor, 可选): 注意力掩码
+- `attn_bias` (Tensor, 可选): 注意力偏置
+- `context` (Tensor, 可选): 交叉注意力的上下文
+- `tie_dim` (int, 可选): 要绑定的查询维度
+
+**返回值:**
+- 注意力输出张量
+
+来源: [alphafold2.py#L98-L190](alphafold2_pytorch/alphafold2.py#L98-L190)
+
+### AxialAttention
+
+用于高效处理2D数据的轴向注意力。
+
+```python
+class AxialAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        heads,
+        row_attn=True,
+        col_attn=True,
+        accept_edges=False,
+        global_query_attn=False,
+        **kwargs
+    )
+```
+
+**参数:**
+- `dim` (int): 输入维度
+- `heads` (int): 注意力头的数量
+- `row_attn` (bool, 可选): 启用行注意力。默认为True。
+- `col_attn` (bool, 可选): 启用列注意力。默认为True。
+- `accept_edges` (bool, 可选): 是否接受边输入。默认为False。
+- `global_query_attn` (bool, 可选): 是否使用全局查询。默认为False。
+
+**前向传播方法:**
+
+```python
+def forward(self, x, edges=None, mask=None)
+```
+
+**参数:**
+- `x` (Tensor): 输入张量 [batch, height, width, dim]
+- `edges` (Tensor, 可选): 边特征
+- `mask` (Tensor, 可选): 注意力掩码
+
+**返回值:**
+- 应用了轴向注意力的更新张量
+
+来源: [alphafold2.py#L192-L255](alphafold2_pytorch/alphafold2.py#L192-L255)
+
+### TriangleMultiplicativeModule
+
+用于成对表示更新的三角形乘法模块。
+
+```python
+class TriangleMultiplicativeModule(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        hidden_dim=None,
+        mix='ingoing'
+    )
+```
+
+**参数:**
+- `dim` (int): 输入维度
+- `hidden_dim` (int, 可选): 隐藏维度。默认为dim。
+- `mix` (str, 可选): 混合模式，'ingoing'或'outgoing'。默认为'ingoing'。
+
+**前向传播方法:**
+
+```python
+def forward(self, x, mask=None)
+```
+
+**参数:**
+- `x` (Tensor): 输入张量 [batch, seq_len, seq_len, dim]
+- `mask` (Tensor, 可选): 注意力掩码
+
+**返回值:**
+- 三角形乘法后的更新张量
+
+来源: [alphafold2.py#L257-L317](alphafold2_pytorch/alphafold2.py#L257-L317)
+
+## 位置编码
+
+### FixedPositionalEmbedding
+
+标准正弦位置嵌入。
+
+```python
+class FixedPositionalEmbedding(nn.Module):
+    def __init__(self, dim)
+```
+
+**参数:**
+- `dim` (int): 嵌入维度
+
+**前向传播方法:**
+
+```python
+def forward(self, n, device)
+```
+
+**参数:**
+- `n` (int): 序列长度
+- `device` (torch.device): 创建嵌入的设备
+
+**返回值:**
+- [sin, cos] 嵌入列表
+
+来源: [rotary.py#L35-L45](alphafold2_pytorch/rotary.py#L35-L45)
+
+### AxialRotaryEmbedding
+
+用于成对数据的2D旋转嵌入。
+
+```python
+class AxialRotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_freq=10)
+```
+
+**参数:**
+- `dim` (int): 嵌入维度
+- `max_freq` (int, 可选): 最大频率。默认为10。
+
+**前向传播方法:**
+
+```python
+def forward(self, n, device)
+```
+
+**参数:**
+- `n` (int): 序列长度
+- `device` (torch.device): 创建嵌入的设备
+
+**返回值:**
+- 2D数据的[sin, cos]嵌入列表
+
+来源: [rotary.py#L47-L67](alphafold2_pytorch/rotary.py#L47-L67)
+
+## 输出容器
+
+### ReturnValues
+
+模型输出的容器。
+
+```python
+@dataclass
+class ReturnValues:
+    distance: torch.Tensor = None
+    theta: torch.Tensor = None
+    phi: torch.Tensor = None
+    omega: torch.Tensor = None
+    msa_mlm_loss: torch.Tensor = None
+    recyclables: Recyclables = None
+```
+
+**属性:**
+- `distance` (Tensor): 预测的距离图
+- `theta` (Tensor): 预测的theta角
+- `phi` (Tensor): 预测的phi角
+- `omega` (Tensor): 预测的omega角
+- `msa_mlm_loss` (Tensor): MSA掩码语言模型损失
+- `recyclables` (Recyclables): 回收信息
+
+来源: [alphafold2.py#L30-L37](alphafold2_pytorch/alphafold2.py#L30-L37)
+
+### Recyclables
+
+可回收表示的容器。
+
+```python
+@dataclass
+class Recyclables:
+    coords: torch.Tensor
+    single_msa_repr_row: torch.Tensor
+    pairwise_repr: torch.Tensor
+```
+
+**属性:**
+- `coords` (Tensor): 预测的坐标
+- `single_msa_repr_row` (Tensor): 单个MSA表示行
+- `pairwise_repr` (Tensor): 成对表示
+
+来源: [alphafold2.py#L24-L28](alphafold2_pytorch/alphafold2.py#L24-L28)
+
+## 使用示例
+
+### 基本模型初始化
+
+```python
+import torch
+from alphafold2_pytorch import Alphafold2
+
+model = Alphafold2(
+    dim = 256,               # 嵌入维度
+    depth = 4,               # 注意力网络深度
+    heads = 8,               # 注意力头数
+    dim_head = 64,           # 每个头维度
+    predict_angles = True,   # 预测角度
+    predict_coords = True    # 预测坐标
+)
+
+# 准备输入
+seq = torch.randint(0, 20, (2, 128))  # 2个序列的批次，长度128
+msa = torch.randint(0, 20, (2, 16, 128))  # 2个MSA的批次，16个比对，长度128
+mask = torch.ones_like(seq).bool()
+msa_mask = torch.ones_like(msa).bool()
+
+# 前向传播
+coords = model(seq, msa, mask=mask, msa_mask=msa_mask)
+print(coords.shape)  # [2, 128, 3] - 批次，序列长度，3D坐标
+```
+
+### 使用ESM嵌入
+
+```python
+from alphafold2_pytorch import Alphafold2, ESMEmbedWrapper
+
+# 初始化基础模型
+base_model = Alphafold2(
+    dim = 256,
+    predict_coords = True
+)
+
+# 用ESM嵌入包装
+model = ESMEmbedWrapper(alphafold2=base_model)
+
+# 使用ESM嵌入的前向传播
+seq = torch.randint(0, 20, (1, 256))
+coords = model(seq)
+```
+
+### 回收预测
+
+```python
+model = Alphafold2(
+    dim = 256,
+    predict_coords = True,
+    return_recyclables = True
+)
+
+# 第一次迭代
+seq = torch.randint(0, 20, (1, 128))
+coords, recyclables = model(
+    seq, 
+    return_recyclables=True
+)
+
+# 带回收的第二次迭代
+refined_coords = model(
+    seq,
+    recyclables=recyclables
+)
+```
+
+## 常量和配置
+
+该实现使用了`constants.py`中定义的几个常量，包括：
+
+- `NUM_AMINO_ACIDS`: 氨基酸类型数量
+- `DISTOGRAM_BUCKETS`: 距离图预测的距离区间数量
+- `THETA_BUCKETS`, `PHI_BUCKETS`, `OMEGA_BUCKETS`: 角度区间数量
+- `MAX_NUM_MSA`: MSA序列的最大数量
+- `MAX_NUM_TEMPLATES`: 模板的最大数量
+
+<CgxTip>
+**重要提示**: 该实现通过PyTorch的`checkpoint_sequential`支持梯度检查点，以减少内存使用。这对于在较长序列上进行训练或微调尤为重要。
+</CgxTip>
+
+---
+
+## 核心组件
+
+- [深度探索/核心组件/嵌入系统](https://zread.ai/lucidrains/alphafold2/10-embedding-system)
+
+---
+slug:10-embedding-system
+blog_type:normal
+---
+
+
+嵌入系统是AlphaFold2实现中的关键组件，提供了丰富的蛋白质序列和进化信息的表示。本文深入探讨了嵌入是如何生成并整合到架构中，以驱动准确的蛋白质结构预测。
+
+## 什么是蛋白质嵌入？
+
+蛋白质嵌入是氨基酸序列的密集向量表示，捕捉了生化特性、进化模式和结构倾向。在AlphaFold2中，嵌入作为理解蛋白质序列的基础，在尝试预测其3D结构之前发挥作用。
+
+该实现支持三种强大的嵌入方法：
+
+| 嵌入模型 | 维度 | 来源 | 主要用途 |
+|----------|------|------|----------|
+| ESM-1b | 1280 | Facebook Research | 单序列表示 |
+| MSA Transformer | 768 | Facebook Research | 多序列比对表示 |
+| ProtBert | 1024 | RostLab | 替代单序列表示 |
+
+来源：[constants.py#L18-L25](alphafold2_pytorch/constants.py#L18-L25)
+
+## 架构概述
+
+嵌入系统遵循包装器模式，每个嵌入模型被封装在一个专用的包装器类中，处理以下任务：
+1. 加载预训练模型
+2. 处理输入序列
+3. 生成嵌入
+4. 将嵌入投影到AlphaFold2所需的维度
+
+以下是嵌入如何融入模型架构的高级视图：
+
+```mermaid
+flowchart LR
+    Input["蛋白质序列\n& MSA"] --> EmSys["嵌入系统"]
+    subgraph EmSys["嵌入系统"]
+        ESM["ESM-1b\n嵌入"]
+        MSA["MSA Transformer\n嵌入"]
+        ProtBert["ProtBert\n嵌入"]
+    end
+    EmSys --> Proj["投影层"]
+    Proj --> AF2["AlphaFold2\n主架构"]
+```
+
+让我们详细看看每种嵌入方法。
+
+## ESM-1b嵌入
+
+ESM-1b（进化规模建模）是一个具有33层和6.5亿参数的Transformer模型，训练于大量蛋白质序列语料库。它能从单序列中捕捉丰富的表示。
+
+### 实现
+
+`ESMEmbedWrapper`类处理ESM-1b嵌入：
+
+```python
+class ESMEmbedWrapper(nn.Module):
+    def __init__(self, *, alphafold2):
+        super().__init__()
+        self.alphafold2 = alphafold2
+        
+        # 加载预训练的ESM-1b模型
+        model, alphabet = torch.hub.load(*ESM_MODEL_PATH) 
+        batch_converter = alphabet.get_batch_converter()
+        
+        self.model = model
+        self.batch_converter = batch_converter
+        # 如需，投影到AlphaFold2的维度
+        self.project_embed = nn.Linear(ESM_EMBED_DIM, alphafold2.dim) if ESM_EMBED_DIM != alphafold2.dim else nn.Identity()
+```
+
+该包装器处理主序列和可选的MSA序列以生成嵌入。
+
+来源：[embeds.py#L77-L103](alphafold2_pytorch/embeds.py#L77-L103)
+
+### 嵌入生成
+
+实际的嵌入生成发生在`get_esm_embedd`函数中，该函数：
+1. 将序列ID转换为字符串表示
+2. 使用ESM批量转换器准备输入
+3. 将序列通过ESM-1b模型
+4. 从第33层（最终层）提取表示
+
+```python
+def get_esm_embedd(seq, embedd_model, batch_converter, msa_data=None):
+    device = seq.device
+    REPR_LAYER_NUM = 33
+    max_seq_len = seq.shape[-1]
+    embedd_inputs = ids_to_embed_input(seq.cpu().tolist())
+    
+    batch_labels, batch_strs, batch_tokens = batch_converter(embedd_inputs)
+    with torch.no_grad():
+        results = embedd_model(batch_tokens.to(device), repr_layers=[REPR_LAYER_NUM], return_contacts=False)
+    # 索引0是起始标记，所以从索引1开始取
+    token_reps = results["representations"][REPR_LAYER_NUM][..., 1:max_seq_len+1, :].unsqueeze(dim=1)
+    return token_reps
+```
+
+来源：[utils.py#L331-L352](alphafold2_pytorch/utils.py#L331-L352)
+
+## MSA Transformer嵌入
+
+多序列比对（MSA）提供了关于蛋白质家族的进化信息。MSA Transformer专门设计用于同时处理整个比对。
+
+### 实现
+
+`MSAEmbedWrapper`类处理MSA嵌入：
+
+```python
+class MSAEmbedWrapper(nn.Module):
+    def __init__(self, *, alphafold2):
+        super().__init__()
+        self.alphafold2 = alphafold2
+        
+        model, alphabet = torch.hub.load(*MSA_MODEL_PATH) 
+        batch_converter = alphabet.get_batch_converter()
+        
+        self.model = model
+        self.batch_converter = batch_converter
+        self.project_embed = nn.Linear(MSA_EMBED_DIM, alphafold2.dim) if MSA_EMBED_DIM != alphafold2.dim else nn.Identity()
+```
+
+该包装器一起处理序列和MSA，小心处理可能填充的MSA行。
+
+来源：[embeds.py#L33-L75](alphafold2_pytorch/embeds.py#L33-L75)
+
+### 嵌入生成
+
+`get_msa_embedd`函数通过以下步骤生成MSA嵌入：
+1. 将序列ID转换为字符串表示
+2. 使用MSA批量转换器准备输入
+3. 将序列通过MSA Transformer模型
+4. 从第12层提取表示
+
+一个关键方面是处理MSA中的掩码行：
+
+```python
+if exists(msa_mask):
+    # 单独处理每个批次元素以处理填充的MSA
+    num_msa = msa_mask.any(dim = -1).sum(dim = -1).tolist()
+    seq_and_msa_list = seq_and_msa.unbind(dim = 0)
+    num_rows = seq_and_msa.shape[1]
+    
+    embeds = []
+    for num, batch_el in zip(num_msa, seq_and_msa_list):
+        batch_el = rearrange(batch_el, '... -> () ...')
+        batch_el = batch_el[:, :num]
+        embed = get_msa_embedd(batch_el, model, batch_converter, device = device)
+        embed = F.pad(embed, (0, 0, 0, 0, 0, num_rows - num), value = 0.)
+        embeds.append(embed)
+    
+    embeds = torch.cat(embeds, dim = 0)
+```
+
+来源：[embeds.py#L51-L68](alphafold2_pytorch/embeds.py#L51-L68), [utils.py#L308-L329](alphafold2_pytorch/utils.py#L308-L329)
+
+## ProtBert嵌入
+
+ProtBert是一个在Hugging Face Transformers库中训练的BERT风格模型，提供了单序列嵌入的替代方法。
+
+### 实现
+
+`ProtTranEmbedWrapper`类处理ProtBert嵌入：
+
+```python
+class ProtTranEmbedWrapper(nn.Module):
+    def __init__(self, *, alphafold2):
+        super().__init__()
+        from transformers import AutoTokenizer, AutoModel
+        
+        self.alphafold2 = alphafold2
+        self.project_embed = nn.Linear(PROTTRAN_EMBED_DIM, alphafold2.dim)
+        self.tokenizer = AutoTokenizer.from_pretrained('Rostlab/prot_bert', do_lower_case=False)
+        self.model = AutoModel.from_pretrained('Rostlab/prot_bert')
+```
+
+来源：[embeds.py#L10-L31](alphafold2_pytorch/embeds.py#L10-L31)
+
+### 嵌入生成
+
+`get_prottran_embedd`函数使用Hugging Face流程生成ProtBert嵌入：
+
+```python
+def get_prottran_embedd(seq, model, tokenizer, device = None):
+    from transformers import pipeline
+    
+    fe = pipeline('feature-extraction', model = model, tokenizer = tokenizer, 
+                  device = (-1 if not exists(device) else device.index))
+    
+    max_seq_len = seq.shape[1]
+    embedd_inputs = ids_to_prottran_input(seq.cpu().tolist())
+    
+    embedding = fe(embedd_inputs)
+    embedding = torch.tensor(embedding, device = device)
+    
+    # 跳过第一个标记（[CLS]）并仅包含实际序列标记
+    return embedding[:, 1:(max_seq_len + 1)]
+```
+
+来源：[utils.py#L295-L306](alphafold2_pytorch/utils.py#L295-L306)
+
+## 与AlphaFold2的集成
+
+生成嵌入后，它们被传递到AlphaFold2模型以驱动结构预测过程。集成发生在每个包装器的`forward`方法中：
+
+```python
+# 来自ESMEmbedWrapper的示例
+def forward(self, seq, msa=None, **kwargs):
+    # 生成嵌入
+    seq_embeds = get_esm_embedd(seq, model, batch_converter, device = device)
+    seq_embeds = self.project_embed(seq_embeds)
+    
+    if msa is not None:
+        # 如提供，生成MSA嵌入
+        flat_msa = rearrange(msa, 'b m n -> (b m) n')
+        msa_embeds = get_esm_embedd(flat_msa, model, batch_converter, device = device)
+        msa_embeds = rearrange(msa_embeds, '(b m) n d -> b m n d')
+        msa_embeds = self.project_embed(msa_embeds)
+    else: 
+        msa_embeds = None
+    
+    # 将嵌入传递给AlphaFold2
+    return self.alphafold2(seq, msa, seq_embed = seq_embeds, msa_embed = msa_embeds, **kwargs)
+```
+
+来源：[embeds.py#L89-L103](alphafold2_pytorch/embeds.py#L89-L103)
+
+## 使用示例
+
+要在预测管道中使用嵌入系统，您需要：
+
+1. 初始化AlphaFold2模型
+2. 用您选择的嵌入包装器包装它
+3. 将序列和MSA传递给包装器
+
+```python
+from alphafold2_pytorch import Alphafold2
+from alphafold2_pytorch.embeds import ESMEmbedWrapper, MSAEmbedWrapper, ProtTranEmbedWrapper
+
+# 初始化基础模型
+model = Alphafold2(
+    dim = 256,
+    depth = 4,
+    heads = 8,
+    dim_head = 32
+)
+
+# 选择嵌入方法（此例中使用ESM）
+model = ESMEmbedWrapper(alphafold2 = model)
+
+# 使用模型
+pred = model(
+    seq = protein_sequence,      # 形状: (批次, 长度)
+    msa = multiple_sequence_alignment  # 形状: (批次, 对齐数量, 长度)
+)
+```
+
+<CgxTip>
+在计算资源有限的情况下，当MSA不可用时，使用ESM-1b处理单序列可获得最佳结果。如果您有高质量的MSA，MSA Transformer方法通常会提供信息更丰富的嵌入，从而带来更好的结构预测。
+</CgxTip>
+
+## 性能考虑
+
+嵌入模型较大，可能会消耗大量内存：
+
+| 模型 | 参数 | 内存使用 | 处理速度 |
+|------|------|----------|----------|
+| ESM-1b | 650M | ~2.6GB | 中等 |
+| MSA Transformer | 100M | ~400MB | 慢（取决于MSA大小） |
+| ProtBert | 420M | ~1.7GB | 中等 |
+
+为了在准确性和计算效率之间取得最佳平衡：
+- 尽可能使用批处理处理多个蛋白质
+- 考虑在训练期间冻结嵌入模型
+- 对于长序列的推理，当GPU内存有限时，考虑分块处理
+
+---
+
+- [深度探索/核心组件/旋转位置编码](https://zread.ai/lucidrains/alphafold2/11-rotary-position-encoding)
+
+---
+slug:11-rotary-position-encoding
+blog_type:normal
+---
+
+
+旋转位置编码（RoPE）是AlphaFold2实现中的关键组件，它通过将相对位置信息直接编码到注意力计算中，增强了注意力机制。本指南解释了旋转位置编码的工作原理、其对蛋白质结构预测的重要性以及如何在您的模型中使用它。
+
+## 什么是旋转位置编码？
+
+旋转位置编码是一种通过应用位置依赖的旋转到查询和键向量，将位置信息注入到注意力机制中的技术。与传统的加性位置编码不同，旋转编码：
+
+- 保留了标记之间的**相对位置依赖性**
+- 创建了**连续**的位置表示
+- 自然处理**任意长度的序列**
+- 对更长的序列提供**更好的泛化能力**
+
+这些特性对于蛋白质结构预测尤其宝贵，因为捕捉氨基酸之间的相对空间关系至关重要。
+
+来源：[rotary.py#L7-L20](alphafold2_pytorch/rotary.py#L7-L20)
+
+## 工作原理
+
+旋转位置编码对注意力查询和键向量中的元素对应用位置依赖的旋转。核心机制包括：
+
+1. **成对旋转**：使用正弦和余弦函数成对旋转元素
+2. **位置依赖频率**：旋转角度取决于位置和频率
+3. **维度依赖频率**：不同维度以不同频率旋转
+
+让我们看看关键组件：
+
+### 核心函数
+
+```python
+def rotate_every_two(x):
+    x = rearrange(x, '... (d j) -> ... d j', j = 2)
+    x1, x2 = x.unbind(dim = -1)
+    x = torch.stack((-x2, x1), dim = -1)
+    return rearrange(x, '... d j -> ... (d j)')
+
+def apply_rotary_pos_emb(x, sinu_pos):
+    sin, cos = map(lambda t: rearrange(t, 'b ... -> b () ...'), sinu_pos)
+    rot_dim = sin.shape[-1]
+    x, x_pass = x[..., :rot_dim], x[..., rot_dim:]
+    x = x * cos + rotate_every_two(x) * sin
+    return torch.cat((x, x_pass), dim = -1)
+```
+
+`rotate_every_two`函数取元素对并进行2D旋转。然后`apply_rotary_pos_emb`使用基于位置的的正弦和余弦值应用这种旋转。
+
+来源：[rotary.py#L9-L20](alphafold2_pytorch/rotary.py#L9-L20)
+
+## 实现类
+
+该存储库提供了两个位置嵌入类：
+
+### 1. FixedPositionalEmbedding
+
+此类实现了一个具有正弦模式的标准1D位置嵌入：
+
+```python
+class FixedPositionalEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, n, device):
+        seq = torch.arange(n, device = device).type_as(self.inv_freq)
+        freqs = einsum('i , j -> i j', seq, self.inv_freq)
+        freqs = repeat(freqs, 'i j -> () i (j r)', r = 2)
+        return [freqs.sin(), freqs.cos()]
+```
+
+此实现创建了随维度呈指数下降的正弦模式，遵循原始Transformer设计，但适配了旋转用途。
+
+来源：[rotary.py#L35-L45](alphafold2_pytorch/rotary.py#L35-L45)
+
+### 2. AxialRotaryEmbedding
+
+这是一个专门的2D版本，为两个轴生成位置编码（特别适用于具有空间维度的蛋白质结构数据）：
+
+```python
+class AxialRotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_freq = 10):
+        super().__init__()
+        self.dim = dim // 2
+        inv_freq = 1. / (10000 ** (torch.arange(0, self.dim, 2).float() / self.dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, n, device):
+        seq = torch.arange(n, device = device).type_as(self.inv_freq)
+
+        x = einsum('n, d -> n d', seq, self.inv_freq)
+        y = einsum('n, d -> n d', seq, self.inv_freq)
+
+        x_sinu = repeat(x, 'i d -> i j d', j = n)
+        y_sinu = repeat(y, 'j d -> i j d', i = n)
+
+        sin = torch.cat((x_sinu.sin(), y_sinu.sin()), dim = -1)
+        cos = torch.cat((x_sinu.cos(), y_sinu.cos()), dim = -1)
+
+        sin, cos = map(lambda t: repeat(t, 'i j d -> () (i j) (d r)', r = 2), (sin, cos))
+        return [sin, cos]
+```
+
+此类对于蛋白质结构预测尤为重要，因为它创建了一个2D位置编码网格，可以表示蛋白质序列中氨基酸之间的空间关系。
+
+来源：[rotary.py#L47-L67](alphafold2_pytorch/rotary.py#L47-L67)
+
+## 旋转编码在注意力中的工作方式
+
+当集成到注意力机制中时，旋转编码通过在计算注意力分数之前修改查询和键向量，影响标记之间的交互。以下是概念流程：
+
+```mermaid
+sequenceDiagram
+    participant Input as 输入嵌入
+    participant RPE as 旋转位置编码
+    participant Q as 查询向量
+    participant K as 键向量
+    participant Attn as 注意力分数
+    
+    Input->>Q: 线性投影
+    Input->>K: 线性投影
+    RPE->>RPE: 根据位置生成sin/cos
+    RPE->>Q: 应用旋转到元素对
+    RPE->>K: 应用旋转到元素对
+    Q->>Attn: 与K计算点积
+    K->>Attn: QK^T
+    Attn->>Attn: 缩放和Softmax
+```
+
+这种编码方法高效地将相对位置信息直接编码到注意力计算中，非常适合捕捉蛋白质结构中的复杂空间关系。
+
+<CgxTip>
+**专业提示**：在处理蛋白质结构时，AxialRotaryEmbedding通常比标准位置嵌入更有效，因为蛋白质自然形成2D和3D结构。使用轴向编码有助于更准确地捕捉这些空间关系。
+</CgxTip>
+
+## 对蛋白质结构预测的益处
+
+旋转位置编码为蛋白质结构预测提供了多项特定优势：
+
+1. **相对位置感知**：捕捉氨基酸之间的空间关系，对于理解蛋白质折叠至关重要
+2. **不变性特性**：帮助模型关注形状和结构而非绝对位置
+3. **长距离依赖**：更好地捕捉蛋白质远端部分之间的相互作用
+4. **参数效率**：在不增加额外参数的情况下编码位置信息
+
+## 在您的模型中使用旋转位置编码
+
+以下是如何将旋转位置编码集成到您的注意力机制中：
+
+```python
+# 初始化位置编码模块
+rotary_pos_emb = AxialRotaryEmbedding(
+    dim = 64,  # 维度应适合您的模型
+)
+
+# 在您的注意力机制中
+def forward(self, q, k, v, seq_len):
+    # 为序列长度生成位置编码
+    sin, cos = rotary_pos_emb(seq_len, device=q.device)
+    
+    # 将旋转编码应用到查询和键
+    q = apply_rotary_pos_emb(q, (sin, cos))
+    k = apply_rotary_pos_emb(k, (sin, cos))
+    
+    # 继续正常的注意力计算
+    attention = torch.matmul(q, k.transpose(-2, -1))
+    # ... 注意力机制的其余部分
+```
+
+## 与其他位置编码方法的比较
+
+| 方法 | 类型 | 相对位置感知 | 参数数量 | 长序列处理 |
+|------|------|---------------|----------|------------|
+| 绝对位置嵌入 | 加性 | 低 | 高（可学习） | 差 |
+| 正弦编码 | 加性 | 中 | 无（固定） | 中 |
+| 旋转位置编码 | 乘性 | 高 | 无（固定） | 优 |
+| 相对位置编码 | 注意力偏置 | 高 | 高 | 好 |
+
+旋转位置编码在位置感知和参数效率之间提供了最佳平衡，使其成为蛋白质结构预测等复杂任务的理想选择。
+
+## 结论
+
+旋转位置编码是一种强大的技术，增强了蛋白质结构预测的注意力机制。通过将相对位置信息直接编码到注意力计算中，它帮助模型更好地理解氨基酸之间的空间关系，从而实现更准确的结构预测。
+
+在您继续探索AlphaFold2时，了解这种位置编码的工作原理将有助于您理解模型如何捕捉蛋白质结构中的复杂3D关系。
+
+---
+
+- [深度探索/核心组件/可逆网络](https://zread.ai/lucidrains/alphafold2/12-reversible-networks)
+
+---
+slug:12-reversible-networks
+blog_type:normal
+---
+
+
+可逆网络是AlphaFold2实现中使用的强大内存优化技术。本文深入探讨了它们的工作原理、价值所在以及在该存储库中的实现方式。对于处理大型蛋白质模型的深度学习从业者来说，理解可逆网络可以显著减少训练过程中的内存占用。
+
+## 可逆网络的重要性
+
+在训练像AlphaFold2这样的深度神经网络时，最大的限制之一是GPU内存。在反向传播过程中，框架通常需要存储前向传播中的所有中间激活值，这对于深度模型来说会消耗大量内存。
+
+**可逆网络解决了这个问题**，它们通过在反向传播过程中重建中间激活值而不是存储它们，显著减少了内存需求——通常减少的量与网络深度成比例！
+
+参考资料：[reversible.py#L264-L294](alphafold2_pytorch/reversible.py#L264-L294)
+
+## 可逆网络的工作原理
+
+可逆网络背后的关键洞察非常简单：如果我们能从层的输出中重建其输入，就不需要存储输入。
+
+### 核心概念：可逆块
+
+实现围绕特殊设计的块展开，这些块将输入张量分成两部分并应用可逆的变换：
+
+1. **分割输入**：将输入张量分为两部分（x1, x2）
+2. **应用变换**：
+   - y1 = x1 + F(x2)
+   - y2 = x2 + G(y1)
+3. **在反向传播过程中**：
+   - 恢复 x2 = y2 - G(y1)
+   - 恢复 x1 = y1 - F(x2)
+
+这种方法允许在不存储中间激活值的情况下进行高效的梯度计算。
+
+```mermaid
+flowchart LR
+    subgraph "前向传播"
+        direction LR
+        A[x1, x2] --> B["y1 = x1 + F(x2)"]
+        B --> C["y2 = x2 + G(y1)"]
+        C --> D[y1, y2]
+    end
+    subgraph "反向传播"
+        direction RL
+        D2[y1, y2] --> C2["x2 = y2 - G(y1)"]
+        C2 --> B2["x1 = y1 - F(x2)"]
+        B2 --> A2[x1, x2]
+    end
+    D --> D2
+```
+
+参考资料：[reversible.py#L59-L156](alphafold2_pytorch/reversible.py#L59-L156)
+
+## 在AlphaFold2中的实现
+
+该存储库实现了两种主要的可逆块类型：
+
+| 块类型 | 目的 | 关键组件 |
+|--------|------|----------|
+| `ReversibleSelfAttnBlock` | MSA或序列内的自注意力 | 四个函数（f,g,j,k）用于变换输入部分 |
+| `ReversibleCrossAttnBlock` | MSA和序列之间的交叉注意力 | 结构相似，但具有交叉注意力模式 |
+
+这些块随后被组合成`ReversibleSequence`，可以替换传统的顺序层。
+
+参考资料：[reversible.py#L60-L83](alphafold2_pytorch/reversible.py#L60-L83), [reversible.py#L159-L179](alphafold2_pytorch/reversible.py#L159-L179), [reversible.py#L303-L321](alphafold2_pytorch/reversible.py#L303-L321)
+
+## 魔法：自定义Autograd函数
+
+真正的魔法发生在`ReversibleFunction`类中，该类实现了PyTorch的autograd Function。这个自定义函数：
+
+1. 通过顺序应用块来处理前向传播
+2. 在反向传播过程中，实时重建中间激活值
+3. 管理复杂的梯度计算链
+
+```python
+class ReversibleFunction(Function):
+    @staticmethod
+    def forward(ctx, inp, ind, blocks, kwargs):
+        x, m = split_at_index(1, ind, inp)
+        
+        for block in blocks:
+            x, m = block(x, m, _reverse = True, **kwargs)
+        
+        ctx.blocks = blocks
+        ctx.kwargs = kwargs
+        ctx.ind = ind
+        ctx.save_for_backward(x.detach(), m.detach())
+        return torch.cat((x, m), dim = 1)
+    
+    @staticmethod
+    def backward(ctx, d):
+        ind = ctx.ind
+        blocks = ctx.blocks
+        kwargs = ctx.kwargs
+        dy, dn = split_at_index(1, ind, d)
+        y, n = ctx.saved_tensors
+        
+        for block in blocks[::-1]:
+            y, n, dy, dn = block.backward_pass(y, n, dy, dn, **kwargs)
+        
+        d = torch.cat((dy, dn), dim = 1)
+        return d, None, None, None
+```
+
+这种方法允许在不牺牲计算精度的情况下进行高效的训练。
+
+参考资料：[reversible.py#L265-L293](alphafold2_pytorch/reversible.py#L265-L293)
+
+## 保持确定性
+
+可逆网络的一个关键挑战是确保确定性行为，尤其是在随机操作中。实现通过`Deterministic`包装器来仔细管理随机状态：
+
+```python
+class Deterministic(nn.Module):
+    def __init__(self, net):
+        super().__init__()
+        self.net = net
+        self.cpu_state = None
+        self.cuda_in_fwd = None
+        self.gpu_devices = None
+        self.gpu_states = None
+```
+
+这个包装器在前向传播过程中记录随机数生成器状态，并在反向传播过程中恢复它们，确保结果一致。
+
+参考资料：[reversible.py#L26-L57](alphafold2_pytorch/reversible.py#L26-L57)
+
+## 使用可逆网络
+
+要在您自己的模型中使用可逆网络：
+
+1. 识别可以变为可逆的块（通常是注意力和前馈层）
+2. 确保您的输入可以分成两部分
+3. 用`ReversibleSequence`替换标准顺序处理
+
+```python
+# 示例用法（简化）
+reversible_blocks = [
+    (self_attn1, ff1, self_attn2, ff2),  # 块1组件
+    (self_attn3, ff3, self_attn4, ff4),  # 块2组件
+]
+
+block_types = ['self', 'self']  # 块类型
+
+reversible_sequence = ReversibleSequence(reversible_blocks, block_types)
+
+# 前向传播
+output = reversible_sequence(sequence, msa, mask=mask)
+```
+
+<CgxTip>
+**内存节省提示**：当您的模型具有许多结构相似的顺序层时，可逆网络效果最佳。内存节省大约与您使用的可逆层数量成比例。对于像AlphaFold2这样的非常深的网络，这可能意味着在单个GPU上训练与需要多个GPU之间的区别。
+</CgxTip>
+
+参考资料：[reversible.py#L342-L347](alphafold2_pytorch/reversible.py#L342-L347)
+
+## 限制和考虑事项
+
+尽管可逆网络提供了显著的内存优势，但也存在一些权衡：
+
+1. **计算开销**：在反向传播过程中重建激活值会增加一些计算成本
+2. **实现复杂性**：需要仔细处理随机状态和自定义autograd函数
+3. **架构约束**：并非所有网络架构都可以变为可逆；它们需要遵循特定模式
+
+对于AlphaFold2，内存优势通常大于这些限制，尤其是在处理长蛋白质序列或大型多重序列比对时。
+
+## 结论
+
+可逆网络为训练像AlphaFold2这样的深度神经网络的内存限制提供了一个优雅的解决方案。通过巧妙地重建中间激活值而不是存储它们，它们使得在有限的硬件上训练更深的模型成为可能。
+
+理解和实现可逆网络为处理更大模型和更长蛋白质序列打开了可能性，最终推动了蛋白质结构预测及其他领域的边界。
+
+---
+
+## 训练方法
+
+- [深度探索/训练方法/端到端训练流程](https://zread.ai/lucidrains/alphafold2/13-end-to-end-training-pipeline)
+
+---
+slug:13-end-to-end-training-pipeline
+blog_type:normal
+---
+
+
+本文档介绍了AlphaFold2 PyTorch实现的端到端训练流程。我们将涵盖从数据准备到模型训练的完整工作流程，提供对系统如何设计以预测蛋白质结构的清晰理解。
+
+## 训练流程概述
+
+端到端训练流程使AlphaFold2模型能够直接从序列和结构数据中学习蛋白质结构预测。与分离的预训练和微调方法不同，该流程通过单一连续过程训练模型预测3D坐标。
+
+```mermaid
+flowchart LR
+    A[蛋白质序列数据] --> B[数据准备]
+    B --> C[特征提取]
+    C --> D[AlphaFold2模型]
+    D --> E[结构预测]
+    E --> F[损失计算]
+    F --> G[优化]
+    G --> D
+```
+
+来源：[train_end2end.py](train_end2end.py), [alphafold2.py](alphafold2_pytorch/alphafold2.py)
+
+## 数据准备
+
+训练流程使用SidechainNet，这是一个全面的蛋白质结构预测数据集，提供序列及其对应的3D坐标。
+
+```python
+data = scn.load(
+    casp_version = 12,
+    thinning = 30,
+    with_pytorch = 'dataloaders',
+    batch_size = 1,
+    dynamic_batching = False
+)
+```
+
+**关键组件：**
+- **数据集来源**：CASP12（蛋白质结构预测的关键评估）
+- **稀疏因子**：30（减少数据集中的冗余）
+- **序列长度过滤**：排除长度超过250个残基的序列
+- **数据格式**：每个批次包含序列、坐标和掩码
+
+训练使用数据循环机制，持续迭代数据集：
+
+```python
+def cycle(loader, cond = lambda x: True):
+    while True:
+        for data in loader:
+            if not cond(data):
+                continue
+            yield data
+```
+
+来源：[train_end2end.py#L63-L73](train_end2end.py#L63-L73)
+
+## 特征提取
+
+该流程支持多种特征提取策略：
+
+| 特征类型 | 描述 | 实现 |
+|---|---|---|
+| ESM | 使用预训练的ESM-1b语言模型嵌入 | Facebook的ESM模型 |
+| MSA | 使用多序列比对信息 | 自定义实现 |
+| None | 仅使用原始序列信息 | 基本嵌入 |
+
+对于基于ESM的特征：
+```python
+if FEATURES == "esm":
+    embedd_model, alphabet = torch.hub.load("facebookresearch/esm", "esm1b_t33_650M_UR50S")
+    batch_converter = alphabet.get_batch_converter()
+    # 在训练期间
+    embedds = get_esm_embedd(seq, embedd_model, batch_converter)
+```
+
+来源：[train_end2end.py#L41-L121](train_end2end.py#L41-L121)
+
+## 模型架构
+
+AlphaFold2模型由几个关键组件组成：
+
+1. **序列嵌入**：将氨基酸序列转换为向量表示
+2. **Evoformer**：通过注意力机制处理MSA和成对表示
+3. **结构模块**：基于学习到的表示预测3D坐标
+
+```python
+model = Alphafold2(
+    dim = 256,
+    depth = 1,
+    heads = 8,
+    dim_head = 64,
+    predict_coords = True,
+    structure_module_dim = 8,
+    structure_module_depth = 2,
+    structure_module_heads = 4,
+    structure_module_dim_head = 16,
+    structure_module_refinement_iters = 2
+).to(DEVICE)
+```
+
+模型处理输入序列（以及可选的MSA/嵌入）以生成3D坐标：
+
+```python
+refined = model(
+    seq,
+    msa = msa,
+    embedds = embedds,
+    mask = mask
+)
+```
+
+来源：[train_end2end.py#L77-L130](train_end2end.py#L77-L130), [alphafold2.py#L469-L629](alphafold2_pytorch/alphafold2.py#L469-L629)
+
+## 训练循环
+
+训练循环包括以下步骤：
+
+1. **数据加载**：从SidechainNet获取批次
+2. **前向传播**：通过模型传递序列以预测坐标
+3. **坐标处理**：将预测坐标与真实坐标对齐
+4. **损失计算**：计算对齐坐标之间的MSE损失
+5. **反向传播**：通过梯度下降更新模型参数
+
+```mermaid
+sequenceDiagram
+    participant D as 数据加载器
+    participant M as AlphaFold2模型
+    participant L as 损失函数
+    participant O as 优化器
+    
+    loop For NUM_BATCHES迭代
+        loop For GRADIENT_ACCUMULATE_EVERY步骤
+            D->>M: 提供 (seq, coords, mask)
+            Note over M: 特征提取 (ESM/MSA)
+            M->>M: 通过网络前向传播
+            M->>L: 预测坐标
+            Note over L: 坐标对齐 (Kabsch)
+            L->>L: 计算RMSE + 分散损失
+            L->>M: 反向传播梯度
+        end
+        O->>M: 更新模型参数
+    end
+```
+
+训练使用梯度累积有效增加批次大小：
+
+```python
+for _ in range(NUM_BATCHES):
+    for _ in range(GRADIENT_ACCUMULATE_EVERY):
+        batch = next(dl)
+        # 前向传播和损失计算
+        loss.backward()
+    
+    optim.step()
+    optim.zero_grad()
+```
+
+来源：[train_end2end.py#L96-L166](train_end2end.py#L96-L166)
+
+## 坐标预测和处理
+
+模型预测蛋白质骨架和侧链坐标，然后进行处理以：
+
+1. **生成完整结构**：基于预测坐标填充缺失原子
+2. **与真实值对齐**：使用Kabsch算法处理旋转/平移自由度
+3. **计算损失**：在原子级别计算RMSE，并进行适当的掩码处理
+
+```python
+# 坐标对齐
+coords_aligned, labels_aligned = Kabsch(refined, coords[flat_cloud_mask])
+
+# 带掩码的损失计算
+loss = torch.sqrt(criterion(coords_aligned[flat_chain_mask], labels_aligned[flat_chain_mask])) + \
+       dispersion_weight * torch.norm((1/weights)-1)
+```
+
+<CgxTip>
+**提示**：坐标系使用埃（Å）单位，并遵循标准蛋白质坐标约定，首先表示N、CA、C、O骨架原子，随后是侧链原子。
+</CgxTip>
+
+来源：[train_end2end.py#L132-L159](train_end2end.py#L132-L159), [utils.py#L152-L191](alphafold2_pytorch/utils.py#L152-L191)
+
+## 可视化和评估
+
+该流程包括将预测结构转换为PDB格式以进行可视化的工具：
+
+```python
+if TO_PDB: 
+    # 从批次中选择idx以保存prot和label
+    idx = 0
+    coords2pdb(seq[idx, :, 0], coords_aligned[idx], cloud_mask, prefix=SAVE_DIR, name="pred.pdb")
+    coords2pdb(seq[idx, :, 0], labels_aligned[idx], cloud_mask, prefix=SAVE_DIR, name="label.pdb")
+```
+
+这允许研究人员使用PyMOL或ChimeraX等标准分子可视化工具直观比较预测结构与真实结构。
+
+来源：[train_end2end.py#L151-L155](train_end2end.py#L151-L155)
+
+## 超参数和配置
+
+该流程使用以下关键超参数：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| 学习率 | 3e-4 | Adam优化器的学习率 |
+| 批次大小 | 1 | 每批次的蛋白质数量 |
+| 梯度累积 | 16 | 参数更新前的步骤数 |
+| 模型维度 | 256 | 嵌入维度 |
+| 序列长度阈值 | 250 | 最大蛋白质长度 |
+| 分散权重 | 0.1 | 损失中分散项的权重 |
+
+这些超参数可以调整，以平衡训练速度、内存使用和模型准确性。
+
+来源：[train_end2end.py#L24-L32](train_end2end.py#L24-L32), [train_end2end.py#L77-L87](train_end2end.py#L77-L87)
+
+## 与预训练模型的集成
+
+该流程可以利用预训练的蛋白质语言模型如ESM-1b来提升性能：
+
+```python
+if FEATURES == "esm":
+    # 从PyTorch Hub加载（约30GB）
+    embedd_model, alphabet = torch.hub.load("facebookresearch/esm", "esm1b_t33_650M_UR50S")
+    batch_converter = alphabet.get_batch_converter()
+```
+
+这种集成使模型能够受益于从数百万蛋白质序列中学习到的语言模型表示， potentially improving structure prediction accuracy.
+
+来源：[train_end2end.py#L41-L48](train_end2end.py#L41-L48)
+
+## 结论
+
+该端到端训练流程提供了训练AlphaFold2风格模型以从序列数据预测蛋白质结构的完整工作流程。通过结合序列嵌入、MSA信息和先进的神经网络架构，系统学习将蛋白质序列直接映射到其3D结构。
+
+模块化设计允许研究人员对不同组件进行实验，如嵌入方法、模型架构和训练策略，同时保持核心的端到端训练方法。
+
+---
+
+- [深度探索/训练方法/预训练方法](https://zread.ai/lucidrains/alphafold2/14-pre-training-approaches)
+
+---
+slug:14-pre-training-approaches
+blog_type:normal
+---
+
+
+蛋白质结构预测模型如AlphaFold2，在针对特定任务进行微调之前，通过在大数据集上进行预训练能够获得显著收益。本文档探讨了该AlphaFold2仓库中实现的预训练方法，包括训练目标、数据准备和嵌入策略。
+
+## AlphaFold2预训练概述
+
+预训练帮助蛋白质结构预测模型在处理特定预测任务之前，学习蛋白质序列和结构的一般关系。该仓库中的实现支持多种预训练目标和嵌入策略，以促进有效学习。
+
+来源：[alphafold2.py#L469-L597](alphafold2_pytorch/alphafold2.py#L469-L597)
+
+## 预训练目标
+
+### 距离图预测
+
+主要的预训练目标是**距离图预测**——预测氨基酸残基之间的离散距离矩阵。这有助于模型在学习完整3D坐标之前，了解蛋白质结构内的空间关系。
+
+```python
+# 距离图预测目标
+distogram = model(seq, mask=mask)
+loss = F.cross_entropy(
+    distogram,
+    discretized_distances,
+    ignore_index=IGNORE_INDEX
+)
+```
+
+模型预测残基之间的距离，并将这些距离离散化为桶状，训练使用交叉熵损失来优化这些预测，与真实距离矩阵进行对比。
+
+来源：[train_pre.py#L76-L89](train_pre.py#L76-L89), [alphafold2.py#L594-L597](alphafold2_pytorch/alphafold2.py#L594-L597)
+
+### 掩码语言模型（MLM）
+
+次要的预训练目标是**掩码语言模型（MLM）**，用于多序列比对（MSA）。该方法包括：
+
+1. 随机掩码输入序列中的标记
+2. 随机用其他氨基酸替换一些标记
+3. 尽管被选中掩码，仍保留一些标记不变
+4. 训练模型预测掩码位置的原始氨基酸
+
+```python
+# MLM噪声函数
+noised_seq, mlm_mask = mlm.noise(seq, mask)
+```
+
+该技术帮助模型学习氨基酸序列及其在MSA中的进化模式的有意义表示。
+
+来源：[mlm.py#L27-L46](alphafold2_pytorch/mlm.py#L27-L46), [alphafold2.py#L582-L590](alphafold2_pytorch/alphafold2.py#L582-L590)
+
+## 数据来源和准备
+
+### SidechainNet数据集
+
+预训练脚本使用**SidechainNet**数据集，该数据集提供包含侧链在内的完整原子细节的蛋白质结构。
+
+```python
+data = scn.load(
+    casp_version=12,
+    thinning=30,
+    with_pytorch='dataloaders',
+    batch_size=1,
+    dynamic_batching=False
+)
+```
+
+数据集配置为使用CASP12数据，并进行稀疏化以减少冗余。应用250个残基的长度阈值，以便在预训练期间专注于可管理的蛋白质大小。
+
+来源：[train_pre.py#L37-L47](train_pre.py#L37-L47)
+
+### TrRosetta数据集
+
+仓库还包括在训练脚本目录中对**TrRosetta数据集**的支持，该数据集可以作为预训练的替代数据源。
+
+来源：[trrosetta.py](training_scripts/datasets/trrosetta.py)
+
+## 嵌入策略
+
+仓库提供了多种在预训练期间可使用的蛋白质嵌入策略：
+
+| 嵌入类型 | 描述 | 输入类型 |
+|----------|------|---------|
+| MSA Transformer | 使用MSA Transformer进行上下文嵌入 | 序列 + MSA |
+| ESM | 使用Facebook的ESM模型进行嵌入 | 序列或序列 + MSA |
+| ProtTran/ProtBERT | 使用ProtBERT进行蛋白质嵌入 | 序列 + MSA |
+
+这些嵌入策略可以作为预训练的起点，为模型提供丰富的蛋白质序列初始表示。
+
+```python
+# ESM嵌入使用的示例
+seq_embeds = get_esm_embedd(seq, model, batch_converter, device=device)
+seq_embeds = self.project_embed(seq_embeds)
+```
+
+来源：[embeds.py#L10-L103](alphafold2_pytorch/embeds.py#L10-L103)
+
+## 预训练过程
+
+### 训练循环结构
+
+预训练循环遵循标准结构：
+
+1. 加载一批数据
+2. 处理序列、坐标和掩码信息
+3. 准备离散化的距离矩阵作为真实值
+4. 通过模型进行前向传播
+5. 计算损失（距离图预测和/或MLM）
+6. 执行反向传播和优化
+
+实现使用梯度累积，有效增加批量大小，而无需额外内存。
+
+来源：[train_pre.py#L64-L96](train_pre.py#L64-L96)
+
+### 模型配置
+
+用于预训练的AlphaFold2模型可以配置多种参数：
+
+```python
+model = Alphafold2(
+    dim=256,
+    depth=1,
+    heads=8,
+    dim_head=64
+).to(DEVICE)
+```
+
+关键参数包括：
+- `dim`：隐藏维度大小
+- `depth`：Evoformer块的数量
+- `heads`：注意力头的数量
+- `mlm_mask_prob`：MLM中掩码标记的概率
+- `max_seq_len`：最大序列长度
+
+来源：[train_pre.py#L51-L56](train_pre.py#L51-L56), [alphafold2.py#L469-L501](alphafold2_pytorch/alphafold2.py#L469-L501)
+
+<CgxTip>
+**提示**：在进行预训练时，从较小的模型（较少的层、较小的隐藏维度）开始，并逐步扩展规模，这样可以在验证方法之前快速迭代预训练设置。这允许你在进行更长时间的大型模型训练之前，先快速验证预训练设置。
+</CgxTip>
+
+## 运行预训练
+
+要执行预训练，运行`train_pre.py`脚本：
+
+```bash
+python train_pre.py
+```
+
+脚本配置了合理的默认值：
+- 100,000次训练迭代
+- 每16批进行一次梯度累积
+- 学习率为3e-4
+- 蛋白质长度阈值为250个残基
+
+来源：[train_pre.py#L14-L19](train_pre.py#L14-L19)
+
+## 从预训练到端到端流程
+
+预训练后，可以使用预训练权重作为端到端训练的初始化。仓库包含一个单独的脚本`train_end2end.py`，用于此目的，该脚本接受预训练模型并进行微调以进行完整结构预测。
+
+```mermaid
+flowchart LR
+    A[在距离图预测上预训练] --> B[预训练权重]
+    B --> C[端到端训练]
+    C --> D[结构预测]
+```
+
+这种两阶段方法（预训练后进行端到端训练）有助于提高收敛速度和最终模型质量。
+
+来源：[train_pre.py](train_pre.py), [train_end2end.py](train_end2end.py)
+
+## 预训练的关键考虑因素
+
+1. **数据质量**：预训练数据的质量显著影响模型性能。考虑使用SidechainNet和TrRosetta等多个数据集。
+2. **计算资源**：预训练需要大量的计算资源。实现支持梯度累积以管理内存限制。
+3. **嵌入选择**：不同的嵌入策略（MSA Transformer、ESM、ProtTran）在速度和质量上有所权衡。实验以找到最适合你用例的方法。
+4. **评估**：定期评估预训练进度，通过监控训练损失和验证集性能来避免过拟合。
+
+通过理解和利用这些预训练方法，你可以构建有效的蛋白质结构预测模型，在处理更具挑战性的端到端结构预测任务之前，先从学习到的表示中获益。
+
+---
+
+- [深度探索/训练方法/TrRosetta数据集使用](https://zread.ai/lucidrains/alphafold2/15-trrosetta-dataset-usage)
+
+---
+slug:15-trrosetta-dataset-usage
+blog_type:normal
+---
+
+
+TrRosetta是用于训练蛋白质结构预测模型（如AlphaFold2）的关键数据集。本指南介绍了如何在lucidrains/alphafold2实现中使用TrRosetta数据集，涵盖数据结构、处理方法以及与训练流程的整合。
+
+## TrRosetta数据集是什么？
+
+TrRosetta（transform-restrained Rosetta）是一个包含蛋白质结构信息的数据集，包括：
+
+- 主要序列
+- 多序列比对（MSAs）
+- 蛋白质结构的3D坐标
+- 角度信息
+- 残基间距离图
+
+该数据集对于训练蛋白质结构预测模型非常宝贵，因为它提供了序列信息（输入）和结构信息（预测目标）。
+
+来源：[trrosetta.py#L16-L28](training_scripts/datasets/trrosetta.py#L16-L28)
+
+## 数据集结构
+
+本实现中使用的TrRosetta数据集具有以下目录结构：
+
+```
+trrosetta/
+├── a3m/             # 多序列比对文件
+│   └── *.a3m
+├── npz/             # 预处理数据文件
+│   └── *.npz  
+├── pdb/             # 蛋白质结构文件
+│   └── *.pdb
+├── train_files.txt  # 训练文件名列表
+├── valid_files.txt  # 验证文件名列表
+└── cache/           # 缓存处理数据（自动创建）
+```
+
+数据集在首次使用时会自动下载并提取，默认缓存位置为`~/.cache/alphafold2_pytorch/trrosetta`。
+
+来源：[trrosetta.py#L26-L28](training_scripts/datasets/trrosetta.py#L26-L28), [trrosetta.py#L91-L114](training_scripts/datasets/trrosetta.py#L91-L114)
+
+## 入门指南
+
+### 快速设置
+
+使用TrRosetta数据集最简单的方法是通过提供的`TrRosettaDataModule`类，该类处理下载、处理和创建适当的dataloader：
+
+```python
+from training_scripts.datasets.trrosetta import TrRosettaDataModule
+
+# 使用默认设置创建数据模块
+data_module = TrRosettaDataModule(
+    train_batch_size=4,
+    eval_batch_size=2,
+    num_workers=4
+)
+
+# 设置数据集（如果需要则下载）
+data_module.setup()
+
+# 访问dataloader
+train_loader = data_module.train_dataloader()
+val_loader = data_module.val_dataloader()
+```
+
+这会自动下载数据集，如果系统上尚未存在。
+
+来源：[trrosetta.py#L352-L476](training_scripts/datasets/trrosetta.py#L352-L476)
+
+## 数据加载和处理
+
+### 加载过程
+
+当访问数据集时，会发生以下步骤：
+
+1. 读取蛋白质的FASTA文件（`.a3m`）以获取MSAs
+2. 解析PDB文件以提取3D坐标、角度和序列
+3. 计算距离图并将其分桶到离散的区间
+4. 所有数据被缓存以加快后续运行的访问速度
+
+<CgxTip>
+对于大规模训练，启用缓存可以显著加快第一轮后的数据加载速度，因为处理PDB和MSA文件计算成本较高。
+</CgxTip>
+
+来源：[trrosetta.py#L202-L227](training_scripts/datasets/trrosetta.py#L202-L227)
+
+### 数据预处理
+
+对原始数据应用了几个预处理步骤：
+
+1. **MSA采样**：MSAs可能非常大，因此它们被采样到最大深度
+2. **序列裁剪**：长序列被裁剪到最大长度
+3. **距离计算**：计算残基间距离（CA-CA或CB-CB）并将其离散化到桶中
+4. **标记化**：将氨基酸序列转换为数值标记
+
+```mermaid
+flowchart TD
+    A[加载.a3m文件] --> B[提取MSAs]
+    C[加载.pdb文件] --> D[提取3D坐标、角度、序列]
+    D --> E[计算距离图]
+    E --> F[分桶距离]
+    B --> G[采样MSAs]
+    G --> H[裁剪序列]
+    F --> H
+    D --> H
+    H --> I[缓存处理数据]
+    I --> J[返回数据字典]
+```
+
+来源：[trrosetta.py#L229-L266](training_scripts/datasets/trrosetta.py#L229-L266), [trrosetta.py#L268-L282](training_scripts/datasets/trrosetta.py#L268-L282), [trrosetta.py#L284-L296](training_scripts/datasets/trrosetta.py#L284-L296)
+
+## 批次结构
+
+每个来自dataloader的批次包含以下元素：
+
+| 字段      | 形状                | 描述                                        |
+|-----------|--------------------|----------------------------------------------------|
+| `id`      | [batch_size]       | 蛋白质标识符                                |
+| `seq`     | [batch_size, L]    | 标记化的蛋白质序列                          |
+| `msa`     | [batch_size, N, L] | 多序列比对                                  |
+| `coords`  | [batch_size, L, 14, 3] | 每个残基的原子坐标                  |
+| `angles`  | [batch_size, L, 12] | 二面角                                      |
+| `mask`    | [batch_size, L]    | 序列填充掩码（1=有效，0=填充）              |
+| `msa_mask`| [batch_size, N, L] | MSA填充掩码（1=有效，0=填充）                |
+| `dist`    | [batch_size, L, L] | 残基间距离图（分桶）                        |
+
+其中：
+- L = 序列长度（填充到批次中的最大长度）
+- N = MSA深度（填充到批次中的最大深度）
+
+来源：[trrosetta.py#L298-L349](training_scripts/datasets/trrosetta.py#L298-L349)
+
+## 配置选项
+
+`TrRosettaDataModule`提供了许多配置选项：
+
+### 基本参数
+
+```python
+data_module = TrRosettaDataModule(
+    # 数据位置
+    data_dir="/path/to/trrosetta",  # 自定义位置（可选）
+    
+    # 批次大小
+    train_batch_size=4,
+    eval_batch_size=2,
+    test_batch_size=1,
+    
+    # 并行加载
+    num_workers=4
+)
+```
+
+### 高级参数
+
+```python
+data_module = TrRosettaDataModule(
+    # 最大序列长度
+    train_max_seq_len=256,  # 裁剪训练序列到此长度
+    eval_max_seq_len=256,   # 裁剪验证序列到此长度
+    test_max_seq_len=-1,    # -1表示不裁剪
+    
+    # 最大MSA深度
+    train_max_msa_num=128,  # 采样训练MSA到此深度
+    eval_max_msa_num=256,   # 采样验证MSA到此深度
+    test_max_msa_num=512,   # 采样测试MSA到此深度
+    
+    # 自定义标记化
+    tokenize=my_tokenize_function,  # 自定义标记器（可选）
+    seq_pad_value=20,               # 填充标记值
+    
+    # 缓存控制
+    overwrite=False  # 设置为True以重新生成缓存
+)
+```
+
+<CgxTip>
+平衡序列长度和MSA深度对于管理GPU内存使用至关重要。对于训练，考虑使用较短的序列和较小的MSA深度，然后随着训练稳定逐渐增加这些值。
+</CgxTip>
+
+来源：[trrosetta.py#L352-L414](training_scripts/datasets/trrosetta.py#L352-L414)
+
+## 与训练流程的整合
+
+### PyTorch Lightning整合
+
+`TrRosettaDataModule`是一个PyTorch Lightning DataModule，易于与Lightning训练流程整合：
+
+```python
+import pytorch_lightning as pl
+from training_scripts.datasets.trrosetta import TrRosettaDataModule
+from your_model import AlphaFoldModel
+
+# 初始化数据和模型
+data_module = TrRosettaDataModule()
+model = AlphaFoldModel()
+
+# 创建并运行训练器
+trainer = pl.Trainer(max_epochs=100, gpus=1)
+trainer.fit(model, datamodule=data_module)
+```
+
+### 命令行整合
+
+对于命令行脚本，可以使用内置的参数解析器：
+
+```python
+from argparse import ArgumentParser
+from training_scripts.datasets.trrosetta import TrRosettaDataModule
+
+parser = ArgumentParser()
+parser = TrRosettaDataModule.add_data_specific_args(parser)
+args = parser.parse_args()
+
+data_module = TrRosettaDataModule(**vars(args))
+```
+
+这允许您直接通过命令行参数指定数据集参数，例如：
+
+```bash
+python train.py --train_batch_size 4 --train_max_seq_len 256 --train_max_msa_num 128
+```
+
+来源：[trrosetta.py#L354-L373](training_scripts/datasets/trrosetta.py#L354-L373)
+
+## 结论
+
+TrRosetta数据集提供了训练蛋白质结构预测模型所需的基本组件。本仓库中的实现处理了下载、处理以及将数据集整合到您的训练流程中，具有可配置性和性能优化。
+
+对于高级用法，您可以扩展`TrRosettaDataset`类以添加自定义处理步骤或整合其他数据源，以实现更复杂的训练模式。
+
+---

@@ -1,0 +1,26 @@
+# ChrisHayduk-minAlphaFold2-DeepWiki
+
+## Content Index
+
+- [Overview](Overview.md)
+- [Model-Architecture](Model-Architecture.md)
+- [Input-Embedding](Input-Embedding.md)
+- [Evoformer-Stack](Evoformer-Stack.md)
+- [Structure-Module](Structure-Module.md)
+- [Prediction-Heads](Prediction-Heads.md)
+- [Loss-Functions](Loss-Functions.md)
+- [FAPE-Losses](FAPE-Losses.md)
+- [Sequence-and-Confidence-Losses](Sequence-and-Confidence-Losses.md)
+- [Structural-Violation-Loss](Structural-Violation-Loss.md)
+- [Residue-Constants](Residue-Constants.md)
+- [Utilities](Utilities.md)
+- [Data-Pipeline](Data-Pipeline.md)
+- [Dataset-and-Feature-Engineering](Dataset-and-Feature-Engineering.md)
+- [File-Format-Parsers](File-Format-Parsers.md)
+- [Geometry-Utilities](Geometry-Utilities.md)
+- [Training-System](Training-System.md)
+- [Model-Configuration-and-Hyperparameters](Model-Configuration-and-Hyperparameters.md)
+- [Training-Loop-and-Data-Loading](Training-Loop-and-Data-Loading.md)
+- [Data-Acquisition-Scripts](Data-Acquisition-Scripts.md)
+- [Testing](Testing.md)
+- [Glossary](Glossary.md)
