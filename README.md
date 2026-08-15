@@ -39,9 +39,9 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ### A. Structure-based 
 
-#### Single-structure prediction
+#### Single structure prediction
 
-> Extraction: distance threshold (Cα/Cβ < 8 Å) → 0/1 contact map, or pLDDT-weighted / sharpened distogram probability (low-temperature — may need re-calibration).
+> Extraction: distance threshold (Cα/Cβ) → 0/1 contact map, or pLDDT-weighted / sharpened distogram probability (low-temperature — may need re-calibration).
 
 <details>
 <summary>AlphaFold2</summary>
@@ -112,31 +112,110 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 - **Paper:** [Efficient and accurate prediction of protein structure using RoseTTAFold2](https://www.biorxiv.org/content/10.1101/2023.05.24.542179v1) (bioRxiv, 2023)
 - **Docs:** [Read more →](docs/RoseTTAFold2/) *to be written*
-- **Code:** https://github.com/RosettaCommons/RoseTTAFold
-- **Web server:** https://robetta.bakerlab.org/
+- **Code:** https://github.com/uw-ipd/RoseTTAFold2
+</details>
+
+---
+
+<details>
+<summary>RoseTTAFold2NA</summary>
+
+- **Paper:** [Accurate prediction of protein–nucleic acid complexes using RoseTTAFoldNA](https://www.nature.com/articles/s41592-023-02086-5) (Nature Methods, 2023)
+- **Docs:** [Read more →](docs/RoseTTAFold2NA/) *to be written*
+- **Code:** https://github.com/uw-ipd/RoseTTAFold2NA
 </details>
 
 
 ---
 
-#### OmegaFold
-
 <details>
-<summary>Structure-based · single-structure</summary>
+<summary>OpenFold</summary>
 
-- **Paper:** [High-resolution de novo structure prediction from primary sequence](https://www.biorxiv.org/content/10.1101/2022.07.21.500999v1) (bioRxiv, 2022)
-- **Docs:** [Read more →](docs/omegafold/) *to be written*
-- **Input:** single sequence (no MSA)
-- **Output:** single structure → inter-chain contact map
-- **Code:** https://github.com/HeliXonProtein/OmegaFold
+- **Paper:** [OpenFold: retraining AlphaFold2 yields new insights into its learning mechanisms and capacity for generalization](https://www.nature.com/articles/s41592-024-02272-z) (Nature Methods, 2024)
+- **Docs:** [Read more →](docs/OpenFold/) *to be written*
+- **Code:** https://github.com/aqlaboratory/openfold
 </details>
 
 
+---
+
+<details>
+<summary>Uni-Fold</summary>
+
+- **Paper:** [Uni-Fold: An Open-Source Platform for Developing Protein Folding Models beyond AlphaFold](https://www.biorxiv.org/content/10.1101/2022.08.04.502811v3) (bioRxiv, 2022)
+- **Docs:** [Read more →](docs/Uni-Fold/) *to be written*
+- **Code:** https://github.com/dptech-corp/Uni-Fold
+</details>
+
+--- 
+
+<details>
+<summary>OmegaFold</summary>
+
+- **Paper:** [High-resolution de novo structure prediction from primary sequence](https://www.biorxiv.org/content/10.1101/2022.07.21.500999v1) (bioRxiv, 2022)
+- **Docs:** [Read more →](docs/OmegaFold/) *to be written*
+- **Code:** https://github.com/HeliXonProtein/OmegaFold
+</details>
+
+---
+
+<details>
+<summary>EquiFold</summary>
+
+- **Paper:** [EquiFold: Protein Structure Prediction with a Novel Coarse-Grained Structure Representation](https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2) (bioRxiv, 2023)
+- **Docs:** [Read more →](docs/EquiFold/) *to be written*
+- **Code:** https://github.com/Genentech/equifold
+</details>
+
+---
+
+<details>
+<summary>RoseTTAFold All-Atom</summary>
+
+- **Paper:** [EquiFold: Protein Structure Prediction with a Novel Coarse-Grained Structure Representation](https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2) (bioRxiv, 2023)
+- **Docs:** [Read more →](docs/RoseTTAFold-All-Atom/) *to be written*
+- **Code:** https://github.com/baker-laboratory/RoseTTAFold-All-Atom
+</details>
+
+--- 
+
+<details>
+<summary>Boltz family</summary>
+
+- **Paper:** 
+  - Boltz-1: [Boltz-1 Democratizing Biomolecular Interaction Modeling](https://www.biorxiv.org/content/10.1101/2024.11.19.624167v4) (bioRxiv, 2025)
+  - Boltz-2: [Boltz-2: Towards Accurate and Efficient Binding Affinity Prediction](https://www.biorxiv.org/content/10.1101/2025.06.14.659707v1) (bioRxiv, 2025)
+- **Docs:** [Read more →](docs/Boltz/) *to be written*
+- **Code:** https://github.com/jwohlwend/boltz 
+</details>
+
+--- 
+
+<details>
+<summary>Chai-1</summary>
+
+- **Paper:** [Chai-1: Decoding the molecular interactions of life](https://www.biorxiv.org/content/10.1101/2024.10.10.615955v2) (bioRxiv, 2024)
+- **Docs:** [Read more →](docs/Chai-1/) *to be written*
+- **Code:** https://github.com/chaidiscovery/chai-lab 
+- **Web server:** https://lab.chaidiscovery.com/dashboard
+</details>
+
+--- 
+
+<details>
+<summary>Chai-2</summary>
+
+- **Paper:** [Zero-shot antibody design in a 24-well plate](https://www.biorxiv.org/content/10.1101/2025.07.05.663018v1) (bioRxiv, 2025)
+- **Docs:** [Read more →](docs/Chai-2/) *to be written*
+- **Code:** 
+</details>
+
+--- 
 
 <!-- More single_structure placeholders can be added here -->
 <!-- PLACEHOLDER: <another single-structure predictor> -->
 
-#### 2 · IDR ensemble generation
+#### Conformational ensemble generation
 
 > Extraction: ensemble contact frequency — how often residue pair (i, j) falls within the threshold across the ensemble.
 
@@ -321,3 +400,9 @@ Type tags used in this repo:
 ## TODO / placeholders
 
 Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to flag "known but not yet filled" entries and "empty niches to be added".
+
+
+## Reference
+
+- https://github.com/AspirinCode/awesome-BioMolGenFold#folding-tool-collection
+- 
