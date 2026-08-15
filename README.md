@@ -458,6 +458,17 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
+<details>
+<summary>Protein Ensemble Database, PED</summary>
+
+- Description: The Protein Ensemble Database (PED) is an open access database for the deposition of structural ensembles, including intrinsically disordered proteins (IDPs). Manually curated data of structural ensembles measured with nuclear magnetic resonance spectroscopy, small-angle X-ray scattering, fluorescence resonance energy transfer are annotated in PED. The deposition of structural coordinates can be used for the evaluation of the ensembles, thus supporting the evolution of new modeling methods leading to much improved skills of connecting the characteristic "lack of structure" of IDPs with function. Each entry in PED corresponds to the primary experimental data and to the structural ensembles associated with these data.
+- Url: https://proteinensemble.org/
+- API: https://proteinensemble.org/api
+
+</details>
+
+
+
 ## Entry template
 
 Each tool uses a collapsible `<details>` block with consistent fields. The `<summary>` is a minimal **type tag** (the tool name lives in the `####` heading, so it is not repeated):
