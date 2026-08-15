@@ -276,7 +276,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 <summary>STARLING</summary>
 
 - **Paper:** [Accurate predictions of disordered protein ensembles with STARLING](https://www.nature.com/articles/s41586-026-10141-2) (Nature, 2026)
-- **Docs:** [Read more →](docs/IDPFold2/) *to be written*
+- **Docs:** [Read more →](docs/STARLING/) *to be written*
 - **Code:** https://github.com/idptools/starling | https://idptools-starling.readthedocs.io/en/latest/ | https://github.com/holehouse-lab/supportingdata/tree/master/2026/starling_2026 | https://github.com/idptools/idpcolab/blob/main/STARLING/STARLING_demo.ipynb
 - **For IDR**
 </details>
@@ -311,6 +311,9 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Code:** N/A
 </details>
 
+
+- https://www.nature.com/articles/s41586-026-10141-2/figures/10
+
 <!-- More idr_ensemble placeholders can be added here -->
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
 <!-- PLACEHOLDER: enhanced-sampling MD post-processing ensemble tool -->
@@ -320,6 +323,33 @@ A curated collection of computational tools for `intermolecular interaction pred
 ### B. Sequence-based contact-map like prediction
 
 > ⚠️ Models trained on structure data but requiring only sequence at inference still belong here. Per-residue binding-site scores (no pair coupling) are excluded from the main track.
+
+
+<details>
+<summary>FINCHES</summary>
+
+- **Paper:** [Sequence-based prediction of intermolecular interactions driven by disordered regions](https://www.science.org/doi/10.1126/science.adq8381) (Science, 2025)
+- **Docs:** [Read more →](docs/FINCHES/) *to be written*
+- **Code:** https://github.com/idptools/finches | https://github.com/idptools/finches-colab
+- **Web server:** https://www.finches-online.com/
+- **For IDR**
+</details>
+
+
+--- 
+
+<details>
+<summary>Disobind</summary>
+
+- **Paper:** [Disobind: A sequence-based, partner-dependent contact map and interface residue predictor for intrinsically disordered regions](https://www.cell.com/cell-systems/abstract/S2405-4712(25)00319-9) (Cell Systems, 2026)
+- **Docs:** [Read more →](docs/Disobind/) *to be written*
+- **Code:** https://github.com/isblab/disobind
+- **For IDR**
+</details>
+
+
+--- 
+
 
 #### DeepInteract
 
