@@ -212,12 +212,80 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 --- 
 
+- helixfold
+
 <!-- More single_structure placeholders can be added here -->
 <!-- PLACEHOLDER: <another single-structure predictor> -->
 
 #### Conformational ensemble generation
 
 > Extraction: ensemble contact frequency — how often residue pair (i, j) falls within the threshold across the ensemble.
+>
+> Primarily designed for IDR tasks.
+
+--- 
+
+<details>
+<summary>BioEmu</summary>
+
+- **Paper:** [Scalable emulation of protein equilibrium ensembles with generative deep learning](https://www.science.org/doi/10.1126/science.adv9817) (Science, 2025)
+- **Docs:** [Read more →](docs/BioEmu/) *to be written*
+- **Code:** https://github.com/microsoft/bioemu
+</details>
+
+--- 
+
+<details>
+<summary>Phanto-IDP</summary>
+
+- **Paper:** [Phanto-IDP: compact model for precise intrinsically disordered protein backbone generation and enhanced sampling](https://academic.oup.com/bib/article/25/1/bbad429/7453435) (Briefings in Bioinformatics, 2024)
+- **Docs:** [Read more →](docs/Phanto-IDP/) *to be written*
+- **Code:** https://github.com/Junjie-Zhu/Phanto-IDP
+- **For IDR**
+</details>
+
+
+---
+
+<details>
+<summary>IDPFold</summary>
+
+- **Paper:** [Accurate Generation of Conformational Ensembles for Intrinsically Disordered Proteins with IDPFold](https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202511636) (Advanced Science, 2025)
+- **Docs:** [Read more →](docs/IDPFold/) *to be written*
+- **Code:** https://github.com/Junjie-Zhu/IDPFold
+- **For IDR**
+</details>
+
+
+---
+
+
+<details>
+<summary>IDPFold2</summary>
+
+- **Paper:** [Extending Conformational Ensemble Prediction to Multidomain Proteins and Protein Complex](https://www.biorxiv.org/content/10.64898/2026.01.14.699584v1) (bioRxiv, 2026)
+- **Docs:** [Read more →](docs/IDPFold2/) *to be written*
+- **Code:** https://github.com/Junjie-Zhu/IDPFold2
+- **For IDR**
+</details>
+
+
+---
+
+<details>
+<summary>STARLING</summary>
+
+- **Paper:** [Accurate predictions of disordered protein ensembles with STARLING](https://www.nature.com/articles/s41586-026-10141-2) (Nature, 2026)
+- **Docs:** [Read more →](docs/IDPFold2/) *to be written*
+- **Code:** https://github.com/idptools/starling | https://idptools-starling.readthedocs.io/en/latest/ | https://github.com/holehouse-lab/supportingdata/tree/master/2026/starling_2026 | https://github.com/idptools/idpcolab/blob/main/STARLING/STARLING_demo.ipynb
+- **For IDR**
+</details>
+
+
+---
+
+
+
 
 #### IDP-LZerD
 
@@ -249,7 +317,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
-### B. Sequence-based contact-map prediction
+### B. Sequence-based contact-map like prediction
 
 > ⚠️ Models trained on structure data but requiring only sequence at inference still belong here. Per-residue binding-site scores (no pair coupling) are excluded from the main track.
 
