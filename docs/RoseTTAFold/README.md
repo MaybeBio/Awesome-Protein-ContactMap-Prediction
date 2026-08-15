@@ -1,0 +1,13 @@
+# RoseTTAFold
+
+## Abstract
+
+In 1972, Anfinsen won a Nobel prize for demonstrating a connection between a protein’s amino acid sequence and its three-dimensional structure. Since 1994, scientists have competed in the biannual Critical Assessment of Structure Prediction (CASP) protein-folding challenge. Deep learning methods took center stage at CASP14, with DeepMind’s Alphafold2 achieving remarkable accuracy. Baek et al. explored network architectures based on the DeepMind framework. They used a three-track network to process sequence, distance, and coordinate information simultaneously and achieved accuracies approaching those of DeepMind. The method, RoseTTA fold, can solve challenging x-ray crystallography and cryo–electron microscopy modeling problems and generate accurate models of protein-protein complexes. —VV
+
+DeepMind presented notably accurate predictions at the recent 14th Critical Assessment of Structure Prediction (CASP14) conference. We explored network architectures that incorporate related ideas and obtained the best performance with a three-track network in which information at the one-dimensional (1D) sequence level, the 2D distance map level, and the 3D coordinate level is successively transformed and integrated. The three-track network produces structure predictions with accuracies approaching those of DeepMind in CASP14, enables the rapid solution of challenging x-ray crystallography and cryo–electron microscopy structure modeling problems, and provides insights into the functions of proteins of currently unknown structure. The network also enables rapid generation of accurate protein-protein complex models from sequence information alone, short-circuiting traditional approaches that require modeling of individual subunits followed by docking. We make the method available to the scientific community to speed biological research.
+
+> 1972年，安芬森因证实蛋白质的氨基酸序列与其三维结构之间存在关联而斩获诺贝尔奖。自1994年起，科学家们便参与两年一届的蛋白质结构预测关键评估（CASP）蛋白质折叠竞赛。深度学习方法在第14届蛋白质结构预测关键评估（CASP14）中成为焦点，DeepMind的AlphaFold2取得了极高的预测精度。Baek 等人基于DeepMind的框架探究了多种网络结构。他们采用三轨网络同时处理序列、距离及坐标信息，实现了接近DeepMind的预测精度。该方法名为RoseTTAFold，能够攻克具有挑战性的X射线晶体学与冷冻电镜建模难题，并构建精准的蛋白质-蛋白质复合物模型。——VV
+>
+> 相关思路的网络架构，并基于三轨网络取得最优性能：该网络依次对一维（1D）序列层面、二维（2D）距离图谱层面以及三维（3D）坐标层面的信息进行变换与整合。该三轨网络输出的结构预测精度接近 DeepMind 在 CASP14 竞赛中达到的水平，能够快速解决具有挑战性的 X 射线晶体学与冷冻电镜结构建模问题，还可为目前结构未知的蛋白质功能研究提供线索。借助该网络，仅依靠序列信息就能快速构建高精度的蛋白质 - 蛋白质复合物模型，省去传统方法先对各个亚基单独建模、再进行分子对接的繁琐流程。
+
+## Model/Method

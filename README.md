@@ -6,14 +6,15 @@
 
 
 
-![alt text](image.png)
+<img src="image.png" alt="alt text" width="100%" />
+
 
 > The figure above was adapted from paper [StructureDistiller: Structural relevance scoring identifies the most informative entries of a contact map](https://www.nature.com/articles/s41598-019-55047-4)
 
 
-A curated collection of computational tools for intermolecular interaction prediction. For any input number of polypeptide chains(≥2), each method outputs a `two-dimensional inter-chain residue-residue interaction matrix` encoding pairwise contact probabilities or predicted inter-residue distances. Methods are organized by their capability to generate full residue-pair interaction/contact maps, rather than by domain labels (e.g., PPI prediction vs. structure prediction).
+A curated collection of computational tools for `intermolecular interaction prediction`. For any input number of polypeptide chains(≥2), each method outputs a `two-dimensional inter-chain residue-residue interaction matrix` encoding pairwise contact probabilities or predicted inter-residue distances. Methods are organized by their capability to generate full residue-pair interaction/contact maps, rather than by domain labels (e.g., PPI prediction vs. structure prediction).
 
-> **Admission criteria:** A tool must produce `a complete 2D matrix across all residue pairs`, with values corresponding to contact probabilities or predicted inter-residue distances. Tools that output only per-residue binding-site scalar scores — without explicit residue-pair coupling information — are excluded from the main track and may only be presented as low-resolution baselines.
+> **⚠️ Admission criteria:** A tool must produce `a complete 2D matrix across all residue pairs`, with values corresponding to contact probabilities or predicted inter-residue distances. Tools that output only per-residue binding-site scalar scores — without explicit residue-pair coupling information — are excluded from the main track and may only be presented as low-resolution baselines.
 
 ## Menu
 
@@ -50,74 +51,73 @@ A curated collection of computational tools for intermolecular interaction predi
 - **Docs:** [Read more →](docs/AlphaFold2/) *to be written*
 </details>
 
-#### AlphaFold3
+--- 
 
 <details>
 <summary>AlphaFold3</summary>
 
 - **Paper:** [Accurate structure prediction of biomolecular interactions with AlphaFold 3](https://www.nature.com/articles/s41586-024-07487-w)(Nature, 2024)
 - **Docs:** [Read more →](docs/AlphaFold3/) *to be written*
-- **Input:** AlphaFold 3 takes a custom JSON file as input, provided via `--json_path` (single file) or `--input_dir` (multiple files). The top-level fields are `name`, `modelSeeds`, `sequences`, `dialect`, `version` (all required), plus optional `bondedAtomPairs` and `userCCD`/`userCCDPath` . The `sequences` list describes the molecular chains in the complex, supporting four entity types: **Protein** (sequence, optional PTM modifications, custom MSA via `unpairedMsa`/`pairedMsa`, and structural templates), **RNA/DNA** (sequence with optional base modifications), and **Ligand** (specified via a CCD code, a SMILES string, or a user-defined CCD entry) . This JSON is parsed by `Input.from_json()` into the `Input` dataclass, whose core attributes are `name`, `chains`, `rng_seeds`, `bonded_atom_pairs`, and `user_ccd` .
-- **Output:** AlphaFold 3 writes its results into a directory named after the (sanitized) job name, containing one `seed-<seed>_sample-<n>` subdirectory per seed × sample — each holding a predicted-structure mmCIF, a confidence JSON, and a summary confidence JSON — along with the overall top-ranking prediction (`<job_name>_model.cif`, `<job_name>_confidences.json`, `<job_name>_summary_confidences.json`), an augmented copy of the input JSON (`<job_name>_data.json`), and a `ranking_scores.csv` summary, with optional distogram/embeddings files if requested . Key confidence metrics include **pLDDT** (per-atom confidence, 0–100), **PAE** (predicted aligned error between tokens), **pTM/ipTM** (template-modeling scores for the overall structure/interfaces), and the composite **`ranking_score`** used to rank predictions, computed as 0.8×ipTM + 0.2×pTM + 0.5×disorder − 100×has_clash ; the write-out logic itself is implemented in `write_outputs()` in `run_alphafold.py` .
 - **Code:** https://github.com/google-deepmind/alphafold3
 - **Web server:** https://alphafoldserver.com/
 </details>
 
-
-
-
-
-#### AlphaFold-Multimer
+---
 
 <details>
 <summary>AlphaFold-Multimer</summary>
 
 - **Paper:** [Protein complex prediction with AlphaFold-Multimer](https://www.biorxiv.org/content/10.1101/2021.10.04.463034v2) (bioRxiv, 2022) 
 - **Docs:** [Read more →](docs/AlphaFold-Multimer/) *to be written*
-- **Input:** The multimer pipeline accepts a FASTA with N chains (not limited to two), processed per-chain via `_process_single_chain` in `pipeline_multimer.DataPipeline` . For heteromers (2+ unique sequences), it additionally builds a cross-chain **paired MSA** from UniProt hits via `_all_seq_msa_features`, with the pairing/matching logic implemented in `create_paired_features` / `pair_sequences` in `msa_pairing.py` , exploiting co-evolution signal across chains. IDRs lacking deep MSA coverage tend to receive lower pLDDT as a natural consequence of the model's confidence estimation, though this isn't an explicitly coded rule.
-- **Output:** The model's `prediction_result` (from `RunModel.predict`) is 3D atom coordinates in `structure_module.final_atom_positions`, saved to PDB via `protein.from_prediction` in `run_alphafold.py` . `distogram.logits`/`bin_edges` are only an auxiliary intermediate head, not the terminal output . Confidence metrics ship pre-calibrated, no manual re-calibration needed: per-residue `plddt`, pairwise `predicted_aligned_error` (which naturally reveals inter-/intra-chain blocks), global `ptm`, and — multimer-specific — `iptm` for interface confidence, combined into `ranking_confidence` for model selection.
 - **Code:** https://github.com/jcheongs/alphafold-multimer
 </details> 
 
-#### ColabFold
+--- 
 
 <details>
 <summary>ColabFold</summary>
+
 - **Paper:** 
   - [ColabFold: making protein folding accessible to all](https://www.nature.com/articles/s41592-022-01488-1) (Nature Methods, 2022)
   - [Easy and accurate protein structure prediction using ColabFold](https://www.nature.com/articles/s41596-024-01060-5) (Nature Protocols, 2024)
-- **Docs:** [Read more →](docs/colabfold/) *to be written
-- - Input:** single-chain sequence + MSA (MMseqs2 / JackHMMER)
-- **Output:** single structure → inter-chain contact map (threshold) or distogram probability matrix
+- **Docs:** [Read more →](docs/ColabFold/) *to be written*
 - **Code:** https://github.com/sokrypton/colabfold
-- **Web server:** https://colab.research.google.com/github/sokrypton/ColabFold/blob/main/AlphaFold2_mmseqs2.ipynb
 </details>
 
-
-
-#### ESMFold (multimer)
+--- 
 
 <details>
-<summary>Structure-based · single-structure</summary>
+<summary>ESMFold</summary>
 
-- **Paper:** [Language models of protein sequences at the evolutionary scale](https://www.science.org/doi/10.1126/science.ade2574) (Science, 2022)
+- **Paper:** [Evolutionary-scale prediction of atomic-level protein structure with a language model](https://www.science.org/doi/10.1126/science.ade2574) (Science, 2023)
 - **Docs:** [Read more →](docs/esmfold/) *to be written*
-- **Input:** single sequence (no MSA; pretrained pLM embedding)
-- **Output:** single structure → inter-chain contact map
-- **Code:** https://github.com/facebookresearch/esm
+- **Code:** https://github.com/facebookresearch/esm | https://github.com/facebookresearch/esm#esmfold
 </details>
 
-#### RoseTTAFold2 / RF2-NA
+--- 
 
 <details>
-<summary>Structure-based · single-structure</summary>
+<summary>RoseTTAFold</summary>
 
 - **Paper:** [Accurate prediction of protein structures and interactions using a three-track neural network](https://www.science.org/doi/10.1126/science.abj8754) (Science, 2021)
-- **Docs:** [Read more →](docs/rosettafold2/) *to be written*
-- **Input:** sequence + MSA
-- **Output:** single structure → inter-chain contact map
+- **Docs:** [Read more →](docs/RoseTTAFold/) *to be written*
 - **Code:** https://github.com/RosettaCommons/RoseTTAFold
+- **Web server:** https://robetta.bakerlab.org/
 </details>
+
+--- 
+
+<details>
+<summary>RoseTTAFold2</summary>
+
+- **Paper:** [Efficient and accurate prediction of protein structure using RoseTTAFold2](https://www.biorxiv.org/content/10.1101/2023.05.24.542179v1) (bioRxiv, 2023)
+- **Docs:** [Read more →](docs/RoseTTAFold2/) *to be written*
+- **Code:** https://github.com/RosettaCommons/RoseTTAFold
+- **Web server:** https://robetta.bakerlab.org/
+</details>
+
+
+---
 
 #### OmegaFold
 
