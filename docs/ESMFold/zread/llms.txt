@@ -1,0 +1,42 @@
+# facebookresearch/esm
+
+Source: https://zread.ai/facebookresearch/esm
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/安装与设置](3-installation-and-setup.md)
+- [入门指南/基础蛋白质序列处理](4-basic-protein-sequence-processing.md)
+- [入门指南/模型加载与预训练权重](5-model-loading-and-pre-trained-weights.md)
+
+## 动态资讯
+
+- [动态资讯/最新更新](6-latest-updates.md)
+- [动态资讯/ESM宏基因组图谱发布](7-esm-metagenomic-atlas-release.md)
+- [动态资讯/蛋白质设计研究论文](8-protein-design-research-papers.md)
+
+## 深度解析
+
+- [深度解析/ESM-2架构与设计](9-esm-2-architecture-and-design.md)
+- [深度解析/ESMFold结构预测系统](10-esmfold-structure-prediction-system.md)
+- [深度解析/语言模型表示](11-language-model-representations.md)
+- [深度解析/蛋白质的Transformer架构](12-transformer-architecture-for-proteins.md)
+### 模型变体与应用
+
+- [深度解析/模型变体与应用/用于多序列比对的MSA Transformer](13-msa-transformer-for-multiple-sequence-alignment.md)
+- [深度解析/模型变体与应用/ESM-1v与ESM-IF1模型](14-esm-1v-and-esm-if1-models.md)
+- [深度解析/模型变体与应用/逆向折叠与蛋白质设计](15-inverse-folding-and-protein-design.md)
+
+### 高级功能
+
+- [深度解析/高级功能/零样本变异预测](16-zero-shot-variant-prediction.md)
+- [深度解析/高级功能/蛋白质编程语言](17-protein-programming-language.md)
+- [深度解析/高级功能/基于自注意力的接触预测](18-contact-prediction-from-self-attention.md)
+
+### 性能与优化
+
+- [深度解析/性能与优化/使用FSDP进行CPU卸载](19-cpu-offloading-with-fsdp.md)
+- [深度解析/性能与优化/内存高效的分块推理](20-memory-efficient-chunked-inference.md)
+- [深度解析/性能与优化/批处理与嵌入](21-batch-processing-and-embeddings.md)
+

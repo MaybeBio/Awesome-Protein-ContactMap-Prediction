@@ -1,0 +1,3157 @@
+# facebookresearch/esm
+
+Source: https://zread.ai/facebookresearch/esm
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/facebookresearch/esm/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+
+**Evolutionary Scale Modeling (ESM)** 代码库包含 Meta 最先进的 Transformer 蛋白质语言模型，旨在直接从氨基酸序列理解和预测蛋白质结构与功能。这个强大的工具包使研究人员能够利用深度学习进行蛋白质分析、结构预测和设计，而无需传统实验方法。
+
+## 什么是 ESM？
+
+ESM 代表了计算生物学的突破性进展，通过将大规模语言建模技术应用于蛋白质序列。正如语言模型从文本中学习模式一样，ESM 模型从数百万个自然序列中学习"蛋白质语言"，使其能够理解进化约束、结构关系和功能特性 [README.md](README.md#L1-L10)。
+
+核心创新是将蛋白质序列视为生物语言中的句子，模型学习预测被掩码的氨基酸，从而深入理解蛋白质结构与功能关系。
+
+## 架构概览
+
+ESM 围绕几个关键架构组件构建，这些组件协同工作以提供全面的蛋白质分析能力：
+
+```mermaid
+graph TB
+    A[ESM 核心库] --> B[模型实现]
+    A --> C[数据处理]
+    A --> D[预训练模型]
+    
+    B --> E[ESM-2 Transformers]
+    B --> F[MSA Transformer]
+    B --> G[ESMFold 结构预测]
+    B --> H[逆向折叠模型]
+    
+    C --> I[字母表 & 分词]
+    C --> J[批量转换器]
+    C --> K[FASTA 处理]
+    
+    D --> L[8M 到 15B 参数模型]
+    D --> M[专用任务模型]
+    
+    E --> N[蛋白质序列分析]
+    F --> O[多序列比对]
+    G --> P[3D 结构预测]
+    H --> Q[蛋白质设计]
+```
+
+## 关键组件
+
+### 核心模型
+
+代码库提供多个专用模型系列，每个系列针对不同的蛋白质分析任务进行了优化：
+
+| 模型系列 | 主要用例 | 参数范围 | 关键特性 |
+|--------------|------------------|-----------------|--------------|
+| **ESM-2** | 通用蛋白质分析 | 8M - 15B | 最先进的序列理解、结构/功能预测 |
+| **ESMFold** | 端到端结构预测 | 3B 基础 | 直接从序列生成 3D 结构，无需 MSA |
+| **MSA Transformer** | 多序列比对分析 | 100M | 利用序列家族的进化信息 |
+| **ESM-1v** | 变异效应预测 | 650M | 专用于突变影响分析 |
+| **ESM-IF1** | 逆向折叠与设计 | 142M | 针对给定结构的序列设计 |
+
+### 数据处理管道
+
+ESM 提供围绕 [Alphabet 类](esm/data.py#L91-L143) 和 [BatchConverter](esm/data.py#L253-L263) 构建的精密数据处理系统，处理：
+
+- **分词**：将氨基酸序列转换为数值表示
+- **批量处理**：高效同时处理多个序列  
+- **特殊标记**：支持掩码、填充和序列边界
+- **MSA 支持**：多序列比对的专门处理
+
+### 模型架构
+
+[ESM-2 模型](esm/model/esm2.py#L14-L78) 是核心架构的典范：
+- **基于 Transformer**：使用自注意力机制捕获长程依赖
+- **分层表示**：多个 Transformer 层提取越来越抽象的特征
+- **接触预测**：内置预测氨基酸相互作用的能力
+- **可扩展设计**：模型参数范围从 8M 到 15B，适应不同计算预算
+
+## 项目结构
+
+代码库组织为逻辑组件以确保清晰性和可维护性：
+
+```
+esm/
+├── model/           # 核心模型实现
+│   ├── esm1.py     # 原始 ESM 模型
+│   ├── esm2.py     # 最新的 ESM-2 架构
+│   └── msa_transformer.py  # MSA 专用模型
+├── data.py         # 数据处理工具
+├── pretrained.py   # 模型加载函数
+├── esmfold/        # 结构预测模块
+└── inverse_folding/  # 蛋白质设计功能
+```
+
+## 快速开始
+
+ESM 提供多种访问方式以满足不同需求：
+
+1. **PyPI 安装**：使用 `pip install fair-esm` 快速设置
+2. **HuggingFace 集成**：为 ESMFold 提供标准化 API 访问
+3. **PyTorch Hub**：无需本地安装直接加载 [hubconf.py](hubconf.py#L1-L44)
+4. **Web API**：通过 ESM 宏基因组 Atlas 进行基于浏览器的折叠
+
+该库通过 Jupyter notebooks 提供全面的示例，涵盖：
+- 基础蛋白质序列处理
+- 从自注意力预测接触
+- 变异效应预测
+- 逆向折叠和蛋白质设计
+- 大规模嵌入计算
+
+## 科学影响
+
+ESM 模型在多个蛋白质分析任务上展现了突破性性能：
+
+- **结构预测**：ESMFold 在无需 MSA 的情况下实现了与 AlphaFold2 相当的准确性
+- **变异预测**：突变效应的零样本预测与实验方法相匹配
+- **蛋白质设计**：能够创建超越自然序列的从头蛋白质
+- **宏基因组分析**：应用于 ESM Atlas 中的 6 亿多个蛋白质结构
+
+这些模型在包括 UniRef50/90/100 在内的大规模数据集上训练，使其能够捕获深层进化模式并泛化到新序列。
+
+## 下一步
+
+要开始使用 ESM，请继续阅读 [快速开始](2-quick-start) 获取即时使用示例，然后参考 [安装与设置](3-installation-and-setup) 了解详细配置说明。如需理解底层技术，请探索 [ESM-2 架构与设计](9-esm-2-architecture-and-design) 和 [ESMFold 结构预测系统](10-esmfold-structure-prediction-system)。
+
+---
+
+- [入门指南/快速开始](https://zread.ai/facebookresearch/esm/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+
+本快速入门指南提供了多种使用 ESM（Evolutionary Scale Modeling）进行蛋白质序列分析和结构预测的入门方法。无论你偏好简化的 API、直接使用代码库，还是基于网页的工具，ESM 都能为不同的工作流程和专业水平提供灵活的切入点。
+
+## ESM 入门指南
+
+ESM 提供三种主要快速入门方法，每种方法适用于不同的使用场景和技术需求：
+
+### 方法 1：Hugging Face Transformers（推荐初学者使用）
+
+最简单的入门方式是通过 Hugging Face transformers 库，它提供了标准化的 API 和简化的依赖管理：
+
+```python
+from transformers import AutoTokenizer, EsmModel
+
+# 加载 ESM 模型和分词器
+tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
+model = EsmModel.from_pretrained("facebook/esm2_t33_650M_UR50D")
+
+# 处理蛋白质序列
+sequences = ["MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG"]
+inputs = tokenizer(sequences, return_tensors="pt", padding=True)
+
+# 获取嵌入向量
+with torch.no_grad():
+    outputs = model(**inputs)
+    embeddings = outputs.last_hidden_state
+```
+
+### 方法 2：基于网页的访问
+
+无需安装即可快速测试：
+
+- **ColabFold 集成**：通过 [Google Colab](https://colabreseaarch.google.com/github/sokrypton/ColabFold/blob/main/ESMFold.ipynb) 在浏览器中直接运行 ESMFold
+- **API 访问**：使用 REST API 进行结构预测：
+
+```bash
+curl -X POST --data "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL" https://api.esmatlas.com/foldSequence/v1/pdb/
+```
+
+- **网页界面**：通过 [ESM Metagenomic Atlas](https://esmatlas.com/resources?action=fold) 访问
+
+### 方法 3：直接安装代码库
+
+获取完整功能和高级特性：
+
+```bash
+# 基础安装
+pip install fair-esm
+
+# 安装最新特性
+pip install git+https://github.com/facebookresearch/esm.git
+
+# 安装 ESMFold（需要 Python <= 3.9 和 CUDA）
+pip install "fair-esm[esmfold]"
+pip install 'dllogger @ git+https://github.com/NVIDIA/dllogger.git'
+pip install 'openfold @ git+https://github.com/aqlaboratory/openfold.git@4b41059694619831a7db195b7e0988fc4ff3a307'
+```
+
+<CgxTip>ESMFold 需要特定的环境配置，包括 Python ≤ 3.9、兼容 CUDA 的 PyTorch，以及用于 OpenFold 编译的 `nvcc`。</CgxTip>
+
+## 基本使用示例
+
+### 加载和使用 ESM 模型
+
+```python
+import torch
+import esm
+
+# 加载 ESM-2 模型
+model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+batch_converter = alphabet.get_batch_converter()
+model.eval()  # 禁用 dropout 以获得确定性结果
+
+# 准备数据
+data = [
+    ("protein1", "MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG"),
+    ("protein2", "KALTARQQEVFDLIRDHISQTGMPPTRAEIAQRLGFRSPNAAEEHLKALARKGVIEIVSGASRGIRLLQEE"),
+    ("protein2 with mask","KALTARQQEVFDLIRD<mask>ISQTGMPPTRAEIAQRLGFRSPNAAEEHLKALARKGVIEIVSGASRGIRLLQEE"),
+]
+batch_labels, batch_strs, batch_tokens = batch_converter(data)
+batch_lens = (batch_tokens != alphabet.padding_idx).sum(1)
+
+# 提取表示
+with torch.no_grad():
+    results = model(batch_tokens, repr_layers=[33], return_contacts=True)
+token_representations = results["representations"][33]
+
+# 生成序列级表示
+sequence_representations = []
+for i, tokens_len in enumerate(batch_lens):
+    sequence_representations.append(token_representations[i, 1 : tokens_len - 1].mean(0))
+```
+
+### PyTorch Hub 集成
+
+ESM 还支持 PyTorch Hub，无需安装即可即时访问：
+
+```python
+import torch
+model, alphabet = torch.hub.load("facebookresearch/esm:main", "esm2_t33_650M_UR50D")
+```
+
+## 可用模型选项
+
+ESM 提供了针对不同任务和计算资源优化的各种模型：
+
+| 模型系列 | 规模 | 参数量 | 最适用场景 |
+|---------|------|--------|-----------|
+| ESM-2 Small | 8M | 6 层 | 快速原型设计、资源受限环境 |
+| ESM-2 Medium | 35M | 12 层 | 平衡性能与速度 |
+| ESM-2 Large | 650M | 33 层 | 高质量嵌入向量 |
+| ESM-2 XLarge | 3B | 36 层 | 研究级精度 |
+| ESMFold | 3B | 48 个折叠块 | 结构预测 |
+
+<CgxTip>开发和测试阶段建议使用较小模型（8M-35M 参数），生产环境再扩展至更大模型。</CgxTip>
+
+## 架构概览
+
+```mermaid
+graph TD
+    A[输入蛋白质序列] --> B{选择方法}
+    
+    B -->|初学者| C[Hugging Face Transformers]
+    B -->|高级用户| D[直接使用 ESM 代码库]
+    B -->|快速测试| E[网页界面/API]
+    
+    C --> F[标准化 API]
+    D --> G[完整功能访问]
+    E --> H[无需安装]
+    
+    F --> I[模型加载]
+    G --> I
+    H --> I
+    
+    I --> J{模型类型}
+    J -->|ESM-2| K[序列嵌入]
+    J -->|ESMFold| L[结构预测]
+    J -->|ESM-MSA| M[多序列分析]
+    
+    K --> N[下游任务]
+    L --> N
+    M --> N
+```
+
+## 后续步骤
+
+完成此快速入门后，可以考虑以下学习路径：
+
+- **[安装与设置](3-installation-and-setup)**：详细的环境配置指南
+- **[基础蛋白质序列处理](4-basic-protein-sequence-processing)**：学习数据处理基础知识
+- **[模型加载与预训练权重](5-model-loading-and-pretrained-weights)**：了解模型选择和加载方法
+- **[概述](1-overview)**：全面了解 ESM 的能力
+
+对于特定应用，可以探索：
+- **[ESMFold 结构预测系统](10-esmfold-structure-prediction-system)**：用于蛋白质结构预测
+- **[零样本变异预测](16-zero-shot-variant-prediction)**：用于突变分析
+- **[逆向折叠与蛋白质设计](15-inverse-folding-and-protein-design)**：用于蛋白质工程
+
+ESM 代码库在 `examples/` 目录中提供了全面的示例，包括用于接触预测、变异预测和逆向折叠任务的 notebook。
+
+---
+
+- [入门指南/安装与设置](https://zread.ai/facebookresearch/esm/3-installation-and-setup)
+
+---
+slug:3-installation-and-setup
+blog_type:normal
+---
+
+
+
+本指南涵盖 Meta AI Research 的 ESM（Evolutionary Scale Modeling）蛋白质语言模型的完整安装和设置流程。ESM 提供了用于蛋白质序列分析、结构预测和设计的最先进的 transformer 模型。
+
+## 系统要求
+
+ESM 支持多种安装方法，各有不同的系统要求：
+
+| 安装方法 | Python 版本 | CUDA 支持 | 依赖项 | 推荐用途 |
+|-------------------|----------------|--------------|--------------|-----------------|
+| **pip install** | 3.7+ | 可选 | 最少依赖 | 快速开始，基本使用 |
+| **pip with esmfold** | ≤3.9 | 必需 | 完整 ESMFold 堆栈 | 结构预测 |
+| **conda environment** | 3.7 | 必需 | 完整堆栈 | 开发，可重现性 |
+| **PyTorch Hub** | 任意 | 可选 | 仅 PyTorch | 测试，最小化设置 |
+
+<CgxTip>若要使用 ESMFold 功能，请确保你有兼容 CUDA 的 PyTorch 和 `nvcc` 编译器，因为 OpenFold 需要 CUDA 编译。</CgxTip>
+
+## 安装方法
+
+### 方法 1：快速 pip 安装
+
+安装 ESM 以进行基本蛋白质序列处理的最简单方法：
+
+```bash
+# 安装最新版本
+pip install fair-esm
+
+# 或从当前主分支安装最新开发版
+pip install git+https://github.com/facebookresearch/esm.git
+```
+
+此安装提供对 ESM-2、ESM-1v、ESM-MSA 和反向折叠模型的访问，但不包括 ESMFold 依赖项。
+
+### 方法 2：ESMFold 安装
+
+使用 ESMFold 获得完整的结构预测功能：
+
+```bash
+# 安装带有 ESMFold 依赖项的 ESM
+pip install "fair-esm[esmfold]"
+
+# 安装额外必需的包
+pip install 'dllogger @ git+https://github.com/NVIDIA/dllogger.git'
+pip install 'openfold @ git+https://github.com/aqlaboratory/openfold.git@4b41059694619831a7db195b7e0988fc4ff3a307'
+```
+
+**重要提示**：ESMFold 要求 Python ≤3.9 和兼容 CUDA 的 PyTorch 安装，并需要 `nvcc` 可用。
+
+### 方法 3：Conda 环境
+
+创建包含所有依赖项的完整、可重现环境：
+
+```bash
+# 从提供的配置文件创建 conda 环境
+conda env create -f environment.yml
+
+# 激活环境
+conda activate esmfold
+```
+
+Conda 环境包含 ESMFold 所需的所有必要包，包括特定版本的 PyTorch、OpenMM，以及 HHsuite 和 Kalign2 等生物信息学工具。
+
+### 方法 4：PyTorch Hub
+
+无需本地安装即可快速测试：
+
+```python
+import torch
+model, alphabet = torch.hub.load("facebookresearch/esm:main", "esm2_t33_650M_UR50D")
+```
+
+## 架构概述
+
+ESM 采用模块化架构，为不同功能提供独立组件：
+
+```mermaid
+graph TB
+    A[ESM 核心库] --> B[模型变体]
+    A --> C[工具]
+    A --> D[脚本]
+    
+    B --> B1[ESM-2 模型]
+    B --> B2[MSA Transformer]
+    B --> B3[ESMFold]
+    B --> B4[反向折叠]
+    
+    C --> C1[数据处理]
+    C --> C2[注意力模块]
+    C --> C3[嵌入工具]
+    
+    D --> D1[提取脚本]
+    D --> D2[折叠脚本]
+    D --> D3[下载权重]
+    
+    E[外部依赖] --> E1[PyTorch]
+    E --> E2[BioPython]
+    E --> E3[OpenFold]
+    E --> E4[DeepSpeed]
+```
+
+## 项目结构
+
+ESM 代码库组织为逻辑模块：
+
+```
+esm/
+├── __init__.py              # 主包初始化
+├── pretrained.py            # 预训练模型加载函数
+├── model/                   # 核心模型实现
+│   ├── esm1.py             # ESM-1 架构
+│   ├── esm2.py             # ESM-2 架构
+│   └── msa_transformer.py  # MSA Transformer
+├── esmfold/v1/             # ESMFold 结构预测
+├── inverse_folding/        # 反向折叠模型
+├── modules.py              # 神经网络模块
+├── data.py                 # 数据处理工具
+└── scripts/                # 命令行工具
+```
+
+## 下载预训练权重
+
+ESM 提供多种不同大小和功能的预训练模型。使用下载脚本获取模型权重：
+
+```bash
+# 下载所有可用模型到当前目录
+bash scripts/download_weights.sh
+
+# 下载到指定目录
+bash scripts/download_weights.sh /path/to/weights/
+```
+
+该脚本需要 `aria2c` 进行高效的多线程下载，并会自动恢复中断的下载。
+
+### 可用模型
+
+| 模型 | 参数量 | 训练数据 | 主要用途 |
+|-------|------------|---------------|-------------|
+| ESM-2 (650M) | 650M | UniRef50 | 通用蛋白质分析 |
+| ESM-2 (3B) | 3B | UniRef50 | 高性能任务 |
+| ESM-2 (15B) | 15B | UniRef50 | 最先进性能 |
+| ESMFold | 3B | PDB + UniRef50 | 结构预测 |
+| MSA Transformer | 1B | UniRef50 + MSA | 多序列分析 |
+| ESM-1v | 650M | UniRef90 | 变异效应预测 |
+| ESM-IF1 | 142M | CATH + UniRef50 | 反向折叠 |
+
+## 验证和测试
+
+安装后，使用此基本测试验证设置：
+
+```python
+import torch
+import esm
+
+# 测试基本模型加载
+try:
+    model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+    batch_converter = alphabet.get_batch_converter()
+    model.eval()
+    print("✓ ESM-2 模型加载成功")
+except Exception as e:
+    print(f"✗ 加载 ESM-2 时出错: {e}")
+
+# 如果已安装，测试 ESMFold
+try:
+    import esm.esmfold.v1
+    print("✓ ESMFold 模块可用")
+except ImportError:
+    print("! ESMFold 未安装（可选）")
+
+# 测试基本功能
+data = [("protein1", "MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG")]
+batch_labels, batch_strs, batch_tokens = batch_converter(data)
+print(f"✓ 数据处理正常：输入形状 {batch_tokens.shape}")
+```
+
+## 常见问题和解决方案
+
+### CUDA 兼容性
+
+如果 ESMFold 安装失败：
+1. 验证 CUDA 安装：`nvcc --version`
+2. 检查 PyTorch CUDA 兼容性：`torch.cuda.is_available()`
+3. 确保 CUDA 工具包和 PyTorch 版本匹配
+
+### 内存要求
+
+大型模型（3B+ 参数）需要大量 GPU 内存：
+- ESM-2 (3B)：至少约 12GB GPU 内存
+- ESM-2 (15B)：推荐约 60GB GPU 内存
+- 对大型模型使用 CPU 卸载：参见 [使用 FSDP 进行 CPU 卸载](19-cpu-offloading-with-fsdp)
+
+### 依赖冲突
+
+如果遇到依赖冲突：
+1. 使用提供的 conda 环境进行干净设置
+2. 在虚拟环境中安装：`python -m venv esm_env`
+3. 检查 [environment.yml](environment.yml) 中的特定包版本
+
+## 后续步骤
+
+成功安装后，请继续：
+
+- [基本蛋白质序列处理](4-basic-protein-sequence-processing) 学习基本 ESM 用法
+- [模型加载和预训练权重](5-model-loading-and-pretrained-weights) 了解详细模型选项
+- [ESMFold 结构预测系统](10-esmfold-structure-prediction-system) 进行结构预测工作流
+
+## 其他资源
+
+- **示例**：浏览 [examples/](examples/) 目录中的 Jupyter 笔记本和脚本
+- **文档**：代码库中提供完整的 API 文档
+- **社区**：在 GitHub 代码库加入讨论并报告问题
+- **ESM Atlas**：访问 [esmatlas.com](https://esmatlas.com) 获取预计算的蛋白质结构
+
+<CgxTip>对于生产部署，考虑使用带有 conda 环境的 Docker 容器化方法，以确保在不同计算环境中的可重现性。</CgxTip>
+
+---
+
+- [入门指南/基础蛋白质序列处理](https://zread.ai/facebookresearch/esm/4-basic-protein-sequence-processing)
+
+---
+slug:4-basic-protein-sequence-processing
+blog_type:normal
+---
+
+
+
+欢迎使用 ESM（Evolutionary Scale Modeling）库处理蛋白质序列的基础指南。本页面涵盖了构成所有 ESM 模型基础的核心数据处理能力，从序列读取到张量转换。
+
+## 理解 ESM 中的蛋白质序列数据
+
+ESM 使用复杂的分词系统处理蛋白质序列，将氨基酸序列转换为适合神经网络模型的数值表示。核心数据处理管道包括读取蛋白质序列、应用适当的分词以及将它们转换为批量张量。
+
+该库定义了一个全面的**蛋白质字母表**，包含 26 个标准氨基酸分词以及用于填充、掩码和序列边界的特殊分词 [esm/constants.py#L7-L11]：
+
+```python
+proteinseq_toks = {
+    'toks': ['L', 'A', 'G', 'V', 'S', 'E', 'R', 'T', 'I', 'D', 'P', 'K', 'Q', 'N', 'F', 'Y', 'M', 'H', 'W', 'C', 'X', 'B', 'U', 'Z', 'O', '.', '-']
+}
+```
+
+## 核心数据处理组件
+
+### FASTA 文件处理
+
+ESM 提供了强大的工具来读取 FASTA 文件，这是蛋白质序列数据的标准格式。`read_fasta()` 函数 [esm/data.py#L339-L351] 提供灵活的解析选项：
+
+```python
+def read_fasta(path, keep_gaps=True, keep_insertions=True, to_upper=False):
+    # 生成 (描述, 序列) 元组的生成器
+```
+
+**关键参数：**
+- `keep_gaps`：在处理多序列比对时保留比对间隙（破折号）
+- `keep_insertions`：保留 MSA 文件中常见的小写插入字符
+- `to_upper`：将序列转换为大写以进行标准化
+
+对于批量处理多个序列，ESM 提供了 `FastaBatchedDataset` 类 [esm/data.py#L19-L90]，它可以高效地从 FASTA 文件加载和管理大型蛋白质序列集合。
+
+### 字母表和分词系统
+
+`Alphabet` 类 [esm/data.py#L91-L180] 作为中央分词枢纽，管理氨基酸字符和数值索引之间的映射。每种模型架构都有特定的字母表配置：
+
+| 模型 | 特殊分词 | BOS/EOS | MSA 支持 |
+|-------|----------------|---------|-------------|
+| ESM-1 | `<null_0>`, `<pad>`, `<eos>`, `<unk>`, `<cls>`, `<mask>`, `<sep>` | 仅 BOS | 否 |
+| ESM-1b | `<cls>`, `<pad>`, `<eos>`, `<unk>`, `<mask>` | BOS + EOS | 否 |
+| MSA Transformer | `<cls>`, `<pad>`, `<eos>`, `<unk>`, `<mask>` | 仅 BOS | 是 |
+
+<CgxTip>
+字母表通过将未知氨基酸映射到 `<unk>` 分词索引来自动处理它们，确保对各种蛋白质序列的稳健处理。
+</CgxTip>
+
+### 批量转换管道
+
+`BatchConverter` 类 [esm/data.py#L253-L299] 通过系统化过程将原始序列数据转换为模型就绪的张量：
+
+```mermaid
+flowchart TD
+    A[原始序列] --> B[字母表编码]
+    B --> C[长度截断]
+    C --> D[填充至最大长度]
+    D --> E[特殊分词插入]
+    E --> F[最终张量]
+    
+    G[序列标签] --> H[标签列表]
+    
+    I[批量大小] --> J[批量维度]
+    
+    F --> K[模型输入]
+    H --> K
+    J --> K
+```
+
+转换器处理关键的预处理步骤：
+- **序列编码**：将氨基酸字符串转换为分词索引
+- **长度管理**：如果指定则应用截断
+- **填充**：添加填充分词以确保统一的批量维度
+- **特殊分词**：根据模型要求插入序列开始（BOS）和序列结束（EOS）分词
+
+## 实际使用示例
+
+### 基本序列处理
+
+```python
+import torch
+from esm.data import Alphabet, BatchConverter
+
+# 为 ESM-1b 模型创建字母表
+alphabet = Alphabet.from_architecture("ESM-1b")
+batch_converter = alphabet.get_batch_converter()
+
+# 准备原始数据（标签、序列对）
+raw_batch = [
+    ("protein1", "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAVDHERGLVDRFYKVELAPTHKGGFGLRGDGFNICKDG"),
+    ("protein2", "MSLLTEALENLTPGELTLVDVETLKRFADKLLALHGKDVTREDVIEVLGNGKGRKKGVIYDLNKNP")
+]
+
+# 转换为张量
+labels, strs, tokens = batch_converter(raw_batch)
+print(f"批量形状: {tokens.shape}")  # [batch_size, sequence_length]
+```
+
+### FASTA 文件处理
+
+```python
+from esm.data import FastaBatchedDataset, read_fasta
+
+# 从 FASTA 文件加载序列
+dataset = FastaBatchedDataset.from_file("examples/data/few_proteins.fasta")
+
+# 访问单个序列
+for label, sequence in dataset:
+    print(f"标签: {label}")
+    print(f"序列: {sequence[:50]}...")  # 显示前 50 个字符
+    break
+
+# 使用自动长度管理进行批量处理
+batch_indices = dataset.get_batch_indices(toks_per_batch=1024)
+for batch_idx in batch_indices:
+    batch_data = [dataset[i] for i in batch_idx]
+    # 处理批量...
+```
+
+## 架构概述
+
+数据处理管道遵循关注点分离的模块化设计：
+
+```mermaid
+graph TB
+    subgraph "输入层"
+        A[FASTA 文件] --> B[read_fasta]
+        C[序列字符串] --> D[FastaBatchedDataset]
+    end
+    
+    subgraph "分词层"
+        E[Alphabet] --> F[BatchConverter]
+        G[MSA Alphabet] --> H[MSABatchConverter]
+    end
+    
+    subgraph "输出层"
+        F --> I[张量]
+        H --> J[MSA 张量]
+    end
+    
+    B --> E
+    D --> E
+    C --> E
+```
+
+这种架构能够灵活处理不同的蛋白质数据类型，同时在模型变体之间保持一致的接口。
+
+<CgxTip>
+对于多序列比对（MSA）数据，使用 `MSABatchConverter`，它可以处理序列比对格式并维持同源序列的层次结构。
+</CgxTip>
+
+## 数据格式规范
+
+### 支持的输入格式
+
+| 格式 | 描述 | 用例 |
+|--------|-------------|----------|
+| FASTA | 带 `>` 标头的标准蛋白质序列格式 | 单个序列、蛋白质数据库 |
+| MSA (A3M) | 带间隙的多序列比对 | 进化分析、MSA Transformer |
+| 原始字符串 | 直接序列输入 | 程序化序列生成 |
+
+### 分词索引映射
+
+字母表维持分词和索引之间的双向映射：
+
+- **标准氨基酸**：L, A, G, V, S, E, R, T, I, D, P, K, Q, N, F, Y, M, H, W, C
+- **特殊字符**：X（未知）、B、U、Z、O、.（间隙）、-（比对间隙）
+- **特殊分词**：`<pad>`、`<cls>`、`<mask>`、`<eos>`、`<unk>`
+
+## 下一步
+
+既然你已经了解了基本的蛋白质序列处理，你就可以探索：
+
+- **[模型加载和预训练权重](5-model-loading-and-pre-trained-weights)**：学习如何加载和使用预训练的 ESM 模型
+- **[安装和设置](3-installation-and-setup)**：确保你的环境配置正确
+- **[快速开始](2-quick-start)**：通过完整示例获得实践经验
+
+这里涵盖的数据处理基础支持所有高级 ESM 功能，从单序列分析到复杂的蛋白质设计任务。
+
+---
+
+- [入门指南/模型加载与预训练权重](https://zread.ai/facebookresearch/esm/5-model-loading-and-pre-trained-weights)
+
+---
+slug:5-model-loading-and-pre-trained-weights
+blog_type:normal
+---
+
+
+
+ESM 提供了一个全面的系统，用于加载各种架构和规模的预训练蛋白质语言模型。本指南涵盖了完整的模型加载基础设施、可用的预训练模型，以及处理不同模型变体的最佳实践。
+
+## 模型加载架构
+
+ESM 加载系统采用分层设计，支持基于远程 hub 的加载和本地文件加载。主要入口是 `load_model_and_alphabet()` 函数，该函数根据输入格式自动确定加载策略。
+
+```mermaid
+flowchart TD
+    A[load_model_and_alphabet] --> B{Input Type?}
+    B -->|.pt file| C[Local Loading]
+    B -->|Model name| D[Hub Loading]
+    
+    C --> E[load_model_and_alphabet_local]
+    D --> F[load_model_and_alphabet_hub]
+    
+    E --> G[_download_model_and_regression_data]
+    F --> G
+    
+    G --> H[load_model_and_alphabet_core]
+    H --> I{Model Version?}
+    I -->|ESM-2| J[_load_model_and_alphabet_core_v2]
+    I -->|Others| K[_load_model_and_alphabet_core_v1]
+    
+    J --> L[Return Model & Alphabet]
+    K --> L
+```
+
+加载系统处理模型权重和用于接触预测任务的可选回归权重。模型从 Facebook 的公共服务器下载，并使用 PyTorch 的 hub 基础设施在本地缓存 [来源](esm/pretrained.py#L52-L59)。
+
+## 可用的预训练模型
+
+ESM 提供了一系列全面的预训练模型，涵盖不同的架构和规模：
+
+### ESM-2 模型（最新一代）
+
+| 模型 | 层数 | 参数量 | 训练数据 | 使用场景 |
+|-------|--------|------------|---------------|----------|
+| `esm2_t6_8M_UR50D` | 6 | 8M | UniRef50 | 轻量级实验 |
+| `esm2_t12_35M_UR50D` | 12 | 35M | UniRef50 | 平衡性能 |
+| `esm2_t30_150M_UR50D` | 30 | 150M | UniRef50 | 生产任务 |
+| `esm2_t33_650M_UR50D` | 33 | 650M | UniRef50 | 高性能 |
+| `esm2_t36_3B_UR50D` | 36 | 3B | UniRef50 | 研究级 |
+| `esm2_t48_15B_UR50D` | 48 | 15B | UniRef50 | 最先进水平 |
+
+### ESM-1 模型（旧版）
+
+| 模型 | 层数 | 参数量 | 训练数据 |
+|-------|--------|------------|---------------|
+| `esm1_t6_43M_UR50S` | 6 | 43M | UniRef50 Sparse |
+| `esm1_t12_85M_UR50S` | 12 | 85M | UniRef50 Sparse |
+| `esm1b_t33_650M_UR50S` | 33 | 650M | UniRef50 Sparse |
+
+### 专用模型
+
+**ESM-1v（变异预测集成）：**
+- 5 个模型集成（`esm1v_t33_650M_UR90S_1` 到 `_5`）
+- 在 UniRef90 上训练，用于零样本变异预测
+
+**MSA Transformer：**
+- `esm_msa1_t12_100M_UR50S` 和 `esm_msa1b_t12_100M_UR50S`
+- 专为多序列比对任务设计
+
+**ESM-Fold 模型：**
+- 从 `esmfold_v0` 到 `esmfold_v1` 的结构预测变体
+- 用于消融研究的基线模型
+
+**逆向折叠：**
+- `esm_if1_gvp4_t16_142M_UR50` 用于蛋白质设计任务
+
+## 加载方法
+
+### 基于 Hub 的加载（推荐）
+
+最简单的加载方式是通过 hub 系统按名称加载：
+
+```python
+import esm
+
+# 加载 ESM-2 模型
+model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+
+# 加载 ESM-1v 集成模型
+model, alphabet = esm.pretrained.esm1v_t33_650M_UR90S_1()
+
+# 加载 ESM-Fold
+model, alphabet = esm.pretrained.esmfold_v1()
+```
+
+所有模型都从 `https://dl.fbaipublicfiles.com/fair-esm/models/` 自动下载并缓存在你的 PyTorch hub 目录中 [来源](esm/pretrained.py#L53)。
+
+### 本地文件加载
+
+对于离线使用或自定义模型，从本地文件加载：
+
+```python
+import esm
+
+# 从本地 .pt 文件加载
+model, alphabet = esm.pretrained.load_model_and_alphabet("path/to/model.pt")
+```
+
+本地加载时会自动搜索并置的回归权重（例如 `model-contact-regression.pt`）（如果可用）[来源](esm/pretrained.py#L67-L77)。
+
+### PyTorch Hub 集成
+
+ESM 模型也可以通过 PyTorch 的 hub 系统访问：
+
+```python
+import torch
+
+# 通过 torch.hub 加载
+model, alphabet = torch.hub.load('facebookresearch/esm:main', 'esm2_t33_650M_UR50D')
+```
+
+<CgxTip>
+15B 参数的 ESM-2 模型需要特殊的内存管理。按照 README 中的说明使用带有 CPU 卸载的 FSDP，以避免 OOM 错误 [来源](esm/pretrained.py#L390-L397)。
+</CgxTip>
+
+## 模型状态和回归权重
+
+ESM 模型包含用于接触预测任务的可选回归权重。加载系统根据模型类型自动处理这些权重：
+
+- **带回归权重的模型**：ESM-1、ESM-2（完整训练）、MSA Transformer
+- **不带回归权重的模型**：ESM-1v、ESM-IF、部分训练的 ESM-2 模型
+
+系统会验证模型状态一致性，并在预期但缺少回归权重时提供警告 [来源](esm/pretrained.py#L186-L221)。
+
+## 版本兼容性
+
+ESM 使用版本特定的加载例程来处理架构差异：
+
+- **ESM-2 模型**：使用 `_load_model_and_alphabet_core_v2()` 和更新的架构
+- **旧版模型**：使用 `_load_model_and_alphabet_core_v1()` 以保持兼容性
+
+这确保了在支持新模型功能的同时保持向后兼容性 [来源](esm/pretrained.py#L190-L193)。
+
+## 内存和性能考虑
+
+对于大型模型（3B+ 参数），考虑以下优化策略：
+
+1. **CPU 卸载**：对 15B 模型使用带有 ZeRO CPU 卸载的 FSDP
+2. **梯度检查点**：减少训练期间的内存使用
+3. **混合精度**：在支持的地方使用 fp16/bf16
+4. **批量大小调整**：根据可用的 GPU 内存进行调整
+
+<CgxTip>
+模型下载进度默认禁用（`progress=False`），以避免在生产环境中日志杂乱 [来源](esm/pretrained.py#L33)。
+</CgxTip>
+
+## 后续步骤
+
+加载模型后，探索以下相关功能：
+
+- **[基础蛋白质序列处理](4-basic-protein-sequence-processing)**：学习处理蛋白质序列和字母表
+- **[ESM-2 架构和设计](9-esm-2-architecture-and-design)**：了解模型架构细节
+- **[零样本变异预测](16-zero-shot-variant-prediction)**：将模型应用于变异效应预测
+- **[使用 FSDP 进行 CPU 卸载](19-cpu-offloading-with-fsdp)**：优化大型模型的内存使用
+
+ESM 加载系统为访问不同规模和专业化的最先进蛋白质语言模型提供了坚实的基础，支持从轻量级实验到生产规模蛋白质分析的各种应用。
+
+---
+
+# 动态资讯
+
+- [动态资讯/最新更新](https://zread.ai/facebookresearch/esm/6-latest-updates)
+
+---
+slug:6-latest-updates
+blog_type:buzz
+---
+
+
+
+## 主要研究发布和代码更新
+
+ESM（Evolutionary Scale Modeling）代码库在2023年取得了显著进展，通过一系列重要发布推动了蛋白质语言建模和结构预测的发展。最引人注目的成果包括两篇开创性论文的代码发布，以及ESMFold系统的重大改进。
+
+### 蛋白质编程语言发布
+
+2023年4月，团队发布了"一种用于生成式蛋白质设计的高级编程语言"的代码[提交 e70899e](https://github.com/facebookresearch/esm/commit/e70899e2c324b283ef9f99848efa8ead093707bc)。该发布通过高级编程接口引入了蛋白质设计的新方法，使研究人员能够以编程方式而非手动方式指定蛋白质结构和约束。[教程笔记本](https://colab.research.google.com/github/facebookresearch/esm/blob/main/examples/protein-programming-language/tutorial.ipynb)展示了如何使用语法树创建对称蛋白质，其中叶节点用于序列片段，内部节点用于层次控制。
+
+### 超越天然蛋白质的语言模型
+
+与此同时，代码库添加了"语言模型能够泛化超越天然蛋白质"的代码[提交 d6a2a8b](https://github.com/facebookresearch/esm/commit/d6a2a8be069c2c2b8af4c0a4c60aa5b7a2f60ce2)。这项发表在bioRxiv上的研究获得159次引用，证明仅训练于蛋白质序列的语言模型能够设计超越天然蛋白质的新型蛋白质结构[Semantic Scholar](https://www.semanticscholar.org/paper/Language-models-generalize-beyond-natural-proteins-Verkuil-Kabeli/658a8195ca7dc839bf254d4b2eb67c50384c5c6e)。研究显示这些模型学会了蛋白质结构的深层"语法"，从而具备了从头设计的能力。
+
+### ESMFold仅IPA模型
+
+2023年3月发布了ESMFold仅IPA模型[提交 ce4c326](https://github.com/facebookresearch/esm/commit/ce4c326a579941953727c0ec67c2385d67eb480d)，为研究人员提供了更高效的结构预测选择。这些模型专注于不变点注意（IPA）机制，这对蛋白质的三维结构推理至关重要。该发布标志着蛋白质结构预测在可及性和计算效率方面迈出了重要一步。
+
+## ESM Atlas扩展和基础设施更新
+
+ESM宏基因组Atlas在2023年初获得重大更新，显著扩展了可用的蛋白质结构预测，并改进了访问这些预测的基础设施。
+
+### v2023_02 Atlas发布
+
+2023年3月的v2023_02更新[提交 0f2babc](https://github.com/facebookresearch/esm/commit/0f2babcf45b389167fcc65055c96a3d32d54303e)使atlas规模达到7.72亿个蛋白质，如Science论文引用更新所示[提交 a944dc5](https://github.com/facebookresearch/esm/commit/a944dc53a9774e5ebfab4be1a395c2c516325e37)。此版本包括批量嵌入和更新的元数据，使其成为最大的预测蛋白质结构集合之一。
+
+### 基础设施改进
+
+实施了多项基础设施改进以提升可用性：
+
+- **控制台脚本**：添加了控制台脚本支持[提交 319f26d](https://github.com/facebookresearch/esm/commit/319f26d54e1e17258099df79681214d26782cfd5)，以便更便捷地通过命令行访问ESMFold功能
+- **模块结构**：修复了模型模块中缺失的`__init__.py`文件[提交 9fb173d](https://github.com/facebookresearch/esm/commit/9fb173d113b99eac455d8f2f6b4a208af2d15e3a)，以改进Python包结构
+- **依赖管理**：为torch_scatter依赖添加了保护机制[提交 636becf](https://github.com/facebookresearch/esm/commit/636becfef1e68dd52700eda936d476cd516d8fb1)，以防止安装问题
+
+## 技术修复和文档改进
+
+开发团队在整个2023年持续关注代码质量和用户体验：
+
+### 错误修复和稳定性
+
+- 修复了util.py中未定义'seq'的关键NameError[提交 d7b3331](https://github.com/facebookresearch/esm/commit/d7b3331f41442ed4ffde70cb95bdd48cabcec2e9)
+- 改进了编程语言报告以减少用户困惑[提交 2b36991](https://github.com/facebookresearch/esm/commit/2b369911bb5b4b0dda914521b9475cad1656b2ac)
+- 修复了拼写错误并改进了元数据处理[提交 2b4415d](https://github.com/facebookresearch/esm/commit/2b4415db32c00c7b35fd339b65c5473dabdfa341)
+
+### 文档和许可
+
+- 规范化了整个代码库的所有许可证头[提交 c9c7d4f](https://github.com/facebookresearch/esm/commit/c9c7d4f0fec964ce10c3e11dccec6c16edaa5144)
+- 更新了README文件，添加了笔记本和Colab链接以提高可访问性
+- 修复了失效链接，并从esmatlas.com/about重复了Atlas许可信息[提交 427bcbd](https://github.com/facebookresearch/esm/commit/427bcbdf65fa2c03909505ce332a7dfbe707b86c)
+
+## 当前状态和社区影响
+
+截至2024年8月，该代码库已被[所有者归档](https://github.com/facebookresearch/esm)，现为只读状态。这标志着ESM项目的转折点，该项目自成立以来对蛋白质语言建模领域产生了重大影响。
+
+项目的影响体现在：
+
+- **引用影响**："语言模型能够泛化超越天然蛋白质"论文累计获得159次引用，显示了显著的学术影响力
+- **社区采用**：蛋白质编程语言教程和示例已被探索计算蛋白质设计的研究人员广泛使用
+- **技术创新**：ESMFold的单序列结构预测方法影响了该领域的后续发展，包括关于注意力机制在蛋白质折叠中作用的讨论[Blopig Blog](https://www.blopig.com/blog/2025/09/is-attention-is-all-you-need-for-protein-folding)
+
+代码库的最终状态代表了蛋白质语言建模、结构预测和设计的综合工具包，为计算生物学和蛋白质工程领域的未来研究奠定了基础。
+
+---
+
+- [动态资讯/ESM宏基因组图谱发布](https://zread.ai/facebookresearch/esm/7-esm-metagenomic-atlas-release)
+
+---
+slug:7-esm-metagenomic-atlas-release
+blog_type:buzz
+---
+
+
+
+ESM宏基因组图谱是迄今为止最具雄心的计算生物学项目之一，发布了超过6亿个源自宏基因组数据的预测蛋白质结构。这项由Meta AI（前身为Facebook Research）发起的计划利用ESM-2语言模型以前所未有的规模和速度预测蛋白质结构，为理解蛋白质宇宙中的"暗物质"开辟了新前沿。
+
+## 技术架构与创新
+
+该图谱的基础是ESMFold，一个与AlphaFold等方法存在本质差异的蛋白质结构预测系统。AlphaFold需要多重序列比对（MSAs）和模板结构，而ESMFold仅使用单个蛋白质序列作为输入即可进行端到端操作。这得益于在数百万蛋白质序列上通过掩码语言建模目标训练的150亿参数语言模型。
+
+关键突破在于模型在训练过程中学习进化模式的方式。正如[Meta AI博客文章](https://ai.meta.com/blog/protein-folding-esmfold-metagenomics)所述，尽管仅在序列上训练，"关于蛋白质结构的信息在模型的内部状态中涌现出来"。这消除了计算密集型MSA搜索步骤，使预测速度比现有最先进方法快60倍。
+
+该架构包含三个主要组件：
+1. **ESM-2语言模型**：处理蛋白质序列并学习表示
+2. **折叠主干**：一系列更新序列和成对表示的折叠块
+3. **结构模块**：输出3D坐标和置信度分数的等变Transformer
+
+## 规模与范围
+
+初始版本包含6.17亿个宏基因组蛋白质结构，如[提交历史](https://github.com/facebookresearch/esm/commit/a944dc53a9774e5ebfab4be1a395c2c516325e37)所示，后续更新将其扩展至7.72亿个蛋白质。其中，约2.25亿个结构被归类为高置信度预测（pTM > 0.7且pLDDT > 0.7）。
+
+该数据集特别有价值之处在于其对宏基因组蛋白质的关注——这些序列源自土壤、海水和人类微生物组等环境样本。这些蛋白质数量远超来自充分研究生物体的蛋白质，代表了生物学多样性中一个基本未开发的领域。正如[C&EN的报道](https://cen.acs.org/physical-chemistry/protein-folding/Meta-AI-releases-models-over/100/web/2022/11)所强调，这提供了"对宏基因组结构空间的首次全面视角"。
+
+## 性能特征
+
+ESMFold的速度优势使得以前难以想象的规模预测成为可能。整个6亿多蛋白质图谱仅用时两周，使用约2000个GPU生成。对于单个蛋白质，ESMFold可在几秒内预测结构，而其他方法则需要几分钟或几小时。
+
+然而，存在准确性权衡。正如[Nature Methods](https://www.nature.com/articles/s41592-023-01790-6)指出，"ESMFold的准确度尚未达到AlphaFold的水平"，但考虑到速度优势，其对许多应用仍保持足够质量。该模型在许多测试用例上获得高于0.7的TM分数，表明正确的骨架拓扑。
+
+## 访问与API集成
+
+该图谱可通过多种界面访问：
+
+1. **网页界面**：访问[esmatlas.com](https://esmatlas.com/explore)，允许用户搜索结构、折叠序列和可视化预测
+2. **API访问**：对结构预测和嵌入的程序化访问
+3. **批量下载**：高置信度结构以压缩归档文件形式提供
+
+API提供了多个端点，如[Wolfram服务文档](https://reference.wolfram.com/language/ref/service/ESMAtlas.html)所述：
+- 从序列进行结构预测
+- 使用MGnify ID检索预计算结构
+- 访问置信度指标和嵌入
+
+## 研究影响与应用
+
+该数据集的规模使得新型研究成为可能，这在小型结构集合中是不可想象的。科学家现在可以：
+- 识别新颖蛋白质家族和功能
+- 研究远缘进化关系
+- 发现在医学、环境修复和生物技术中具有潜在应用的酶
+- 分析整个生态系统的结构多样性
+
+正如[Pernilla Wittung-Stafshede](https://cen.acs.org/physical-chemistry/protein-folding/Meta-AI-releases-models-over/100/web/2022/11)指出，该数据库"真正广泛地展现了地球上[蛋白质]宇宙的景象"，但她提醒说"结构预测算法仅仅是开始"，功能表征仍是下一个挑战。
+
+## 技术考虑与限制
+
+用户应注意几个重要考虑因素：
+
+1. **置信度指标**：并非所有7.72亿个预测都同等可靠。应查阅pLDDT和pTM分数以评估预测质量
+2. **序列同一性**：许多结构与已知蛋白质具有低序列同一性，使得功能注释具有挑战性
+3. **计算资源**：虽然比替代方案更快，但在本地运行ESMFold仍需要大量GPU内存来处理大型蛋白质
+4. **API限制**：如[GitHub讨论](https://github.com/facebookresearch/esm/discussions/549)所述，嵌入API存在限制，可能不支持所有用例
+
+## 未来方向
+
+ESM宏基因组图谱代表了全面绘制蛋白质结构空间的重要一步。未来开发可能聚焦于：
+- 提高预测准确性，特别是孤儿蛋白质
+- 更好的功能注释方法
+- 与实验验证管道集成
+- 扩展至包括蛋白质复合物和相互作用
+
+该版本展示了最初为文本开发的大型语言模型如何适应解决生物学中的基本问题，可能加速医学、生物技术和环境科学领域的发现。正如[科学媒体中心评论](https://sciencemediacentre.es/en/reaction-meta-publishes-esmfold-model-predicts-structure-hundreds-millions-proteins)所述，这种方法"将已知宇宙扩展到进化过程探索的范围之外"，进入蛋白质设计的新空间。
+
+该图谱持续更新，最近的提交显示对嵌入和元数据处理的改进，表明这是一个积极开发的资源，可能会在规模和能力上持续增长。
+
+---
+
+- [动态资讯/蛋白质设计研究论文](https://zread.ai/facebookresearch/esm/8-protein-design-research-papers)
+
+---
+slug:8-protein-design-research-papers
+blog_type:buzz
+---
+
+
+
+ESM（Evolutionary Scale Modeling）项目发表了多篇突破性研究论文，这些论文从根本上塑造了计算蛋白质设计领域。这些论文展示了大规模蛋白质语言模型如何超越传统的序列分析，实现生成式蛋白质设计、结构预测和功能优化。
+
+## 核心研究论文
+
+### 语言模型超越自然蛋白质的泛化能力
+
+ESM团队最具影响力的论文之一是《Language Models Generalize Beyond Natural Proteins》，由Brian Hie及其同事撰写，证明了仅基于序列训练的蛋白质语言模型可以生成具有有效结构的新型多样化蛋白质。这一显著发现是：**仅基于自然蛋白质序列训练的模型，可以在没有显式结构监督的情况下设计结构**。
+
+该论文表明，随着语言模型规模的扩大，它们逐渐形成对蛋白质结构和生物物理学的隐式理解，从而能够生成可折叠成稳定结构的序列。这项研究作为《Language Models Generalize Beyond Natural Proteins》代码发布的一部分，已被后续蛋白质设计研究广泛引用。
+
+### 生成式蛋白质设计的高级编程语言
+
+Brian Hie和Salvatore Candido领导的《A high-level programming language for generative protein design》论文，可以说是该领域最具雄心的贡献。这项研究引入了**蛋白质设计的模块化编程范式**，允许设计者使用高级构建模块组合所需的属性。
+
+这项研究于[2023年4月以代码形式发布](https://github.com/facebookresearch/esm/commit/e70899e2c324b283ef9f99848efa8ead093707bc)，结合了：
+- 基于模块化构建模块的高级编程语言
+- 实现全原子结构设计的基于能量的生成模型
+- 编程特定结构和功能属性的能力
+
+这种方法代表了对传统蛋白质工程方法的重大突破，为从头蛋白质设计提供了更加系统化和可控的框架。
+
+### 基于进化尺度的原子级蛋白质结构预测
+
+Zeming Lin等人在《Science》上发表的《Evolutionary-scale prediction of atomic-level protein structure with a language model》证明了**使用大型语言模型直接从初级序列推断结构**，可以在高分辨率结构预测中实现数量级的速度提升。
+
+主要发现包括：
+- 扩展到150亿参数的语言模型发展出原子分辨率的结构理解能力
+- ESMFold在保持与AlphaFold2相当准确性的同时，速度提升高达60倍
+- 该方法实现了宏基因组蛋白质的大规模结构表征
+- 构建了包含超过6.17亿个预测结构的ESM宏基因组图谱
+
+## 技术贡献与影响
+
+### 逆向折叠与序列设计
+
+ESM团队在逆向折叠模型方面也做出了重要贡献，特别是ESM-IF1。正如[issue #694](https://github.com/facebookresearch/esm/issues/694)等社区讨论所指出的，研究人员正在积极寻求针对特定数据集微调这些模型。逆向折叠方法预测可折叠成目标结构的序列，这对以下方面至关重要：
+- 酶工程与优化
+- 治疗性蛋白质设计
+- 生物传感器开发
+- 工业酶应用
+
+社区认识到，虽然ESM-IF1提供了强大的功能，但仍需要持续努力，使具有特定应用需求的研究人员能够更容易地进行微调。
+
+### 零样本变异预测
+
+另一项重要贡献是零样本变异预测能力的开发。ESM模型可以在无需任务特定训练的情况下预测突变效应，这已在各种基准研究中得到证明。然而，正如[issue #532中的用户反馈](https://github.com/facebookresearch/esm/issues/532)所示，精确复现论文结果可能具有挑战性，这凸显了标准化评估协议的重要性。
+
+## 社区反响与持续发展
+
+ESM研究论文获得了科学界的好评，在学术界和工业界得到了广泛引用和应用。模型和代码的开源发布使先进的蛋白质设计能力得以普及。
+
+然而，社区也指出了需要改进的领域：
+- **可复现性挑战**：用户报告了难以精确复现基准结果的问题
+- **内存和计算需求**：大型模型需要大量资源，尽管[CPU卸载等努力](https://github.com/facebookresearch/esm/issues/699)正在解决这个问题
+- **文档空白**：用户经常请求更详细的专业应用示例
+
+开发团队持续积极参与解决这些问题，这从持续的提交和对社区反馈的响应中可见一斑。
+
+## 未来方向
+
+ESM研究的发展轨迹表明了几个有前景的未来方向：
+
+1. **增强可控性**：基于编程语言方法，实现对设计属性的更精确控制
+2. **多模态集成**：在统一模型中结合序列、结构和功能数据
+3. **高效推理**：针对资源受限环境持续优化
+4. **领域特定微调**：提供更易用的框架，将模型适应专业应用
+
+ESM项目对开放研究和社区参与的承诺，使其能够持续推动计算蛋白质设计的创新。随着领域的发展，这些基础论文很可能成为理解大规模语言模型如何改变我们工程生物系统能力的重要参考点。
+
+对于希望在此工作基础上进行构建的开发者和研究人员，ESM仓库不仅提供了模型和代码，还提供了一个框架，将蛋白质设计视为可以使用现代机器学习技术系统化处理的计算问题。
+
+---
+
+# 深度解析
+
+- [深度解析/ESM-2架构与设计](https://zread.ai/facebookresearch/esm/9-esm-2-architecture-and-design)
+
+---
+slug:9-esm-2-architecture-and-design
+blog_type:normal
+---
+
+
+
+ESM-2 在蛋白质语言建模领域取得了显著进步，它实现了一个专为理解蛋白质序列而优化的精密 transformer 架构。本文档将探讨 ESM-2 的架构设计、关键组件和创新点，这些使其成为蛋白质分析和表示学习的强大工具。
+
+## 核心架构概述
+
+ESM-2 基于 transformer 架构构建，将蛋白质序列作为离散 token 处理，类似于语言模型处理文本的方式。该模型遵循标准的仅编码器 transformer 模式，并包含多项蛋白质特定优化，增强了其从氨基酸序列中捕获生物模式和结构信息的能力。
+
+主模型类 `ESM2` 继承自 `nn.Module`，实现了一个完整的 transformer 编码器，包含专门用于蛋白质序列处理的组件 [esm/model/esm2.py#L14-L23]。该架构设计用于处理蛋白质数据的独特特征，包括可变序列长度、生物操作的特殊 token 以及接触预测能力的需求。
+
+### 模型配置和参数
+
+ESM-2 提供了多个不同规模的模型变体，参数量从 800 万到 150 亿不等。每个变体遵循相同的架构模式，但具有不同的维度：
+
+- **8M**: 6 层，320 embed_dim，8 个注意力头
+- **35M**: 12 层，480 embed_dim，8 个注意力头  
+- **150M**: 30 层，640 embed_dim，16 个注意力头
+- **650M**: 33 层，1280 embed_dim，20 个注意力头
+- **3B**: 36 层，2560 embed_dim，40 个注意力头
+- **15B**: 48 层，5120 embed_dim，64 个注意力头
+
+这些配置在预训练模块中定义，每个模型大小都有特定的加载函数 [esm/pretrained.py#L350-L551]。
+
+## 关键架构组件
+
+### 1. Token 嵌入和位置编码
+
+模型首先使用 token 嵌入将氨基酸序列转换为密集向量表示。ESM-2 使用一个嵌入层，将每个氨基酸 token 映射到高维空间 [esm/model/esm2.py#L47-L52]：
+
+```python
+self.embed_tokens = nn.Embedding(
+    self.alphabet_size,
+    self.embed_dim,
+    padding_idx=self.padding_idx,
+)
+```
+
+ESM-2 的一个关键创新是使用**旋转位置嵌入**而非传统的绝对位置嵌入。这种方法能更好地处理可变长度序列，并更有效地捕获相对位置关系 [esm/rotary_embedding.py#L15-L70]。
+
+### 2. Transformer 层
+
+ESM-2 的核心由多个 transformer 层组成，每层实现了标准的 transformer 块，并包含蛋白质特定优化。每个 `TransformerLayer` 包含 [esm/modules.py#L84-L144]：
+
+- **多头自注意力**机制（带旋转嵌入）
+- **前馈网络**（使用 GELU 激活）
+- **层归一化**（使用 ESM1bLayerNorm）
+- **残差连接**（用于梯度流动）
+
+注意力机制特别精密，实现了旋转位置嵌入，使模型能够理解氨基酸之间的相对位置 [esm/multihead_attention.py#L68-L509]。
+
+### 3. 专用注意力机制
+
+ESM-2 集成了旋转位置嵌入，这代表了相对于传统注意力机制的显著进步。`RotaryEmbedding` 类通过基于位置对查询和键向量应用旋转矩阵来实现这一点 [esm/rotary_embedding.py#L35-L70]：
+
+```python
+def forward(self, q: torch.Tensor, k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    self._cos_cached, self._sin_cached = self._update_cos_sin_tables(k, seq_dimension=-2)
+    return (
+        apply_rotary_pos_emb(q, self._cos_cached, self._sin_cached),
+        apply_rotary_pos_emb(k, self._cos_cached, self._sin_cached),
+    )
+```
+
+这种方法使模型能够更有效地捕获蛋白质序列中的长程依赖关系，这对理解蛋白质结构和功能至关重要。
+
+### 4. 输出头和专用任务
+
+ESM-2 包含多个用于不同下游任务的输出头：
+
+- **语言建模头**：用于掩码语言建模和序列预测
+- **接触预测头**：用于预测氨基酸接触，与蛋白质结构相关 [esm/modules.py#L317-L359]
+
+接触预测头特别重要，因为它使模型能够仅从序列数据推断结构信息，展示了蛋白质中序列与结构之间的深层联系。
+
+## 前向传播架构
+
+ESM-2 的前向传播遵循精心设计的流程 [esm/model/esm2.py#L77-L146]：
+
+1. **Token 处理**：输入 token 被嵌入并缩放
+2. **掩码处理**：训练期间对掩码 token 的特殊处理
+3. **层处理**：通过 transformer 层顺序处理
+4. **归一化**：应用最终层归一化
+5. **输出生成**：生成多个输出，包括 logits、表示，以及可选的注意力权重
+
+该模型还支持从中间层提取表示，这对于可能受益于不同抽象级别的各种下游任务很有价值。
+
+## 训练和优化特性
+
+### Token 丢弃策略
+
+ESM-2 实现了精密的 token 丢弃策略，有助于防止过拟合并提高泛化能力 [esm/model/esm2.py#L88-L100]。该方法根据每个批次中观察到的掩码比率动态调整掩码比例，确保一致的训练动态。
+
+### 层归一化策略
+
+该模型使用 ESM1bLayerNorm，这是专为蛋白质序列优化的层归一化变体 [esm/modules.py#L44-L83]。这种归一化策略有助于稳定训练并提高收敛性。
+
+## 模型变体和扩展
+
+ESM-2 展现了出色的扩展特性，性能随模型尺寸提升而稳定改善。该架构设计为能从小型 8M 参数模型高效扩展到大型 15B 参数模型，同时保持相同的基本设计原则。
+
+扩展策略包括：
+- **嵌入维度的线性扩展**（与模型尺寸成正比）
+- **注意力头的二次扩展**（用于更大的模型）
+- **增加深度**（更多层）（用于更大的模型）
+- **一致的架构模式**（适用于所有尺寸）
+
+这种扩展方法确保从小型模型学到的见解和行为能够迁移到大型模型，使架构具有鲁棒性和可预测性。
+
+## 与下游应用的集成
+
+ESM-2 的架构专为支持广泛的蛋白质相关任务而设计：
+
+- **序列分析**：理解蛋白质功能和进化
+- **结构预测**：用于 3D 结构推断的接触预测
+- **变异效应预测**：评估突变的影响
+- **蛋白质设计**：生成新型蛋白质序列
+
+该架构的模块化设计使其能够轻松适应这些不同的任务，同时保持一致的核心表示学习方法。
+
+## 后续步骤
+
+要了解 ESM-2 架构如何实现特定应用，请探索以下相关主题：
+
+- [ESMFold 结构预测系统](10-esmfold-structure-prediction-system) - 了解 ESM-2 如何驱动蛋白质结构预测
+- [语言模型表示](11-language-model-representations) - 深入探讨学习到的表示
+- [蛋白质的 Transformer 架构](12-transformer-architecture-for-proteins) - transformer 应用的更广泛背景
+- [零样本变异预测](16-zero-shot-variant-prediction) - 架构的实际应用
+
+ESM-2 架构代表了既定 transformer 原理与蛋白质特定创新的精心平衡，使其成为蛋白质理解和工程应用的强大基础。
+
+---
+
+- [深度解析/ESMFold结构预测系统](https://zread.ai/facebookresearch/esm/10-esmfold-structure-prediction-system)
+
+---
+slug:10-esmfold-structure-prediction-system
+blog_type:normal
+---
+
+
+
+ESMFold 代表了蛋白质结构预测领域的突破性进展，它利用蛋白质语言模型的力量，直接从单个蛋白质序列实现快速、准确的原子级结构预测。与传统需要多重序列比对（MSA）的方法不同，ESMFold 仅使用单一蛋白质序列作为输入，在保持竞争性准确性的同时，速度显著提升。
+
+## 架构概述
+
+ESMFold 将预训练的 ESM-2 蛋白质语言模型与专门的折叠主干网络相结合，将序列表示转换为 3D 坐标。系统通过一个复杂的流水线运行，集成了语言模型嵌入与几何推理模块。
+
+```mermaid
+graph TD
+    A[输入序列] --> B[序列编码]
+    B --> C[ESM-2 语言模型]
+    C --> D[序列表示]
+    D --> E[折叠主干网络]
+    E --> F[三角注意力块]
+    F --> G[结构模块]
+    G --> H[3D 坐标]
+    H --> I[PDB 输出]
+    
+    J[循环回路] --> E
+    G --> J
+```
+
+核心架构由三个主要组件协同工作：
+
+1. **ESM-2 语言模型**：从原始氨基酸序列中提取有意义的表示
+2. **折叠主干网络**：通过三角注意力机制处理表示
+3. **结构模块**：将处理后的特征转换为原子坐标
+
+## 核心组件
+
+### ESMFold 主模型
+
+主 `ESMFold` 类协调整个预测流水线 [esmfold.py](esm/esmfold/v1/esmfold.py#L50-L365)。它集成了语言模型与折叠主干网络，并处理迭代优化预测的循环机制。
+
+关键特性包括：
+- **多种 ESM-2 变体**：支持从 8M 到 15B 参数的模型 [esmfold.py](esm/esmfold/v1/esmfold.py#L37-L50)
+- **可配置循环**：默认 4 次迭代的优化 [esmfold.py](esm/esmfold/v1/esmfold.py#L158-L159)
+- **分块推理**：针对长序列的内存高效处理 [esmfold.py](esm/esmfold/v1/esmfold.py#L354-L359)
+
+### 折叠主干网络架构
+
+`FoldingTrunk` 构成核心几何推理引擎 [trunk.py](esm/esmfold/v1/trunk.py#L110-L244)。它通过以下方式处理序列和成对表示：
+
+- **48 个三角自注意力块**：捕获残基对之间的长程依赖关系 [trunk.py](esm/esmfold/v1/trunk.py#L126-L134)
+- **位置嵌入**：编码相对残基位置 [trunk.py](esm/esmfold/v1/trunk.py#L75-L93)
+- **循环机制**：使用先前的输出迭代优化预测 [trunk.py](esm/esmfold/v1/trunk.py#L137-L142)
+
+主干网络处理两种并行表示：
+- **序列特征**（1024 维）：每个残基的嵌入
+- **成对特征**（128 维）：残基间关系嵌入
+
+### 三角自注意力
+
+`TriangularSelfAttentionBlock` 实现核心注意力机制 [tri_self_attn_block.py](esm/esmfold/v1/tri_self_attn_block.py#L25-L161)。这种专门的注意力模式：
+- 同时处理序列和成对表示
+- 使用三角乘法更新确保几何一致性
+- 支持分块计算以提高内存效率
+
+## 模型变体和配置
+
+ESMFold 提供多种针对不同用例优化的模型变体：
+
+| 模型变体 | ESM-2 参数 | 折叠块数 | 用例 |
+|---------------|------------------|----------------|----------|
+| esmfold_v0 | 3B | 48 | 研究基准（论文版本） |
+| esmfold_v1 | 3B | 48 | 包含最新改进的生产模型 |
+| structure_module_only_* | 8M-15B | 0 | 语言模型能力分析 |
+
+<CgxTip>
+"structure_module_only" 变体设计用于消融研究，以了解仅语言模型（不含折叠主干网络）的贡献。这些模型仅使用结构模块将 ESM-2 表示直接映射到坐标。
+</CgxTip>
+
+## 推理流水线
+
+### 序列处理
+
+ESMFold 接受单序列和多聚体复合物：
+
+```python
+# 单序列预测
+model.infer("MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAVDHERGLVDRFYKVELAPTHKGGFGLRGDGFNICKDG")
+
+# 多聚体预测（链用':'分隔）
+model.infer("MKTAYIAKQRQISF:VKSHFSRQLEERL")
+```
+
+系统自动处理：
+- **序列编码**和分词 [misc.py](esm/esmfold/v1/misc.py#L18-L23)
+- **链分离**与可配置连接子 [misc.py](esm/esmfold/v1/misc.py#L61-L67)
+- **残基索引**以建立正确的几何关系
+
+### 内存优化
+
+ESMFold 提供多种内存优化策略：
+
+1. **分块注意力**：将内存从 O(L²) 降低到 O(L) [trunk.py](esm/esmfold/v1/trunk.py#L150-L155)
+2. **CPU 卸载**：利用 CPU 内存存储模型参数 [scripts/fold.py](scripts/fold.py#L25-L41)
+3. **批量处理**：组合序列以提高 GPU 利用率 [scripts/fold.py](scripts/fold.py#L43-L54)
+
+## 命令行界面
+
+`scripts/fold.py` 提供了用于批量处理的全面 CLI：
+
+```bash
+python scripts/fold.py \
+  -i input.fasta \
+  -o output_directory/ \
+  --num-recycles 4 \
+  --chunk-size 128 \
+  --max-tokens-per-batch 1024
+```
+
+关键选项：
+- `--chunk-size`：控制内存使用（推荐值：128、64 或 32）
+- `--cpu-offload`：为大型模型启用 CPU 内存卸载
+- `--max-tokens-per-batch`：平衡速度与内存使用
+
+## 输出和质量指标
+
+ESMFold 提供全面的输出，包括：
+
+- **3D 坐标**（PDB 格式）[misc.py](esm/esmfold/v1/misc.py#L93-L118)
+- **pLDDT 分数**：每个残基的置信度指标
+- **pTM 分数**：全局结构质量评估
+- **距离图**：预测的距离分布
+
+<CgxTip>
+pLDDT（预测局部距离差异测试）分数范围从 0 到 100，高于 70 的值表示置信预测。这些分数特别适用于识别预测结构中的可靠区域。
+</CgxTip>
+
+## 性能特征
+
+ESMFold 在保持准确性的同时实现了显著的速度优势：
+
+- 比 AlphaFold2 **快 60 倍**（单序列）
+- **无需 MSA** 消除了预处理时间
+- **GPU 优化**并可选 CPU 卸载
+- **可扩展**从 8M 到 15B 参数模型
+
+系统的高效性源于其端到端可微分架构，以及 ESM-2 在数百万蛋白质序列上预训练期间学到的强大表示。
+
+## 集成和使用
+
+ESMFold 与更广泛的 ESM 生态系统无缝集成。在理解核心架构后，你可能想要探索：
+
+- [ESM-2 架构和设计](9-esm-2-architecture-and-design) 以深入了解语言模型
+- [内存高效的分块推理](20-memory-efficient-chunked-inference) 以了解优化技术
+- [批量处理和嵌入](21-batch-processing-and-embeddings) 用于大规模应用
+
+模块化设计允许轻松集成到现有的蛋白质分析流水线中，使其适用于研究和生产环境。
+
+---
+
+- [深度解析/语言模型表示](https://zread.ai/facebookresearch/esm/11-language-model-representations)
+
+---
+slug:11-language-model-representations
+blog_type:normal
+---
+
+
+
+ESM（Evolutionary Scale Modeling）框架采用复杂的语言模型表示来捕捉蛋白质序列中的复杂模式和关系。这些表示构成了各种下游任务的基础，包括结构预测、变异效应预测和蛋白质设计。
+
+## 表示架构概述
+
+ESM模型基于transformer架构，通过多层自注意力机制和前馈网络处理蛋白质序列。核心表示管道遵循分层结构：
+
+```mermaid
+graph TD
+    A[输入蛋白质序列] --> B[分词与嵌入]
+    B --> C[位置编码]
+    C --> D[Transformer层]
+    D --> E[逐层表示]
+    E --> F[最终表示]
+    F --> G[下游任务]
+    
+    subgraph "Transformer层"
+        H[多头自注意力] --> I[残差连接]
+        I --> J[层归一化]
+        J --> K[前馈网络]
+        K --> L[残差连接]
+        L --> M[层归一化]
+    end
+```
+
+## 分词与词汇表
+
+表示过程从使用`Alphabet`类[esm/data.py#L91-L130]进行分词开始，该类定义了词汇表和编码方案：
+
+- **标准词元**：20种标准氨基酸残基
+- **特殊词元**：`<pad>`、`<eos>`、`<unk>`、`<cls>`、`<mask>`、`<sep>`
+- **词元映射**：每个词元映射到唯一索引用于嵌入查找
+
+词汇表通过组合前置词元、标准词元、空词元（用于对齐）和后置词元构建[esm/data.py#L108-L112]。
+
+## 嵌入层
+
+嵌入层将离散词元索引转换为连续向量表示：
+
+```python
+self.embed_tokens = nn.Embedding(
+    self.alphabet_size,
+    self.embed_dim,
+    padding_idx=self.padding_idx,
+)
+```
+
+嵌入维度因模型大小而异（例如，ESM-2 650M参数模型为1280）[esm/model/esm2.py#L43-L47]。嵌入按`embed_scale`（通常为1.0）缩放，并通过词元dropout进行正则化[esm/model/esm2.py#L84-L92]。
+
+## 位置编码
+
+ESM-2通过`RotaryEmbedding`类[esm/rotary_embedding.py#L23-L70]引入旋转位置编码，提供：
+
+- **相对位置感知**：旋转编码相对位置信息
+- **高效性**：无需额外参数进行位置编码
+- **兼容性**：与多头注意力机制无缝集成
+
+旋转编码应用于注意力机制中的查询和键张量[esm/multihead_attention.py#L354-L355]。
+
+## Transformer层表示
+
+每个transformer层通过两个主要组件处理表示：
+
+### 多头自注意力
+`MultiheadAttention`模块[esm/multihead_attention.py#L68-L508]实现：
+- **查询-键-值投影**：注意力计算的线性变换
+- **缩放点积注意力**：带头维度缩放的注意力机制
+- **多头处理**：不同表示子空间的并行注意力头
+- **旋转嵌入**：位置感知的注意力计算
+
+### 前馈网络
+`FeedForwardNetwork`模块[esm/modules.py#L395-L415]提供：
+- **两层MLP**：将嵌入维度扩展4倍后投影回原维度
+- **GELU激活**：ReLU的平滑近似以改善梯度流
+- **Dropout正则化**：防止训练期间过拟合
+
+## 逐层表示提取
+
+ESM模型支持通过`repr_layers`参数[esm/model/esm2.py#L77-L144]从任何层提取表示：
+
+```python
+def forward(self, tokens, repr_layers=[], need_head_weights=False, return_contacts=False):
+    # ... 处理过程 ...
+    repr_layers = set(repr_layers)
+    hidden_representations = {}
+    if 0 in repr_layers:
+        hidden_representations[0] = x  # 嵌入层
+    
+    for layer_idx, layer in enumerate(self.layers):
+        x, attn = layer(x, ...)
+        if (layer_idx + 1) in repr_layers:
+            hidden_representations[layer_idx + 1] = x.transpose(0, 1)
+```
+
+这使得可以精细控制为不同下游任务提取哪些表示。
+
+## 表示属性
+
+### 维度结构
+- **批次维度**：同时处理的序列数量
+- **序列维度**：可变长度（最大为模型上限）
+- **特征维度**：嵌入大小（大型ESM-2模型为1280）
+
+### 归一化
+ESM-2使用`ESM1bLayerNorm`提高稳定性[esm/model/esm2.py#L69]，在最终transformer层之后和语言建模头之前应用层归一化。
+
+### 注意力权重
+当`need_head_weights=True`时，模型返回每个头的注意力权重[esm/model/esm2.py#L102-L121]，支持：
+- **可解释性**：理解哪些序列位置相互影响
+- **接触预测**：使用注意力模式进行结构预测
+- **可视化**：分析模型注意力模式
+
+## 下游应用
+
+学习到的表示作为各种任务的输入特征：
+
+- **结构预测**：ESMFold使用表示生成3D结构
+- **变异效应预测**：突变影响的零样本预测
+- **蛋白质设计**：生成新蛋白质序列的生成建模
+- **功能预测**：蛋白质功能的分类和回归任务
+
+## 模型加载与使用
+
+预训练模型可通过`pretrained`模块加载[esm/pretrained.py#L24-L28]：
+
+```python
+model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+batch_converter = alphabet.get_batch_converter()
+```
+
+加载的模型通过前向传递提供对所有中间表示的访问，为不同研究和应用场景提供灵活的使用模式。
+
+## 后续步骤
+
+要深入了解架构，请探索：
+- [ESM-2架构与设计](9-esm-2-architecture-and-design) 获取详细的架构分析
+- [蛋白质的Transformer架构](12-transformer-architecture-for-proteins) 了解蛋白质特定适配
+- [零样本变异预测](16-zero-shot-variant-prediction) 查看表示应用
+
+---
+
+- [深度解析/蛋白质的Transformer架构](https://zread.ai/facebookresearch/esm/12-transformer-architecture-for-proteins)
+
+---
+slug:12-transformer-architecture-for-proteins
+blog_type:normal
+---
+
+
+
+ESM（Evolutionary Scale Modeling）框架实现了专为蛋白质序列分析和理解设计的复杂 transformer 架构。这些架构利用注意力机制的强大功能来捕获蛋白质序列中的复杂模式和关系，支持从结构预测到功能注释的各种应用。
+
+## 核心 Transformer 架构
+
+### ESM-2 模型架构
+
+ESM-2 模型代表了最先进的蛋白质语言模型，它基于深度 transformer 架构构建，并包含多项关键创新：
+
+```python
+class ESM2(nn.Module):
+    def __init__(
+        self,
+        num_layers: int = 33,
+        embed_dim: int = 1280,
+        attention_heads: int = 20,
+        alphabet: Union[esm.data.Alphabet, str] = "ESM-1b",
+        token_dropout: bool = True,
+    ):
+```
+
+该架构由多个 transformer 层组成，包含旋转位置嵌入、专门的层归一化和接触预测能力 [esm/model/esm2.py#L14-L23]。每层遵循标准的 transformer 模式，包含自注意力机制和前馈网络，但融合了蛋白质特定的优化。
+
+### Transformer 层实现
+
+核心 `TransformerLayer` 实现了基础构建块：
+
+```python
+class TransformerLayer(nn.Module):
+    def __init__(
+        self,
+        embed_dim,
+        ffn_embed_dim,
+        attention_heads,
+        add_bias_kv=True,
+        use_esm1b_layer_norm=False,
+        use_rotary_embeddings: bool = False,
+    ):
+```
+
+每层包含带有旋转嵌入的自注意力、专门的层归一化（ESM1bLayerNorm）以及使用 GELU 激活的两层前馈网络 [esm/modules.py#L84-L145]。残差连接和层归一化采用预归一化模式以提高训练稳定性。
+
+## 多头注意力机制
+
+### 旋转位置嵌入
+
+ESM 集成了旋转位置嵌入（RoPE），无需绝对位置嵌入即可提供位置信息：
+
+```python
+class RotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim: int, *_, **__):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+```
+
+旋转嵌入根据查询和键向量的位置应用旋转矩阵，使模型能够捕获相对位置关系 [esm/rotary_embedding.py#L37-L47]。这种方法对蛋白质序列特别有效，因为局部和远程相互作用都至关重要。
+
+### 多头注意力实现
+
+`MultiheadAttention` 类实现了带有多项蛋白质特定优化的缩放点积注意力：
+
+```python
+class MultiheadAttention(nn.Module):
+    def __init__(
+        self,
+        embed_dim,
+        num_heads,
+        kdim=None,
+        vdim=None,
+        dropout=0.0,
+        bias=True,
+        add_bias_kv: bool = False,
+        add_zero_attn: bool = False,
+        self_attention: bool = False,
+        encoder_decoder_attention: bool = False,
+        use_rotary_embeddings: bool = False,
+    ):
+```
+
+关键特性包括支持旋转嵌入、高效批处理以及蛋白质序列的专门掩码 [esm/multihead_attention.py#L74-L88]。注意力机制可以选择性返回头权重以支持可解释性和接触预测。
+
+## 专门的 Transformer 变体
+
+### MSA Transformer
+
+MSA（Multiple Sequence Alignment）Transformer 扩展了架构以处理进化信息：
+
+```python
+class MSATransformer(nn.Module):
+    def __init__(self, args, alphabet):
+        # Implementation for MSA processing
+```
+
+该变体同时处理多序列比对，捕获同源序列中的协同进化模式 [esm/model/msa_transformer.py#L21-L23]。架构使用轴向注意力来高效处理 MSA 数据的二维特性。
+
+### GVP-Transformer
+
+对于反向折叠应用，ESM 实现了将几何向量感知器与 transformer 架构相结合的 GVP-Transformer：
+
+```python
+class GVPTransformerModel(nn.Module):
+    """
+    GVP-Transformer inverse folding model.
+    
+    Architecture: Geometric GVP-GNN as initial layers, followed by
+    sequence-to-sequence Transformer encoder and decoder.
+    """
+```
+
+这种混合架构通过 GVP 层处理 3D 结构信息，然后输入到标准 transformer 层 [esm/inverse_folding/gvp_transformer.py#L11-L19]。
+
+## 层归一化策略
+
+ESM 实现了两种层归一化方法：
+
+### ESM1LayerNorm
+```python
+class ESM1LayerNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-12, affine=True):
+        """Construct a layernorm layer in the TF style (eps inside the sqrt)."""
+```
+
+TensorFlow 风格的层归一化，将 epsilon 置于平方根内以确保数值稳定性 [esm/modules.py#L44-L47]。
+
+### ESM1bLayerNorm
+```python
+try:
+    from apex.normalization import FusedLayerNorm as _FusedLayerNorm
+    class ESM1bLayerNorm(_FusedLayerNorm):
+```
+
+使用 Apex 的优化融合层归一化，提高 GPU 性能 [esm/modules.py#L60-L67]。
+
+## 接触预测集成
+
+transformer 架构包含专门用于接触预测的组件：
+
+```python
+self.contact_head = ContactPredictionHead(
+    self.num_layers * self.attention_heads,
+    self.prepend_bos,
+    self.append_eos,
+    eos_idx=self.eos_idx,
+)
+```
+
+接触头处理所有层的注意力权重以预测残基间接触，利用 transformer 捕获长程依赖关系的能力 [esm/model/esm2.py#L58-L64]。
+
+<CgxTip>旋转位置嵌入的使用消除了对绝对位置嵌入的需求，使模型对序列长度变化更加鲁棒，并能更好地捕获蛋白质中的相对结构关系。</CgxTip>
+
+<CgxTip>ESM 的 transformer 架构通过专门的层类型支持单序列和 MSA 处理，使同一核心框架能够高效处理不同的蛋白质分析任务。</CgxTip>
+
+## 架构比较
+
+| 特性 | ESM-2 | MSA Transformer | GVP-Transformer |
+|---------|-------|------------------|-----------------|
+| 输入类型 | 单序列 | 多序列比对 | 3D 结构 + 序列 |
+| 位置编码 | 旋转嵌入 | 轴向注意力 | 几何特征 |
+| 主要用途 | 通用蛋白质理解 | 进化分析 | 反向折叠 |
+| 注意力模式 | 标准自注意力 | 轴向注意力 | 标准 + GVP 处理 |
+
+这种 transformer 架构构成了 ESM 蛋白质分析能力的基础，从序列理解到结构预测和设计。模块化设计允许轻松适应特定的蛋白质相关任务，同时保持基于注意力的核心学习范式。
+
+要深入了解特定实现，请探索 [ESM-2 架构与设计](9-esm-2-architecture-and-design)或深入研究 [MSA Transformer 用于多序列比对](13-msa-transformer-for-multiple-sequence-alignment)。
+
+---
+
+## 模型变体与应用
+
+- [深度解析/模型变体与应用/用于多序列比对的MSA Transformer](https://zread.ai/facebookresearch/esm/13-msa-transformer-for-multiple-sequence-alignment)
+
+---
+slug:13-msa-transformer-for-multiple-sequence-alignment
+blog_type:normal
+---
+
+
+
+MSA Transformer 代表一种专门设计的架构，通过利用轴向注意力机制来处理多重序列比对（MSAs）。与处理一维序列的标准 Transformer 不同，MSA Transformer 在二维生物数据上运行，其中一个维度代表序列位置，另一个维度代表比对中的同源序列。
+
+## 架构概述
+
+MSA Transformer 扩展了标准 Transformer 架构，配备了专门化的注意力机制，可高效处理 MSAs 的二维结构。核心创新在于**轴向注意力**，它将完整的二维注意力分解为独立的行向和列向操作，将计算复杂度从 O(N²R²) 显著降低至 O(NR² + NR²)，其中 N 是序列长度，R 是序列数量。
+
+```mermaid
+graph TD
+    A[输入 MSA] --> B[Token Embedding]
+    B --> C[Positional Embedding]
+    C --> D[轴向 Transformer 层]
+    D --> E[行自注意力]
+    D --> F[列自注意力]
+    D --> G[前馈网络]
+    E --> H[层归一化 + 残差]
+    F --> H
+    G --> H
+    H --> I[接触预测头]
+    H --> J[语言模型头]
+    I --> K[接触图]
+    J --> L[序列预测]
+```
+
+## 核心组件
+
+### MSATransformer 类
+
+主模型类 [esm/model/msa_transformer.py](esm/model/msa_transformer.py#L21) 实现了完整的 MSA Transformer 架构，包含以下关键参数：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `num_layers` | 12 | Transformer 层数 |
+| `embed_dim` | 768 | 嵌入维度 |
+| `attention_heads` | 12 | 注意力头数 |
+| `ffn_embed_dim` | 3072 | 前馈网络维度 |
+| `max_tokens_per_msa` | 2¹⁴ | 批量推理的最大 token 数 |
+
+<CgxTip>当梯度禁用时，模型会自动批量处理注意力计算，允许在测试时处理比 GPU 内存容量更大的 MSAs。此行为可通过 `max_tokens_per_msa_` 方法控制。</CgxTip>
+
+### 轴向注意力机制
+
+轴向注意力系统由两个专门组件组成：
+
+**RowSelfAttention** [esm/axial_attention.py](esm/axial_attention.py#L11)：计算 MSA 中序列的自注意力，使模型能够捕获每个位置上同源序列之间的进化关系。
+
+**ColumnSelfAttention** [esm/axial_attention.py](esm/axial_attention.py#L133)：计算每个序列位置的自注意力，使模型能够学习位置依赖性和结构约束。
+
+这些组件被集成到 **AxialTransformerLayer** [esm/modules.py](esm/modules.py#L145) 中，该层协调注意力流：
+
+```python
+# 前向传播结构
+x, row_attn = self.row_self_attention(x, ...)
+x, column_attn = self.column_self_attention(x, ...)
+x = self.feed_forward_layer(x)
+```
+
+### 嵌入层
+
+模型采用多种嵌入策略：
+- **Token 嵌入**：标准氨基酸 token 表示
+- **位置嵌入**：[LearnedPositionalEmbedding](esm/modules.py#L224) 用于序列位置信息
+- **MSA 位置嵌入**：当启用 `embed_positions_msa` 时，用于 MSA 深度的可选嵌入
+
+## 关键特性
+
+### 接触预测
+
+MSA Transformer 包含专门的 **ContactPredictionHead** [esm/modules.py](esm/modules.py#L317)，可从注意力模式预测残基-残基接触。该头应用：
+
+1. **对称化**：使注意力矩阵对称
+2. **平均积校正（APC）**：减少背景噪声
+3. **逻辑回归**：最终接触概率预测
+
+### 内存高效推理
+
+模型为大型 MSAs 实现了复杂的批处理策略。`max_tokens_per_msa_` 方法 [esm/model/msa_transformer.py](esm/model/msa_transformer.py#L229) 允许在推理期间动态调整批大小：
+
+```python
+# 启用内存高效处理
+model.max_tokens_per_msa_(2**16)  # 增加批大小
+```
+
+## 可用模型
+
+ESM 提供两个预训练的 MSA Transformer 模型：
+
+| 模型 | 参数量 | 训练数据 | 状态 |
+|-------|------------|---------------|--------|
+| `esm_msa1_t12_100M_UR50S` | 100M | UniRef50 Sparse | 已弃用 |
+| `esm_msa1b_t12_100M_UR50S` | 100M | UniRef50 Sparse | 推荐使用 |
+
+<CgxTip>使用 `esm_msa1b_t12_100M_UR50S()`，因为它修复了原始模型中存在的位置嵌入错误。</CgxTip>
+
+## 使用示例
+
+### 基本模型加载
+
+```python
+import esm
+
+# 加载推荐的 MSA Transformer 模型
+model, alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+model.eval()
+
+# MSA 数据的批量转换器
+batch_converter = alphabet.get_batch_converter()
+```
+
+### 接触预测
+
+```python
+# 准备 MSA 数据（batch_size, num_sequences, seq_length）
+msa_data = [("protein1", msa_sequences)]
+
+# 转换为张量
+batch_labels, batch_strs, batch_tokens = batch_converter(msa_data)
+
+# 预测接触
+with torch.no_grad():
+    contacts = model.predict_contacts(batch_tokens)
+```
+
+### 特征提取
+
+```python
+# 从特定层提取表示
+with torch.no_grad():
+    results = model(
+        batch_tokens,
+        repr_layers=[6, 12],  # 从第 6 和 12 层提取
+        need_head_weights=True
+    )
+    
+    representations = results["representations"]
+    attentions = results["attentions"]
+```
+
+## 与 ESM 生态系统的集成
+
+MSA Transformer 与其他 ESM 组件无缝集成：
+
+- **字母系统**：所有 ESM 模型保持一致的 tokenization
+- **预训练权重**：通过 [esm/pretrained.py](esm/pretrained.py#L273) 集中加载模型
+- **接触预测**：与其他 ESM 模型共享基础设施
+- **批处理**：与 ESM 的数据加载工具兼容
+
+## 应用
+
+MSA Transformer 在需要进化信息的场景中表现出色：
+
+1. **蛋白质结构预测**：从 MSAs 生成接触图
+2. **变异效应预测**：利用进化约束
+3. **蛋白质设计**：理解序列-结构关系
+4. **功能注释**：从进化模式推断蛋白质功能
+
+有关接触预测工作流程，请参阅 [自注意力接触预测](18-contact-prediction-from-self-attention) 文档。要探索变异预测应用，请参考 [零样本变异预测](16-zero-shot-variant-prediction)。
+
+## 性能考虑
+
+MSA Transformer 的计算复杂度随序列长度和 MSA 深度缩放。为获得最佳性能：
+
+- 对大型 MSAs 使用内置批处理
+- 考虑序列长度限制（通常 < 1024 个残基）
+- 通过 `max_tokens_per_msa` 参数监控 GPU 内存使用情况
+- 利用模型同时处理多个序列的能力
+
+轴向注意力设计使 MSA Transformer 对于具有中等序列长度的深层 MSAs 特别高效，代表了相比完整二维注意力方法的重大进步。
+
+---
+
+- [深度解析/模型变体与应用/ESM-1v与ESM-IF1模型](https://zread.ai/facebookresearch/esm/14-esm-1v-and-esm-if1-models)
+
+---
+slug:14-esm-1v-and-esm-if1-models
+blog_type:normal
+---
+
+
+
+ESM-1v 和 ESM-IF1 模型是进化尺度建模（ESM）系列中的专业变体，专为不同的蛋白质分析任务而设计：ESM-1v 通过集成方法进行变异预测，ESM-IF1 则从蛋白质结构进行逆折叠。这些模型通过任务特定的修改和训练策略扩展了核心 ESM 架构。
+
+## ESM-1v：变异预测集成模型
+
+ESM-1v 是一个优化的蛋白质语言模型，专门用于零样本变异效应预测。与单模型方法不同，ESM-1v 采用集成策略来提高对多样化蛋白质序列预测的鲁棒性和准确性。
+
+### 架构与配置
+
+ESM-1v 集成由五个独立训练的模型组成，每个模型具有相同的架构规范：
+
+- **模型架构**：33 层 transformer，包含 650M 参数
+- **训练数据**：UniRef90 数据集
+- **嵌入维度**：1280
+- **注意力头数**：20
+- **FFN 嵌入维度**：5120
+
+集成中的每个模型都在相同的数据集上训练，但使用不同的随机初始化，从而为蛋白质序列模式提供多样化的视角 [esm/pretrained.py#L285-L336]。集成方法减少了预测中的方差，提高了变异效应评估的可靠性。
+
+### 模型加载与使用
+
+加载 ESM-1v 模型遵循标准的 ESM 模式，使用特定的集成模型名称：
+
+```python
+import esm
+
+# 加载单独的集成成员
+model1, alphabet = esm.pretrained.esm1v_t33_650M_UR90S_1()
+model2, alphabet = esm.pretrained.esm1v_t33_650M_UR90S_2()
+# ... 继续加载所有 5 个模型
+```
+
+可以通过对所有五个模型的预测进行平均来集体使用集成，这是变异效应预测任务的推荐方法。
+
+### 关键架构特性
+
+ESM-1v 基于 ProteinBertModel 架构构建 [esm/model/esm1.py#L22]，针对 ESM-1v 变体进行了特定的初始化：
+
+- **位置嵌入**：正弦位置嵌入，用于序列位置感知
+- **嵌入缩放**：嵌入维度的平方根缩放（embed_scale = √embed_dim）
+- **层归一化**：后嵌入层归一化，确保训练稳定
+
+## ESM-IF1：逆折叠模型
+
+ESM-IF1 代表了蛋白质建模的根本性不同方法，专注于逆折叠问题：从蛋白质骨架结构预测蛋白质序列。该模型将几何神经网络与 transformer 架构相结合，以弥合结构表示和序列表示之间的差距。
+
+### 混合架构设计
+
+ESM-IF1 采用复杂的混合架构，通过几何向量感知器（GVP）层处理几何信息，然后应用序列到序列 transformer [esm/inverse_folding/gvp_transformer.py#L24-L30]：
+
+```mermaid
+graph TD
+    A[输入：3D 坐标] --> B[GVP-GNN 编码器]
+    B --> C[几何特征]
+    C --> D[Transformer 编码器]
+    D --> E[结构表示]
+    E --> F[Transformer 解码器]
+    F --> G[输出：蛋白质序列]
+```
+
+### 模型规格
+
+ESM-IF1 架构包含 142M 参数，各组件细分如下 [esm/pretrained.py#L339-L347]：
+
+- **GVP-GNN 层数**：4 个几何处理层
+- **Transformer 编码器**：8 层，用于结构到序列映射
+- **Transformer 解码器**：8 层，用于序列生成
+- **训练数据**：CATH 结构 + 来自 UniRef50 的 12M AlphaFold2 预测结果
+
+### 几何处理管道
+
+GVP 编码器处理 3D 坐标信息以提取旋转不变特征 [esm/inverse_folding/gvp_encoder.py#L18]：
+
+```python
+def forward(self, coords, coord_mask, padding_mask, confidence):
+    # 通过 GVP 层处理 3D 坐标
+    # 生成几何表示
+    # 处理缺失坐标的部分掩码
+```
+
+这种几何预处理使模型能够处理部分掩码的结构，使其在现实世界应用中具有鲁棒性，因为在这些应用中完整的结构数据可能不可用。
+
+### 训练与性能
+
+ESM-IF1 在逆折叠任务中取得了令人印象深刻的性能指标：
+- **天然序列恢复率**：在结构保留骨架上达到 51%
+- **埋藏残基恢复率**：结构约束残基达到 72%
+- **跨度掩码**：经过训练可容忍缺失的骨架坐标
+
+该模型在 1200 万个 AlphaFold2 预测结构上的训练为蛋白质序列-结构关系提供了广泛的覆盖 [examples/inverse_folding/README.md#L5-L9]。
+
+## 模型比较与用例
+
+| 特性 | ESM-1v | ESM-IF1 |
+|---------|--------|---------|
+| **主要任务** | 变异效应预测 | 逆折叠（从结构预测序列） |
+| **输入类型** | 蛋白质序列 | 3D 骨架坐标 |
+| **架构** | Transformer 集成 | GVP-GNN + Transformer seq2seq |
+| **参数量** | 650M × 5 个模型 | 142M |
+| **训练数据** | UniRef90 | CATH + 12M AlphaFold2 结构 |
+| **关键创新** | 集成鲁棒性 | 几何-序列集成 |
+
+## 实际实现
+
+### ESM-1v 变异预测工作流程
+
+1. 加载所有五个集成模型
+2. 处理野生型和突变序列
+3. 为每个序列生成嵌入
+4. 计算集成的似然差异
+5. 聚合预测以获得最终变异效应分数
+
+### ESM-IF1 逆折叠工作流程
+
+1. 准备 3D 坐标数据（PDB/mmCIF 格式）
+2. 通过 GVP 编码器处理以获取几何特征
+3. 使用 transformer 解码器生成序列预测
+4. 采样多个序列以实现多样性
+5. 基于似然对预测进行评分和排序
+
+<CgxTip>对于 ESM-1v，始终使用完整的五个模型集成以获得最佳的变异预测性能。单个模型可能显示方差，但集成平均可提供更可靠的结果。</CgxTip>
+
+<CgxTip>ESM-IF1 的跨度掩码能力使其能够处理部分不完整的结构。这对于具有缺失区域或低分辨率数据的实验结构特别有价值。</CgxTip>
+
+## 与 ESM 生态系统的集成
+
+两个模型都与更广泛的 ESM 框架无缝集成，共享蛋白质字母表和基本 transformer 模块等通用组件。然而，它们代表了特定领域的专业扩展：
+
+- **ESM-1v** 扩展了基于序列的建模方法用于变异分析
+- **ESM-IF1** 弥合了结构建模和序列建模范式之间的差距
+
+这些模型补充了其他 ESM 变体，如用于通用蛋白质表示的 ESM-2 和用于结构预测的 ESMFold，为蛋白质分析和设计提供了全面的工具包。
+
+要深入探索架构基础，请参阅 [ESM-2 架构与设计](9-esm-2-architecture-and-design)。有关蛋白质设计的实际应用，请继续阅读 [逆折叠与蛋白质设计](15-inverse-folding-and-protein-design)。
+
+---
+
+- [深度解析/模型变体与应用/逆向折叠与蛋白质设计](https://zread.ai/facebookresearch/esm/15-inverse-folding-and-protein-design)
+
+---
+slug:15-inverse-folding-and-protein-design
+blog_type:normal
+---
+
+
+
+ESM-IF1 逆向折叠模型在蛋白质序列设计领域取得了突破性进展，能够根据蛋白质骨架原子坐标预测蛋白质序列。该系统采用了一种融合几何向量感知器（GVP）与序列到序列 Transformer 的复杂架构，在蛋白质设计任务中实现了最先进的性能。
+
+## 架构概览
+
+ESM-IF1 模型采用两阶段架构设计：首先通过几何 GVP-GNN 层进行初始结构处理，然后采用序列到序列 Transformer 编码器-解码器架构 [gvp_transformer.py#L24-L30]。这种混合方法使模型能够有效捕捉蛋白质结构的 3D 几何约束和氨基酸序列的序列模式。
+
+```mermaid
+graph TD
+    A[骨架坐标<br/>N, CA, C 原子] --> B[GVP 编码器<br/>几何处理]
+    B --> C[结构嵌入]
+    C --> D[Transformer 编码器]
+    D --> E[上下文表示]
+    E --> F[Transformer 解码器]
+    F --> G[生成序列]
+    
+    H[置信度分数] --> B
+    I[填充掩码] --> B
+```
+
+### 核心组件
+
+**GVP-Transformer 模型**：主模型类 [gvp_transformer.py#L24] 协调整个逆向折叠过程。它为编码器和解码器初始化独立的嵌入标记，构建几何编码器，并构造 Transformer 解码器 [gvp_transformer.py#L32-L43]。
+
+**GVP 编码器**：几何处理层 [gvp_encoder.py#L18] 处理 3D 坐标到学习表示的初始转换。该组件对于捕捉蛋白质结构中固有的空间关系和几何约束至关重要。
+
+**Transformer 解码器**：序列生成组件 [transformer_decoder.py#L24] 实现了标准的 Transformer 解码器架构，采用掩码自注意力和编码器-解码器注意力机制进行自回归序列生成。
+
+## 几何向量感知器 (GVP)
+
+ESM-IF1 的几何处理能力源于几何向量感知器模块，该模块可同时处理标量和向量信息 [gvp_modules.py#L113]。这些专门的神经网络组件专为处理 3D 几何数据而设计：
+
+- **GVP 层**：核心几何处理单元，转换输入的（标量，向量）表示元组 [gvp_modules.py#L125-L154]
+- **GVP 卷积**：几何图神经网络的消息传递层 [gvp_modules.py#L267-L317]
+- **组合操作**：专为几何数据设计的专用 dropout、层归一化和激活函数 [gvp_modules.py#L191-L254]
+
+<CgxTip>
+GVP 架构将蛋白质坐标作为标量和向量特征的元组进行处理，使模型能够保持旋转等变性——这是理解 3D 结构的关键特性。
+</CgxTip>
+
+## 模型加载与初始化
+
+ESM-IF1 可以使用特定模型配置的预训练函数加载：
+
+```python
+import esm.inverse_folding
+model, alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
+model = model.eval()  # 关键：设置为评估模式以禁用 dropout
+```
+
+模型参数包括：
+- **GVP 层**：4 个几何处理层
+- **Transformer 层**：16 个注意力层
+- **参数**：1.42 亿个可训练参数
+- **训练数据**：1200 万个 AlphaFold2 预测结构
+
+## 输入处理与数据格式
+
+### 坐标表示
+
+模型期望骨架原子坐标采用特定格式 [util.py#L62-L70]：
+- **形状**：L × 3 × 3 数组，其中 L 是序列长度
+- **原子**：每个残基的 N、CA、C 坐标
+- **索引**：`coords[i][0]` = N 原子，`coords[i][1]` = CA 原子，`coords[i][2]` = C 原子
+
+### 结构加载
+
+对于单链结构 [util.py#L27-L35]：
+```python
+structure = esm.inverse_folding.util.load_structure(fpath, chain_id)
+coords, seq = esm.inverse_folding.util.extract_coords_from_structure(structure)
+```
+
+对于多链复合物 [examples/inverse_folding/README.md]：
+```python
+structure = esm.inverse_folding.util.load_structure(fpath, chain_ids)
+coords, native_seqs = esm.inverse_folding.multichain_util.extract_coords_from_complex(structure)
+```
+
+## 序列设计与采样
+
+### 单链设计
+
+核心采样方法基于多项式采样生成序列，不使用束搜索 [gvp_transformer.py#L88-L90]：
+
+```python
+sampled_seq = model.sample(coords, temperature=T)
+```
+
+**温度控制**：
+- **高温度**（T > 1）：更多样化序列，较低恢复率
+- **低温度**（T < 1）：较少多样化，较高天然恢复率
+- **最优恢复率**：T = 1e-6 [examples/inverse_folding/README.md]
+
+### 多链设计
+
+对于复合物，ESM-IF1 可以在以整个复合物结构为条件的特定链上设计序列：
+
+```python
+sampled_seq = esm.inverse_folding.multichain_util.sample_sequence_in_complex(
+    model, coords, target_chain_id, temperature=T
+)
+```
+
+<CgxTip>
+多链设计模式通过利用链间结构上下文通常能降低困惑度并提高序列恢复率，但对某些蛋白质而言，单链模式可能表现更佳。
+</CgxTip>
+
+## 序列评分与评估
+
+### 对数似然评分
+
+模型为序列-结构对提供条件对数似然评分 [util.py#L125-L134]：
+
+```python
+ll_fullseq, ll_withcoord = esm.inverse_folding.util.score_sequence(
+    model, alphabet, coords, seq
+)
+```
+
+**输出解释**：
+- **ll_fullseq**：整个序列的平均对数似然
+- **ll_withcoord**：具有可用坐标的残基的平均对数似然
+
+### 性能指标
+
+ESM-IF1 在保留结构基准测试中取得了令人瞩目的性能：
+- **天然序列恢复率**：总体 51%
+- **埋藏残基恢复率**：72%
+- **训练数据集**：1200 万个 AlphaFold2 结构
+
+## 批处理与实用工具
+
+### CoordBatchConverter
+
+专用批处理器处理坐标数据 [util.py#L220-L269]：
+
+```python
+converter = CoordBatchConverter()
+batch_coords, batch_tokens, batch_labels = converter.from_lists(
+    coords_list, confidence_list, seq_list, device=device
+)
+```
+
+### 特征处理
+
+模型包含以下实用工具：
+- **RBF 编码**：距离的径向基函数编码 [util.py#L191-L194]
+- **坐标变换**：旋转和归一化操作 [util.py#L146-L214]
+- **缺失数据处理**：NaN 替换和掩码 [util.py#L183-L186]
+
+## 实际应用
+
+### 命令行界面
+
+**序列采样** [sample_sequences.py]：
+```bash
+python sample_sequences.py data/5YH2.pdb \
+    --chain C --temperature 1 --num-samples 3 \
+    --outpath output/sampled_sequences.fasta
+```
+
+**多链模式**：
+```bash
+python sample_sequences.py data/5YH2.pdb \
+    --chain C --temperature 1 --num-samples 3 \
+    --outpath output/sampled_sequences_multichain.fasta \
+    --multichain-backbone
+```
+
+**序列评分** [score_log_likelihoods.py]：
+```bash
+python score_log_likelihoods.py data/5YH2.pdb \
+    data/5YH2_mutated_seqs.fasta --chain C \
+    --outpath output/5YH2_mutated_seqs_scores.csv
+```
+
+### 质量控制
+
+序列设计的推荐实践：
+1. **过滤重复序列**：移除具有长氨基酸重复的序列（例如 "EEEEEEEE"）
+2. **比较模式**：尝试单链和多链设计模式
+3. **温度调整**：根据期望的多样性与恢复率权衡调整温度
+4. **验证**：使用对数似然评估对设计序列进行评分
+
+## 与其他 ESM 模型的集成
+
+ESM-IF1 补充了 ESM 生态系统中的其他模型：
+- **ESMFold**：从序列预测结构（逆向问题）
+- **ESM-2**：用于下游任务的序列嵌入
+- **MSA Transformer**：多序列比对处理
+
+逆向折叠能力为蛋白质工程、药物设计和理解序列-结构关系开辟了新的应用。
+
+有关高级使用模式以及与其他 ESM 组件的集成，请参考 [ESMFold 结构预测系统](10-esmfold-structure-prediction-system) 和 [语言模型表示](11-language-model-representations) 文档。
+
+---
+
+## 高级功能
+
+- [深度解析/高级功能/零样本变异预测](https://zread.ai/facebookresearch/esm/16-zero-shot-variant-prediction)
+
+---
+slug:16-zero-shot-variant-prediction
+blog_type:normal
+---
+
+
+
+零样本变异预测能够在无需任务特定训练的情况下评估蛋白质突变效应，利用蛋白质语言模型中学习到的表示。这一能力代表了计算生物学领域的根本性进步，使研究人员能够直接从序列信息预测遗传变异的功能影响。
+
+## 核心架构和模型
+
+ESM 为零样本变异预测提供了专用模型，主要是 ESM-1v 集成模型和 MSA Transformer。ESM-1v 模型专门为此任务设计，包含五个独立训练的 33 层 transformer 模型，每个模型具有 650M 参数，在 UniRef90 上训练 [esm1v_t33_650M_UR90S_1() through esm1v_t33_650M_UR90S_5()](esm/pretrained.py#L294-L335)。这种集成方法通过模型多样性增强了预测的鲁棒性。
+
+```mermaid
+flowchart TD
+    A[输入蛋白质序列] --> B[深度突变扫描数据]
+    B --> C{模型选择}
+    C -->|ESM-1v 集成| D[单序列分析]
+    C -->|MSA Transformer| E[多序列比对]
+    D --> F[评分策略选择]
+    E --> F
+    F --> G[WT 边际]
+    F --> H[掩码边际] 
+    F --> I[伪 PPL]
+    G --> J[突变效应分数]
+    H --> J
+    I --> J
+```
+
+底层架构基于 ProteinBertModel [esm/model/esm1.py#L22]，通过 transformer 层处理序列以生成上下文表示。这些表示捕获了在大量蛋白质序列数据集上预训练期间隐式学习到的进化和结构信息。
+
+## 评分策略
+
+ESM 实现了三种不同的变异效应预测评分策略，每种策略利用模型学习表示的不同方面：
+
+### 野生型边际策略
+野生型边际方法通过比较每个位置上突变氨基酸与野生型氨基酸的对数概率来计算突变分数 [examples/variant-prediction/predict.py#L107-L116]。该策略计算效率高，因为只需要一次模型前向传播：
+
+```python
+score = token_probs[0, 1 + idx, mt_encoded] - token_probs[0, 1 + idx, wt_encoded]
+```
+
+### 掩码边际策略
+掩码边际策略系统地掩码每个位置并计算可能氨基酸的概率分布 [examples/variant-prediction/predict.py#L171-L184]。这种方法以增加计算为代价提供更准确的预测，每个序列位置需要一次前向传播。对于 MSA Transformer 模型，这是唯一支持的策略 [examples/variant-prediction/predict.py#L158-L160]。
+
+### 伪困惑度策略
+伪困惑度方法通过计算突变序列在模型下的对数似然来评估突变 [examples/variant-prediction/predict.py#L118-L146]。这种方法对于评估多个突变特别有用，但计算密集，因为需要单独掩码每个位置。
+
+## 实现流程
+
+变异预测流程遵循结构化工作流程：
+
+1. **数据准备**：从 CSV 格式加载深度突变扫描数据，包含指定格式的突变注释（例如，位置 123 上的丙氨酸替换为 B 表示为 "A123B"）[examples/variant-prediction/predict.py#L148]
+
+2. **模型加载**：使用标准化接口加载预训练模型 [esm/pretrained.py#L24-L31]，在可用时自动启用 GPU 加速 [examples/variant-prediction/predict.py#L154-L158]
+
+3. **序列编码**：使用模型的字母表将蛋白质序列转换为标记表示 [examples/variant-prediction/predict.py#L162-L166]
+
+4. **评分计算**：使用选定的评分策略计算数据集中所有变异的突变效应
+
+5. **集成聚合**：对于 ESM-1v 模型，计算所有五个集成成员的预测并可以聚合以提高鲁棒性
+
+<CgxTip>
+offset-idx 参数对于正确映射参考序列和突变数据之间的突变位置至关重要。这考虑了序列编号方案的差异，特别是在处理已加工或截断序列时。
+</CgxTip>
+
+## 性能和验证
+
+零样本变异预测能力已在 41 个深度突变扫描数据集上得到广泛验证，显示出与实验测量的强相关性。性能指标按多个聚合级别组织 [examples/variant-prediction/README.md#L38-L45]：
+
+- **原始预测**：每个蛋白质的个体突变分数
+- **每蛋白质性能**：每个数据集的 Spearman 相关系数
+- **聚合指标**：验证集和测试集上的性能摘要
+
+这种全面评估展示了该方法在多样化蛋白质家族和功能分析中的泛化能力。
+
+## 使用示例
+
+### ESM-1v 集成预测
+```bash
+python predict.py \
+    --model-location esm1v_t33_650M_UR90S_1 esm1v_t33_650M_UR90S_2 esm1v_t33_650M_UR90S_3 esm1v_t33_650M_UR90S_4 esm1v_t33_650M_UR90S_5 \
+    --sequence HPETLVKVKDAEDQLGARVGYIELDLNSGKILESFRPEERFPMMSTFKVLLCGAVLSRVDAGQEQLGRRIHYSQNDLVEYSPVTEKHLTDGMTVRELCSAAITMSDNTAANLLLTTIGGPKELTAFLHNMGDHVTRLDRWEPELNEAIPNDERDTTMPAAMATTLRKLLTGELLTLASRQQLIDWMEADKVAGPLLRSALPAGWFIADKSGAGERGSRGIIAALGPDGKPSRIVVIYTTGSQATMDERNRQIAEIGASLIKHW \
+    --dms-input ./data/BLAT_ECOLX_Ranganathan2015.csv \
+    --mutation-col mutant \
+    --dms-output ./data/BLAT_ECOLX_Ranganathan2015_labeled.csv \
+    --offset-idx 24 \
+    --scoring-strategy wt-marginals
+```
+
+### MSA Transformer 预测
+```bash
+python predict.py \
+    --model-location esm_msa1b_t12_100M_UR50S \
+    --sequence HPETLVKVKDAEDQLGARVGYIELDLNSGKILESFRPEERFPMMSTFKVLLCGAVLSRVDAGQEQLGRRIHYSQNDLVEYSPVTEKHLTDGMTVRELCSAAITMSDNTAANLLLTTIGGPKELTAFLHNMGDHVTRLDRWEPELNEAIPNDERDTTMPAAMATTLRKLLTGELLTLASRQQLIDWMEADKVAGPLLRSALPAGWFIADKSGAGERGSRGIIAALGPDGKPSRIVVIYTTGSQATMDERNRQIAEIGASLIKHW \
+    --dms-input ./data/BLAT_ECOLX_Ranganathan2015.csv \
+    --mutation-col mutant \
+    --dms-output ./data/BLAT_ECOLX_Ranganathan2015_labeled.csv \
+    --offset-idx 24 \
+    --scoring-strategy masked-marginals \
+    --msa-path ./data/BLAT_ECOLX_1_b0.5.a3m
+```
+
+<CgxTip>
+对于 MSA Transformer 预测，确保你的 MSA 文件是 a3m 格式并包含足够的序列多样性。msa-samples 参数控制从 MSA 中使用的序列数量，平衡计算成本与预测准确性。
+</CgxTip>
+
+## 与其他 ESM 功能的集成
+
+零样本变异预测补充了其他 ESM 功能，为蛋白质分析提供了全面的工具包。变异预测可以与 [ESMFold 结构预测系统](10-esmfold-structure-prediction-system) 结合以评估突变的结构影响，或与 [逆折叠和蛋白质设计](15-inverse-folding-and-protein-design) 结合用于理性蛋白质工程应用。
+
+用于变异预测的底层表示与驱动其他 ESM 应用的嵌入相同，展示了学习到的蛋白质语言模型表示在多样化生物任务中的多功能性。
+
+## 下一步
+
+对于实际实现，从 [快速入门](2-quick-start) 指南开始设置你的环境，然后探索 [模型加载和预训练权重](5-model-loading-and-pre-trained-weights) 部分以获取详细的模型访问说明。对于结合变异预测与结构分析的高级应用，请继续阅读 [ESMFold 结构预测系统](10-esmfold-structure-prediction-system)。
+
+---
+
+- [深度解析/高级功能/蛋白质编程语言](https://zread.ai/facebookresearch/esm/17-protein-programming-language)
+
+---
+slug:17-protein-programming-language
+blog_type:normal
+---
+
+
+
+蛋白质编程语言是一种用于生成式蛋白质设计的高级声明式语言，使研究人员能够通过组合程序指定蛋白质设计目标。这种创新方法在论文《一种用于生成式蛋白质设计的高级编程语言》中进行了描述，它抽象化了蛋白质优化的复杂性，同时提供了对设计目标的细粒度控制。
+
+## 核心架构
+
+该语言围绕分层程序结构构建，其中**ProgramNode**对象构成基本构建块。每个节点可以包含序列片段、能量函数项和子节点，从而支持复杂设计场景的递归组合[examples/protein-programming-language/language/program.py#L18-L50](examples/protein-programming-language/language/program.py#L18-L50)。
+
+```mermaid
+graph TD
+    A[ProgramNode] --> B[SequenceSegment]
+    A --> C[EnergyFunctionTerms]
+    A --> D[Child Nodes]
+    
+    B --> E[FixedLengthSequenceSegment]
+    B --> F[VariableLengthSequenceSegment]
+    B --> G[ConstantSequenceSegment]
+    
+    C --> H[MaximizePTM]
+    C --> I[MaximizePLDDT]
+    C --> J[SymmetryRing]
+    C --> K[MinimizeCRmsd]
+    C --> L[MinimizeSurfaceHydrophobics]
+    
+    D --> M[Protomer Nodes]
+    D --> N[Chain Nodes]
+```
+
+## 序列管理
+
+该语言提供三种类型的序列片段工厂，处理不同的突变策略：
+
+- **FixedLengthSequenceSegment**：保持恒定长度同时允许氨基酸替换[examples/protein-programming-language/language/sequence.py#L96-L124](examples/protein-programming-language/language/sequence.py#L96-L124)
+- **VariableLengthSequenceSegment**：支持插入、删除和替换，具有可配置的操作概率[examples/protein-programming-language/language/sequence.py#L146-L209](examples/protein-programming-language/language/sequence.py#L146-L209)
+- **ConstantSequenceSegment**：用于固定区域的不可变序列[examples/protein-programming-language/language/sequence.py#L81-L93](examples/protein-programming-language/language/sequence.py#L81-L93)
+
+<CgxTip>序列片段使用复杂的突变系统，其中每个氨基酸位置维护自己的突变候选，在尊重半胱氨酸限制等生化约束的同时，实现序列空间的高效探索。</CgxTip>
+
+## 能量函数框架
+
+能量项作为抽象的**EnergyTerm**类实现，从折叠结果计算标量优化目标[examples/protein-programming-language/language/energy.py#L16-L22](examples/protein-programming-language/language/energy.py#L16-L22)。该框架包括：
+
+| Energy Term | Purpose | Target Value |
+|-------------|---------|--------------|
+| MaximizePTM | 折叠质量的预测TM-score | 1.0 |
+| MaximizePLDDT | 每残基置信度 | 1.0 |
+| MinimizeCRmsd | 与模板的结构相似性 | 0.0 |
+| MinimizeDRmsd | 与模板的距离矩阵RMSD | 0.0 |
+| SymmetryRing | 强制循环对称性 | 0.0 |
+| MinimizeSurfaceHydrophobics | 减少暴露的疏水残基 | 0.0 |
+
+每个能量项计算一个损失值，优化算法将其最小化，较低的值表示更好地满足设计目标。
+
+## 优化引擎
+
+该语言采用**Metropolis-Hastings模拟退火**进行序列优化，在`run_simulated_annealing`函数中实现[examples/protein-programming-language/language/optimize.py#L93-L120](examples/protein-programming-language/language/optimize.py#L93-L120)。优化过程遵循以下流程：
+
+```mermaid
+flowchart TD
+    A[Initialize Program] --> B[Set Temperature]
+    B --> C[Generate Mutations]
+    C --> D[Fold with ESMFold]
+    D --> E[Compute Energy Terms]
+    E --> F[Metropolis Accept/Reject]
+    F --> G{Steps Complete?}
+    G -->|No| H[Anneal Temperature]
+    H --> C
+    G -->|Yes| I[Return Best Program]
+```
+
+优化状态跟踪当前、候选和最佳能量以及详细的能量项分解，实现收敛行为的细粒度分析。
+
+## 设计程序示例
+
+该仓库包含七个代表性设计程序，展示了该语言的多功能性：
+
+### 自由幻觉
+使用基本质量指标从头生成新颖的蛋白质序列[examples/protein-programming-language/programs/free_hallucination.py#L15-L25](examples/protein-programming-language/programs/free_hallucination.py#L15-L25)：
+```python
+def free_hallucination(sequence_length: int) -> ProgramNode:
+    sequence = FixedLengthSequenceSegment(sequence_length)
+    return ProgramNode(
+        sequence_segment=sequence,
+        energy_function_terms=[
+            MaximizePTM(),
+            MaximizePLDDT(),
+            MinimizeSurfaceHydrophobics(),
+        ],
+    )
+```
+
+### 固定骨架设计
+使用结构约束优化预定义骨架结构的序列[examples/protein-programming-language/programs/fixed_backbone.py#L15-L40](examples/protein-programming-language/programs/fixed_backbone.py#L15-L40)。该程序将质量指标与RMSD最小化相结合，以保持结构保真度。
+
+### 对称单体设计
+通过在具有对称约束的父节点下组合多个相同的原体节点来创建循环对称蛋白质[examples/protein-programming-language/programs/symmetric_monomer.py#L15-L37](examples/protein-programming-language/programs/symmetric_monomer.py#L15-L37)。
+
+<CgxTip>分层程序结构支持复杂的设计模式，如对称多聚体，其中子节点共享序列片段但保持独立的残基索引，使优化器能够高效探索对称解决方案。</CgxTip>
+
+## 高级功能
+
+该语言支持几种高级能力：
+
+- **多链建模**：程序可以通过`children_are_different_chains`标志指定不同的链
+- **加权能量项**：每个能量项可以分配自定义权重，以优先考虑不同的设计目标
+- **残基索引**：跨复杂多组件程序自动管理残基索引范围
+- **模板集成**：与PDB结构直接集成，用于固定骨架和支架设计
+
+## 入门指南
+
+开始使用蛋白质编程语言：
+
+1. 完成[教程笔记本](examples/protein-programming-language/tutorial.ipynb)，涵盖基本程序编写和优化
+2. 查看`programs/`目录中的示例程序，了解不同的设计模式
+3. 使用`run_simulated_annealing`函数配合自定义程序和适当的温度计划
+
+该语言为蛋白质设计提供了强大的抽象层，能够快速原型化复杂设计场景，同时保持灵活性以融入领域特定约束和目标。
+
+要深入了解底层模型架构，请参阅[ESMFold结构预测系统](10-esmfold-structure-prediction-system)，有关实际实现细节，请参考[逆折叠与蛋白质设计](15-inverse-folding-and-protein-design)。
+
+---
+
+- [深度解析/高级功能/基于自注意力的接触预测](https://zread.ai/facebookresearch/esm/18-contact-prediction-from-self-attention)
+
+---
+slug:18-contact-prediction-from-self-attention
+blog_type:normal
+---
+
+
+
+通过自注意力进行接触预测是ESM模型的一项基本能力，能够仅从序列预测蛋白质的3D结构。该方法利用transformer模型中学习到的注意力模式来推断残基-残基接触，无需多重序列比对。
+
+## 架构概述
+
+ESM模型通过两种互补的方法预测接触：
+
+### 单序列接触预测 (ESM-2)
+
+ESM-2直接使用自注意力权重从单个蛋白质序列预测接触。模型通过其transformer层处理序列，并提取与结构接触相关的注意力模式。
+
+### 基于MSA的接触预测 (MSA Transformer)
+
+MSA Transformer同时处理多重序列比对，利用进化信息提高接触预测准确性。该方法捕获同源序列间的共进化信号。
+
+```mermaid
+graph TD
+    A[输入数据] --> B{模型类型}
+    B -->|单序列| C[ESM-2]
+    B -->|多序列| D[MSA Transformer]
+    
+    C --> E[自注意力提取]
+    D --> F[跨序列注意力]
+    
+    E --> G[接触预测]
+    F --> G
+    
+    G --> H[接触矩阵]
+    H --> I[结构推断]
+```
+
+## 实现细节
+
+### 接触预测流程
+
+接触预测过程涉及几个关键步骤：
+
+1. **序列处理**：将蛋白质序列转换为token表示
+2. **模型推理**：通过transformer层处理以提取注意力权重
+3. **接触评分**：将注意力模式转换为接触概率
+4. **评估**：将预测与真实结构进行比较
+
+核心接触预测功能在ESM模型的`predict_contacts`方法中实现 [esm/model/esm2.py#L146](esm/model/esm2.py#L146)：
+
+```python
+def predict_contacts(self, tokens):
+    # 从所有层提取注意力权重
+    # 转换为接触预测
+    # 返回接触概率矩阵
+```
+
+### 接触定义
+
+接触基于碳-beta原子距离定义，阈值为8.0埃。对于甘氨酸残基，使用几何约束从N、CA和C原子推断碳-beta位置 [examples/contact_prediction.ipynb#L350](examples/contact_prediction.ipynb#L350)：
+
+```python
+def contacts_from_pdb(structure, distance_threshold=8.0, chain=None):
+    # 提取原子坐标
+    # 计算C-beta位置（甘氨酸进行推断）
+    # 计算成对距离
+    # 生成二进制接触矩阵
+```
+
+### 评估指标
+
+接触预测性能在不同距离范围内进行评估：
+
+| 范围 | 定义 | 序列间隔 |
+|-------|------------|-------------------|
+| 局部 | 3-6残基 | 短程相互作用 |
+| 短程 | 6-12残基 | 二级结构元件 |
+| 中程 | 12-24残基 | 结构域级相互作用 |
+| 长程 | >24残基 | 长程接触 |
+
+指标包括不同top-L/2、top-L/5和top-L/10水平的精确度，以及AUC分数 [examples/contact_prediction.ipynb#L450](examples/contact_prediction.ipynb#L450)。
+
+## 性能比较
+
+基于三个测试蛋白（1a3a、5ahw、1xcr）的基准测试结果：
+
+### ESM-2单序列性能
+- **长程P@L**：40-86%（取决于蛋白质）
+- **中程P@L**：26-34%
+- **短程P@L**：20-29%
+
+### MSA Transformer性能
+- **长程P@L**：72-89%（显著提升）
+- **中程P@L**：31-33%
+- **短程P@L**：24-31%
+
+MSA Transformer始终优于单序列预测，特别是对于长程接触，证明了进化信息的价值。
+
+<CgxTip>
+MSA Transformer的优越性能来自于同时处理多个同源序列，捕获单序列模型无法访问的共进化约束。</CgxTip>
+
+## 可视化与分析
+
+接触预测可视化为热图，显示预测的接触概率与真实接触的对比：
+
+- **蓝点**：正确预测的接触（真阳性）
+- **红点**：错误预测（假阳性）  
+- **灰点**：遗漏的接触（假阴性）
+
+可视化清楚地显示了模型仅从序列信息中捕获长程结构模式的能力 [examples/contact_prediction.ipynb#L650](examples/contact_prediction.ipynb#L650)。
+
+## 使用示例
+
+### 单序列接触预测
+
+```python
+import esm
+
+# 加载模型
+model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+model = model.eval().cuda()
+batch_converter = alphabet.get_batch_converter()
+
+# 准备序列
+sequence_data = [("protein1", "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAVDHERGLVDRFYKVELAPTHKGGFGLRGDGFNICKDG")]
+batch_labels, batch_strs, batch_tokens = batch_converter(sequence_data)
+batch_tokens = batch_tokens.to(device)
+
+# 预测接触
+contact_predictions = model.predict_contacts(batch_tokens)[0].cpu()
+```
+
+### 基于MSA的接触预测
+
+```python
+# 加载MSA transformer
+msa_model, msa_alphabet = esm.pretrained.esm_msa1b_t12_100M_UR50S()
+msa_model = msa_model.eval().cuda()
+msa_converter = msa_alphabet.get_batch_converter()
+
+# 准备MSA数据
+msa_data = read_msa("protein_alignment.a3m")
+msa_data = greedy_select(msa_data, num_seqs=128)  # 如需要则子采样
+
+# 预测接触
+batch_labels, batch_strs, batch_tokens = msa_converter([msa_data])
+batch_tokens = batch_tokens.to(device)
+contact_predictions = msa_model.predict_contacts(batch_tokens)[0].cpu()
+```
+
+<CgxTip>
+为了获得最佳MSA Transformer性能，请使用具有良好覆盖率的多样化序列比对。`greedy_select`函数可以在对大型MSA进行子采样时最大化序列多样性。</CgxTip>
+
+## 与结构预测的集成
+
+ESM模型的接触预测可作为下游结构预测方法的约束：
+
+1. **距离几何**：将接触转换为距离约束
+2. **折叠识别**：使用接触识别结构模板
+3. **从头建模**：用接触约束指导片段组装
+
+接触预测能力代表了基于序列的理解与结构建模之间的桥梁，支持蛋白质设计、功能预测和变异效应分析等应用。
+
+## 后续步骤
+
+为全面了解ESM的结构能力：
+
+- [ESMFold结构预测系统](10-esmfold-structure-prediction-system) - 端到端结构预测
+- [蛋白质Transformer架构](12-transformer-architecture-for-proteins) - 深入探讨模型架构
+- [MSA Transformer用于多重序列比对](13-msa-transformer-for-multiple-sequence-alignment) - MSA处理细节
+
+接触预测功能展示了transformer模型如何直接从序列数据中学习结构原理，为计算生物学和蛋白质工程开辟了新的可能性。
+
+---
+
+## 性能与优化
+
+- [深度解析/性能与优化/使用FSDP进行CPU卸载](https://zread.ai/facebookresearch/esm/19-cpu-offloading-with-fsdp)
+
+---
+slug:19-cpu-offloading-with-fsdp
+blog_type:normal
+---
+
+
+
+借助完全分片数据并行（FSDP）实现的CPU卸载是一项先进的内存优化技术，它通过策略性地将参数和梯度卸载到CPU内存，从而能够在有限的GPU资源上运行大型ESM模型。这种方法对于处理最大的ESM-2模型（如150亿参数变体）特别有价值，否则这些模型会超出GPU内存容量。
+
+## 理解FSDP架构
+
+FSDP实现了一种复杂的内存管理策略，将模型参数、梯度和优化器状态分布在GPU和CPU内存中。关键创新在于**完全分片**方法，即每个GPU工作器在任何给定时间仅存储总模型参数的一部分，从而大幅降低每GPU内存需求。
+
+```mermaid
+graph TD
+    A[模型加载] --> B[FSDP包装器配置]
+    B --> C[参数分片]
+    C --> D[启用CPU卸载]
+    D --> E[逐层包装]
+    E --> F[分布式推理]
+    
+    G[GPU内存] --> H[活动参数]
+    I[CPU内存] --> J[卸载参数]
+    
+    H --> K[前向传播]
+    J --> K
+    K --> L[反向传播]
+```
+
+该实现利用Meta的FairScale库提供此功能，ESM提供了为蛋白质语言模型应用这些优化的简化接口。
+
+## 实现细节
+
+ESM模型的核心FSDP配置涉及几个控制内存管理行为的关键参数：
+
+| 参数 | 用途 | 推荐设置 |
+|-----------|---------|-------------------|
+| `mixed_precision` | 启用FP16训练/推理 | True |
+| `flatten_parameters` | 优化参数存储 | True |
+| `state_dict_device` | 控制模型状态存储位置 | torch.device("cpu") |
+| `cpu_offload` | 启用参数卸载到CPU | True |
+
+初始化过程从分布式设置和模型数据下载开始，然后应用FSDP包装器[esm2_infer_fairscale_fsdp_cpu_offloading.py](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L8-L24)：
+
+```python
+# 初始化分布式环境
+torch.distributed.init_process_group(backend="nccl", init_method=url, world_size=1, rank=0)
+
+# 配置FSDP参数
+fsdp_params = dict(
+    mixed_precision=True,
+    flatten_parameters=True,
+    state_dict_device=torch.device("cpu"),
+    cpu_offload=True,
+)
+```
+
+## 逐层优化策略
+
+ESM FSDP实现的一个关键方面是**逐层包装策略**。不是将整个模型作为单个单元包装，而是每个transformer层都单独用FSDP包装[esm2_infer_fairscale_fsdp_cpu_offloading.py](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L29-L35)：
+
+```python
+# 分别用FSDP包装每一层
+for name, child in model.named_children():
+    if name == "layers":
+        for layer_name, layer in child.named_children():
+            wrapped_layer = wrap(layer)
+            setattr(child, layer_name, wrapped_layer)
+model = wrap(model)
+```
+
+这种细粒度方法提供了几个优势：
+- **精细内存控制**：每层可以独立卸载
+- **改进并行性**：不同层可以同时处理
+- **减少通信开销**：在CPU和GPU之间传输更小的参数块
+
+## 模型兼容性和用例
+
+带CPU卸载的FSDP专为内存受限的最大ESM模型设计。主要目标是**ESM-2 150亿参数模型**[esm/pretrained.py](esm/pretrained.py#L390-L397)，它包含48个transformer层，需要大量内存资源：
+
+```python
+def esm2_t48_15B_UR50D():
+    """48层ESM-2模型，包含150亿参数，在UniRef50上训练。
+    如果加载此模型时出现OOM，请参阅README了解如何使用FSDP和ZeRO CPU卸载
+    """
+```
+
+<CgxTip>
+逐层FSDP包装对于获得最佳性能至关重要。与ESM实现中使用的细粒度方法相比，简单包装整个模型会导致内存利用效率低下和推理速度变慢。
+</CgxTip>
+
+## 性能考虑
+
+虽然CPU卸载大幅减少GPU内存需求，但它引入了CPU-GPU数据传输的额外计算开销。性能影响取决于几个因素：
+
+- **PCIe带宽**：决定CPU和GPU内存之间的传输速度
+- **模型架构**：更深的模型从细粒度卸载中受益更多
+- **批次大小**：更大的批次可以摊销传输成本
+- **序列长度**：更长的序列需要更频繁的参数交换
+
+混合精度设置通过减少传输期间的内存带宽需求来帮助缓解一些性能成本。
+
+## 与ESM工作流集成
+
+FSDP实现与标准ESM工作流无缝集成。在使用FSDP包装初始化模型后，推理使用与常规模型相同的接口进行[esm2_infer_fairscale_fsdp_cpu_offloading.py](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L37-L57)：
+
+```python
+# 标准ESM推理流水线
+batch_labels, batch_strs, batch_tokens = batch_converter(data)
+batch_tokens = batch_tokens.cuda()
+with torch.no_grad():
+    results = model(batch_tokens, repr_layers=[48], return_contacts=True)
+```
+
+这种兼容性确保现有的ESM应用程序可以利用FSDP优化，而无需重大代码修改。
+
+<CgxTip>
+为了获得CPU卸载的最佳性能，请确保系统有足够的CPU内存（通常是模型大小的2-3倍）和CPU与GPU之间快速的PCIe连接。
+</CgxTip>
+
+## 后续步骤
+
+要探索相关的性能优化技术，可以考虑阅读[内存高效分块推理](20-memory-efficient-chunked-inference)以了解替代内存管理策略，或查看[批处理和嵌入](21-batch-processing-and-embeddings)以了解吞吐量优化技术。如需理解底层模型架构，请参阅[ESM-2架构和设计](9-esm-2-architecture-and-design)。
+
+---
+
+- [深度解析/性能与优化/内存高效的分块推理](https://zread.ai/facebookresearch/esm/20-memory-efficient-chunked-inference)
+
+---
+slug:20-memory-efficient-chunked-inference
+blog_type:normal
+---
+
+
+
+当 GPU 内存受限时，内存高效的分块推理是使用 ESM 模型处理大型蛋白质序列的关键优化技术。该方法通过将计算分解为可管理的块来处理超出可用内存的序列，同时保持模型准确性。
+
+## 分块注意力机制
+
+ESM 中的核心内存优化通过轴向注意力模块中的分块注意力计算实现。系统会自动检测序列何时超过内存阈值并切换到批处理。
+
+### RowSelfAttention 实现
+
+`RowSelfAttention` 类在 MSA transformers 中为行级注意力实现分块处理 [esm/axial_attention.py](esm/axial_attention.py#L11-L132)。关键优化在 `_batched_forward` 方法中实现：
+
+```python
+def _batched_forward(self, x, self_attn_mask=None, self_attn_padding_mask=None):
+    num_rows, num_cols, batch_size, embed_dim = x.size()
+    max_rows = max(1, self.max_tokens_per_msa // num_cols)
+    # 分块处理注意力权重
+    for start in range(0, num_rows, max_rows):
+        attn_weights = self.compute_attention_weights(
+            x[start : start + max_rows], scaling,
+            self_attn_mask=self_attn_mask,
+            self_attn_padding_mask=self_attn_padding_mask[:, start : start + max_rows]
+        )
+```
+
+当 `num_rows * num_cols > self.max_tokens_per_msa` 时会自动触发分块逻辑，并在推理期间禁用梯度 [esm/axial_attention.py](esm/axial_attention.py#L113-L132)。
+
+### ColumnSelfAttention 实现
+
+类似地，`ColumnSelfAttention` 为列级注意力提供分块处理 [esm/axial_attention.py](esm/axial_attention.py#L133-L240)。这种双轴分块能够在不将整个注意力矩阵加载到内存的情况下高效处理大型多序列比对。
+
+## 内存阈值配置
+
+分块行为由 `max_tokens_per_msa` 参数控制，默认值为 `2^16`（65,536 个 token）[esm/axial_attention.py](esm/axial_attention.py#L19)。该阈值决定了系统何时从标准注意力切换到分块处理：
+
+- **低于阈值**：标准注意力计算以获得最佳速度
+- **高于阈值**：自动分块处理以节省内存
+
+## 与 FSDP CPU 卸载的集成
+
+对于极端内存限制的情况，ESM 将分块推理与 FairScale 的完全分片数据并行（FSDP）CPU 卸载相结合 [examples/esm2_infer_fairscale_fsdp_cpu_offloading.py](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L20-L33)：
+
+```python
+fsdp_params = dict(
+    mixed_precision=True,
+    flatten_parameters=True,
+    state_dict_device=torch.device("cpu"),  # 减少 GPU 内存使用
+    cpu_offload=True,  # 启用 CPU 卸载
+)
+```
+
+这种组合允许在单个 GPU 上运行如 ESM-2 15B 参数模型等大型模型，通过：
+1. 分块注意力计算以减少峰值内存
+2. 将优化器状态和参数卸载到 CPU
+3. 使用混合精度减少内存占用
+
+## 性能特征
+
+分块推理引入了计算开销，但能够处理任意大型序列：
+
+| 序列大小 | 处理模式 | 内存使用 | 速度影响 |
+|----------|----------|----------|----------|
+| < 65K token | 标准 | O(n²) | 基准 |
+| > 65K token | 分块 | O(chunk_size²) | 慢约 10-20% |
+| + FSDP | 分块 + CPU 卸载 | 最小 GPU | 慢约 30-50% |
+
+内存节省随序列长度呈二次方缩放，使得这种方法对于宏基因组学应用和大型蛋白质家族至关重要。
+
+<CgxTip>
+当序列超过内存阈值时，分块推理在推理（torch.no_grad()）期间自动激活。无需手动配置 - 系统透明地优化内存使用。
+</CgxTip>
+
+<CgxTip>
+为获得最大内存效率，请将分块推理与 FSDP CPU 卸载和混合精度结合使用。这可以在仅 16GB VRAM 的 GPU 上运行 15B 参数模型。
+</CgxTip>
+
+## 使用模式
+
+分块推理与现有 ESM API 无缝协作：
+
+```python
+# 标准用法 - 分块自动激活
+with torch.no_grad():
+    results = model(large_batch_tokens, repr_layers=[48], return_contacts=True)
+```
+
+系统会自动检测内存限制并切换到分块处理，无需更改代码。对于极端内存限制，请使用示例中显示的 FSDP 模式 [examples/esm2_infer_fairscale_fsdp_cpu_offloading.py](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py)。
+
+内存高效的分块推理是一项关键优化，使大规模蛋白质语言模型推理能够在标准硬件上实现，让研究人员无需企业级 GPU 资源即可处理海量蛋白质数据集。
+
+---
+
+- [深度解析/性能与优化/批处理与嵌入](https://zread.ai/facebookresearch/esm/21-batch-processing-and-embeddings)
+
+---
+slug:21-batch-processing-and-embeddings
+blog_type:normal
+---
+
+
+
+批处理和嵌入是 ESM（进化规模建模）框架中的基本操作，能够高效处理多个蛋白质序列并提取有意义的表示。本文档介绍了批量处理蛋白质序列和生成嵌入的核心组件与工作流程。
+
+## 核心数据处理组件
+
+ESM 提供了一个全面的数据处理流水线，围绕三个主要类构建，它们协同工作以高效处理批量操作。
+
+### FastaBatchedDataset
+
+`FastaBatchedDataset` 类是从 FASTA 文件加载和组织蛋白质序列的基础 [esm/data.py#L19-L90](esm/data.py#L19-L90)。该类自动解析 FASTA 文件，提取序列标签和序列，并提供智能批处理功能。
+
+```python
+# 从 FASTA 文件初始化
+dataset = FastaBatchedDataset.from_file("proteins.fasta")
+
+# 获取针对内存使用优化的批次索引
+batch_indices = dataset.get_batch_indices(toks_per_batch=4096)
+```
+
+该类包含一个复杂的 `get_batch_indices` 方法，根据序列长度和可用内存约束优化批次形成，确保高效的 GPU 利用率。
+
+### Alphabet 和分词
+
+`Alphabet` 类管理蛋白质序列的词汇表和分词过程 [esm/data.py#L91-L252](esm/data.py#L91-L252)。它处理氨基酸字符与神经网络使用的数值索引之间的映射。
+
+主要特性包括：
+- 支持特殊标记（CLS、EOS、MASK、PAD）
+- 可配置的分词策略
+- 与批次转换器的集成
+
+### BatchConverter
+
+`BatchConverter` 类是将原始序列数据转换为模型就绪张量的主力 [esm/data.py#L253-L299](esm/data.py#L253-L299)。它处理填充、特殊标记插入和张量创建。
+
+```python
+# 从字母表创建批次转换器
+batch_converter = alphabet.get_batch_converter(truncation_seq_length=1024)
+
+# 将原始序列转换为张量
+labels, sequences, tokens = batch_converter([
+    ("protein1", "MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG"),
+    ("protein2", "KALTARQQEVFDLIRDHISQTGMPPTRAEIAQRLGFRSPNAAEEHLKALARKGVIEIVSGASRGIRLLQEE")
+])
+```
+
+转换器通过填充较短序列并根据模型架构要求添加特殊标记来自动处理可变序列长度。
+
+## 批处理工作流程
+
+典型的批处理工作流程遵循以下结构化序列：
+
+```mermaid
+flowchart TD
+    A[加载 FASTA 文件] --> B[FastaBatchedDataset]
+    B --> C[生成批次索引]
+    C --> D[BatchConverter]
+    D --> E[模型前向传播]
+    E --> F[提取嵌入]
+    
+    subgraph "内存优化"
+        C --> G[动态批处理]
+        G --> H[序列长度排序]
+    end
+    
+    subgraph "模型处理"
+        D --> I[分词]
+        I --> J[填充与特殊标记]
+        J --> K[张量创建]
+    end
+```
+
+## 嵌入生成
+
+ESM 模型在 Transformer 架构的多个层生成丰富的嵌入。嵌入提取过程通过模型的 forward 方法处理，支持可配置的表示层。
+
+### 多层表示
+
+ESM-2 模型提供对所有 Transformer 层表示的访问 [esm/model/esm2.py#L77-L145](esm/model/esm2.py#L77-L145)：
+
+```python
+# 从特定层生成嵌入
+results = model(
+    batch_tokens, 
+    repr_layers=[0, 6, 12, 33],  # 从多个层提取
+    need_head_weights=False,
+    return_contacts=False
+)
+
+# 访问嵌入
+embeddings = results["representations"]
+layer_33_embeddings = embeddings[33]  # 最终层嵌入
+```
+
+### 嵌入维度
+
+不同的 ESM 模型变体提供不同的嵌入维度：
+
+| 模型 | 参数量 | 嵌入维度 | 层数 | 使用场景 |
+|-------|------------|---------------|--------|----------|
+| ESM-2 8M | 8M | 320 | 6 | 快速原型设计 |
+| ESM-2 35M | 35M | 480 | 12 | 平衡性能 |
+| ESM-2 150M | 150M | 640 | 30 | 高质量嵌入 |
+| ESM-2 650M | 650M | 1280 | 33 | 生产级别 |
+| ESM-2 3B | 3B | 1280 | 36 | 最高精度 |
+
+## 高效内存处理
+
+对于大规模批处理，ESM 提供了几种优化策略：
+
+### 使用 FSDP 进行 CPU 卸载
+
+该框架支持完全分片数据并行（FSDP）与 CPU 卸载，用于处理像 15B 参数 ESM-2 这样的大规模模型 [examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L1-L57](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L1-L57)：
+
+```python
+# 使用 CPU 卸载初始化 FSDP
+fsdp_params = dict(
+    mixed_precision=True,
+    flatten_parameters=True,
+    state_dict_device=torch.device("cpu"),
+    cpu_offload=True,
+)
+
+with enable_wrap(wrapper_cls=FSDP, **fsdp_params):
+    model, vocab = esm.pretrained.load_model_and_alphabet_core(
+        model_name, model_data, regression_data
+    )
+```
+
+<CgxTip>
+CPU 卸载通过将参数存储在 CPU 上，并在计算期间仅在需要时将它们传输到 GPU，从而能够处理超出 GPU 内存限制的模型。
+</CgxTip>
+
+### 动态批处理
+
+`FastaBatchedDataset.get_batch_indices()` 方法实现了智能批处理，在最大化吞吐量的同时优化内存使用：
+
+```python
+# 生成内存最优的批次
+batch_indices = dataset.get_batch_indices(
+    toks_per_batch=8192,  # 每批次的目标标记数
+    extra_toks_per_seq=2  # 考虑特殊标记
+)
+```
+
+这种方法按长度对序列进行排序并分组，以最小化填充开销，同时保持在内存约束范围内。
+
+## 高级批处理模式
+
+### 变异预测批处理
+
+对于变异预测任务，ESM 展示了复杂的批处理策略，能够处理多种评分方法 [examples/variant-prediction/predict.py#L1-L242](examples/variant-prediction/predict.py#L1-L242)：
+
+```python
+# 野生型边际评分策略
+if args.scoring_strategy == "wt-marginals":
+    with torch.no_grad():
+        token_probs = torch.log_softmax(model(batch_tokens.cuda())["logits"], dim=-1)
+    df[model_location] = df.apply(
+        lambda row: label_row(row[args.mutation_col], args.sequence, token_probs, alphabet, args.offset_idx),
+        axis=1,
+    )
+```
+
+### MSA 处理
+
+对于多序列比对（MSA）数据，框架通过 `MSABatchConverter` 提供专门的批处理 [esm/data.py#L300-L338](esm/data.py#L300-L338)：
+
+```python
+# 处理 MSA 数据
+msa_data = read_msa(msa_path, nseq=400)
+batch_converter = MSABatchConverter(alphabet)
+batch_labels, batch_strs, batch_tokens = batch_converter(msa_data)
+```
+
+## 性能优化策略
+
+### 批大小调整
+
+最优批大小因模型和硬件配置而异：
+
+| 模型 | GPU 内存 | 推荐批大小 |
+|-------|------------|------------------------|
+| ESM-2 8M | 8GB | 32-64 个序列 |
+| ESM-2 150M | 16GB | 8-16 个序列 |
+| ESM-2 650M | 24GB | 4-8 个序列 |
+| ESM-2 3B | 40GB | 1-2 个序列 |
+
+### 序列长度管理
+
+对于非常长的序列，请考虑以下策略：
+
+1. **截断**：在 `BatchConverter` 中使用 `truncation_seq_length` 参数
+2. **分块**：将长序列分割为重叠的块
+3. **分层处理**：分别处理段并组合嵌入
+
+<CgxTip>
+截断序列时，请考虑生物学背景，并确保为特定应用保留关键区域。
+</CgxTip>
+
+## 与下游任务的集成
+
+批处理的嵌入作为各种下游应用的输入：
+
+- **结构预测**：ESMFold 使用嵌入生成 3D 结构
+- **功能预测**：分类模型使用嵌入作为特征
+- **蛋白质设计**：嵌入指导序列优化算法
+- **变异效应预测**：比较序列变体之间的嵌入
+
+ESM 批处理系统的模块化设计能够与这些应用无缝集成，同时保持计算效率。
+
+有关更高级的优化技术，请参阅[使用 FSDP 进行 CPU 卸载](19-cpu-offloading-with-fsdp)和[内存高效分块推理](20-memory-efficient-chunked-inference)。
+
+---
