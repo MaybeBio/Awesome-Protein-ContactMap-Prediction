@@ -97,6 +97,16 @@ A curated collection of computational tools for `intermolecular interaction pred
 --- 
 
 <details>
+<summary>ESMFold2</summary>
+
+- **Paper:** [Language Modeling Materializes a World Model of Protein Biology](https://www.biorxiv.org/content/10.64898/2026.06.03.729735v1) (bioRxiv, 2026)
+- **Docs:** [Read more →](docs/ESMFold2/) *to be written*
+- **Code:** https://github.com/Biohub/esm#esmfold2 | https://huggingface.co/biohub/ESMFold2
+</details>
+
+--- 
+
+<details>
 <summary>RoseTTAFold</summary>
 
 - **Paper:** [Accurate prediction of protein structures and interactions using a three-track neural network](https://www.science.org/doi/10.1126/science.abj8754) (Science, 2021)
