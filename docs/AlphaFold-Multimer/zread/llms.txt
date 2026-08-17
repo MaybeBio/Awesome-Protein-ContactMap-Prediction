@@ -1,0 +1,57 @@
+# jcheongs/alphafold-multimer
+
+Source: https://zread.ai/jcheongs/alphafold-multimer
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/使用 Docker 安装 AlphaFold-Multimer](3-installing-alphafold-multimer-with-docker.md)
+- [入门指南/下载基因数据库和模型参数](4-downloading-genetic-databases-and-model-parameters.md)
+- [入门指南/运行你的首次预测](5-running-your-first-prediction.md)
+
+## 深度解析
+
+### 核心架构
+
+- [深度解析/核心架构/AlphaFold-Multimer 架构概览](6-alphafold-multimer-architecture-overview.md)
+- [深度解析/核心架构/数据流程与特征处理](7-data-pipeline-and-feature-processing.md)
+- [深度解析/核心架构/模型配置与预设](8-model-configuration-and-presets.md)
+
+### 多聚体特定功能
+
+- [深度解析/多聚体特定功能/多序列比对 (MSA) 配对](9-multiple-sequence-alignment-msa-pairing.md)
+- [深度解析/多聚体特定功能/链特征合并与组装](10-chain-feature-merging-and-assembly.md)
+- [深度解析/多聚体特定功能/原核与真核配对策略](11-prokaryotic-vs-eukaryotic-pairing-strategies.md)
+
+### 模型组件
+
+- [深度解析/模型组件/Evoformer 和嵌入模块](12-evoformer-and-embedding-modules.md)
+- [深度解析/模型组件/结构模块与不变点注意力机制](13-structure-module-and-invariantpointattention.md)
+- [深度解析/模型组件/用于多聚体预测的模板嵌入](14-template-embedding-for-multimer-prediction.md)
+- [深度解析/模型组件/循环与集成机制](15-recycling-and-ensembling-mechanisms.md)
+
+### 置信度指标
+
+- [深度解析/置信度指标/残基置信度 (pLDDT)](16-per-residue-confidence-plddt.md)
+- [深度解析/置信度指标/预测 TM-score (pTM)](17-predicted-tm-score-ptm.md)
+- [深度解析/置信度指标/预测对齐误差 (PAE) 可视化](18-predicted-aligned-error-pae-visualization.md)
+
+### 后处理
+
+- [深度解析/后处理/用于结构优化的 Amber 弛豫](19-amber-relaxation-for-structure-refinement.md)
+- [深度解析/后处理/模型排序与选择](20-model-ranking-and-selection.md)
+- [深度解析/后处理/结构违规检测](21-structural-violation-detection.md)
+
+### 性能优化
+
+- [深度解析/性能优化/数据库预设 (reduced_dbs vs full_dbs)](22-database-presets-reduced_dbs-vs-full_dbs.md)
+- [深度解析/性能优化/GPU 配置与资源管理](23-gpu-configuration-and-resource-management.md)
+- [深度解析/性能优化/基准测试与性能分析](24-benchmarking-and-profiling.md)
+
+### API 参考
+
+- [深度解析/API 参考/RunModel 类与预测接口](25-runmodel-class-and-prediction-interface.md)
+- [深度解析/API 参考/用于多聚体处理的 DataPipeline 类](26-datapipeline-class-for-multimer-processing.md)
+- [深度解析/API 参考/特征字典结构](27-feature-dictionary-structure.md)
+
