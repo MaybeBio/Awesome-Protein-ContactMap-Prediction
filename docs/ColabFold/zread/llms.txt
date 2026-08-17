@@ -1,0 +1,34 @@
+# sokrypton/ColabFold
+
+Source: https://zread.ai/sokrypton/ColabFold
+
+## 开始入门
+
+- [开始入门/概述](1-overview.md)
+- [开始入门/快速入门](2-quick-start.md)
+- [开始入门/安装选项](3-installation-options.md)
+### 蛋白质折叠方法
+
+- [开始入门/蛋白质折叠方法/使用AlphaFold2](4-using-alphafold2.md)
+- [开始入门/蛋白质折叠方法/使用ESMFold](5-using-esmfold.md)
+
+
+## 热议话题
+
+- [热议话题/热议内容](6-whats-the-buzz.md)
+- [热议话题/大家怎么说](7-what-people-are-saying.md)
+- [热议话题/关于团队](8-about-the-team.md)
+
+## 深度探索
+
+- [深度探索/蛋白质结构预测概念](9-protein-structure-prediction-concepts.md)
+- [深度探索/ColabFold架构](10-colabfold-architecture.md)
+- [深度探索/MSA服务器设置与配置](14-msa-server-setup-and-configuration.md)
+- [深度探索/Docker部署](15-docker-deployment.md)
+- [深度探索/扩展ColabFold](17-extending-colabfold.md)
+### 高级功能
+
+- [深度探索/高级功能/高级配置选项](11-advanced-configuration-options.md)
+- [深度探索/高级功能/实验性功能](12-experimental-features.md)
+- [深度探索/高级功能/自定义MSA生成](13-custom-msa-generation.md)
+
