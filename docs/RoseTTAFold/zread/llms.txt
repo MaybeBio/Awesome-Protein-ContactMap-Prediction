@@ -1,0 +1,49 @@
+# RosettaCommons/RoseTTAFold
+
+Source: https://zread.ai/RosettaCommons/RoseTTAFold
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/安装与环境配置](3-installation-and-environment-setup.md)
+- [入门指南/数据库下载与配置](4-database-download-and-configuration.md)
+
+## 动态资讯
+
+- [动态资讯/最新更新](5-latest-updates.md)
+- [动态资讯/问题与反馈](6-issues-and-feedbacks.md)
+- [动态资讯/关于贡献者](7-about-contributors.md)
+
+## 深度解析
+
+### 三轨神经网络架构
+
+- [深度解析/三轨神经网络架构/RoseTTAFold核心模型实现](8-rosettafold-core-model-implementation.md)
+- [深度解析/三轨神经网络架构/结构信息注意力机制](9-attention-mechanisms-with-structural-information.md)
+- [深度解析/三轨神经网络架构/SE(3)-等变网络用于3D坐标](10-se-3-equivariant-networks-for-3d-coordinates.md)
+
+### 蛋白质结构预测流程
+
+- [深度解析/蛋白质结构预测流程/MSA生成与序列处理](11-msa-generation-and-sequence-processing.md)
+- [深度解析/蛋白质结构预测流程/模板整合与特征提取](12-template-integration-and-feature-extraction.md)
+- [深度解析/蛋白质结构预测流程/迭代结构优化](13-iterative-structure-refinement.md)
+
+### 蛋白质-蛋白质相互作用建模
+
+- [深度解析/蛋白质-蛋白质相互作用建模/双轨网络用于复合物预测](14-two-track-network-for-complex-prediction.md)
+- [深度解析/蛋白质-蛋白质相互作用建模/PPI筛选与界面建模](15-ppi-screening-and-interface-modeling.md)
+- [深度解析/蛋白质-蛋白质相互作用建模/复合物建模流程](16-complex-modeling-workflow.md)
+
+### 高级功能与扩展
+
+- [深度解析/高级功能与扩展/PyRosetta集成用于结构优化](17-pyrosetta-integration-for-structure-refinement.md)
+- [深度解析/高级功能与扩展/DeepAccNet误差预测](18-deepaccnet-error-prediction.md)
+- [深度解析/高级功能与扩展/端到端与PyRosetta实现对比](19-end-to-end-vs-pyrosetta-implementation.md)
+
+### 性能与优化
+
+- [深度解析/性能与优化/GPU加速与CUDA支持](20-gpu-acceleration-and-cuda-support.md)
+- [深度解析/性能与优化/大分子蛋白质内存管理](21-memory-management-for-large-proteins.md)
+- [深度解析/性能与优化/批处理与并行化](22-batch-processing-and-parallelization.md)
+

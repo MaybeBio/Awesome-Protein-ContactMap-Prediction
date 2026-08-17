@@ -1,0 +1,3034 @@
+# RosettaCommons/RoseTTAFold
+
+Source: https://zread.ai/RosettaCommons/RoseTTAFold
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/RosettaCommons/RoseTTAFold/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+
+RoseTTAFold 是一个深度学习框架，采用三轨道神经网络架构，能够准确预测蛋白质结构和相互作用。本仓库提供了这一突破性方法的官方实现，该方法融合了序列、距离和坐标信息，在蛋白质结构预测领域达到了最先进的性能水平。
+
+## 架构概述
+
+RoseTTAFold 采用独特的 **三轨道神经网络**，同时处理蛋白质信息的多种表征形式：
+
+- **序列轨道**：捕获进化信息的多序列比对（MSA）数据
+- **距离轨道**：残基间距离和方向预测
+- **坐标轨道**：使用 SE(3)-等变网络处理的三维结构坐标
+
+该架构通过注意力机制整合这些轨道，允许不同表征之间的信息流动，使模型能够学习序列、结构和功能之间的复杂关系。
+
+```mermaid
+graph TB
+    A[输入序列] --> B[MSA 生成]
+    B --> C[三轨道网络]
+    
+    subgraph "三轨道神经网络"
+        D[序列轨道<br/>MSA 处理]
+        E[距离轨道<br/>成对关系] 
+        F[坐标轨道<br/>3D 结构]
+        D <--> E
+        E <--> F
+        D <--> F
+    end
+    
+    C --> G[结构预测]
+    G --> H[最终 3D 模型]
+    
+    I[模板数据库] --> C
+    J[二级结构] --> C
+```
+
+## 核心组件
+
+RoseTTAFold 框架由几个主要模块组成：
+
+### 核心网络架构
+- **RoseTTAFoldModel** ([`network/RoseTTAFoldModel.py`](network/RoseTTAFoldModel.py#L8))：实现三轨道架构的主要神经网络模块
+- **Transformer Networks** ([`network/Transformer.py`](network/Transformer.py#L43))：用于序列和成对表征学习的多头注意力机制
+- **SE(3) Networks** ([`network/SE3_network.py`](network/SE3_network.py#L8))：用于 3D 坐标处理的等变图卷积网络
+
+### 处理流程
+- **输入准备** ([`input_prep/`](input_prep/))：MSA 生成和二级结构预测
+- **折叠整合** ([`folding/`](folding/))：基于 PyRosetta 的结构优化和能量最小化
+- **双轨道扩展** ([`network_2track/`](network_2track/))：用于蛋白质-蛋白质相互作用预测的优化版本
+
+### 分析工具
+- **DeepAccNet** ([`DAN-msa/`](DAN-msa/))：用于模型质量评估的错误预测系统
+- **示例工作流** ([`example/`](example/))：单体预测、复合物建模和端到端处理的完整示例
+
+## 项目结构
+
+```
+RoseTTAFold/
+├── 🧬 network/           # 核心三轨道神经网络
+├── 🔧 input_prep/        # MSA 和特征准备  
+├── 🏗️ folding/          # PyRosetta 结构优化
+├── 🔄 network_2track/    # 优化的 PPI 预测
+├── 📊 DAN-msa/          # 错误预测模块
+├── 📁 example/          # 使用示例和测试数据
+└── 🚀 scripts/          # 执行和设置脚本
+```
+
+## 核心功能
+
+| 功能 | 描述 | 实现 |
+|---------|-------------|---------------|
+| **三轨道架构** | 同时处理序列、距离和坐标信息 | [`RoseTTAFoldModel.py`](network/RoseTTAFoldModel.py#L8) |
+| **SE(3)-等变性** | 旋转和平移不变的 3D 处理 | [`SE3_network.py`](network/SE3_network.py#L54) |
+| **模板整合** | 融入已知结构模板 | [`predict_e2e.py`](network/predict_e2e.py) |
+| **端到端预测** | 直接的序列到结构映射 | [`run_e2e_ver.sh`](run_e2e_ver.sh#L1) |
+| **复合物建模** | 蛋白质-蛋白质相互作用预测 | [`network_2track/`](network_2track/) |
+| **错误估计** | 预测的置信度评分 | [`DAN-msa/`](DAN-msa/) |
+
+## 使用模式
+
+RoseTTAFold 支持多种执行模式，适用于不同的使用场景：
+
+### 1. 端到端预测
+使用集成的三轨道网络，从序列到最终结构的完整流程：
+
+```bash
+# 执行端到端预测
+./run_e2e_ver.sh input.fasta output_directory
+```
+
+此工作流 ([`run_e2e_ver.sh`](run_e2e_ver.sh#L31)) 执行：
+- 使用 HHblits 生成 MSA
+- 使用 PSIPRED 预测二级结构
+- 使用 HHsearch 搜索模板
+- 三轨道结构预测
+
+### 2. PyRosetta 集成
+对于需要使用 Rosetta 能量函数进行高质量结构优化的用户：
+
+```bash
+# 执行 PyRosetta 增强预测  
+./run_pyrosetta_ver.sh input.fasta output_directory
+```
+
+### 3. 复合物建模
+使用优化的双轨道网络进行蛋白质-蛋白质相互作用预测的专门模式：
+
+```bash
+python network/predict_complex.py -i paired.a3m -o complex -Ls 218 310
+```
+
+## 技术要求
+
+RoseTTAFold 需要大量的计算资源和多个外部依赖：
+
+- **GPU**：CUDA 兼容 GPU（推荐以提高性能）
+- **内存**：大型蛋白质需要 64GB+ RAM
+- **存储**：所需数据库需要 400GB+ 空间
+- **依赖**：PyTorch、PyRosetta、HHsuite、PSIPRED
+
+<CgxTip>
+框架提供两个 conda 环境配置：`RoseTTAFold-linux.yml` 用于标准使用，`RoseTTAFold-linux-cu101.yml` 用于 CUDA 10.1 兼容性。此外，`folding-linux.yml` 是 PyRosetta 集成和 DeepAccNet 错误预测所必需的。
+</CgxTip>
+
+## 后续步骤
+
+开始使用 RoseTTAFold：
+
+1. **[快速入门](2-quick-start)**：通过简单示例学习基本工作流
+2. **[安装和环境设置](3-installation-and-environment-setup)**：详细的安装说明和依赖管理
+3. **[数据库下载和配置](4-database-download-and-configuration)**：设置所需的序列和结构数据库
+
+如需深入了解技术细节，请探索涵盖三轨道架构、蛋白质结构预测流程和高级功能的**深度解析**部分。
+
+---
+
+*RoseTTAFold 代表了计算蛋白质结构预测的重大进步，将深度学习与生物物理原理相结合，为单个蛋白质和蛋白质复合物提供准确的模型。*
+
+---
+
+- [入门指南/快速开始](https://zread.ai/RosettaCommons/RoseTTAFold/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+
+RoseTTAFold 是一个强大的深度学习框架，采用三轨道神经网络进行准确的蛋白质结构和相互作用预测。本快速入门指南将帮助你在几分钟内快速上手基本蛋白质结构预测。
+
+## 系统要求
+
+在开始之前，请确保你具备：
+- Linux 操作系统
+- 支持 CUDA 的 NVIDIA GPU（CUDA 10.1 或 11.0）
+- Conda 包管理器
+- 充足的存储空间（数据库约需 400GB）
+- PyRosetta 许可证（仅 PyRosetta 版本需要）
+
+## 快速安装
+
+最快的入门方式是使用提供的 conda 环境文件：
+
+```bash
+# 克隆仓库
+git clone https://github.com/RosettaCommons/RoseTTAFold.git
+cd RoseTTAFold
+
+# 创建 conda 环境（根据你的 CUDA 版本选择）
+conda env create -f RoseTTAFold-linux.yml  # 适用于 CUDA 11
+# 或
+conda env create -f RoseTTAFold-linux-cu101.yml  # 适用于 CUDA 10.1
+
+# 下载预训练权重
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/weights.tar.gz
+tar xfz weights.tar.gz
+
+# 安装依赖项
+./install_dependencies.sh
+```
+
+## 基本用法：单体结构预测
+
+RoseTTAFold 提供两种主要单体结构预测方法：
+
+### 1. 端到端版本（更快，单一模型）
+
+端到端版本提供快速预测，输出单个模型：
+
+```bash
+cd example
+../run_e2e_ver.sh input.fa .
+```
+
+### 2. PyRosetta 版本（更详细，多模型）
+
+PyRosetta 版本生成多个精修结构模型：
+
+```bash
+cd example  
+../run_pyrosetta_ver.sh input.fa .
+```
+
+<CgxTip>对于初学者，建议从端到端版本开始，因为它速度更快且依赖项更少（无需 PyRosetta 许可证）。</CgxTip>
+
+## 输入格式
+
+你的输入应该是包含蛋白质序列的 FASTA 文件：
+
+```fasta
+>Protein_Name
+MAAPTPADKSMMAAVPEWTITNLKRVCNAGNTSCTWTFGVDTHLATATSCTYVVKANANASQASGGPVTCGPYTITSSWSGQFGPNNGFTTFAVTDFSKKLIVWPAYTDVQVQAGKVVSPNQSYAPANLPLEHHHHHH
+```
+
+## 预期输出
+
+| 版本 | 输出文件 | 描述 |
+|---------|--------------|-------------|
+| 端到端 | `t000_.e2e.pdb` | 单个 PDB 文件，B-factor 列包含估算的 CA-lddt 分数 |
+| PyRosetta | `model/model_1-5.crderr.pdb` | 五个精修模型，B-factor 列包含估算的 CA RMS 误差 |
+
+## 架构概述
+
+RoseTTAFold 使用革命性的三轨道神经网络，同时处理：
+1. **序列信息**（MSA 数据）
+2. **距离/方向图**（2D 表示）  
+3. **3D 坐标**（笛卡尔空间）
+
+```mermaid
+graph TD
+    A[输入序列] --> B[MSA 生成]
+    B --> C[模板搜索]
+    C --> D[三轨道神经网络]
+    D --> E[结构预测]
+    E --> F[最终模型]
+    
+    subgraph "三轨道处理"
+        D1[序列轨道]
+        D2[2D 距离轨道] 
+        D3[3D 坐标轨道]
+        D1 --> D
+        D2 --> D
+        D3 --> D
+    end
+```
+
+## 后续步骤
+
+成功运行基本单体预测后，探索这些高级功能：
+
+- **复合物建模**：学习使用双轨道网络预测蛋白质-蛋白质相互作用。详细说明请参见[复合物建模工作流](16-complex-modeling-workflow)。
+
+- **数据库设置**：用于生产环境时，下载并配置完整的序列和结构数据库。请遵循[数据库下载和配置](4-database-download-and-configuration)指南。
+
+- **高级功能**：在[深入探讨](8-rosettafold-core-model-implementation)章节探索 PyRosetta 集成、DeepAccNet 误差预测和批处理能力。
+
+## 故障排除
+
+如果遇到 hhblits/hhsearch 段错误，请尝试从源代码编译 hhsuite，而不是使用 conda 安装的版本。对于计算集群使用，请修改提供的脚本，为每个流水线步骤提交具有适当依赖关系的独立作业。
+
+<CgxTip>建模脚本仅供指导参考。对于生产环境，建议根据你的特定计算基础设施优化资源分配和作业调度。</CgxTip>
+
+---
+
+- [入门指南/安装与环境配置](https://zread.ai/RosettaCommons/RoseTTAFold/3-installation-and-environment-setup)
+
+---
+slug:3-installation-and-environment-setup
+blog_type:normal
+---
+
+
+
+RoseTTAFold 需要全面设置，包括 conda 环境、第三方依赖和大规模生物数据库。本指南提供了配置蛋白质结构预测环境的系统方法。
+
+## 系统要求和架构概述
+
+RoseTTAFold 支持两种主要计算模式，具有不同的资源需求：
+
+| 模式 | GPU 支持 | 主要用例 | 环境 |
+|------|-------------|------------------|-------------|
+| 端到端 | CUDA 10.2/11.1 | 快速单体预测 | RoseTTAFold |
+| PyRosetta | CUDA 10.2/11.1 | 带优化的高精度建模 | RoseTTAFold + folding |
+
+```mermaid
+flowchart TD
+    A[RoseTTAFold 仓库] --> B[Conda 环境]
+    B --> C[RoseTTAFold 环境]
+    B --> D[Folding 环境]
+    C --> E[核心依赖]
+    D --> F[PyRosetta + DeepAccNet]
+    
+    A --> G[第三方工具]
+    G --> H[HHsuite]
+    G --> I[PSIPRED]
+    G --> J[CS-BLAST]
+    G --> K[LDDT]
+    
+    A --> L[生物数据库]
+    L --> M[UniRef30]
+    L --> N[BFD]
+    L --> O[PDB 模板]
+    
+    E --> P[网络权重]
+    F --> P
+```
+
+## 先决条件
+
+在继续之前，请确保你拥有：
+- 已安装 **Conda**（Miniconda 或 Anaconda）
+- **NVIDIA GPU** 并配备 CUDA 兼容驱动程序（CUDA 10.2 或 11.1）
+- **存储空间**：数据库至少需要 500GB 可用空间
+- **内存**：最低 16GB RAM，推荐 64GB 用于大型蛋白质
+
+## 环境设置
+
+### 1. 仓库克隆
+
+```bash
+git clone https://github.com/RosettaCommons/RoseTTAFold.git
+cd RoseTTAFold
+```
+
+### 2. Conda 环境创建
+
+RoseTTAFold 根据你的 CUDA 版本提供两种环境配置：
+
+**对于 CUDA 11.1：**
+```bash
+conda env create -f RoseTTAFold-linux.yml
+```
+
+**对于 CUDA 10.2：**
+```bash
+conda env create -f RoseTTAFold-linux-cu101.yml
+```
+
+两种环境都包含核心依赖，如 PyTorch 1.8-1.9、HHsuite、PSIPRED 以及几何深度学习的专用包 [RoseTTAFold-linux.yml](RoseTTAFold-linux.yml#L1-L109)。
+
+**额外的 Folding 环境：**
+基于 PyRosetta 的建模和 DeepAccNet 错误预测所必需：
+```bash
+conda env create -f folding-linux.yml
+```
+
+这个轻量级环境包含 TensorFlow-GPU 1.14 和支持库 [folding-linux.yml](folding-linux.yml#L1-L10)。
+
+### 3. 网络权重下载
+
+预训练权重根据 Rosetta-DL 软件许可证提供，仅供非商业用途：
+
+```bash
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/weights.tar.gz
+tar xfz weights.tar.gz
+```
+
+<CgxTip>
+权重包包括原始 RoseTTAFold 模型和用于蛋白质-蛋白质相互作用筛选的 RoseTTAFold-2track 模型的 RF2t.pt 权重。如需最新的 2-track 权重，请重新下载。
+</CgxTip>
+
+## 第三方依赖安装
+
+执行自动化安装脚本，安装无法通过 conda 获取的工具：
+
+```bash
+./install_dependencies.sh
+```
+
+此脚本下载并配置：
+- **LDDT**：用于模型验证的局部距离差异测试
+- **CS-BLAST**：用于增强序列比对的上下文特定 BLAST
+
+脚本自动检测你的平台（Linux/macOS）并安装适当的二进制文件 [install_dependencies.sh](install_dependencies.sh#L1-L28)。
+
+## 生物数据库配置
+
+RoseTTAFold 需要三个基本数据库用于 MSA 生成和模板搜索：
+
+### 1. UniRef30 数据库 (46GB)
+```bash
+wget http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+mkdir -p UniRef30_2020_06
+tar xfz UniRef30_2020_06_hhsuite.tar.gz -C ./UniRef30_2020_06
+```
+
+### 2. BFD 数据库 (272GB)
+```bash
+wget https://bfd.mmseqs.com/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz
+mkdir -p bfd
+tar xfz bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz -C ./bfd
+```
+
+### 3. PDB 模板数据库 (>100GB)
+```bash
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
+tar xfz pdb100_2021Mar03.tar.gz
+```
+
+<CgxTip>
+MSA 生成管道 [input_prep/make_msa.sh](input_prep/make_msa.sh#L18-L24) 迭代搜索 UniRef30 和 BFD 数据库，以构建全面的多序列比对，用于准确的进化信息提取。
+</CgxTip>
+
+## PyRosetta 许可证设置
+
+对于基于 PyRosetta 的建模管道：
+
+1. **获取许可证**：在 [PyRosetta Downloads](https://els2.commotion.uw.edu/product/pyrosetta) 注册
+2. **安装 PyRosetta**：在 `folding` conda 环境中按照你平台的安装说明操作
+3. **验证安装**：使用提供的示例脚本进行测试
+
+## 管道验证
+
+### 端到端模式测试
+```bash
+cd example
+../run_e2e_ver.sh input.fa .
+```
+
+### PyRosetta 模式测试
+```bash
+cd example  
+../run_pyrosetta_ver.sh input.fa .
+```
+
+两个脚本都会激活相应的 conda 环境并执行完整管道，包括 MSA 生成、模板搜索和结构预测 [run_e2e_ver.sh](run_e2e_ver.sh#L25-L30), [run_pyrosetta_ver.sh](run_pyrosetta_ver.sh#L25-L30)。
+
+## 常见问题故障排除
+
+### CUDA 兼容性
+- **HHsuite 的段错误**：从源代码编译，而不是使用 conda 版本
+- **GPU 内存问题**：减少批大小或对大型蛋白质使用仅 CPU 模式
+
+### 数据库配置
+- **缺失数据库**：验证管道脚本中的所有数据库路径
+- **权限问题**：确保对数据库目录有适当的读取访问权限
+
+### 环境冲突
+- **PyRosetta 冲突**：按照规定使用单独的 `folding` 环境
+- **依赖版本不匹配**：严格使用提供的环境文件
+
+## 后续步骤
+
+成功安装后，继续进行 [数据库下载和配置](4-database-download-and-configuration) 以了解详细的数据库管理，或探索 [快速开始](2-quick-start) 获取即时使用示例。如需了解计算管道，请参阅深入探讨部分中的 [MSA 生成和序列处理](11-msa-generation-and-sequence-processing)。
+
+---
+
+- [入门指南/数据库下载与配置](https://zread.ai/RosettaCommons/RoseTTAFold/4-database-download-and-configuration)
+
+---
+slug:4-database-download-and-configuration
+blog_type:normal
+---
+
+
+
+本指南涵盖了高效运行 RoseTTAfold 所需的基础数据库和配置要求。正确的数据库设置对于精确的蛋白质结构预测和相互作用建模至关重要。
+
+## 必需数据库
+
+RoseTTAfold 需要三个主要数据库才能正常运行。这些数据库提供了精确预测所需的序列多样性、结构模板和进化信息。
+
+### 序列数据库
+
+**UniRef30 数据库** (46GB)
+- 包含以 30% 一致性阈值聚类处理的蛋白质序列
+- 对于生成多重序列比对（MSA）至关重要
+- 下载并解压：
+```bash
+wget http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+mkdir -p UniRef30_2020_06
+tar xfz UniRef30_2020_06_hhsuite.tar.gz -C ./UniRef30_2020_06
+```
+
+**BFD 数据库** (272GB)
+- 包含宏基因组序列的 Big Fantastic Database
+- 为远缘同源物提供深度进化信息
+- 下载并解压：
+```bash
+wget https://bfd.mmseqs.com/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz
+mkdir -p bfd
+tar xfz bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz -C ./bfd
+```
+
+### 结构模板数据库
+
+**PDB100 数据库** (100GB+)
+- 包含用于同源建模的结构模板
+- 包含 HHsuite 格式的序列和结构信息
+- 下载并解压：
+```bash
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
+tar xfz pdb100_2021Mar03.tar.gz
+```
+
+<CgxTip>对于 CASP14 基准测试，请使用替代的 PDB100 数据库：`https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2020Mar11.tar.gz`</CgxTip>
+
+## 配置设置
+
+### 环境变量
+
+管道使用 `PIPEDIR` 环境变量来定位数据库和脚本。这在执行脚本中自动设置：
+
+```bash
+export PIPEDIR=/path/to/RoseTTAFold
+```
+
+### 数据库集成
+
+MSA 生成脚本 [make_msa.sh](input_prep/make_msa.sh#L17-L18) 通过特定路径引用数据库：
+
+```bash
+declare -a DATABASES=( \
+    "$PIPEDIR/UniRef30_2020_06/UniRef30_2020_06" \
+    "$PIPEDIR/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt")
+```
+
+模板搜索使用 PDB100 数据库路径：
+```bash
+DB="$PIPEDIR/pdb100_2021Mar03/pdb100_2021Mar03"
+```
+
+## 数据库使用管道
+
+```mermaid
+flowchart TD
+    A[输入 FASTA] --> B[HHblits 搜索]
+    B --> C[UniRef30 数据库]
+    B --> D[BFD 数据库]
+    C --> E[MSA 生成]
+    D --> E
+    E --> F[PSIPRED 二级结构预测]
+    F --> G[HHsearch 模板搜索]
+    G --> H[PDB100 数据库]
+    H --> I[模板特征]
+    I --> J[结构预测]
+```
+
+<CgxTip>确保所有数据库都已解压在相对于 RoseTTAfold 安装目录的正确目录结构中，以便脚本能够正确定位它们。</CgxTip>
+
+## 存储要求
+
+| 数据库 | 大小 | 用途 | 格式 |
+|----------|------|---------|--------|
+| UniRef30_2020_06 | 46GB | MSA 生成 | HHsuite 格式 |
+| BFD | 272GB | 深度进化信息 | MMseqs2 格式 |
+| PDB100_2021Mar03 | 100GB+ | 结构模板 | HHsuite 格式 |
+
+完整数据库设置的总存储需求：**约 418GB**。
+
+## 配置文件
+
+### 网络参数
+
+折叠过程使用存储在 [params.json](folding/data/params.json#L1-L18) 中的配置参数，其中包括距离预测阈值、能量项和采样参数。
+
+### 二级结构预测
+
+PSIPRED 需要位于以下位置的特定数据文件：
+```bash
+$CONDA_PREFIX/share/psipred_4.01/data
+```
+
+这在 [make_ss.sh](input_prep/make_ss.sh#L3) 脚本中自动配置。
+
+## 验证
+
+数据库设置完成后，通过运行示例验证安装：
+
+```bash
+cd example
+../run_pyrosetta_ver.sh input.fa .
+```
+
+管道将自动检测并使用配置的数据库进行 MSA 生成、模板搜索和结构预测。
+
+## 下一步
+
+配置好数据库后，请继续阅读 [安装和环境设置](3-installation-and-environment-setup) 以完成系统准备，或直接转到 [快速入门](2-quick-start) 开始使用 RoseTTAFold 处理你的蛋白质序列。
+
+对于复杂的蛋白质-蛋白质相互作用建模，需要额外的数据库准备步骤，详见 [复合物建模工作流程](16-complex-modeling-workflow)。
+
+---
+
+# 动态资讯
+
+- [动态资讯/最新更新](https://zread.ai/RosettaCommons/RoseTTAFold/5-latest-updates)
+
+---
+slug:5-latest-updates
+blog_type:buzz
+---
+
+
+
+RoseTTAFold 作为计算蛋白质结构预测和设计的基石持续发展，2024-2025 年的重大进展将其能力扩展到传统蛋白质系统之外。该项目通过架构创新、社区驱动的改进和生物分子建模领域的突破性应用保持了发展势头。
+
+## 主要架构进展
+
+### RoseTTAFold All-Atom (RFAA) - 2024年4月
+
+最重要的突破是 **RoseTTAFold All-Atom** 在《科学》杂志上的发表（[DOI: 10.1126/science.adl2528](https://doi.org/10.1126/science.adl2528)），标志着从仅蛋白质建模向全面生物分子系统的根本性转变。由蛋白质设计研究所的 Rohith Krishna、Jue Wang 和 Woody Ahern 领导，RFAA 结合了氨基酸和 DNA 碱基的残基表示以及所有其他分子组分的原子表示。
+
+这一进展使研究人员能够建模包含蛋白质、核酸、小分子、金属和共价修饰的复杂组装体。团队通过设计结合心脏治疗药物地高辛、酶辅因子血红素和光捕获分子胆色素的蛋白质，在实验上验证了该方法，展示了分子识别设计领域前所未有的精度。
+
+### RFdiffusion All-Atom 集成
+
+基于 RFAA，团队开发了 **RFdiffusion All-Atom (RFdiffusionAA)**，将生成能力扩展到围绕小分子创建蛋白质结构。这种基于去噪任务的微调方法使研究人员能够从氨基酸残基的随机分布开始，生成具有原子级精度的功能性结合蛋白。
+
+## 性能与基础设施更新
+
+### 数据库优化改进
+
+最近的提交显示团队专注于性能优化，特别是在 MSA（多序列比对）处理方面。2022年1月的更新引入了[序列化数据库以更好地利用内存缓存](https://github.com/RosettaCommons/RoseTTAFold/commit/81c65ef47058d0de172a806dc00484c6bfdf6da5)，解决了大规模预测的计算效率问题。
+
+### GPU 兼容性挑战
+
+社区积极解决 GPU 兼容性问题，多个[关于 CUDA 架构错误的开放问题](https://github.com/RosettaCommons/RoseTTAFold/issues/156)影响了 NVIDIA 40系列显卡。这些挑战反映了 GPU 硬件的快速发展以及持续维护 CUDA 集成的必要性。
+
+## 社区扩展与分支
+
+### RoseTTAFold2-PPI 用于蛋白质-蛋白质相互作用
+
+2025年10月，Qian Cong 实验室发布了 [RoseTTAFold2-PPI](https://github.com/CongLabCode/RoseTTAFold2-PPI)，这是一个专门用于大规模蛋白质-蛋白质相互作用筛选的深度学习模型。基于 RoseTTAFold2 架构构建，该工具能够系统分析 PPIs——这是理解生物系统和药物发现的基础能力。
+
+该实现包括优化的配对 MSA 生成流水线，并提供残基间相互作用的概率矩阵，但用户应注意预测的固有变异性，约5%的情况下标准偏差超过0.1。
+
+### RFdiffusion3 发布 - 2025年12月
+
+最新的进展 [RFdiffusion3](https://www.ipd.uw.edu/2025/12/rfdiffusion3-now-available) 比其前代产品快十倍，同时引入了原子级扩散，在化学相互作用设计方面实现了前所未有的精度。这个统一的基础模型整合了以前需要多个专门工具才能实现的功能，无论是设计对称组装体、结合蛋白质还是催化酶。
+
+## 认可与影响
+
+### 诺贝尔奖认可
+
+2024年诺贝尔化学奖授予 David Baker（与 DeepMind 的 Demis Hassabis 和 John Jumper 一起），凸显了计算蛋白质设计的变革性影响。正如[《麻省理工科技评论》采访](https://www.technologyreview.com/2025/11/24/1128322/whats-next-for-alphafold-a-conversation-with-a-google-deepmind-nobel-laureate/)所指出的，Baker 在 RoseTTAFold 和相关工具方面的工作使合成蛋白质的开发过程"加快了10倍"。
+
+### Robetta 服务扩展
+
+[Robetta 服务器](https://robetta.bakerlab.org)继续提供免费的 RoseTTAFold 预测访问，为233个国家的73,000多名用户服务。该服务在2025年12月的一周内处理了730个新作业并生成了3,195个最终模型，展示了该工具在研究社区的广泛采用。
+
+## 技术挑战与社区响应
+
+### 持续问题
+
+社区仍然存在几个持续的挑战：
+
+- **内存管理**：VRAM有限（12GB或更少）的用户继续探索[top-k参数优化](https://github.com/RosettaCommons/RoseTTAFold/issues/155)以平衡准确性和计算资源
+- **复杂预测脚本错误**：[predict_complex.py的write_pdb例程](https://github.com/RosettaCommons/RoseTTAFold/issues/153)需要补丁来正确处理链和残基编号
+- **数据库访问**：[bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz](https://github.com/RosettaCommons/RoseTTAFold/issues/146)下载问题仍未解决，迫使用户寻找替代数据源
+
+### 社区贡献
+
+该项目受益于积极的社区参与，贡献范围从文档改进到关键错误修复。最近的补丁展示了项目的协作性质，特别是在解决复杂预测工作流和GPU兼容性问题方面。
+
+## 未来方向
+
+RoseTTAFold的发展轨迹指向日益集成的生物分子设计能力。随着RFdiffusion3的发布和全原子建模的持续发展，该工具定位于解决酶设计、治疗开发和合成生物学中的复杂挑战。开源方法确保了快速迭代和社区驱动的创新，维持了RoseTTAFold作为计算结构生物学基础工具的角色。
+
+结构预测、生成设计和实验验证的融合代表了研究人员进行生物分子工程方法的范式转变，而RoseTTAFold作为这些进步的核心平台。
+
+---
+
+- [动态资讯/问题与反馈](https://zread.ai/RosettaCommons/RoseTTAFold/6-issues-and-feedbacks)
+
+---
+slug:6-issues-and-feedbacks
+blog_type:buzz
+---
+
+
+
+RoseTTAFold自发布以来便受到计算生物学领域的广泛关注，但用户在使用过程中遇到了多个反复出现的问题，这些问题既体现了工具的强大功能，也暴露了其当前的局限性。本分析综合了GitHub issues、论坛和社区讨论的反馈，全面概述了用户面临的最紧迫挑战。
+
+## GPU兼容性与CUDA问题
+
+最常报告的问题围绕GPU兼容性展开，特别是与新型NVIDIA硬件的兼容性问题。使用RTX 40系列显卡的用户持续遇到[CUDA架构错误](https://github.com/RosettaCommons/RoseTTAFold/issues/156)，错误信息为"RuntimeError: nvrtc: error: invalid value for --gpu-architecture (-arch)"。此问题似乎源于PyTorch内置的CUDA版本与新型GPU架构不兼容。
+
+NVIDIA论坛也记录了类似的[兼容性问题](https://forums.developer.nvidia.com/t/cuda-error-the-provided-ptx-was-compiled-with-an-unsupported-toolchain/185754)，用户通过将GPU驱动更新至470.57或更高版本成功解决了问题。根本原因似乎是PyTorch自带的CUDA版本可能超过了系统安装的CUDA toolkit版本。
+
+## 内存管理挑战
+
+内存限制是另一个显著瓶颈。即使使用RTX 4090（24GB）等高端GPU的用户，在处理1200个以上氨基酸的蛋白质时仍会报告[内存不足错误](https://github.com/baker-laboratory/RoseTTAFold-All-Atom/issues/63)。即使是使用RTX 3090的用户，由于内存管理效率低下，在处理相对较短的序列时也会遇到崩溃。
+
+社区已经探索了多种解决方案：
+- 调整Refine模块中的`top-k`值以减少VRAM使用
+- 修改`PYTORCH_CUDA_ALLOC_CONF`环境变量
+- 通过PyTorch的数据并行功能使用多个GPU
+
+然而，这些解决方案往往需要在预测准确性上做出妥协，特别是对于具有链间β-折叠相互作用的复杂蛋白质结构。
+
+## 多进程与系统配置
+
+一个影响多个用户的持续问题是[多进程错误](https://github.com/RosettaCommons/RoseTTAFold/issues/141)"ValueError: Number of processes must be at least 1"。此错误发生在`pick_final_models.div.py`脚本中，似乎与Python在不同系统上的多进程实现有关。
+
+问题源于Python通过`fork()`与`spawn`方法处理进程创建的方式。如[Python多进程指南所述](https://pythonspeed.com/articles/python-multiprocessing)，默认的`fork`方法在涉及线程时可能导致死锁。用户通过在创建进程池前显式设置启动方法为"spawn"成功解决了问题。
+
+## 数据库下载与存储问题
+
+BFD数据库（Big Fantastic Database）因其巨大体积（272GB）带来显著挑战。多位用户报告[下载失败](https://github.com/RosettaCommons/RoseTTAFold/issues/146)和"Unexpected EOF in archive"消息的解压错误。
+
+类似问题也记录在[AlphaFold仓库](https://github.com/deepmind/alphafold/issues/500)中，用户发现数据库在登录节点而非计算节点上解压是解决问题的关键。庞大的体积也造成存储限制，部分用户无法在临时分区上容纳完整数据库。
+
+## 复杂预测与PDB输出错误
+
+处理蛋白质复合物的用户发现了[PDB输出生成的关键错误](https://github.com/RosettaCommons/RoseTTAFold/issues/153)。`predict_complex.py`脚本在使用`-Ls`参数时错误处理链断裂和残基编号，导致生成的PDB文件格式错误，无法被BioPython等标准工具解析。
+
+用户提供的补丁解决了残基位置计算错误，并增加了对间隙区域的适当处理。然而，此修复尚未被正式纳入主代码库，迫使用户手动修补其安装版本。
+
+## 文档与可用性缺陷
+
+新用户经常在基本设置和使用上遇到困难。常见抱怨包括：
+- 数据库下载要求不明确（仅UniRef30是否足够？）
+- 输出解释模糊（"Running HHblits"是什么意思？）
+- 缺乏非标准用例的清晰示例
+
+[在线服务器限制](https://github.com/RosettaCommons/RoseTTAFold/issues/150)只能处理长于27个残基的序列，也让处理较小肽段的用户感到沮丧，尽管底层模型能够处理此类输入。
+
+## 社区响应与解决方案
+
+尽管面临这些挑战，社区仍然开发出了多种有效的解决方案：
+
+1. **CUDA问题**：使用带有特定CUDA版本的conda环境或从源代码编译PyTorch
+2. **内存限制**：实施梯度检查点或使用混合精度训练
+3. **数据库问题**：使用备用镜像或在具有充足资源的计算节点上解压
+4. **多进程**：在创建进程池前设置`multiprocessing.set_start_method("spawn")`
+
+RoseTTAFold团队对某些问题做出了响应，特别是那些具有明确可复现性和影响力的问题。然而，许多关键错误长期未得到解决，迫使用户维护自己的修补版本。
+
+## 与替代工具的比较
+
+将RoseTTAFold与AlphaFold和RoseTTAFold2等替代工具比较时，呈现出几种模式：
+- AlphaFold通常具有更好的GPU兼容性，但需要更多计算资源
+- RoseTTAFold2解决了部分内存问题，但引入了新的依赖冲突
+- 两种工具都面临类似的数据库下载挑战
+
+工具选择往往取决于特定用例和可用硬件，而非预测准确性的明显优势。
+
+## 未来展望
+
+社区反馈提出了多个改进方向：
+- 更好的GPU架构检测和回退机制
+- 针对大型蛋白质的更高效内存管理
+- 改进文档并添加故障排除指南
+- 标准化数据库管理工具
+- 定期更新以解决兼容性问题
+
+随着领域发展，解决这些基础设施挑战对于蛋白质结构预测工具的广泛采用和可及性至关重要。
+
+尽管面临这些挑战，活跃的社区参与说明了RoseTTAFold对研究社区的价值。通过持续开发和关注用户反馈，许多问题都可以得到解决，使工具更加稳健和用户友好。
+
+---
+
+- [动态资讯/关于贡献者](https://zread.ai/RosettaCommons/RoseTTAFold/7-about-contributors)
+
+---
+slug:7-about-contributors
+blog_type:buzz
+---
+
+
+
+## 远见卓识的领军者：Minkyung Baek
+
+RoseTTAFold 的开发核心人物是 **Minkyung Baek**，她从化学转向计算生物学的历程，体现了现代科学研究的跨学科特性。现任首尔国立大学生物科学系助理教授的 Baek，在蛋白质结构预测领域的贡献为她赢得了国际声誉，包括 2025 年享有盛誉的 **APEC 科学创新研究教育奖（ASPIRE）**——这使她成为自 2015 年以来首位获此殊荣的韩国人。
+
+Baek 的标志性创新成果 RoseTTAFold，代表了我们处理蛋白质结构预测方式的范式转变。正如她在 ASPIRE 颁奖致辞中所说，该工具已在生物学研究、药物发现和疫苗设计等领域得到广泛应用。她的研究不仅限于静态结构，还扩展到探索 **多种蛋白质构象**、蛋白质-蛋白质及蛋白质-核酸相互作用，以及设计具有特定功能的新型生物分子。
+
+从化学转向 AI 驱动的蛋白质研究并非一帆风顺。"我没有孤立地研究 AI，而是寻找弥合 AI 与蛋白质研究之间概念鸿沟的方法，"Baek 解释道。这种 **创造性跨学科融合** 的理念已成为她研究方法的标志。
+
+## 技术贡献者与社区影响
+
+### Shawn Callegari：数据库优化
+
+**Shawn Callegari** 为 RoseTTAFold 的基础设施做出了重要技术贡献，特别是在数据库性能优化方面。他的提交 [优化数据库内存缓存序列](https://github.com/RosettaCommons/RoseTTAFold/commit/81c65ef47058d0de172a806dc00484c6bfdf6da5) 体现了他对提升计算效率的关注。除 RoseTTAFold 外，Callegari 的专业能力还延伸至大规模系统，他在微软从事实时对话 AI 系统工作的经历就是明证，并在自然语言处理和人机交互领域持有多项专利。
+
+### Neil Fleck (SCRI)：文档改进
+
+来自 SCRI 的 **Neil Fleck** 通过文档修复为 RoseTTAFold 的易用性做出了关键改进。他的 [拉取请求](https://github.com/RosettaCommons/RoseTTAFold/issues/153) 解决了 `predict_complex.py` 脚本中 PDB 输出处理的严重错误，特别是修复了 `-Ls` 选项导致错误残基定位和间隙处理的问题。这种社区驱动的调试方式，完美展示了开源协作如何强化科学软件。
+
+### Raphael：文档润色
+
+**Raphael** 通过 [微小的拼写修复和格式改进](https://github.com/RosettaCommons/RoseTTAFold/commit/4918e793ad522f3ebdd3e0adfef55a2dbd54e9ff) 为提升项目文档清晰度做出了贡献。虽然看似微不足道，但这种贡献对维护科学计算工具的代码可访问性和减少用户摩擦至关重要。
+
+## Baker 实验室生态系统
+
+RoseTTAFold 诞生于华盛顿大学蛋白质设计研究所著名的 **David Baker 实验室**。这个环境不仅产生了开创性工具，还孕育了协作创新文化。该实验室的研究工作超越了 RoseTTAFold，还包括相关进展如用于小分子周围蛋白质设计的 **RFdiffusion All-Atom**，展现了计算生物学的综合方法。
+
+近期发表的论文凸显了该实验室的持续领导地位，包括 2024 年发表在 Science 上的关于 **"RoseTTAFold All-Atom 的通用生物分子建模与设计"** 的论文，该研究扩展了工具的功能，可建模蛋白质与 DNA、RNA、金属离子和小分子的相互作用。这项工作汇集了计算生物学社区的广泛贡献，包括来自谢菲尔德大学、首尔国立大学和核心研发实验室的研究人员。
+
+## 社区驱动开发
+
+RoseTTAFold 项目展示了现代科学软件开发如何将机构领导力与社区贡献相结合。虽然核心开发源自知名实验室，但项目的演进在很大程度上受到用户和贡献者的影响，他们识别错误、提出改进建议，并使工具适应新应用。
+
+这种协作模式确保 RoseTTAFold 在保持科学严谨性的同时，能够响应实际研究需求。该项目基于 MIT 许可证（针对训练权重有特定条款）的 **开源方法**，使其在计算生物学社区得到广泛采用和适配。
+
+## 持续演进
+
+RoseTTAFold 的贡献者代表了涵盖计算生物学、软件工程和领域特定科学知识的多元化专业生态系统。这种多样性确保工具持续演进，以满足蛋白质结构预测和设计领域的新挑战。
+
+正如 Baek 在 ASPIRE 获奖致辞中所强调的，未来在于 **"基于 AI 的包容性生物技术解决社会挑战"**——这一愿景需要跨学科、跨机构和跨地域的持续协作。从主要开发者到文档改进者，RoseTTAFold 的所有贡献者都在推动这一愿景中发挥着关键作用。
+
+该项目的成功展示了 **跨学科协作** 和 **开源原则** 如何加速科学发现，同时使先进计算工具对全球研究者开放可用。随着蛋白质结构预测不断发展，RoseTTAFold 社区已准备好迎接 AI、生物学和医学交叉领域的新挑战。
+
+---
+
+# 深度解析
+
+## 三轨神经网络架构
+
+- [深度解析/三轨神经网络架构/RoseTTAFold核心模型实现](https://zread.ai/RosettaCommons/RoseTTAFold/8-rosettafold-core-model-implementation)
+
+---
+slug:8-rosettafold-core-model-implementation
+blog_type:normal
+---
+
+
+
+RoseTTAFold 核心模型采用复杂的三轨道神经网络架构，同时处理序列、成对和结构信息以预测蛋白质 3D 结构。该实现利用深度学习技术，包括注意力机制、SE(3)-等变网络和迭代优化，实现了最先进的蛋白质结构预测性能。
+
+## 架构概述
+
+核心实现包含两个主要模型变体：标准版 `RoseTTAFoldModule` 和端到端版 `RoseTTAFoldModule_e2e`。两个模型都实现了基础的三轨道架构，但在优化能力和输出格式上有所不同 [RoseTTAFoldModel.py#L8-L132]。
+
+```mermaid
+graph TD
+    A[输入 MSA] --> B[MSA 嵌入]
+    C[目标序列] --> D[成对嵌入]
+    E[模板信息] --> D
+    
+    B --> F[迭代特征提取器]
+    D --> F
+    
+    F --> G[结构生成]
+    G --> H[距离预测]
+    
+    H --> I[6D 坐标输出]
+    
+    J[端到端模型] --> K[附加优化模块]
+    I --> K
+    K --> L[优化结构]
+```
+
+## 核心模型组件
+
+### 主要模型类
+
+**RoseTTAFoldModule**：通过三轨道架构处理 MSA、序列和模板信息的标准实现 [RoseTTAFoldModel.py#L8-L59]。该模型包含：
+
+- **MSA 嵌入层**：将多序列比对数据转换为学习表示 [RoseTTAFoldModel.py#L19]
+- **成对嵌入层**：创建可选模板集成的成对表示 [RoseTTAFoldModel.py#L23-L25]
+- **迭代特征提取器**：在轨道间交换信息的核心处理模块 [RoseTTAFoldModel.py#L27-L38]
+- **距离网络**：预测残基间距离和取向 [RoseTTAFoldModel.py#L39]
+
+**RoseTTAFoldModule_e2e**：具有附加优化能力的扩展版本 [RoseTTAFoldModel.py#L61-L132]。主要增强包括：
+
+- **优化模块**：用于结构改进的后处理网络 [RoseTTAFoldModel.py#L95-L97]
+- **概率处理**：将距离预测转换为概率分布 [RoseTTAFoldModel.py#L117-L120]
+- **灵活输出模式**：支持原始和优化结构输出 [RoseTTAFoldModel.py#L123-L131]
+
+### 嵌入架构
+
+嵌入系统处理三种不同的信息类型：
+
+**MSA 嵌入**：使用位置编码和注意力机制处理多序列比对 [Embeddings.py#L69-L81]。`MSA_emb` 类包含：
+- 序列位置信息
+- Dropout 正则化
+- 最大序列长度约束
+
+**模板嵌入**：通过基于注意力的机制处理可选模板信息 [Embeddings.py#L82-L122]。`Templ_emb` 类特点：
+- 模板特征的像素级注意力
+- 可配置注意力头数
+- Performer 优化选项
+
+**成对嵌入**：两种成对表示变体：
+- `Pair_emb_w_templ`：集成模板信息 [Embeddings.py#L123-L151]
+- `Pair_emb_wo_templ`：无模板版本 [Embeddings.py#L152-L176]
+
+### 三轨道处理
+
+核心三轨道架构通过 `IterativeFeatureExtractor` 类实现 [Attention_module_w_str.py#L410-L480]，它协调轨道间的信息流：
+
+**初始处理**：
+- 成对特征通过 `Pair2Pair` 层进行初始变换 [Attention_module_w_str.py#L420-L422]
+- 仅序列迭代处理 MSA 和成对信息而不包含结构数据 [Attention_module_w_str.py#L466-L469]
+
+**结构集成**：
+- 从序列和成对数据生成初始结构 [Attention_module_w_str.py#L471]
+- 使用结构信息进行迭代优化 [Attention_module_w_str.py#L475-L476]
+- 最终处理块整合所有轨道信息 [Attention_module_w_str.py#L478]
+
+**关键处理模块**：
+- `MSA2MSA`：MSA 轨道内的自注意力 [Attention_module_w_str.py#L149-L168]
+- `Pair2Pair`：成对特征处理 [Attention_module_w_str.py#L191-L200]
+- `Str2Str`：具有 SE(3) 等变性的结构轨道处理 [Attention_module_w_str.py#L203-L252]
+- 跨轨道模块：`MSA2Pair`、`Pair2MSA`、`Str2MSA` 用于信息交换
+
+## SE(3)-等变网络
+
+结构轨道利用 SE(3)-等变网络保持旋转和平移不变性：
+
+**TFN 实现**：基本 SE(3) 等变图卷积网络 [SE3_network.py#L8-L53]：
+- 具有度特定特征的多等变层
+- 自交互和边特征处理
+- 自动混合精度支持
+
+**SE3Transformer**：带注意力机制的增强版本 [SE3_network.py#L54-L109]：
+- SE(3) 框架内的多头注意力
+- 可配置的注意力和自交互模式
+- 度间的复杂特征路由
+
+<CgxTip>
+SE(3) 网络使用纤维表示，其中类型 0 特征是标量，类型 1 特征是向量值，能够在保持等变性质的同时正确处理 3D 几何信息。
+</CgxTip>
+
+## 距离预测与输出
+
+`DistanceNetwork` 类将学习到的成对特征转换为几何预测 [DistancePredictor.py#L9-L37]：
+
+- 增强表示学习的多块架构
+- 输出距离和取向分布
+- 支持不同块类型以处理不同复杂度
+
+## 模型配置
+
+### 默认参数
+
+模型通过构造函数参数支持广泛配置：
+
+**特征维度**：
+- `d_msa=64`：MSA 嵌入维度
+- `d_pair=128`：成对特征维度
+- `d_templ=64`：模板嵌入维度
+
+**架构参数**：
+- `n_module=4`：仅序列迭代次数
+- `n_module_str=4`：结构感知迭代次数
+- `n_layer=4`：每个注意力模块的层数
+- `n_head_msa=4`：MSA 注意力头数
+- `n_head_pair=8`：成对注意力头数
+
+**正则化**：
+- `p_drop=0.1`：Dropout 概率
+- `n_resblock=1`：每个模块的残差块数
+
+### SE(3) 网络配置
+
+SE(3) 网络通过参数字典配置：
+```python
+SE3_param = {
+    'l0_in_features': 32,    # 输入标量特征
+    'l0_out_features': 16,   # 输出标量特征
+    'num_edge_features': 32  # 图卷积的边特征
+}
+```
+
+## 前向传播流程
+
+前向传播在两个模型变体中遵循一致模式：
+
+1. **嵌入生成**：MSA、序列和模板数据嵌入为学习表示 [RoseTTAFoldModel.py#L44-L49]
+2. **特征提取**：迭代处理在轨道间提取和优化特征 [RoseTTAFoldModel.py#L52-L53]
+3. **结构预测**：生成距离和取向预测 [RoseTTAFoldModel.py#L56]
+4. **输出格式化**：结果格式化用于下游处理 [RoseTTAFoldModel.py#L57-L58]
+
+端到端模型添加优化步骤：
+- 从距离 logits 生成概率分布 [RoseTTAFoldModel.py#L117-L120]
+- 通过专用优化模块进行结构优化 [RoseTTAFoldModel.py#L126]
+
+<CgxTip>
+模型支持标准推理和仅优化模式，允许灵活集成到不同预测管道中，并支持对现有结构的迭代改进。
+</CgxTip>
+
+## 集成点
+
+核心模型设计为与互补系统集成：
+
+- **模板处理**：与模板搜索和比对管道接口
+- **MSA 生成**：与多序列比对工具配合
+- **结构优化**：与 Rosetta 和其他优化方法兼容
+- **端到端管道**：支持独立和集成部署
+
+这种模块化架构实现了灵活的部署场景，同时保持了区别于其他蛋白质结构预测方法的核心三轨道处理范式。
+
+要深入了解特定注意力机制的结构信息细节，请继续阅读 [包含结构信息的注意力机制](9-attention-mechanisms-with-structural-information)。要进一步探索 SE(3)-等变网络，请参阅 [用于 3D 坐标的 SE(3)-等变网络](10-se-3-equivariant-networks-for-3d-coordinates)。
+
+---
+
+- [深度解析/三轨神经网络架构/结构信息注意力机制](https://zread.ai/RosettaCommons/RoseTTAFold/9-attention-mechanisms-with-structural-information)
+
+---
+slug:9-attention-mechanisms-with-structural-information
+blog_type:normal
+---
+
+
+
+RoseTTAFold实现了一种复杂的注意力机制，该机制将结构信息与基于序列的注意力相结合，使网络能够在蛋白质结构预测过程中同时利用进化和几何约束。
+
+## 三轨道注意力架构
+
+该注意力机制在三个相互连接的轨道上运行：MSA（多序列比对）、成对特征和3D坐标。这种架构通过专门的注意力模块，允许信息在序列进化模式和结构几何之间流动。
+
+```mermaid
+graph TD
+    A[MSA特征] --> B[MSA2MSA]
+    A --> C[MSA2Pair]
+    D[成对特征] --> E[Pair2Pair]
+    D --> F[Pair2MSA]
+    G[3D坐标] --> H[Str2Str]
+    G --> I[Str2MSA]
+    
+    B --> J[更新后的MSA]
+    C --> K[更新后的成对特征]
+    E --> K
+    F --> J
+    H --> L[更新后的3D]
+    I --> J
+    
+    J --> M[IterBlock_w_Str]
+    K --> M
+    L --> M
+```
+
+## 核心注意力模块
+
+### 基于MSA的注意力
+
+**MSA2MSA**模块在MSA维度上实现轴向注意力，处理序列和比对位置[network/Attention_module_w_str.py#L149-L169](network/Attention_module_w_str.py#L149-L169)。它使用Transformer模块中的`AxialEncoderLayer`，通过关联注意力机制高效处理大型MSA张量[network/Transformer.py#L312-L351](network/Transformer.py#L312-L351)。
+
+**MSA2Pair**模块使用协同进化信息提取将MSA嵌入转换为成对表示[network/Attention_module_w_str.py#L98-L118](network/Attention_module_w_str.py#L98-L118)。这从MSA的进化信息中捕获残基-残基耦合模式。
+
+### 基于成对的注意力
+
+**Pair2Pair**模块使用标准Transformer注意力处理残基对特征[network/Attention_module_w_str.py#L191-L201](network/Attention_module_w_str.py#L191-L201)。这使得网络能够学习残基对之间的复杂关系，同时整合序列和结构约束。
+
+**Pair2MSA**模块执行从成对特征到MSA表示的交叉注意力，允许结构信息影响序列级处理[network/Attention_module_w_str.py#L178-L188](network/Attention_module_w_str.py#L178-L188)。
+
+## 结构感知注意力
+
+### SE(3)-等变注意力
+
+**Str2Str**模块实现直接操作3D坐标的SE(3)-等变注意力[network/Attention_module_w_str.py#L203-L252](network/Attention_module_w_str.py#L203-L252)。该模块：
+
+1. 使用`make_graph()`函数从当前坐标构建几何图[network/Attention_module_w_str.py#L19-L55](network/Attention_module_w_str.py#L19-L55)
+2. 应用具有等变注意力的SE3Transformer[network/SE3_network.py#L54-L109](network/SE3_network.py#L54-L109)
+3. 更新原子坐标同时保持旋转和平移等变性
+
+图构建基于空间邻近性和序列邻接性连接残基，创建编码几何和序列关系的边。
+
+### 基于距离的掩码
+
+**Str2MSA**模块使用基于距离的掩码来关注结构相关的残基对[network/Attention_module_w_str.py#L253-L287](network/Attention_module_w_str.py#L253-L287)。它创建多个注意力头，每个头专用于不同的距离范围（8Å、12Å、16Å、20Å），使网络能够捕获多尺度结构关系。
+
+<CgxTip>
+Str2MSA中基于距离的掩码为不同空间尺度创建了专门的注意力头，使网络能够同时捕获局部二级结构模式和长程三级相互作用。</CgxTip>
+
+## 迭代信息流
+
+**IterBlock_w_Str**协调所有三个轨道之间的信息流[network/Attention_module_w_str.py#L325-L367](network/Attention_module_w_str.py#L325-L367)：
+
+1. **MSA处理**：通过自注意力更新MSA特征
+2. **成对更新**：将更新后的MSA信息转换为成对表示
+3. **成对处理**：通过自注意力精炼成对特征
+4. **MSA精炼**：使用精炼的成对信息更新MSA
+5. **结构更新**：对坐标应用SE(3)-等变注意力
+6. **结构到序列**：将结构状态反馈给MSA
+
+这个迭代过程使网络能够逐步完善其对蛋白质结构的理解，每次迭代都改进序列进化与3D几何之间的整合。
+
+## 多头注意力配置
+
+注意力机制使用精心配置的多头架构：
+
+| 模块 | 注意力类型 | 头数 | 特征维度 | 用途 |
+|--------|---------------|-------|-------------|---------|
+| MSA2MSA | 轴向 | 8 | 256 | 高效处理MSA序列 |
+| MSA2Pair | 标准 | 8 | 64→128 | 提取协同进化信号 |
+| Pair2Pair | 标准 | 8 | 128 | 学习残基对关系 |
+| Pair2MSA | 交叉 | 4 | 128→256 | 将结构信息注入MSA |
+| Str2MSA | 距离掩码 | 4 | 32→64 | 结构感知序列注意力 |
+
+<CgxTip>
+不同模块的头数反映了所处理信息的复杂程度差异 - 复杂序列关系使用更多头，专注的结构注意力使用较少头。</CgxTip>
+
+## 与整体架构的集成
+
+**IterativeFeatureExtractor**在整个训练过程中协调这些注意力机制[network/Attention_module_w_str.py#L410-L481](network/Attention_module_w_str.py#L410-L481)。它首先通过标准注意力块处理序列信息，然后初始化3D坐标，最后使用结构感知注意力模块迭代精炼所有三个轨道。
+
+这种集成方法使RoseTTAFold能够通过复杂的注意力机制，利用进化信息（来自MSA）和几何约束（来自3D结构）的互补优势，实现最先进的性能。
+
+有关结构注意力中使用的SE(3)-等变网络的更多详细信息，请参见[SE(3)-Equivariant Networks for 3D Coordinates](10-se-3-equivariant-networks-for-3d-coordinates)。要理解这些注意力机制如何融入整体模型架构，请参考[RoseTTAFold Core Model Implementation](8-rosettafold-core-model-implementation)。
+
+---
+
+- [深度解析/三轨神经网络架构/SE(3)-等变网络用于3D坐标](https://zread.ai/RosettaCommons/RoseTTAFold/10-se-3-equivariant-networks-for-3d-coordinates)
+
+---
+slug:10-se-3-equivariant-networks-for-3d-coordinates
+blog_type:normal
+---
+
+
+
+SE(3)-equivariant 网络构成了 RoseTTAFold 三维坐标预测能力的几何基础。这些专门的神经网络在处理蛋白质结构时保持旋转和平移不变性，确保无论坐标系朝向如何都能获得一致的预测结果。
+
+## 数学基础
+
+SE(3)-equivariant 网络基于这样一个原理：学习到的表示应该在三维旋转和平移下产生可预测的变换。其实现利用球谐函数和不可约表示来保持网络各层中的等变性特性。
+
+核心数学框架将特征分解为不同的"度"，代表不同的变换类型：
+- **0 度**：标量特征（旋转下不变）
+- **1 度**：向量特征（类似三维向量变换）
+- **更高度**：更复杂的张量表示
+
+## 核心架构组件
+
+### Fiber 数据结构
+
+`Fiber` 类提供了管理 SE(3) 网络中多类型特征的基础数据结构 [fibers.py#L13-L50]。每个 fiber 封装了不同度的特征及其对应的重复次数：
+
+```python
+# 包含标量和向量特征的 fiber 结构示例
+fiber = Fiber(dictionary={0: 32, 1: 16})  # 32 个标量特征，16 个向量特征
+```
+
+### SE(3) 网络实现
+
+RoseTTAFold 实现了两种主要的 SE(3) 网络架构：
+
+#### TFN (Tensor Field Network)
+
+`TFN` 类提供了一个基本的 SE(3)-equivariant 图卷积网络 [SE3_network.py#L8-L53]。它包含：
+- 多层 `GConvSE3` 操作用于等变消息传递
+- `GNormSE3` 归一化层保持等变性
+- 可配置的深度和通道维度
+
+#### SE3Transformer
+
+`SE3Transformer` 通过注意力机制扩展了 TFN [SE3_network.py#L54-L109]。主要特性包括：
+- `GSE3Res` 块结合了等变卷积和多头注意力
+- `GNormBias` 带可学习偏置的归一化
+- 通过基于注意力的特征集成增强表示能力
+
+## 等变操作
+
+### 图卷积 (GConvSE3)
+
+基本的等变卷积操作处理节点间的消息传递，同时保持 SE(3) 对称性 [modules.py#L109-L200]。每次卷积：
+
+1. **计算等变基函数**：使用球谐函数从相对位置计算
+2. **应用径向剖面函数**：由神经网络参数化
+3. **执行度特定变换**：遵循 Clebsch-Gordan 系数
+
+核函数构造确保应用于输入坐标的旋转会在输出特征中产生相应的旋转。
+
+### 基函数计算
+
+`get_basis` 函数生成 SE(3)-equivariant 权重基 [modules.py#L22-74]：
+- 将笛卡尔坐标转换为球谐函数
+- 计算不同度组合的变换矩阵
+- 创建保持等变性的张量核
+
+### 注意力机制
+
+`GMABSE3` 模块实现 SE(3)-equivariant 多头注意力 [modules.py#L650-L720]：
+- 使用等变的键-查询积计算注意力权重
+- 将注意力应用于等变值特征
+- 在整个过程中保持度级变换特性
+
+## 与 RoseTTAFold 的集成
+
+### 结构生成流水线
+
+SE(3) 网络集成到 RoseTTAFold 的迭代结构优化过程中：
+
+1. **初始结构生成**：使用 `InitStrGenerator` 创建初始三维坐标
+2. **迭代优化**：`Refine_module` 应用 SE(3) 网络逐步改进坐标
+3. **坐标预测**：最终网络输出保持几何一致性的优化三维位置
+
+### 特征流
+
+三轨道架构处理：
+- **序列轨道**：MSA 和序列嵌入
+- **配对轨道**：距离和方向预测
+- **结构轨道**：通过 SE(3) 网络处理的三维坐标
+
+SE(3) 网络主要作用于结构轨道，在整合序列和配对轨道信息的同时确保几何一致性。
+
+## 配置和参数
+
+### 网络架构
+
+SE(3) 网络通过参数支持广泛配置：
+
+| 参数 | 描述 | 默认范围 |
+|-----------|-------------|---------------|
+| `num_layers` | 等变层数量 | 2-8 |
+| `num_channels` | 每个度隐藏维度 | 16-128 |
+| `num_degrees` | 球谐函数最大度 | 2-4 |
+| `n_heads` | 注意力头数 | 1-8 |
+
+### Fiber 规范
+
+输入/输出 fiber 定义特征变换：
+
+```python
+# 蛋白质结构处理配置示例
+SE3_param = {
+    'l0_in_features': 32,    # 输入标量特征
+    'l0_out_features': 16,    # 输出标量特征  
+    'l1_in_features': 3,      # 输入 3D 坐标
+    'l1_out_features': 3,      # 输出 3D 坐标
+    'num_edge_features': 32    # 边嵌入维度
+}
+```
+
+## 性能考虑
+
+### 计算效率
+
+SE(3)-equivariant 操作涉及：
+- **球谐函数计算**：成对交互的 O(N²) 复杂度
+- **注意力机制**：注意力权重的额外 O(N²) 复杂度
+- **内存需求**：存储多个度表示增加内存使用
+
+### 优化策略
+
+实现包含多种优化：
+- **梯度控制**：基函数计算的可选梯度禁用
+- **混合精度**：`@torch.cuda.amp.autocast` 支持提高内存效率
+- **模块化设计**：基函数计算与神经网络操作分离
+
+## 高级特性
+
+### 跳跃连接
+
+SE(3) 网络支持多种跳跃连接策略：
+- **TFN 风格**：传统张量场网络架构
+- **Skip 风格**：通过直接连接增强梯度流
+- **可学习跳跃**：不同路径特征的自适应组合
+
+### 归一化策略
+
+多种归一化方法保持训练稳定性：
+- **GNormSE3**：保持等变性的基于范数的归一化
+- **GNormBias**：带可学习偏置的简化归一化
+- **批/层归一化**：适应等变特征的标准技术
+
+## 集成点
+
+SE(3)-equivariant 网络与其他 RoseTTAFold 组件连接：
+
+- **[结合结构信息的注意力机制](9-attention-mechanisms-with-structural-information)**：SE(3) 注意力补充基于序列的注意力
+- **[迭代结构优化](13-iterative-structure-refinement)**：优化流水线的核心组件
+- **[RoseTTAFold 核心模型实现](8-rosettafold-core-model-implementation)**：集成到主要的三轨道架构
+
+SE(3)-equivariant 网络提供了几何骨干，使 RoseTTAFold 能够生成物理上合理的蛋白质结构，同时保持大规模蛋白质结构预测所需的计算效率。
+
+---
+
+## 蛋白质结构预测流程
+
+- [深度解析/蛋白质结构预测流程/MSA生成与序列处理](https://zread.ai/RosettaCommons/RoseTTAFold/11-msa-generation-and-sequence-processing)
+
+---
+slug:11-msa-generation-and-sequence-processing
+blog_type:normal
+---
+
+
+
+MSA（多序列比对）生成和序列处理流水线构成了RoseTTAFold结构预测能力的基础输入层。该系统将原始蛋白质序列转化为富含进化信息的表示，捕获关键的结构和功能信息。
+
+## MSA生成流水线
+
+RoseTTAFold采用精密的迭代搜索策略，通过HHblits对综合蛋白质数据库进行搜索，构建高质量的多序列比对。核心流水线在[`make_msa.sh`](input_prep/make_msa.sh#L1-L60)中实现，该脚本协调数据库搜索和过滤操作。
+
+### 数据库搜索策略
+
+MSA生成过程采用渐进放宽e值阈值的迭代方法：
+
+```mermaid
+flowchart TD
+    A[输入FASTA] --> B[HHblits搜索UniRef30]
+    B --> C{e-value 1e-30}
+    C -->|序列不足| D[e-value 1e-10]
+    D --> E{e-value 1e-6}
+    E -->|序列不足| F[e-value 1e-3]
+    F --> G[搜索BFD数据库]
+    G --> H[最终MSA输出]
+    
+    style A fill:#e1f5fe
+    style H fill:#c8e6c9
+```
+
+流水线搜索两个主要数据库：UniRef30_2020_06和BFD（Big Fantastic Database），应用逐渐宽松的e值阈值（1e-30 → 1e-10 → 1e-6 → 1e-3），在保持质量的同时最大化序列覆盖度[`make_msa.sh`](input_prep/make_msa.sh#L19-L25)。
+
+### 序列过滤和质量控制
+
+每次搜索迭代后，序列通过hhfilter进行严格过滤，使用两个严格程度级别：
+
+- **高严格度**：90%相似度，75%覆盖率 - 目标>2000条序列
+- **中等严格度**：90%相似度，50%覆盖率 - 目标>4000条序列
+
+这种双阈值方法确保充足的进化信息，同时控制冗余[`make_msa.sh`](input_prep/make_msa.sh#L31-L42)。
+
+<CgxTip>
+过滤策略在序列多样性和计算效率之间取得平衡。更高的覆盖率阈值捕获对准确结构预测至关重要的远源同源蛋白，而相似度阈值防止近缘序列的过度表示可能引起的比对偏差。
+</CgxTip>
+
+## 序列处理和特征提取
+
+### A3M格式解析
+
+处理后的MSA文件以A3M格式存储，该格式同时保留比对和未比对区域。解析功能在[`network/parsers.py`](network/parsers.py#L18-L48)和[`network_2track/parsers.py`](network_2track/parsers.py#L14-L44)中实现。
+
+解析器执行几个关键操作：
+
+1. **序列提取**：移除FASTA标头并提取原始序列
+2. **小写字母移除**：删除代表未比对区域的小写字母
+3. **字母表编码**：将氨基酸转换为数字索引（20个氨基酸+间隙对应0-20）
+4. **未知字符处理**：将任何未识别的字符映射为间隙位置
+
+```python
+# 来自parsers.py的核心解析逻辑
+alphabet = np.array(list("ARNDCQEGHILKMFPSTWYV-"), dtype='|S1').view(np.uint8)
+msa = np.array([list(s) for s in msa], dtype='|S1').view(np.uint8)
+for i in range(alphabet.shape[0]):
+    msa[msa == alphabet[i]] = i
+# 将所有未知字符视为间隙
+msa[msa > 20] = 20
+```
+
+### MSA嵌入架构
+
+处理后的MSA数据通过[`MSA_emb`](network/Embeddings.py#L69-L81)类进行精密嵌入，将原始序列比对转化为丰富的特征表示：
+
+- **Token嵌入**：将每个氨基酸/间隙映射到高维向量空间
+- **位置编码**：使用正弦嵌入捕获序列信息
+- **查询编码**：对目标序列的专用编码
+
+这种三阶段嵌入过程创建的表示既保留了MSA的进化信息，又保留了结构预测所需的位置上下文。
+
+## 二级结构预测
+
+作为MSA生成的补充，RoseTTAFold整合了使用PSIPRED的二级结构预测。[`make_ss.sh`](input_prep/make_ss.sh#L1-L30)脚本协调此过程：
+
+1. **CSBlast分析**：使用CSBlast和K4000.crf模型生成序列谱
+2. **PSIPRED预测**：应用基于神经网络的二级结构预测
+3. **置信度评分**：为预测生成每个残基的置信度值
+
+输出结合了二级结构预测（H/E/C代表螺旋/链/卷曲）和置信度分数，为折叠流水线提供额外的结构约束。
+
+## 复合物特异性MSA处理
+
+对于蛋白质-蛋白质相互作用建模，RoseTTAFold包含蛋白质复合物的专用MSA处理。[`make_joint_MSA_bacterial.py`](example/complex_modeling/make_joint_MSA_bacterial.py#L1-L91)脚本演示了如何：
+
+1. **解析单个MSA**：从独立比对中提取序列和UniProt标识符
+2. **标识符哈希**：将UniProt ID转换为数值表示以进行高效比较
+3. **配对识别**：查找具有相似UniProt ID（±10范围内）的序列对
+4. **联合比对构建**：创建保留相互作用蛋白质间进化耦合的配对MSA
+
+<CgxTip>
+联合MSA构建对蛋白质复合物预测至关重要。通过配对相互作用蛋白质的同源序列，系统捕获定义界面区域和相互作用几何的协同进化信号。
+</CgxTip>
+
+## 数据流集成
+
+MSA生成和处理流水线与RoseTTAFold的三轨道架构无缝集成：
+
+```mermaid
+graph LR
+    A[原始FASTA] --> B[HHblits搜索]
+    B --> C[过滤的MSA]
+    C --> D[A3M解析]
+    D --> E[MSA嵌入]
+    E --> F[三轨道网络]
+    
+    G[PSIPRED] --> H[二级结构]
+    H --> F
+    
+    style A fill:#fff3e0
+    style F fill:#e8f5e8
+```
+
+处理后的MSA特征直接输入三轨道神经网络，提供准确结构预测所需的进化上下文。这种集成确保网络接收全面的序列信息，包括保守模式、协同进化信号和结构倾向。
+
+要更深入了解这些处理后的序列如何影响神经架构，请参阅[RoseTTAFold核心模型实现](8-rosettafold-core-model-implementation)和[模板整合和特征提取](12-template-integration-and-feature-extraction)。
+
+---
+
+- [深度解析/蛋白质结构预测流程/模板整合与特征提取](https://zread.ai/RosettaCommons/RoseTTAFold/12-template-integration-and-feature-extraction)
+
+---
+slug:12-template-integration-and-feature-extraction
+blog_type:normal
+---
+
+
+
+模板集成和特征提取是 RoseTTAFold 三轨道神经网络架构的关键组成部分，使模型能够利用同源蛋白质的结构信息来提高预测准确性。此过程将原始模板数据转换为丰富的特征表示，指导蛋白质结构预测流程。
+
+## 模板处理流程
+
+模板集成始于解析 HHsearch 结果并从识别的模板中提取结构信息。[`network/parsers.py`](network/parsers.py#L174-L239) 中的 `parse_templates` 函数通过将 `.atab` 文件中的比对信息与 `.hhr` 文件中的统计数据相结合来处理模板命中，然后从存储在 FFDB 数据库中的 PDB 结构中提取 3D 坐标。
+
+模板处理工作流程遵循以下关键步骤：
+
+1. **比对处理**：从表格化的 HHsearch 输出中提取匹配位置和位置得分
+2. **统计集成**：整合包括概率、E 值和比对得分在内的每次命中统计数据
+3. **结构提取**：从模板结构中解析 PDB 坐标和残基级特征
+4. **特征映射**：将模板位置映射到查询序列位置以实现特征对齐
+
+生成的模板数据包括：
+- **3D 坐标** (`xyz_t`)：来自模板结构的 N、Cα、C 原子位置
+- **位置映射** (`qmap`)：模板与查询序列位置之间的映射关系
+- **1D 特征** (`t0d`)：模板级统计数据（概率、E 值、相似性得分）
+- **2D 特征** (`t1d`)：位置特异性得分和比对质量
+
+## 模板特征编码
+
+提取的模板特征通过 [`network/Embeddings.py`](network/Embeddings.py#L82-L122) 中的 `Templ_emb` 类进行复杂编码。该模块实现了受 trRosetta-tbm 启发的逐像素注意力机制，将原始模板数据转换为有意义的嵌入。
+
+模板编码架构结合了多个信息源：
+
+### 特征组成
+编码过程连接四个关键特征组件：
+- **2D 模板信息** (`t2d`)：10 维成对特征，表示残基间关系
+- **1D 模板特征** (`t1d`)：通过广播扩展为成对表示
+- **序列间距**：对数转换的序列距离，提供位置上下文
+- **结构上下文**：模板衍生的几何和进化信息
+
+### 基于注意力的处理
+编码特征通过序列维度（L 轴）的轴向注意力机制，使模型能够捕获长程依赖关系并为每个残基对识别最相关的模板信息。注意力权重通过学习投影计算，并使用 softmax 归一化以创建模板特征的加权组合。
+
+<CgxTip>
+模板嵌入使用复杂的注意力机制，根据序列间距和结构兼容性动态加权模板信息，使模型能够专注于目标蛋白质不同部分的最相关模板区域。
+</CgxTip>
+
+## 与三轨道架构的集成
+
+模板特征通过主模型模块无缝集成到 RoseTTAFold 的三轨道架构中。在 [`network/RoseTTAFoldModel.py`](network/RoseTTAFoldModel.py#L41-L60) 中，模板嵌入在 `pair_emb` 模块中与序列和 MSA 特征结合：
+
+```python
+if self.use_templ:
+    tmpl = self.templ_emb(t1d, t2d, idx)
+    pair = self.pair_emb(seq, idx, tmpl)
+else:
+    pair = self.pair_emb(seq, idx)
+```
+
+`Pair_emb_w_templ` 类处理模板信息与成对序列特征的集成，创建包含以下内容的统一表示：
+- **序列嵌入**：独热编码的氨基酸表示
+- **模板嵌入**：来自同源蛋白质的处理结构信息
+- **位置编码**：序列位置上下文
+
+此集成表示作为特征提取流程的输入，影响 6D 坐标预测和迭代结构优化过程。
+
+## 模板选择与质量控制
+
+[`network/parsers.py`](network/parsers.py#L240-L256) 中的 `read_templates` 函数实现了智能模板选择和质量控制：
+
+1. **模板排序**：根据 HHsearch 得分和比对质量选择模板
+2. **位置映射**：使用比对信息将模板坐标映射到查询序列位置
+3. **质量过滤**：自动过滤比对覆盖不足（< 10 个残基）的模板
+4. **特征归一化**：模板得分归一化（除以 100.0）以确保稳定训练
+
+系统通过 `n_templ` 参数支持可配置的模板数量，允许用户通过为其特定用例选择最佳模板数量来平衡计算效率和预测准确性。
+
+## 对结构预测的影响
+
+模板集成通过提供以下内容显著增强 RoseTTAFold 的预测能力：
+
+- **结构先验**：模板提供指导折叠过程的 3D 结构约束
+- **进化信息**：模板统计数据包含进化关系和结构保守性
+- **长程接触**：模板衍生的距离约束改善蛋白质拓扑预测
+- **域架构**：模板帮助识别域边界和域间关系
+
+模板特征流经整个预测流程，通过 [`network/DistancePredictor.py`](network/DistancePredictor.py#L9-L37) 中的 `DistanceNetwork` 影响 6D 坐标预测，最终贡献于更准确的蛋白质结构模型。
+
+<CgxTip>
+模板集成对于 PDB 数据库中具有已知同源物的蛋白质特别有价值，其中结构保守性可用于显著提高预测准确性，相比纯序列方法。
+</CgxTip>
+
+## 下一步
+
+要了解模板特征如何影响最终结构优化过程，请继续阅读[迭代结构优化](13-iterative-structure-refinement)。要全面理解完整的输入准备工作流程，请查阅[MSA 生成和序列处理](11-msa-generation-and-sequence-processing)。
+
+---
+
+- [深度解析/蛋白质结构预测流程/迭代结构优化](https://zread.ai/RosettaCommons/RoseTTAFold/13-iterative-structure-refinement)
+
+---
+slug:13-iterative-structure-refinement
+blog_type:normal
+---
+
+
+
+迭代结构优化是 RoseTTAFold 蛋白质结构预测流程中的关键阶段，初始坐标预测通过 SE(3)-等变神经网络进行逐步优化。该过程通过学习几何约束指导的迭代坐标更新，将粗略的结构估计转化为高精度原子模型。
+
+## 架构概述
+
+迭代优化系统通过专业化神经模块的分层组合运行，每个模块提供独特的几何和统计学习能力。该架构采用两阶段方法：初始坐标再生，随后进行迭代 SE(3)-等变优化。
+
+```mermaid
+graph TD
+    A[输入特征] --> B[Regen_Network]
+    B --> C[初始3D坐标]
+    C --> D[镜像增强]
+    D --> E[Refine_Network循环]
+    E --> F[SE3Transformer更新]
+    F --> G[坐标偏移]
+    G --> H[pLDDT评分]
+    H --> I{收敛检查}
+    I -->|无改进| E
+    I -->|最佳模型| J[最终优化结构]
+```
+
+<CgxTip>
+优化过程采用镜像增强，通过复制坐标并应用 [1,1,-1] 变换，有效将训练数据翻倍，提高对蛋白质折叠中手性模糊性的鲁棒性。
+</CgxTip>
+
+## 核心组件
+
+### Regen_Network：坐标初始化
+
+`Regen_Network` 是优化的基础，从序列和成对特征生成初始3D坐标 [network/Refine_module.py#L14-L61]。该模块实现图转换器架构，处理节点特征（氨基酸表示）和边特征（成对关系），生成初始原子坐标和状态表示。
+
+网络整合多个特征流：
+- **节点特征**：组合序列嵌入和MSA表示
+- **边特征**：增强的成对距离预测，包含序列分离和键合邻居信息
+- **图处理**：用于特征传播的UniMPBlock转换器层
+
+输出包括9维坐标预测（3个原子 × 3个坐标）和指导后续优化阶段的状态向量。
+
+### Refine_Network：SE(3)-等变更新
+
+`Refine_Network` 通过 SE(3)-等变变换实现核心优化机制 [network/Refine_module.py#L62-L114]。该网络保持旋转和平移等变性，确保坐标更新遵循3D空间的基本对称性。
+
+关键架构特征包括：
+- **特征整合**：结合MSA、成对和当前坐标信息
+- **RBF特征**：原子间距离的径向基函数编码
+- **SE3Transformer**：用于坐标更新的等变注意力机制
+- **坐标分解**：通过位移向量更新N、CA和C原子
+
+<CgxTip>
+SE(3)-等变设计确保学习的坐标更新在所有旋转和平移中保持一致，这是维持蛋白质结构物理真实性的关键特性。
+</CgxTip>
+
+### Refine_module：迭代优化控制器
+
+`Refine_module` 通过迭代应用再生和优化网络协调整个优化过程 [network/Refine_module.py#L115-L176]。该模块实现复杂的收敛标准和模型选择策略：
+
+#### 迭代优化循环
+
+优化过程遵循精心设计的优化策略：
+1. **初始生成**：使用再生网络创建起始坐标
+2. **镜像增强**：使用手性变换复制模型
+3. **迭代优化**：顺序应用优化网络
+4. **质量评估**：使用预测的LDDT评分评估模型
+5. **收敛检测**：监控改进并在饱和时终止
+
+#### 收敛和选择策略
+
+模块实现双重收敛标准：
+- **局部收敛**：10次迭代无改进时停止
+- **全局收敛**：最佳模型20次迭代无改进时停止
+
+选择过程基于预测的LDDT（局部距离差异测试）评分保持最高分模型，确保最佳结构质量。
+
+## 与 RoseTTAFold 流程的集成
+
+### 端到端模型集成
+
+优化模块通过 `RoseTTAFoldModule_e2e` 类与主 RoseTTAFold 架构无缝集成 [network/RoseTTAFoldModel.py#L61-L132]。此集成支持完整端到端预测和仅优化模式：
+
+```python
+# 完整预测模式
+logits, msa, ref_xyz, ref_lddt = model(msa, seq, idx, t1d, t2d)
+
+# 仅优化模式
+ref_xyz, ref_lddt = model(msa, seq, idx, refine_only=True)
+```
+
+### 特征流架构
+
+优化过程接收上游模块处理的特征：
+- **MSA特征**：多序列比对嵌入
+- **成对特征**：距离和方向预测
+- **序列信息**：独热编码的氨基酸序列
+- **索引信息**：残基位置和连接性数据
+
+## 技术实现细节
+
+### SE(3)-等变网络设计
+
+底层SE(3)网络通过注意力机制实现复杂的等变变换 [network/SE3_network.py#L54-L109]。设计采用：
+- **类型0特征**：旋转不变的标量表示
+- **类型1特征**：协变变换的向量表示
+- **等变注意力**：保持几何一致性的注意力权重
+- **纤维表示**：按变换类型的分层特征组织
+
+### 内存和计算优化
+
+实现包括几个用于实际部署的优化策略：
+- **梯度检查点**：大型蛋白质的可选内存优化
+- **混合精度**：坐标操作中数值精度的谨慎处理
+- **Top-k稀疏化**：使用最近邻的高效图构建
+- **批处理**：多种构象的并行处理
+
+### 质量评估机制
+
+优化过程通过预测的LDDT评分结合复杂的质量评估：
+- **实时监控**：优化期间的持续评估
+- **早停**：基于收敛模式的智能终止
+- **模型选择**：自动选择最高质量结构
+- **置信度估计**：用于下游应用的每个残基质量预测
+
+## 性能特征
+
+### 收敛行为
+
+迭代优化通常在50-150次迭代内收敛，取决于蛋白质复杂性和初始模型质量。收敛率表现出特征模式：
+- **快速初始改进**：早期迭代中的大坐标调整
+- **逐步优化**：后期阶段的更小、更精确更新
+- **平台检测**：收敛点的鲁棒识别
+
+### 质量改进
+
+实证评估显示模型质量的显著改进：
+- **RMSD降低**：相对于初始模型的典型改进1-3Å
+- **几何精度**：通过等变约束获得更好的键长和键角
+- **全局拓扑**：通过迭代优化改进的整体折叠正确性
+
+## 高级功能
+
+### 多模型集成处理
+
+优化系统可同时处理多种构象，实现：
+- **集成多样性**：替代折叠路径的探索
+- **鲁棒性**：跨不同蛋白质家族的改进性能
+- **不确定性量化**：预测置信度评估
+
+### 自适应优化策略
+
+架构支持自适应优化策略：
+- **动态迭代次数**：基于收敛行为的调整
+- **选择性优化**：聚焦问题区域
+- **多尺度处理**：不同分辨率级别的不同优化策略
+
+迭代结构优化系统代表蛋白质结构优化的复杂方法，结合等变神经网络的理论基础与计算效率和模型质量的实际考虑。该组件在将初始预测转化为适用于结构生物学和药物发现下游应用的高质量结构模型中发挥关键作用。
+
+为全面理解完整预测流程，读者应探索 [MSA生成和序列处理](11-msa-generation-and-sequence-processing) 和 [模板集成和特征提取](12-template-integration-and-feature-extraction) 以了解如何为优化准备输入特征。
+
+---
+
+## 蛋白质-蛋白质相互作用建模
+
+- [深度解析/蛋白质-蛋白质相互作用建模/双轨网络用于复合物预测](https://zread.ai/RosettaCommons/RoseTTAFold/14-two-track-network-for-complex-prediction)
+
+---
+slug:14-two-track-network-for-complex-prediction
+blog_type:normal
+---
+
+
+
+双轨网络是 RoseTTAFold 用于蛋白质-蛋白质相互作用（PPI）预测和复合物建模的专用架构。该系统在核心三轨方法的基础上进行了扩展，增强了处理链间关系和预测多蛋白质链之间相互作用界面的能力。
+
+## 架构概览
+
+双轨网络在 `network_2track/` 目录中实现，采用优化的流线型设计，既适用于复合物预测，又保持与 RoseTTAFold 核心原则的兼容性。该架构处理成对的多序列比对（MSA）以预测链间接触和相互作用几何结构。
+
+```mermaid
+graph TB
+    A[成对 MSA 输入] --> B[MSA 嵌入]
+    A --> C[序列嵌入]
+    B --> D[迭代特征提取器]
+    C --> D
+    D --> E[距离预测网络]
+    D --> F[坐标预测网络]
+    E --> G[链间接触图]
+    F --> H[3D 结构坐标]
+```
+
+## 核心组件
+
+### TrunkModule 架构
+
+位于 [`TrunkModel.py`](network_2track/TrunkModel.py#L8) 的核心 `TrunkModule` 协调整个预测流程：
+
+- **MSA 嵌入**：通过带位置编码的 `MSA_emb` 处理输入序列
+- **成对嵌入**：生成残基对表示，可选集成模板信息
+- **特征提取**：采用 `IterativeFeatureExtractor` 进行多尺度特征学习
+- **预测头**：包含距离和坐标预测网络
+
+该模块通过条件嵌入路径支持模板增强和无模板模式 [`TrunkModel.py`](network_2track/TrunkModel.py#L13-15)。
+
+### 迭代特征提取
+
+位于 [`Attention_module.py`](network_2track/Attention_module.py#L205) 的 `IterativeFeatureExtractor` 实现核心注意力机制：
+
+- **初始处理**：应用 `Pair2Pair` 变换建立基线关系
+- **差分模块**：通过 `n_diff_module` 个独立迭代处理特征
+- **共享模块**：利用 `IterBlockShare` 进行一致的特征细化
+- **MSA-成对交互**：维护序列和成对表示之间的双向信息流
+
+该架构使网络能够通过迭代细化捕获链内和链间进化信号。
+
+### 距离预测网络
+
+位于 [`DistancePredictor.py`](network_2track/DistancePredictor.py#L8) 的 `DistanceNetwork` 预测几何约束：
+
+- **对称处理**：结合正向和反向成对表示
+- **多头预测**：生成距离、omega、theta 和 phi 角度预测
+- **ResNet 主干**：利用残差网络进行鲁棒的几何学习
+
+## 输入处理和数据流
+
+### 成对 MSA 格式
+
+网络期望成对 MSA，其中来自不同链的序列通过特殊索引连接。[`example/complex_2track/input.a3m`](example/complex_2track/input.a3m#L1) 中的示例演示了这种格式：
+
+- 通过序列索引分离链（第二条链偏移 +200）
+- 跨越链边界的进化耦合保持
+- 构建联合 MSA 以提取共进化信号
+
+### 预测流程
+
+[`predict_msa.py`](network_2track/predict_msa.py#L34) 中的 `Predictor` 类管理完整工作流：
+
+1. **模型加载**：加载预训练的 "RF2t" 权重
+2. **MSA 处理**：解析和格式化成对 MSA 输入
+3. **索引生成**：创建带链分离的位置索引
+4. **推理**：生成链间接触概率
+5. **输出**：将距离图存储为压缩的 NPZ 格式
+
+## 关键架构特性
+
+### 注意力机制
+
+双轨网络采用专用注意力模块：
+
+- **MSA2MSA**：处理序列级进化信息
+- **Pair2Pair**：处理残基对关系建模
+- **MSA2Pair**：桥接序列和成对表示
+- **Pair2MSA**：将成对约束传播到序列特征
+
+### 模板集成
+
+通过 `Templ_emb` 和 `Pair_emb_w_templ` 提供可选模板支持：
+
+- **1D 模板特征**：序列谱和二级结构信息
+- **2D 模板特征**：来自已知结构的距离和方向约束
+- **基于注意力的集成**：像素级注意力用于模板特征加权
+
+## 性能特征
+
+### 计算效率
+
+- **批处理**：支持多个复合物的批量推理
+- **内存优化**：针对大型蛋白质复合物的高效张量操作
+- **GPU 加速**：CUDA 优化实现以加快预测速度
+
+### 预测能力
+
+- **链间接触**：预测跨越链边界的残基-残基接触
+- **几何约束**：生成距离和方向预测
+- **界面建模**：识别潜在的相互作用界面和结合模式
+
+## 与 RoseTTAFold 生态系统的集成
+
+双轨网络与 RoseTTAFold 框架无缝集成：
+
+- **共享组件**：利用通用注意力机制和嵌入策略
+- **一致的 API**：遵循与单链预测相同的接口模式
+- **管道兼容性**：与现有的 MSA 生成和结构细化工具协同工作
+
+这种专用架构使 RoseTTAFold 能够解决蛋白质-蛋白质相互作用预测这一挑战性问题，同时保持核心系统特有的效率和准确性。
+
+---
+
+- [深度解析/蛋白质-蛋白质相互作用建模/PPI筛选与界面建模](https://zread.ai/RosettaCommons/RoseTTAFold/15-ppi-screening-and-interface-modeling)
+
+---
+slug:15-ppi-screening-and-interface-modeling
+blog_type:normal
+---
+
+
+
+RoseTTAFold通过其专用的双轨道神经网络架构，为蛋白质-蛋白质相互作用（PPI）筛选和界面建模提供了强大的功能。该系统通过利用配对多重序列比对中的协同进化信号，并在可用时整合模板信息，能够准确预测蛋白质复合物结构。
+
+## 双轨道网络架构
+
+RoseTTAFold中PPI筛选的核心通过`network_2track`目录中的`TrunkModule`类实现，该类处理配对序列信息以预测链间接触和界面[TrunkModel.py](network_2track/TrunkModel.py#L8-L65)。该架构包含：
+
+- **MSA嵌入**：使用`MSA_emb`处理配对的多重序列比对，以捕获序列级特征
+- **配对嵌入**：通过`Pair_emb_wo_templ`或在有模板信息时通过`Pair_emb_w_templ`生成配对表示
+- **迭代特征提取**：采用具有注意力机制的`IterativeFeatureExtractor`来学习复杂的链间关系
+- **距离预测**：使用`DistanceNetwork`预测链间接触概率和距离分布
+
+模型通过特殊索引处理序列，其中不同的链通过向位置索引添加偏移量（500个残基）来分隔[predict_complex.py](network/predict_complex.py#L149-L152)，确保网络能够区分不同的蛋白质亚基。
+
+## PPI筛选工作流程
+
+筛选过程始于生成高质量的配对多重序列比对，这些比对捕获了相互作用蛋白质之间的协同进化信号：
+
+```mermaid
+flowchart TD
+    A[单独的MSA] --> B[配对算法]
+    B --> C[配对MSA生成]
+    C --> D[质量过滤]
+    D --> E[双轨道网络处理]
+    E --> F[界面预测]
+    F --> G[复合物结构建模]
+```
+
+### 配对MSA生成
+
+对于细菌蛋白质，RoseTTAFold提供了专门的配对脚本，根据UniProt登录号匹配序列[make_joint_MSA_bacterial.py](example/complex_modeling/make_joint_MSA_bacterial.py#L1-L91)。该算法：
+
+1. 解析单独的A3M文件以提取序列和UniProt标识符
+2. 使用复杂的编码方案将UniProt登录号转换为数值索引
+3. 查找登录号相似的序列对（差异阈值在10以内）
+4. 构建保持正确序列对应关系的配对比对
+
+`uni2idx`函数实现了复杂的编码，保留了UniProt登录号的层次结构，从而实现高效的数值比较和配对[make_joint_MSA_bacterial.py](example/complex_modeling/make_joint_MSA_bacterial.py#L25-L50)。
+
+### 复合物结构预测
+
+主要的预测管道在`predict_complex.py`中实现，处理无模板和有模板建模[predict_complex.py](network/predict_complex.py#L88-L250)。关键功能包括：
+
+- **窗口化处理**：对于大型复合物（>400个残基），系统使用滑动窗口方法，具有可配置的窗口大小（默认200）和位移（默认100）来管理内存限制
+- **模板整合**：支持通过`xyz_t`、`t1d`和`t0d`数组整合复合物模板特征，包含结构和比对信息
+- **基于裁剪的预测**：处理重叠窗口并根据覆盖计数使用加权平均合并结果
+- **端到端优化**：使用`RoseTTAFoldModule_e2e`进行完整的结构预测和迭代优化
+
+## 界面建模功能
+
+### 接触预测
+
+双轨道网络专注于通过关注距离矩阵的跨链区域来预测链间接触[predict_msa.py](network_2track/predict_msa.py#L78-L82)：
+
+```python
+# 提取链间接触概率
+prob = np.sum(prob.reshape(L,L,-1)[:L1,L1:,:20], axis=-1).astype(np.float16)
+```
+
+这仅提取链间部分（前L1个残基与剩余残基）并对应于近距离接触（<8Å）的前20个距离区间求和。
+
+### 模板整合
+
+当有复合物模板可用时，系统可以通过以下方式整合结构信息：
+
+- **xyz_t**：N、CA、C原子的模板坐标，未对齐区域为NaN
+- **t1d**：来自HHsearch的1D模板特征，包括评分和二级结构
+- **t2d**：从坐标信息导出的2D模板特征
+
+模板特征通过专门的嵌入层处理并整合到配对表示中[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L61-L110)。
+
+## 高级处理能力
+
+### 内存高效的裁剪
+
+对于大型蛋白质复合物，系统实现了复杂的裁剪策略：
+
+1. **网格生成**：使用可配置的步长创建重叠窗口
+2. **序列过滤**：使用覆盖阈值移除间隙过多的序列
+3. **并行处理**：在可能时同时处理多个裁剪区域
+4. **结果合并**：使用基于计数的权重合并裁剪预测
+
+### 优化管道
+
+端到端模型包括专门的优化模块（`Refine_module`），通过迭代SE(3)-等变变换改进初始预测[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L85-L86)。这确保了高质量的界面几何结构和正确的链堆积。
+
+## 实际实现
+
+### 命令行使用
+
+PPI筛选的典型工作流程包括：
+
+1. 为每个亚基生成单独的MSA
+2. 使用适当的配对策略创建配对比对
+3. 使用hhfilter过滤配对比对（90-95%同一性，50-75%覆盖度）
+4. 运行复合物预测：
+
+```bash
+python network/predict_complex.py -i filtered.a3m -o complex -Ls 218 310
+```
+
+`-Ls`参数按配对顺序指定各个链的长度[README](example/complex_modeling/README#L22-L24)。
+
+### 输出生成
+
+系统生成：
+- **距离/方向图**：6D坐标预测（dist、omega、theta、phi），保存为压缩的NPZ文件
+- **3D结构**：通过TRFold整合生成的完整原子坐标
+- **置信度评分**：用于模型质量评估的每残基LDDT预测
+
+<CgxTip>双轨道架构的关键创新在于其能够在处理配对序列信息的同时，为链内和链间关系保持独立的表示，即使在模板信息有限的情况下也能实现准确的界面预测。</CgxTip>
+
+<CgxTip>对于自动配对具有挑战性的真核蛋白质，可能需要手动整理配对比对或使用替代的协同进化检测方法，以获得最佳的PPI筛选性能。</CgxTip>
+
+## 后续步骤
+
+要全面了解完整的建模工作流程，请探索[复合物建模工作流程](16-complex-modeling-workflow)文档。要详细了解底层的神经网络架构，请参考[用于复合物预测的双轨道网络](14-two-track-network-for-complex-prediction)页面。
+
+---
+
+- [深度解析/蛋白质-蛋白质相互作用建模/复合物建模流程](https://zread.ai/RosettaCommons/RoseTTAFold/16-complex-modeling-workflow)
+
+---
+slug:16-complex-modeling-workflow
+blog_type:normal
+---
+
+
+
+RoseTTAFold 中的复合物建模工作流利用来自配对多重序列比对（MSA）的协同进化信号和专门的双轨道神经网络架构，实现蛋白质-蛋白质复合物结构的预测。该工作流专为多个蛋白质亚基之间的相互作用建模而设计，提供了从输入准备到最终结构生成的系统化方法。
+
+## 工作流概述
+
+复合物建模过程遵循一个结构化流程，将单个蛋白质序列转换为精确的 3D 复合物结构。该工作流包含四个主要阶段：各个亚基的 MSA 生成、配对比对创建、模板整合（可选）以及使用双轨道网络进行复合物结构预测。
+
+```mermaid
+flowchart TD
+    A[单个亚基序列] --> B[为每个亚基生成 MSA]
+    B --> C[创建配对比对]
+    C --> D[过滤配对 MSA]
+    D --> E{是否有可用模板？}
+    E -->|是| F[准备模板特征]
+    E -->|否| G[使用无模板模式]
+    F --> H[运行复合物预测]
+    G --> H
+    H --> I[生成 3D 复合物结构]
+    I --> J[可选：Rosetta 精修]
+```
+
+## 输入准备
+
+### 单个 MSA 生成
+
+第一步需要为每个蛋白质亚基单独生成高质量的多重序列比对。这些单个 MSA 作为提取进化信息的基础，这些信息稍后将进行配对以识别相互作用蛋白质之间的协同进化信号。
+
+对于细菌蛋白质，RoseTTAFold 提供了专门的脚本来自动化配对过程。[`make_joint_MSA_bacterial.py`](example/complex_modeling/make_joint_MSA_bacterial.py) 脚本基于 UniProt 登录号相似性配对序列，假设具有相似登录号的序列可能属于同一个操纵子或功能复合物 [来源](example/complex_modeling/make_joint_MSA_bacterial.py#L78-L79)。
+
+### 配对比对创建
+
+创建准确的配对比对对于成功的复合物建模至关重要。配对算法识别来自不同亚基的、可能相互作用的序列对：
+
+```python
+# 查找差异不超过 10 的 uniprot id 对
+idx1,idx2 = np.where(np.abs(hash1[:,None]-hash2[None,:]) < 10)
+```
+
+脚本随后通过连接配对同源物的序列生成配对的 MSA 文件，其中查询序列（已知的相互作用物）置于比对的前列 [来源](example/complex_modeling/make_joint_MSA_bacterial.py#L86-L89)。
+
+<CgxTip>对于真核蛋白质，由于缺乏类似操纵子的基因组组织，配对比对的生成仍然具有挑战性。用户可能需要探索替代策略，如系统发育谱分析或实验相互作用数据来指导配对。</CgxTip>
+
+### MSA 过滤
+
+创建配对比对后，过滤是必不可少的步骤，以去除冗余序列并提高信号质量。推荐的过滤参数使用 HHfilter：
+
+```bash
+hhfilter -i paired.a3m -o filtered.a3m -id 90 -cov 75
+```
+
+此命令去除同一性 >90% 且覆盖率 <75% 的序列，有助于平衡多样性和比对质量 [来源](example/complex_modeling/README#L11)。
+
+## 模板整合
+
+### 可选模板特征
+
+RoseTTAFold 支持整合来自已知复合物模板的结构信息。当可用时，模板特征应准备在包含三个关键组件的 NPZ 文件中：
+
+- **xyz_t**：复合物模板的 N、CA、C 坐标，形状为 (templates, residues, 3, 3)
+- **t1d**：来自 HHsearch 结果的 1D 特征（得分、二级结构、概率）
+- **t0d**：包括概率、同一性和相似性得分的 0D 特征
+
+模板中未对齐的区域应使用 NaN 值标记坐标，使用零值标记特征 [来源](example/complex_modeling/README#L16-L22)。
+
+### 模板特征处理
+
+预测流程通过将模板特征转换为适当的张量格式来处理：
+
+```python
+if templ_npz != None:
+    templ = np.load(templ_npz)
+    xyz_t = torch.from_numpy(templ["xyz_t"])
+    t1d = torch.from_numpy(templ["t1d"])
+    t0d = torch.from_numpy(templ["t0d"])
+else:
+    xyz_t = torch.full((1, L, 3, 3), np.nan).float()
+    t1d = torch.zeros((1, L, 3)).float()
+    t0d = torch.zeros((1,3)).float()
+```
+
+当未提供模板时，系统会自动创建占位符模板特征，支持无模板预测 [来源](network/predict_complex.py#L120-L127)。
+
+## 复合物结构预测
+
+### 双轨道网络架构
+
+复合物预测利用在 [`TrunkModule`](network_2track/TrunkModel.py#L8) 类中实现的专门双轨道神经网络架构。该架构通过并行轨道处理配对的 MSA 数据，捕获链内和链间的进化信息：
+
+```python
+def forward(self, msa, seq, idx, t1d=None, t2d=None):
+    # 获取嵌入
+    msa = self.msa_emb(msa, idx)
+    if self.use_templ:
+        tmpl = self.templ_emb(t1d, t2d, idx)
+        pair = self.pair_emb(seq, idx, tmpl)
+    else:
+        pair = self.pair_emb(seq, idx)
+```
+
+网络生成复合物的 6D 方向预测和 3D 坐标预测 [来源](network_2track/TrunkModel.py#L45-L65)。
+
+### 预测流程
+
+主要预测工作流在 [`Predictor`](network/predict_complex.py#L88) 类中实现，该类处理输入处理、模型推理和输出生成。关键步骤包括：
+
+1. **MSA 处理**：解析配对的 MSA 并转换为张量格式
+2. **索引管理**：创建残基索引，通过添加偏移量（500 个残基）分隔不同亚基，防止链间交叉污染
+3. **模板整合**：如果可用，处理模板特征
+4. **窗口预测**：对大型复合物使用滑动窗口方法（默认：200 个残基窗口，100 个残基位移）
+
+```python
+# 通过添加索引偏移量分隔亚基
+for L_i in Ls[:-1]:
+    idx_pdb[:,L_prev+L_i:] += 500
+    L_prev += L_i
+```
+
+这种索引方案确保来自不同亚基的残基在预测过程中被正确区分 [来源](network/predict_complex.py#L133-L135)。
+
+### 命令行界面
+
+复合物预测通过命令行界面启动：
+
+```bash
+python network/predict_complex.py -i filtered.a3m -o complex -Ls 218 310
+```
+
+`-Ls` 参数指定各个亚基按配对顺序的长度，这对于正确的链分离至关重要 [来源](example/complex_modeling/README#L26-L27)。
+
+## 输出和后处理
+
+### 结构生成
+
+预测流程为复合物中所有亚基的骨架原子（N、CA、C）生成 3D 坐标。输出以 NPZ 格式保存，包含预测坐标和置信度分数。
+
+### 可选精修
+
+为获得更高质量的模型，用户可以应用带坐标约束的 Rosetta fastrelax 来添加侧链原子并优化结构：
+
+```bash
+你可能需要运行带坐标约束的 Rosetta fastrelax 来添加侧链。
+```
+
+此步骤有助于提高预测复合物的物理真实性，同时保持整体骨架构象 [来源](example/complex_modeling/README#L29)。
+
+<CgxTip>专为复合物设计的双轨道网络架构比单链方法能更有效地捕获蛋白质间协同进化信号，使其特别适用于异源二聚体和多聚体蛋白质复合物。</CgxTip>
+
+## 高级配置
+
+复合物建模工作流通过预测脚本支持各种配置选项，包括 GPU 加速、自定义模型目录和模板整合。用户可以调整大型复合物的窗口大小和位移等参数，以平衡计算效率和预测准确性。
+
+要全面理解底层的神经网络架构和实现细节，请参阅 [用于复合物预测的双轨道网络](14-two-track-network-for-complex-prediction) 文档。要探索替代预测方法，请参阅 [端到端实现与 PyRosetta 实现的比较](19-end-to-end-vs-pyrosetta-implementation)。
+
+---
+
+## 高级功能与扩展
+
+- [深度解析/高级功能与扩展/PyRosetta集成用于结构优化](https://zread.ai/RosettaCommons/RoseTTAFold/17-pyrosetta-integration-for-structure-refinement)
+
+---
+slug:17-pyrosetta-integration-for-structure-refinement
+blog_type:normal
+---
+
+
+
+RoseTTAFold中的PyRosetta集成是一种复杂的混合方法，它将深度神经网络预测与基于经典物理的精修相结合。这种集成利用PyRosetta强大的分子建模能力，通过迭代精修协议将原始网络输出转化为物理上真实的蛋白质结构。
+
+## 架构概览
+
+PyRosetta集成采用两阶段流水线，其中神经网络预测引导基于Rosetta的结构精修。该架构通过约束生成和迭代最小化，将深度学习预测与基于物理的建模连接起来。
+
+```mermaid
+flowchart TD
+    A[MSA & Templates] --> B[RoseTTAFold Network]
+    B --> C[Distance & Orientation Predictions]
+    C --> D[Constraint Generation]
+    D --> E[PyRosetta Refinement]
+    E --> F[Final 3D Structure]
+    
+    subgraph "Network Stage"
+        B --> B1[Three-Track Neural Network]
+        B1 --> B2[Distogram Prediction]
+        B1 --> B3[Orientation Prediction]
+    end
+    
+    subgraph "Refinement Stage"
+        E --> E1[Constraint Setup]
+        E1 --> E2[Multi-Mode Minimization]
+        E2 --> E3[FastRelax Protocol]
+    end
+```
+
+## 网络预测接口
+
+PyRosetta集成始于专门的预测模块`predict_pyRosetta.py` [network/predict_pyRosetta.py](network/predict_pyRosetta.py#L51)。该模块实现了`Predictor`类，专门生成适用于Rosetta约束生成的距离和方向预测。
+
+关键配置参数包括：
+- **模型架构**：8个模块，包含4个结构精修模块 [network/predict_pyRosetta.py#L18-L49]
+- **SE(3)网络**：2层，16个通道用于坐标预测 [network/predict_pyRosetta.py#L37-L48]
+- **输入处理**：支持MSA解析和模板整合 [network/predict_pyRosetta.py#L81-L120]
+
+预测器输出四种类型的约束：
+- 距离分布（37个区间，4.25-20Å）
+- 二面角（omega、theta、phi）
+- 骨架几何的方向约束
+
+## Rosetta约束系统
+
+### 约束生成
+
+`utils.py`中的约束生成过程 [folding/utils.py](folding/utils.py#L12-L100) 将神经网络概率转化为Rosetta兼容的约束函数。该系统使用复杂的概率过滤和样条插值：
+
+**距离约束**：应用于Cβ原子（甘氨酸为Cα），采用基于概率的过滤。仅保留概率>0.05的约束 [folding/data/params.json](folding/data/params.json#L2)。
+
+**方向约束**：Omega、theta和phi角被转换为具有可配置权重和容差窗口的谐波约束。
+
+### 多模式精修协议
+
+精修协议通过三种不同模式运行 [folding/RosettaTR.py](folding/RosettaTR.py#L50-L150)：
+
+| 模式 | 策略 | 描述 |
+|------|----------|-------------|
+| 模式 0 | 短程 → 中程 → 长程 | 顺序精修，约束强度递增 |
+| 模式 1 | (短程 + 中程) → 长程 | 组合初始精修后应用长程约束 |
+| 模式 2 | (短程 + 中程 + 长程) | 同时应用所有约束类型 |
+
+每种模式采用不同的约束权重调度：
+- **VDW权重**：在精修阶段中从3.0逐步增加到10.0 [folding/RosettaTR.py#L10]
+- **距离约束**：随着结构收敛，影响减弱（3.0 → 1.0）[folding/RosettaTR.py#L11]
+- **方向约束**：一致应用，略有减少（1.0 → 0.5）[folding/RosettaTR.py#L12]
+
+## 高级精修功能
+
+### 笛卡尔空间优化
+
+该协议包含使用`sf_cart`评分函数的专门笛卡尔空间最小化 [folding/RosettaTR.py#L47-L49]。这能够在保持约束满足的同时实现精确的原子定位。
+
+### 噪声注入和采样
+
+为了增强构象采样，系统引入受控扰动：
+- 随机二面角扰动（±10°）用于多次重启 [folding/RosettaTR.py#L75-L80]
+- Savitzky-Golay滤波用于平滑约束应用 [folding/utils.py](folding/utils.py#L30-L32)
+- 坐标数组操作的循环移位选项 [folding/arguments.py](folding/arguments.py#L38)
+
+### FastRelax集成
+
+可选的FastRelax协议使用Rosetta的全原子能量函数提供最终结构精修，确保物理真实的侧链堆积和骨架几何 [folding/arguments.py](folding/arguments.py#L35-L36)。
+
+## 工作流执行
+
+完整的PyRosetta工作流通过`run_pyrosetta_ver.sh`编排 [run_pyrosetta_ver.sh](run_pyrosetta_ver.sh#L1-L124)：
+
+1. **MSA生成**：HHblits创建序列谱
+2. **模板搜索**：HHsearch搜索结构同源物
+3. **网络预测**：距离和方向估计
+4. **并行精修**：使用不同参数的多个模型
+5. **模型选择**：基于DeepAccNet的质量评估
+
+工作流为每个目标生成15个模型，使用不同的概率阈值（0.05、0.15、0.25、0.35、0.45）和精修模式，提供全面的构象采样。
+
+<CgxTip>
+PyRosetta集成采用渐进式约束加权策略，早期精修阶段强调长程距离约束，后期阶段则通过方向约束和范德华势专注于局部几何优化。
+</CgxTip>
+
+<CgxTip>
+为获得最佳性能，系统对超过300个残基的蛋白质采用裁剪预测，使用大小为150、步长为50的重叠窗口进行处理，以管理内存使用同时保持约束连续性。
+</CgxTip>
+
+## 配置参数
+
+精修行为通过`params.json`控制 [folding/data/params.json](folding/data/params.json)：
+
+- **PCUT**：约束包含的最小概率阈值（0.05）
+- **EBASE/EREP**：距离势的基线能量和排斥参数
+- **NRUNS**：独立精修轨迹数量（默认：3）
+- **DSTEP/ASTEP**：距离（0.5Å）和角度（15°）离散化的分辨率
+
+这些参数在约束严格性和构象灵活性之间取得平衡，能够对不同蛋白质家族进行稳健的结构预测。
+
+## 集成优势
+
+PyRosetta集成相比纯神经网络方法提供几个优势：
+
+1. **物理真实性**：Rosetta基于物理的能量函数确保化学上合理的结构
+2. **约束灵活性**：概率约束允许基于预测置信度的自适应精修
+3. **采样多样性**：多次重启和参数变化探索构象空间
+4. **质量评估**：集成的DeepAccNet提供自动化模型质量评估
+
+这种混合方法成功地将深度学习的模式识别能力与经典分子建模的物理严谨性相结合，产生适用于下游应用的高质量蛋白质结构预测。
+
+**后续步骤**：要了解互补的端到端方法，参见[End-to-End vs PyRosetta Implementation](19-end-to-end-vs-pyrosetta-implementation)。有关神经网络架构的详细信息，请参考[RoseTTAFold Core Model Implementation](8-rosettafold-core-model-implementation)。
+
+---
+
+- [深度解析/高级功能与扩展/DeepAccNet误差预测](https://zread.ai/RosettaCommons/RoseTTAFold/18-deepaccnet-error-prediction)
+
+---
+slug:18-deepaccnet-error-prediction
+blog_type:normal
+---
+
+
+
+DeepAccNet 是一个复杂的神经网络系统，旨在通过估算局部距离差异测试（LDDT）分数和生成距离误差预测来预测蛋白质结构模型的准确性。该模块与 RoseTTAFold 流水线无缝集成，为预测结构提供质量评估。
+
+## 架构概述
+
+DeepAccNet 采用多轨道神经架构，处理来自蛋白质模型的结构和能量特征：
+
+```mermaid
+graph TD
+    A[输入 PDB/Decoy] --> B[特征提取]
+    B --> C[能量项]
+    B --> D[几何特征]
+    B --> E[距离图]
+    C --> F[DeepAccNet 模型]
+    D --> F
+    E --> F
+    F --> G[LDDT 预测]
+    F --> H[误差直方图]
+    G --> I[质量评估]
+    H --> I
+```
+
+系统在 `DAN-msa/` 目录中的多个关键模块中实现，核心神经网络架构位于 [`pyErrorPred/model.py`](DAN-msa/pyErrorPred/model.py#L17)，特征提取工具位于 [`pyErrorPred/featurize.py`](DAN-msa/pyErrorPred/featurize.py#L53)。
+
+## 核心模型架构
+
+DeepAccNet 模型类实现了一个复杂的神经网络，具有针对不同蛋白质大小和特征类型的可配置参数：
+
+- **单轨道大小**（`obt_size`）：残基级特征的 70 个维度
+- **双轨道大小**（`tbt_size`）：成对特征的 58 个维度  
+- **蛋白质大小**（`prot_size`）：大规模蛋白质的可选参数
+- **分块处理**：将大蛋白质划分为 8 个块以提高内存效率
+
+该模型支持多种架构优化，包括：
+- **自注意力机制**用于捕获长程依赖关系
+- **3D 卷积层**用于空间特征学习
+- **部分实例归一化**用于稳定训练
+- **成对特征的对称化**
+
+## 特征工程流水线
+
+DeepAccNet 通过多个专用函数从蛋白质结构中提取综合特征：
+
+### 基于能量的特征
+[`extract_EnergyDistM()`](DAN-msa/pyErrorPred/featurize.py#L53) 函数处理 Rosetta 能量图，提取：
+- 氢键模式（bb_sc, sc）
+- 范德华相互作用
+- 静电项
+- 溶剂化能量
+
+### 几何特征
+通过以下方式捕获结构几何：
+- **键长和键角**：N-CA、CA-C、C-N 键及相关角度
+- **二面角**：余弦/正弦空间中的 Phi、psi、omega 角
+- **二级结构**：基于 DSSP 的分类
+- **距离图**：多个原子对距离矩阵
+
+### 序列特征
+氨基酸属性通过以下方式编码：
+- **物理化学性质**：大小、疏水性、电荷
+- **进化信息**：位置特异性评分矩阵
+- **序列分离**：相对位置编码
+
+## LDDT 预测算法
+
+核心质量评估指标通过 [`calculate_LDDT()`](DAN-msa/pyErrorPred/model.py#L267) 函数计算：
+
+```python
+def calculate_LDDT(self, estogram, mask, center=7):
+    # 从计算中移除对角线
+    mask = tf.multiply(mask, tf.ones(tf.shape(mask))-tf.eye(tf.shape(mask)[0]))
+    masked = tf.transpose(tf.multiply(tf.transpose(estogram, [2,0,1]), mask), [1,2,0])
+
+    p0 = tf.reduce_sum(masked[:,:,center], axis=-1)
+    p1 = tf.reduce_sum(masked[:,:,center-1]+masked[:,:,center+1], axis=-1)
+    p2 = tf.reduce_sum(masked[:,:,center-2]+masked[:,:,center+2], axis=-1)
+    p3 = tf.reduce_sum(masked[:,:,center-3]+masked[:,:,center+3], axis=-1)
+    p4 = tf.reduce_sum(mask, axis=-1)
+
+    return 0.25 * (4.0*p0 + 3.0*p1 + 2.0*p2 + p3) / p4
+```
+
+该算法通过以下方式估算 LDDT 分数：
+1. **距离概率加权**：使用以不同距离阈值为中心的直方图区间
+2. **掩码处理**：排除对角线元素和掩码区域
+3. **加权平均**：应用距离相关权重（4.0、3.0、2.0、1.0）
+
+## 预测流水线
+
+预测工作流通过主要的 [`ErrorPredictorMSA.py`](DAN-msa/ErrorPredictorMSA.py#L10) 脚本编排：
+
+### 输入处理
+- 接受单个 PDB 文件或 decoy 结构文件夹
+- 集成来自 RoseTTAFold 的预测距离图
+- 支持距离图滚动以兼容 Trunk 模型
+
+### 模型集成
+- 使用 2 个模型副本进行稳健预测
+- 每个副本使用不同随机种子训练
+- 通过平均合并结果
+
+### 输出生成
+系统产生三个关键输出：
+1. **LDDT 分数**：每残基质量估计
+2. **误差直方图**：完整距离误差分布
+3. **掩码**：有效相互作用区域
+
+<CgxTip>
+预测流水线支持单结构和批处理模式，适用于实时质量评估和大规模模型评估。
+</CgxTip>
+
+## 性能优化
+
+DeepAccNet 采用了几种优化策略：
+
+### 内存管理
+- **基于块的处理**：大蛋白质划分为可管理的段
+- **GPU 内存增长**：动态分配防止内存不足错误
+- **特征掩码**：减少不相关区域的计算
+
+### 计算效率
+- **并行处理**：特征提取的多 CPU 支持
+- **TensorFlow 优化**：基于图的计算提高速度
+- **注意力机制**：[`pixelSelfAttention()`](DAN-msa/pyErrorPred/layers.py#L4) 用于高效长程依赖建模
+
+## 与 RoseTTAFold 的集成
+
+DeepAccNet 作为更广泛的 RoseTTAFold 生态系统中的质量评估组件：
+
+- **输入兼容性**：接受来自 RoseTTAFold 预测的距离图
+- **工作流集成**：无缝适配端到端和 PyRosetta 流水线
+- **质量反馈**：为结构选择提供置信度分数
+
+误差预测能力通过识别可靠区域和潜在建模错误补充了结构预测，使下游应用更加明智。
+
+## 用法和应用
+
+该系统设计用于多种用例：
+
+### 结构验证
+- 评估预测模型的质量
+- 识别潜在问题区域
+- 指导模型选择和优化
+
+### 研究应用
+- 基准结构预测方法
+- 分析预测置信度模式
+- 指导实验验证工作
+
+### 集成点
+DeepAccNet 与其他 RoseTTAFold 组件连接：
+- [RoseTTAFold 核心模型实现](8-rosettafold-core-model-implementation) 用于结构生成
+- [PyRosetta 集成用于结构优化](17-pyrosetta-integration-for-structure-refinement) 用于详细优化
+- [端到端 vs PyRosetta 实现](19-end-to-end-vs-pyrosetta-implementation) 用于工作流优化
+
+模块化设计使 DeepAccNet 可以独立使用或作为完整蛋白质结构预测流水线的一部分，为计算结构生物学应用提供必要的质量评估能力。
+
+---
+
+- [深度解析/高级功能与扩展/端到端与PyRosetta实现对比](https://zread.ai/RosettaCommons/RoseTTAFold/19-end-to-end-vs-pyrosetta-implementation)
+
+---
+slug:19-end-to-end-vs-pyrosetta-implementation
+blog_type:normal
+---
+
+
+
+RoseTTAFold 提供了两种不同的蛋白质结构预测方法：一种端到端的神经网络流水线和一种集成 PyRosetta 的工作流。理解这两种实现之间的差异对于根据你的具体用例选择合适的方法至关重要。
+
+## 架构概述
+
+这两种实现遵循截然不同的结构预测范式：
+
+```mermaid
+graph TD
+    A[输入序列] --> B[MSA 生成]
+    B --> C[模板搜索]
+    C --> D{实现选择}
+    
+    D -->|端到端| E[神经网络预测]
+    E --> F[直接 3D 坐标]
+    F --> G[PDB 输出]
+    
+    D -->|PyRosetta| H[距离/方向预测]
+    H --> I[Rosetta 折叠协议]
+    I --> J[能量最小化]
+    J --> K[模型选择]
+    K --> G
+```
+
+## 核心实现差异
+
+### 模型加载与配置
+
+主要的架构区别始于模型加载。端到端版本使用严格的状态字典匹配加载模型，而 PyRosetta 采用更灵活的方法：
+
+- **端到端**：使用 `suffix='e2e'` 和 `strict=True` 进行模型加载 [predict_e2e.py#L107](network/predict_e2e.py#L107)
+- **PyRosetta**：使用 `suffix='pyrosetta'` 和 `strict=False` 允许部分状态加载 [predict_pyRosetta.py#L73](network/predict_pyRosetta.py#L73)
+
+### 模板集成
+
+两种实现都利用模板信息，但使用不同的参数：
+
+| 特性 | 端到端 | PyRosetta |
+|---------|------------|-----------|
+| 模板数量 | 10 个模板 [predict_e2e.py#L120](network/predict_e2e.py#L120) | 25 个模板 [predict_pyRosetta.py#L86](network/predict_pyRosetta.py#L86) |
+| 窗口大小 | 150 个残基，shift=75 [predict_e2e.py#L115](network/predict_e2e.py#L115) | 150 个残基，shift=50 [predict_pyRosetta.py#L81](network/predict_pyRosetta.py#L81) |
+
+### 输出生成
+
+最显著的差异在于输出生成：
+
+**端到端实现**直接生成 3D 坐标并写入带有置信度分数（预测 LDDT）的 PDB 文件 [predict_e2e.py#L240-280](network/predict_e2e.py#L240-280)：
+
+- 生成完整的原子坐标（N、CA、C、O、CB）
+- 使用内部 `extend()` 函数应用几何约束
+- 写入 PDB 文件，其中 B 因子表示预测置信度
+
+**PyRosetta 实现**输出中间预测用于下游 Rosetta 处理 [predict_pyRosetta.py#L140-170](network/predict_pyRosetta.py#L140-170)：
+
+- 生成距离和方向概率分布
+- 保存包含距离图数据的压缩 `.npz` 文件
+- 需要单独的折叠协议来生成 3D 结构
+
+## 工作流比较
+
+### 端到端流水线
+
+端到端工作流采用精简的方法：
+
+```mermaid
+flowchart LR
+    A[输入 FASTA] --> B[MSA 生成]
+    B --> C[二级结构]
+    C --> D[模板搜索]
+    D --> E[神经网络预测]
+    E --> F[3D 坐标]
+    F --> G[PDB 输出]
+```
+
+此方法在 `run_e2e_ver.sh` [run_e2e_ver.sh#L52-71](run_e2e_ver.sh#L52-71) 中实现，并在单个神经网络推理步骤中完成。
+
+### PyRosetta 流水线
+
+PyRosetta 方法涉及多个阶段：
+
+```mermaid
+flowchart LR
+    A[输入 FASTA] --> B[MSA 生成]
+    B --> C[二级结构]
+    C --> D[模板搜索]
+    D --> E[距离预测]
+    E --> F[Rosetta 折叠]
+    F --> G[模型选择]
+    G --> H[最终 PDB]
+```
+
+此工作流需要额外的步骤，包括 Rosetta 折叠协议 [run_pyrosetta_ver.sh#L85-95](run_pyrosetta_ver.sh#L85-95] 和使用 DeepAccNet 进行模型选择 [run_pyrosetta_ver.sh#L105-120](run_pyrosetta_ver.sh#L105-120]。
+
+## 性能特征
+
+### 计算需求
+
+| 方面 | 端到端 | PyRosetta |
+|--------|------------|-----------|
+| GPU 内存 | 较高（直接坐标生成） | 较低（概率分布） |
+| CPU 使用 | 最少的后处理 | 显著（Rosetta 折叠） |
+| 运行时间 | 推理更快 | 总体较慢（多个阶段） |
+| 输出质量 | 适用于初始预测 | 精炼后质量更高 |
+
+### 内存管理
+
+两种实现对大型蛋白质都使用裁剪策略，但方法不同：
+
+- **端到端**：实现复杂的裁剪，带有重叠窗口和置信度加权 [predict_e2e.py#L160-190](network/predict_e2e.py#L160-190]
+- **PyRosetta**：使用更简单的裁剪和基于置信度的加权 [predict_pyRosetta.py#L110-140](network/predict_pyRosetta.py#L110-140]
+
+## 用例推荐
+
+<CgxTip>当优先考虑速度而非最终精度时，选择端到端实现进行快速原型设计和初始结构预测。</CgxTip>
+
+<CgxTip>对于高精度建模任务，当计算资源可用且额外的精炼步骤能显著提高结构质量时，选择 PyRosetta 实现。</CgxTip>
+
+### 何时使用端到端
+
+- 多个序列的快速筛选
+- CPU 资源有限的环境
+- 初始结构评估
+- 需要快速响应的应用
+
+### 何时使用 PyRosetta
+
+- 高精度结构确定
+- 详细的蛋白质工程应用
+- 需要广泛精炼的情况
+- 当访问 Rosetta 的能量函数有益时
+
+## 与其他组件的集成
+
+两种实现都集成到 RoseTTAFold 的生态系统中，但集成程度不同：
+
+- **端到端**：自包含的预测流水线
+- **PyRosetta**：与 DeepAccNet 集成进行错误预测 [DAN-msa/ErrorPredictorMSA.py](DAN-msa/ErrorPredictorMSA.py) 和 Rosetta 的折叠协议 [folding/RosettaTR.py](folding/RosettaTR.py)
+
+实现之间的选择会影响下游工作流，应在整体计算流水线和精度要求的背景下考虑。
+
+有关神经网络架构的更详细信息，请参阅 [RoseTTAFold 核心模型实现](8-rosettafold-core-model-implementation)，或有关 PyRosetta 特定功能，请参考 [PyRosetta 用于结构精炼的集成](17-pyrosetta-integration-for-structure-refinement)。
+
+---
+
+## 性能与优化
+
+- [深度解析/性能与优化/GPU加速与CUDA支持](https://zread.ai/RosettaCommons/RoseTTAFold/20-gpu-acceleration-and-cuda-support)
+
+---
+slug:20-gpu-acceleration-and-cuda-support
+blog_type:normal
+---
+
+
+
+RoseTTAFold 通过支持 CUDA 来利用 GPU 加速，显著提升其神经网络计算的性能，尤其是针对三轨道架构和 SE(3)-等变网络。本文档概述了 CUDA 实现细节、支持的配置和优化策略。
+
+## CUDA 环境设置
+
+RoseTTAFold 提供了两种主要的环境配置，分别支持不同的 CUDA 版本：
+
+### CUDA 10.2 支持
+`RoseTTAFold-linux-cu101.yml` 环境文件配置了支持 CUDA 10.2 的 RoseTTAFold [RoseTTAFold-linux-cu101.yml](RoseTTAFold-linux-cu101.yml#L1-L108)。关键 CUDA 组件包括：
+
+- **cudatoolkit=10.2.89**: GPU 计算的核心 CUDA 工具包
+- **pytorch=1.8.1**: 支持 CUDA 10.2 的 PyTorch 版本
+- **pytorch-cluster=1.5.9**: 支持 CUDA 加速的图处理
+- **pytorch-geometric=1.7.2**: 支持 CUDA 的几何深度学习
+- **dgl-cu102==0.6.1**: 专为 CUDA 10.2 编译的深度图库
+
+### CUDA 11.1 支持
+`RoseTTAFold-linux.yml` 环境提供了对较新的 CUDA 11.1 的支持 [RoseTTAFold-linux.yml](RoseTTAFold-linux.yml#L1-L109]：
+
+- **cudatoolkit=11.1.74**: 性能增强的 CUDA 工具包
+- **pytorch=1.9.0**: 支持 CUDA 11.1 优化的最新 PyTorch 版本
+- **dgl-cu110==0.6.1**: 为 CUDA 11.0/11.1 编译的深度图库
+
+## GPU 加速神经网络组件
+
+### SE(3)-等变网络
+SE(3)-等变网络通过仔细的内存管理和计算模式专门为 GPU 执行优化：
+
+```python
+@torch.cuda.amp.autocast(enabled=False)
+def forward(self, G, type_0_features, type_1_features):
+    # 从相对位置计算等变权重基
+    basis, r = get_basis_and_r(G, self.num_degrees-1)
+    h = {'0': type_0_features, '1': type_1_features}
+    for layer in self.block0:
+```
+
+`TFN` 和 `SE3Transformer` 类都实现了这种模式 [network/SE3_network.py](network/SE3_network.py#L45-L50)，禁用自动混合精度以保持等变计算的数值稳定性，同时仍然利用 GPU 加速。
+
+### 线性注意力优化
+基于 Performer 的注意力机制包括设备感知的张量操作：
+
+```python
+def softmax_kernel(data, *, projection_matrix, is_query, normalize_data=True, eps=1e-4, device = None):
+    b, h, *_ = data.shape
+    data_normalizer = (data.shape[-1] ** -0.25) if normalize_data else 1.
+    ratio = (projection_matrix.shape[0] ** -0.5)
+    projection = projection_matrix.unsqueeze(0).repeat(h, 1, 1)
+```
+
+`device` 参数确保张量在适当的 GPU 上创建 [network/performer_pytorch.py](network/performer_pytorch.py#L27-L35)。
+
+## 性能优化策略
+
+### 内存管理
+RoseTTAFold 实现了几种 GPU 内存优化技术：
+
+1. **选择性混合精度**: 虽然 SE(3) 网络为稳定性禁用自动混合精度，但其他组件可以利用它来提高内存效率。
+
+2. **图处理优化**: PyTorch Geometric 和 DGL 库为三轨道架构提供 GPU 优化的图操作。
+
+3. **批处理**: 框架支持对多个序列进行批处理以最大化 GPU 利用率。
+
+### 性能分析支持
+包含一个轻量级的性能分析实用程序用于性能监控 [network/utils/utils_profiling.py](network/utils/utils_profiling.py#L1-L6)：
+
+```python
+try:
+    profile
+except NameError:
+    def profile(func):
+        return func
+```
+
+这允许开发者添加性能分析而不影响生产代码。
+
+## GPU 要求和兼容性
+
+| 组件 | CUDA 10.2 | CUDA 11.1 | 说明 |
+|-----------|-----------|-----------|-------|
+| PyTorch | 1.8.1 | 1.9.0 | 核心深度学习框架 |
+| PyTorch Geometric | 1.7.2 | 1.7.2 | 几何深度学习 |
+| DGL | 0.6.1 (cu102) | 0.6.1 (cu110) | 图神经网络 |
+| CUDA Toolkit | 10.2.89 | 11.1.74 | GPU 计算平台 |
+
+## 安装和设置
+
+要启用 GPU 加速：
+
+1. **选择环境**: 根据你的 GPU 驱动兼容性选择 CUDA 10.2 或 11.1
+2. **安装依赖**: 使用相应的 conda 环境文件：
+   ```bash
+   conda env create -f RoseTTAFold-linux-cu101.yml  # 对于 CUDA 10.2
+   conda env create -f RoseTTAFold-linux.yml        # 对于 CUDA 11.1
+   ```
+3. **验证 GPU 访问**: 确保 CUDA 驱动程序已正确安装并可访问
+
+<CgxTip>SE(3)-等变网络有意禁用自动混合精度（`@torch.cuda.amp.autocast(enabled=False)`）以保持几何计算的数值稳定性，而其他组件可以从混合精度中受益以提高性能。</CgxTip>
+
+## 后续步骤
+
+要进行全面性能优化，可以考虑探索 [大型蛋白质的内存管理](21-memory-management-for-large-proteins) 和 [批处理和并行化](22-batch-processing-and-parallelization) 以在生产场景中最大化 GPU 利用率。
+
+---
+
+- [深度解析/性能与优化/大分子蛋白质内存管理](https://zread.ai/RosettaCommons/RoseTTAFold/21-memory-management-for-large-proteins)
+
+---
+slug:21-memory-management-for-large-proteins
+blog_type:normal
+---
+
+
+
+在 RoseTTAFold 中进行大型蛋白质结构预测面临显著的内存挑战，这源于注意力机制的二次复杂度以及蛋白质序列和结构表征的高维特性。本文档概述了在整个代码库中实现的复杂内存优化策略，这些策略使得处理包含数百至数千个残基的蛋白质成为可能。
+
+## 内存优化架构
+
+RoseTTAFold 采用多层级的内存管理方法，结合算法优化与实现级技术。内存管理策略可作如下可视化：
+
+```mermaid
+graph TD
+    A[大型蛋白质输入] --> B[注意力机制]
+    A --> C[图处理]
+    A --> D[特征存储]
+    
+    B --> E[线性注意力 Performer]
+    B --> F[捆绑注意力]
+    B --> G[轴向注意力]
+    B --> H[分块处理]
+    
+    C --> I[Top-K 图构建]
+    C --> J[轻量级 PickleGraph]
+    
+    D --> K[混合精度训练]
+    D --> L[梯度检查点]
+    
+    E --> M[O(N) 复杂度]
+    F --> N[参数共享]
+    G --> O[降低维度]
+    H --> P[内存批处理]
+```
+
+## 线性注意力实现
+
+最显著的内存优化来自基于 Performer 的线性注意力机制，它将标准注意力的二次复杂度从 O(L²) 降低到 O(L)，其中 L 是序列长度。
+
+核心线性注意力在 [`network/performer_pytorch.py`](network/performer_pytorch.py#L109-L148) 中实现：
+
+```python
+def linear_attention(q, k, v):
+    # 使用 softmax 内核的线性注意力机制
+    # 将内存复杂度从 O(L²) 降低到 O(L)
+    D_inv = 1. / (torch.einsum('...nd,...d->...n', q, k.sum(dim=-2)) + 1e-6)
+    context = torch.einsum('...nd,...ne->...de', k, v)
+    out = torch.einsum('...de,...nd,...n->...ne', context, q, D_inv)
+    return out
+```
+
+该实现通过 [`SelfAttention`](network/performer_pytorch.py#L210-L263) 类集成到 Transformer 层中，该类提供了内存高效处理的配置选项：
+
+- **广义注意力**：使用 ReLU 内核以提高数值稳定性
+- **投影矩阵优化**：在保留信息的同时降低特征维度
+- **分块处理**：将大型序列划分为可管理的批次
+
+## 捆绑和轴向注意力策略
+
+对于 MSA（多序列比对）处理，RoseTTAFold 实现了专门的注意力模式，显著降低内存使用：
+
+### 捆绑注意力
+[`TiedMultiheadAttention`](network/Transformer.py#L84-L130) 和 [`SoftTiedMultiheadAttention`](network/Transformer.py#L157-L211) 类实现了注意力头之间的参数共享，将内存占用减少了注意力头数量的倍数。
+
+### 轴向注意力
+[`AxialEncoderLayer`](network/Transformer.py#L312-L360) 类沿序列 (L) 和 MSA (N) 维度分离注意力，将复杂度从 O(N²L²) 降低到 O(NL² + NL)：
+
+```python
+class AxialEncoderLayer(nn.Module):
+    def forward(self, src, return_att=False):
+        # 输入形状：(BATCH, NSEQ, NRES, EMB)
+        # 沿 L 和 N 维度分离注意力
+        # 将内存从 O(N²L²) 降低到 O(NL² + NL)
+```
+
+## 基于图的内存优化
+
+结构处理使用内置内存优化的图神经网络：
+
+### Top-K 图构建
+[`make_graph`](network/Attention_module_w_str.py#L19-L30) 函数将连接性限制为 top_k 最近邻，防止形成密集图：
+
+```python
+def make_graph(xyz, pair, idx, top_k=64, kmin=9):
+    # 将图连接性限制为 top_k 邻居
+    # 防止图操作中出现 O(L²) 内存增长
+```
+
+### 轻量级图存储
+[`PickleGraph`](network/utils/utils_data.py#L11-L37) 类提供内存高效的图序列化，用于中间存储和检查点。
+
+## 分块处理和批处理
+
+[`Chunk`](network/performer_pytorch.py#L197-L209) 模块支持在内存受限的批次中处理大型序列：
+
+```python
+class Chunk(nn.Module):
+    def forward(self, x, **kwargs):
+        if self.chunks == 1:
+            return self.fn(x, **kwargs)
+        chunks = x.chunk(self.chunks, dim = self.dim)
+        return torch.cat([self.fn(c, **kwargs) for c in chunks], dim = self.dim)
+```
+
+这种方法通过将长序列分割为符合内存限制的块，使得处理超出可用 GPU 内存容量的序列成为可能。
+
+## 混合精度和内存管理
+
+### 自动混合精度
+SE(3) 网络使用 [`@torch.cuda.amp.autocast`](network/Attention_module_w_str.py#L221) 进行内存高效计算：
+
+```python
+@torch.cuda.amp.autocast(enabled=False)
+def forward(self, msa, pair, xyz, seq1hot, idx, top_k=64):
+```
+
+### 梯度检查点
+[`create_custom_forward`](network/Transformer.py#L12-L16) 函数为内存密集型操作启用梯度检查点：
+
+```python
+def create_custom_forward(module, **kwargs):
+    def custom_forward(*inputs):
+        return module(*inputs, **kwargs)
+    return custom_forward
+```
+
+## 内存管理的配置参数
+
+<CgxTip>
+关键内存优化参数通过 Transformer 层中的 performer_opts 暴露。对于大型蛋白质（>1000 残基），使用 performer_opts 并设置 generalized_attention=True 和适当的 nb_features 以平衡准确性和内存使用。
+</CgxTip>
+
+| 参数 | 默认值 | 大型蛋白质建议 | 内存影响 |
+|-----------|---------|-----------------------------|---------------|
+| `performer_opts.nb_features` | None | 32-64 | 减小投影矩阵大小 |
+| `performer_opts.generalized_attention` | False | True | 提高数值稳定性 |
+| `top_k` (图) | 64 | 32-48 | 限制图连接性 |
+| `chunks` | 1 | 4-8 | 启用批处理 |
+
+## 内存使用模式
+
+内存管理策略因组件而异：
+
+1. **MSA 处理**：使用轴向注意力和 performer 优化
+2. **配对表征**：采用捆绑注意力和分块处理  
+3. **结构处理**：利用稀疏图和混合精度
+4. **端到端流水线**：结合所有技术与梯度检查点
+
+<CgxTip>
+对于大于 1500 个残基的蛋白质，考虑减少 MSA 深度 (N) 并使用更激进的分块。Performer 注意力的内存节省随序列长度呈二次方增长，这对大型蛋白质至关重要。
+</CgxTip>
+
+## 与训练流水线的集成
+
+内存优化无缝集成到主要训练模块中：
+
+- [`RoseTTAFoldModule`](network/RoseTTAFoldModel.py#L8-L60)：带有 performer 选项的标准配置
+- [`RoseTTAFoldModule_e2e`](network/RoseTTAFoldModel.py#L61-L100)：带有额外内存优化的端到端版本
+
+这些模块根据输入大小和可用资源自动应用适当的内存管理技术，无需人工干预即可在大型蛋白质复合物上进行训练。
+
+有关更多优化技术，请参阅 [GPU 加速和 CUDA 支持](20-gpu-acceleration-and-cuda-support) 和 [批处理和并行化](22-batch-processing-and-parallelization)。
+
+---
+
+- [深度解析/性能与优化/批处理与并行化](https://zread.ai/RosettaCommons/RoseTTAFold/22-batch-processing-and-parallelization)
+
+---
+slug:22-batch-processing-and-parallelization
+blog_type:normal
+---
+
+
+
+RoseTTAFold 实现了多种复杂的批处理和并行化策略，以高效处理大规模蛋白质结构预测。本文档将探讨流水线中不同组件的并行处理能力。
+
+## 基于窗口的滑动窗口处理
+
+对于超出内存限制的大型蛋白质，RoseTTAFold 采用滑动窗口方法，以重叠区块处理蛋白质序列。该策略能够在保持计算效率的同时预测任意长度蛋白质的结构。
+
+PyRosetta 和端到端模式中的滑动窗口实现遵循一致的模式：
+
+```python
+# 大蛋白质处理的窗口参数
+window = 150  # 窗口大小（残基数）
+shift = 50    # 连续窗口之间的重叠
+
+# 用于平铺的网格生成
+grids = np.arange(0, L-window+shift, shift)
+ngrids = grids.shape[0]
+```
+
+预测过程会遍历所有可能的窗口对，独立处理每个裁剪区域，然后通过加权平均合并结果 [predict_pyRosetta.py#L95-L130], [predict_e2e.py#L89-L140]。
+
+### 裁剪处理策略
+
+对于每个窗口对 `(i, j)`，系统会：
+
+1. **选择**：为两个窗口中的残基创建布尔掩码
+2. **输入准备**：提取对应的 MSA、序列和模板特征
+3. **网络推理**：在裁剪后的输入上运行 RoseTTAFold 模型
+4. **加权累积**：使用预测的 LDDT 分数作为权重合并结果
+
+```python
+# 使用 LDDT 预测进行加权平均
+pred_lddt = torch.clamp(pred_lddt, 0.0, 1.0)
+weight = pred_lddt[0][:,None] + pred_lddt[0][None,:]
+weight = weight.cpu().numpy() + 1e-8
+sub_idx_2d = np.ix_(sub_idx, sub_idx)
+count[sub_idx_2d] += weight
+prob_s[i_logit][sub_idx_2d] += weight[:,:,None]*prob
+```
+
+## TRFold 中的批处理
+
+TRFold 优化模块实现了批处理功能，可同时探索多个构象轨迹。该方法通过从不同初始条件采样来提高鲁棒性：
+
+```python
+def fold(self, xyz, batch=32, lr=0.8, nsteps=100):
+    # 通过随机扰动初始化多个轨迹
+    xyz = perturb_init(xyz, batch) # (batch, L, 3)
+    
+    # 所有批次的优化变量
+    T = torch.zeros_like(xyz,device=self.device,requires_grad=True)
+    Q = torch.randn([batch,L,4],device=self.device,requires_grad=True)
+```
+
+TRFold 中的批处理具有以下优势：
+
+- **并行优化**：同时优化多个构象
+- **鲁棒性**：不同的随机种子防止收敛到局部最小值
+- **效率**：通过批量矩阵操作最大化 GPU 利用率
+- **选择**：基于组合损失函数选择最佳评分模型
+
+## GPU 内存管理
+
+RoseTTAFold 实现了战略性内存管理，以处理大型模型和数据集：
+
+### 自动混合精度
+
+系统使用 CUDA 的自动混合精度（AMP）来减少内存使用，同时保持数值稳定性：
+
+```python
+with torch.cuda.amp.autocast():
+    logit_s, init_crds, pred_lddt = self.model(input_msa, input_seq, input_idx, 
+                                             t1d=input_t1d, t2d=input_t2d)
+```
+
+### 内存清除
+
+对于大型蛋白质，显式内存清除可防止 GPU 内存不足错误：
+
+```python
+# 在主要操作之间清除缓存内存
+torch.cuda.empty_cache()
+```
+
+### MSA 序列限制
+
+MSA 输入会被截断以防止内存过载：
+
+```python
+# 限制 MSA 深度以防止内存问题
+input_msa = input_msa[:,:1000].to(self.device)
+```
+
+## 多线程 PyRosetta 集成
+
+PyRosetta 折叠组件支持多线程配置以实现并行执行：
+
+```python
+# 通过线程控制初始化 PyRosetta
+init_cmd.append("-multithreading:interaction_graph_threads 1 -multithreading:total_threads 1")
+init(" ".join(init_cmd))
+```
+
+虽然当前实现为保持稳定性使用单线程，但该基础设施支持多线程执行以供未来优化。
+
+## 性能优化策略
+
+### 模板处理
+
+模板特征通过可配置限制进行高效处理：
+
+```python
+# 内存效率的模板限制
+n_templ = 25  # PyRosetta 模式
+n_templ = 10  # 端到端模式
+```
+
+### 高效数据结构
+
+系统使用内存高效的数据格式：
+
+- **Float16 存储**：输出概率以半精度存储
+- **稀疏表示**：仅处理距离截止范围内的残基
+- **批量索引**：批处理的高效张量操作
+
+## 并行处理工作流
+
+```mermaid
+flowchart TD
+    A[输入 MSA/序列] --> B{蛋白质长度 > 300?}
+    B -->|是| C[生成窗口网格]
+    B -->|否| D[直接处理]
+    C --> E[处理窗口对]
+    E --> F[加权平均]
+    F --> G[优化阶段]
+    D --> G
+    G --> H[批量 TRFold]
+    H --> I[选择最佳模型]
+    I --> J[输出结构]
+    
+    subgraph "批处理"
+        E
+        H
+    end
+    
+    subgraph "内存管理"
+        K[AMP 精度]
+        L[缓存清除]
+        M[MSA 截断]
+    end
+    
+    K --> E
+    L --> F
+    M --> E
+```
+
+## 配置选项
+
+### 窗口处理参数
+
+| 参数 | 默认值 | 描述 | 影响 |
+|-----------|---------|-------------|--------|
+| `window` | 150 | 窗口大小（残基数） | 内存使用与上下文 |
+| `shift` | 50 | 窗口之间的重叠 | 冗余与效率 |
+
+### TRFold 批处理参数
+
+| 参数 | 默认值 | 描述 | 范围 |
+|-----------|---------|-------------|-------|
+| `batch` | 32 | 并行轨迹数 | 1-64 |
+| `lr` | 0.8 | 优化学习率 | 0.1-2.0 |
+| `nsteps` | 200 | 每条轨迹的优化步数 | 50-500 |
+
+## 最佳实践
+
+### 对于大型蛋白质
+- 对超过 300 个残基的序列使用滑动窗口模式
+- 监控 GPU 内存使用情况并相应调整批次大小
+- 对于超大型序列考虑使用 CPU 模式
+
+### 对于高通量处理
+- 在 TRFold 中最大化批次大小以获得更好的 GPU 利用率
+- 当模板质量较低时使用端到端模式以加快处理速度
+- 为多个蛋白质处理实现作业调度
+
+### 内存优化
+- 在可用时启用混合精度处理
+- 在大型预测之间清除 CUDA 缓存
+- 根据可用内存限制 MSA 深度
+
+RoseTTAFold 中的批处理和并行化功能能够高效处理从小结构域到大型多结构域蛋白质的各种尺寸蛋白质结构预测，同时保持高准确性和计算效率。
+
+有关底层架构的更多详细信息，请参阅 [RoseTTAFold 核心模型实现](8-rosettafold-core-model-implementation)，有关 GPU 特定优化的内容，请参考 [GPU 加速和 CUDA 支持](20-gpu-acceleration-and-cuda-support)。
+
+---
