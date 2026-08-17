@@ -1,0 +1,3054 @@
+# dptech-corp/Uni-Fold
+
+Source: https://zread.ai/dptech-corp/Uni-Fold
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/dptech-corp/Uni-Fold/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+
+Uni-Fold 是一个全面的开源平台，它重新构想了超越 AlphaFold 原始实现的蛋白质结构预测。完全基于 PyTorch 构建，Uni-Fold 是首个支持 AlphaFold-Multimer 模型完整训练的开源仓库，同时提供卓越的性能和效率。
+
+## Uni-Fold 的革命性突破
+
+Uni-Fold 引入了多项突破性功能，使其区别于其他实现：
+
+**完整的 PyTorch 实现**：与原始基于 JAX 的 AlphaFold 不同，Uni-Fold 提供了 AlphaFold 和 AlphaFold-Multimer 架构的完整 PyTorch 重新实现，实现了与更广泛的 PyTorch 生态系统的无缝集成 [setup.py](setup.py#L20-L22)。
+
+**训练卓越性**：Uni-Fold 通过成功的从头训练证明了模型的正确性，其达到的准确度与原始 AlphaFold 相当或更高，使其成为首个支持 AlphaFold-Multimer 训练的开源平台 [README.md](README.md#L15-L17)。
+
+**性能领先**：基准测试显示 Uni-Fold 是目前最快的 AlphaFold 实现，在单体和多聚体预测准确度上均有显著提升 ![accuracy](https://github.com/dptech-corp/Uni-Fold/blob/main/img/accuracy.png?raw=true) ![train_time](https://github.com/dptech-corp/Uni-Fold/blob/main/img/train_time.png?raw=true)。
+
+**UF-Symmetry 创新**：该平台引入了 UF-Symmetry，这是一个专门用于高效预测大型对称蛋白质复合物的解决方案，这些复合物在标准实现中会导致内存溢出错误 ![uf-symmetry-effect.gif](https://github.com/dptech-corp/Uni-Fold/blob/main/img/uf-symmetry-effect.gif?raw=true)。
+
+## 架构概览
+
+Uni-Fold 采用模块化架构，在保持集成的同时分离关注点：
+
+```mermaid
+graph TB
+    A[输入序列] --> B[特征处理]
+    B --> C[MSA 生成]
+    B --> D[模板搜索]
+    C --> E[Evoformer 模块]
+    D --> E
+    E --> F[结构模块]
+    F --> G[3D 坐标]
+    
+    H[训练数据] --> I[数据管道]
+    I --> J[损失函数]
+    J --> K[模型优化]
+    
+    L[UF-Symmetry] --> M[对称性检测]
+    M --> N[复合物组装]
+    N --> G
+    
+    subgraph "核心组件"
+        E
+        F
+    end
+    
+    subgraph "训练基础设施"
+        I
+        J
+        K
+    end
+    
+    subgraph "高级功能"
+        L
+        M
+        N
+    end
+```
+
+该架构利用 [Uni-Core](https://github.com/dptech-corp/Uni-Core) 实现分布式训练能力，支持跨多个 GPU 和节点的高效扩展，同时支持混合精度训练和融合 CUDA 内核等高级功能。
+
+## 关键组件和能力
+
+### 模型架构
+
+Uni-Fold 实现了完整的 AlphaFold 架构，并进行了多项增强：
+
+**Evoformer 模块**：核心注意力机制处理多序列比对 (MSAs) 和成对表示，捕获进化信息和结构关系 [unifold/modules/evoformer.py](unifold/modules/evoformer.py)。
+
+**结构模块**：使用不变点注意力和几何约束将学习到的表示转换为 3D 原子坐标 [unifold/modules/structure_module.py](unifold/modules/structure_module.py)。
+
+**模板集成**：整合同源蛋白质的结构模板，以提高具有已知结构亲属关系目标的预测准确性 [unifold/modules/template.py](unifold/modules/template.py)。
+
+### 训练基础设施
+
+该平台提供全面的训练能力：
+
+**分布式训练**：基于 Uni-Core 框架构建，支持高效的多 GPU 和多节点训练，具有自动梯度同步功能 [unifold/model.py](unifold/model.py#L12-L31)。
+
+**混合精度支持**：支持 float16 和 bfloat16 训练，以减少内存使用并加速计算，同时保持数值稳定性 [unifold/model.py](unifold/model.py#L33-L43)。
+
+**高级优化**：包括每个样本的梯度裁剪、融合 CUDA 内核和大规模训练的内存高效实现 [README.md](README.md#L17-L18)。
+
+### 数据处理管道
+
+Uni-Fold 具有复杂的数据处理管道：
+
+**特征提取**：对蛋白质序列、MSA 和结构特征进行全面处理，生成模型就绪的表示 [unifold/data/process.py](unifold/data/process.py)。
+
+**模板处理**：高级模板搜索和处理，支持可配置的模板数据库和过滤标准 [unifold/msa/templates.py](unifold/msa/templates.py)。
+
+**数据增强**：多种增强策略，用于提高模型鲁棒性和泛化能力 [unifold/data/data_ops.py](unifold/data/data_ops.py)。
+
+## 项目结构
+
+该仓库被组织成逻辑组件，以确保清晰性和可维护性：
+
+```
+unifold/
+├── modules/           # 核心神经网络模块
+├── data/             # 数据处理和特征提取
+├── msa/              # 多序列比对处理
+├── losses/           # 损失函数实现
+├── symmetry/         # UF-Symmetry 实现
+└── colab/           # Google Colab 集成
+```
+
+这种模块化设计便于扩展和自定义，同时保持关注点的清晰分离。[modules](unifold/modules/) 目录包含核心神经网络组件，而 [data](unifold/data/) 处理所有预处理和特征工程任务。
+
+## 性能和准确性
+
+Uni-Fold 在多个维度上实现了卓越性能：
+
+**预测准确性**：对训练后发布的 PDB 结构进行综合评估，显示与 AlphaFold-Multimer 相当的单体预测准确度和更优越的多聚体性能 ![case](https://github.com/dptech-corp/Uni-Fold/blob/main/img/case.png?raw=true)。
+
+**计算效率**：基准测试显示 Uni-Fold 是最快的 AlphaFold 实现，在训练和推理速度上有显著提升，同时保持内存效率。
+
+**可扩展性**：该平台高效处理不同大小的蛋白质，从小肽到大复合物，UF-Symmetry 将能力扩展到使用标准方法难以处理的对称组装体。
+
+## 快速入门
+
+Uni-Fold 为用户提供了多种参与平台的途径：
+
+**快速开始**：从 [快速开始](2-quick-start) 指南开始，使用预训练模型立即获得动手体验。
+
+**安装**：遵循 [安装和环境设置](3-installation-and-environment-setup) 获取详细的环境配置说明。
+
+**数据库准备**：访问 [数据库准备和下载](4-database-preparation-and-downloads) 指南以设置所需的生物数据库。
+
+**基本使用**：参考 [运行基本蛋白质结构预测](5-running-basic-protein-structure-prediction) 获取分步推理说明。
+
+该平台还通过全面的训练脚本、微调能力和广泛的定制选项支持高级用户。无论你是探索蛋白质折叠的研究人员、在平台上构建的开发人员，还是将结构预测应用于生物问题的科学家，Uni-Fold 都为成功提供了所需的工具和灵活性。
+
+Uni-Fold 不仅仅是一个重新实现——它是下一代蛋白质结构预测模型的基础，将 AlphaFold 的成功与 PyTorch 生态系统的灵活性和强大功能相结合。
+
+---
+
+- [入门指南/快速开始](https://zread.ai/dptech-corp/Uni-Fold/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+
+Uni-Fold 提供了一个开源的蛋白质结构预测平台，在 PyTorch 中重新实现了 AlphaFold 和 AlphaFold-Multimer。本快速入门指南将帮助你在几分钟内运行蛋白质结构预测。
+
+## 系统架构概览
+
+Uni-Fold 采用模块化架构，将同源搜索、特征处理和结构预测分离：
+
+```mermaid
+graph TD
+    A[输入 FASTA] --> B[同源搜索]
+    B --> C[特征处理]
+    C --> D[结构预测]
+    D --> E[输出 PDB 文件]
+    
+    F[数据库] --> B
+    G[模型参数] --> D
+    
+    subgraph "核心组件"
+        B
+        C
+        D
+    end
+```
+
+## 前置条件
+
+开始之前，请确保你具备：
+- 已安装 Docker 和 nvidia-docker-2
+- 至少 3TB 的数据库存储空间
+- 兼容 CUDA 的 GPU（推荐）
+
+## 安装步骤
+
+### 1. 拉取 Docker 镜像
+
+```bash
+docker pull dptechnology/unifold:latest-pytorch1.11.0-cuda11.3
+```
+
+### 2. 克隆并安装 Uni-Fold
+
+```bash
+git clone https://github.com/dptech-corp/Uni-Fold
+cd Uni-Fold
+pip install -e .
+```
+
+### 3. 下载所需数据库
+
+```bash
+bash scripts/download/download_all_data.sh /path/to/database/directory
+```
+
+### 4. 下载预训练模型
+
+```bash
+wget https://github.com/dptech-corp/Uni-Fold/releases/download/v2.0.0/unifold_params_2022-08-01.tar.gz
+tar -zxf unifold_params_2022-08-01.tar.gz
+```
+
+## 运行你的首次预测
+
+### 基本命令结构
+
+主要的预测工作流由 `run_unifold.sh` 脚本处理，该脚本执行两个主要步骤：同源搜索和结构预测 [run_unifold.sh](run_unifold.sh#L1-L32)。
+
+```bash
+bash run_unifold.sh \
+    /path/to/input.fasta \
+    /path/to/output/directory/ \
+    /path/to/database/directory/ \
+    2020-05-01 \
+    model_2_ft \
+    /path/to/model_parameters.pt
+```
+
+### 参数说明
+
+| 参数 | 说明 | 示例 |
+|-----------|-------------|---------|
+| `fasta_path` | 输入蛋白质序列文件 | `protein.fa` |
+| `output_dir` | 结果输出目录 | `./results/` |
+| `database_dir` | 下载的数据库路径 | `./databases/` |
+| `max_template_date` | 模板截止日期 | `2020-05-01` |
+| `model_name` | 使用的模型（单体用 `model_2_ft`，多聚体用 `multimer_ft`） | `model_2_ft` |
+| `param_path` | 模型参数路径 | `./unifold_params_2022-08-01/model_2_ft.pt` |
+
+### 输入格式要求
+
+- **单体预测**：FASTA 文件应包含一个序列
+- **多聚体预测**：FASTA 文件应包含目标复合物的所有序列，相同的序列根据其拷贝数重复出现
+
+## 理解输出
+
+运行预测后，你的输出目录将包含：
+
+```
+output_directory/
+├── best.pdb              # 置信度最高的预测结果
+├── result_model_1.pkl.gz # 原始模型输出
+├── result_model_2.pkl.gz # 附加模型输出
+└── ranking_debug.json    # 置信度指标（plddt、iptm+ptm）
+```
+
+`best.pdb` 文件包含最终预测的结构，而置信度指标以 JSON 格式存储，便于分析。
+
+## 快速演示训练
+
+要测试你的安装，运行演示训练脚本：
+
+```bash
+bash train_monomer_demo.sh .
+```
+
+这将使用包含的[示例数据](example_data/)来验证包安装是否正确。该演示在最小数据上运行，不能反映实际性能 [train_monomer_demo.sh](train_monomer_demo.sh#L1-L16)。
+
+## 替代方案：Colab Notebook
+
+对于无需本地设置的快速实验，可以使用 [Uni-Fold Colab notebook](notebooks/unifold.ipynb#L1-L50)，它提供了基于 Web 的界面，支持单体和多聚体预测，包括 UF-Symmetry 支持。
+
+## 后续步骤
+
+成功运行首次预测后，你可能想要：
+
+- [安装和环境设置](3-installation-and-environment-setup) 了解详细配置
+- [数据库准备和下载](4-database-preparation-and-downloads) 进行数据库管理
+- [运行基本蛋白质结构预测](5-running-basic-protein-structure-prediction) 了解高级用法
+
+<CgxTip>
+对于多聚体预测，请确保你的 FASTA 文件包含所有链，并正确复制序列。Uni-Fold 需要明确复制相同的序列，以匹配蛋白质复合物的化学计量比。
+</CgxTip>
+
+<CgxTip>
+`model_2_ft` 和 `multimer_ft` 模型是微调版本，通常比从 AlphaFold 参数转换的基础 `model_2_af2` 和 `multimer_af2` 提供更好的性能。
+</CgxTip>
+
+---
+
+- [入门指南/安装与环境配置](https://zread.ai/dptech-corp/Uni-Fold/3-installation-and-environment-setup)
+
+---
+slug:3-installation-and-environment-setup
+blog_type:normal
+---
+
+
+
+Uni-Fold 因其对 CUDA 内核、PyTorch 和生物信息学工具的依赖，需要仔细的环境配置。本指南涵盖从系统要求到验证的完整安装过程。
+
+## 系统要求
+
+Uni-Fold 支持带有启用 CUDA 的 GPU 的 Linux 操作系统。该平台需要 Python 3.6-3.10，并依赖于分布式训练框架 Uni-Core [setup.py](setup.py#L1-L51)。为获得最佳性能，请确保你的系统满足以下规格：
+
+| 要求 | 最低版本 | 推荐版本 |
+|-------------|----------------|-------------------|
+| 操作系统 | Linux (POSIX) | Ubuntu 18.04+ |
+| CUDA | 11.3 | 11.3+ |
+| Python | 3.6 | 3.8-3.10 |
+| GPU 内存 | 8GB | 16GB+ |
+| 存储 | 500GB (数据库) | 3TB (完整安装) |
+| RAM | 16GB | 32GB+ |
+
+## 安装方法
+
+### 方法 1：Docker 安装（推荐）
+
+Docker 方法可消除依赖冲突并确保环境可重现。Uni-Fold 提供了一个基于 Uni-Core 的预配置 Docker 镜像，包含 PyTorch 1.11.0 和 CUDA 11.3 [docker/Dockerfile](docker/Dockerfile#L1-L31)。
+
+```mermaid
+flowchart TD
+    A[安装 nvidia-docker-2] --> B[拉取 Docker 镜像]
+    B --> C[创建容器]
+    C --> D[克隆仓库]
+    D --> E[安装 Uni-Fold]
+    E --> F[验证]
+    
+    B --> |docker pull dptechnology/unifold:latest-pytorch1.11.0-cuda11.3| C
+    D --> |git clone https://github.com/dptech-corp/Uni-Fold| E
+    E --> |pip install -e .| F
+```
+
+<CgxTip>
+Docker 镜像包含预编译的生物信息学工具（HHsuite、HMMER、Kalign），这些工具是 MSA 处理所必需的，可节省大量设置时间。
+</CgxTip>
+
+**Docker 安装分步说明：**
+
+1. **安装 nvidia-docker-2**（容器中访问 GPU 所需）：
+   ```bash
+   # 遵循 NVIDIA 官方文档
+   curl https://get.docker.com | sh
+   distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+   curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+   curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+   sudo apt-get update && sudo apt-get install -y nvidia-docker2
+   sudo systemctl restart docker
+   ```
+
+2. **拉取 Uni-Fold Docker 镜像**：
+   ```bash
+   docker pull dptechnology/unifold:latest-pytorch1.11.0-cuda11.3
+   ```
+
+3. **创建并进入容器**：
+   ```bash
+   docker run --gpus all -it --name unifold-container dptechnology/unifold:latest-pytorch1.11.0-cuda11.3 bash
+   ```
+
+4. **克隆并安装 Uni-Fold**：
+   ```bash
+   git clone https://github.com/dptech-corp/Uni-Fold
+   cd Uni-Fold
+   pip install -e .
+   ```
+
+### 方法 2：手动安装
+
+对于喜欢本地安装的高级用户，请按此顺序操作以避免依赖冲突：
+
+```mermaid
+graph LR
+    A[安装 Uni-Core] --> B[安装系统依赖]
+    B --> C[安装 Python 依赖]
+    C --> D[安装 Uni-Fold]
+    D --> E[编译生物信息学工具]
+```
+
+**手动安装分步说明：**
+
+1. **安装 Uni-Core 框架**（先决条件）：
+   ```bash
+   # 遵循 Uni-Core 安装指南
+   # 需要特定的 CUDA 和 PyTorch 版本
+   pip install unicore
+   ```
+
+2. **安装系统依赖**：
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y hmmer kalign aria2c git cmake build-essential
+   ```
+
+3. **安装 Python 依赖**：
+   ```bash
+   pip install absl-py biopython ml-collections numpy pandas scipy
+   ```
+
+4. **克隆并安装 Uni-Fold**：
+   ```bash
+   git clone https://github.com/dptech-corp/Uni-Fold
+   cd Uni-Fold
+   pip install -e .
+   ```
+
+5. **从源代码编译 HHsuite**（MSA 处理所需）：
+   ```bash
+   git clone --branch v3.3.0 https://github.com/soedinglab/hh-suite.git /tmp/hh-suite
+   mkdir /tmp/hh-suite/build
+   cd /tmp/hh-suite/build
+   cmake -DCMAKE_INSTALL_PREFIX=/opt/hhsuite ..
+   make -j 4 && make install
+   ln -s /opt/hhsuite/bin/* /usr/bin
+   ```
+
+## 环境配置
+
+### CUDA 和 GPU 设置
+
+Uni-Fold 需要 CUDA 11.3 以使用提供的 Docker 镜像获得最佳性能。验证你的 CUDA 安装：
+
+```bash
+nvidia-smi  # 检查 GPU 可用性
+nvcc --version  # 检查 CUDA 版本
+```
+
+### Python 环境
+
+该包支持 Python 3.6-3.10，具有以下核心依赖 [setup.py](setup.py#L25-L30)：
+
+- **absl-py**: Google 的 Python 通用库
+- **biopython**: 计算生物学工具
+- **ml-collections**: 配置管理
+- **numpy**: 数值计算
+- **pandas**: 数据处理
+- **scipy**: 科学计算
+
+### 环境变量
+
+设置这些环境变量以获得最佳性能：
+
+```bash
+export NCCL_ASYNC_ERROR_HANDLING=1  # 更好的错误处理
+export OMP_NUM_THREADS=1  # 防止线程冲突
+```
+
+## 数据库设置
+
+Uni-Fold 需要多个生物数据库用于 MSA 生成和模板搜索。完整数据库集的总存储需求约为 3TB [scripts/download/download_all_data.sh](scripts/download/download_all_data.sh#L1-L79)。
+
+### 数据库下载选项
+
+| 模式 | 所需存储 | 描述 |
+|------|------------------|-------------|
+| 完整数据库 | ~2.5TB | 完整的 BFD 数据库 |
+| 精简数据库 | ~500GB | 小型 BFD 子集 |
+
+**下载所有数据库：**
+```bash
+bash scripts/download/download_all_data.sh /path/to/database/directory
+```
+
+**下载精简数据库：**
+```bash
+bash scripts/download/download_all_data.sh /path/to/database/directory reduced_dbs
+```
+
+<CgxTip>
+使用 aria2c 进行并行下载。脚本会自动检查 aria2c 的可用性，如果缺少则提供安装说明。
+</CgxTip>
+
+### 单独数据库组件
+
+数据库下载包含以下基本组件：
+
+- **BFD/Small BFD**: 序列同源数据库
+- **MGnify**: 宏基因组蛋白质序列  
+- **PDB70**: PDB 结构的序列聚类
+- **PDB mmCIF**: 结构模板
+- **Uniclust30**: 聚类蛋白质序列
+- **Uniref90**: 非冗余蛋白质序列
+- **UniProt**: 综合蛋白质数据库
+- **PDB SeqRes**: PDB 序列数据库
+
+## 验证和测试
+
+### 演示训练测试
+
+使用提供的演示训练脚本验证你的安装 [train_monomer_demo.sh](train_monomer_demo.sh#L1-L16)：
+
+```bash
+# 测试单体训练
+bash train_monomer_demo.sh ./demo_output
+
+# 测试多聚体训练  
+bash train_multimer_demo.sh ./demo_output
+```
+
+这些脚本在示例数据上运行最小训练周期以确认：
+- 软件包安装正确性
+- GPU 可访问性
+- 分布式训练功能
+- 数据管道完整性
+
+### 推理测试
+
+下载预训练模型后，测试推理管道：
+
+```bash
+# 下载预训练模型
+wget https://github.com/dptech-corp/Uni-Fold/releases/download/v2.0.0/unifold_params_2022-08-01.tar.gz
+tar -zxf unifold_params_2022-08-01.tar.gz
+
+# 测试推理（需要数据库）
+bash run_unifold.sh \
+    example_data/test.fasta \
+    ./output/ \
+    /path/to/database/directory/ \
+    2020-05-01 \
+    model_2_ft \
+    ./unifold_params_2022-08-01/model_2_ft.pt
+```
+
+## 常见问题和故障排除
+
+### CUDA 版本冲突
+
+**问题**：Uni-Core 需要特定的 CUDA 版本
+**解决方案**：使用提供的 Docker 镜像或手动安装匹配的 CUDA/PyTorch 版本
+
+### 内存错误
+
+**问题**：训练或推理期间内存不足
+**解决方案**： 
+- 减少训练脚本中的批量大小
+- 使用 `--bf16` 或混合精度训练
+- 增加 GPU 内存或使用梯度检查点
+
+### 数据库下载失败
+
+**问题**：未找到 aria2c 或下载中断
+**解决方案**：
+```bash
+sudo apt install aria2c  # 安装 aria2c
+# 恢复中断的下载
+bash scripts/download/download_all_data.sh /path/to/directory
+```
+
+### 权限问题
+
+**问题**：安装期间权限被拒绝
+**解决方案**：使用虚拟环境或适当的权限：
+```bash
+python -m venv unifold_env
+source unifold_env/bin/activate
+pip install -e .
+```
+
+## 后续步骤
+
+成功安装和环境设置后，请继续：
+
+1. **[数据库准备和下载](4-database-preparation-and-downloads)** - 详细的数据库配置
+2. **[运行基本蛋白质结构预测](5-running-basic-protein-structure-prediction)** - 你的第一次蛋白质结构预测
+3. **[快速开始](2-quick-start)** - 立即使用的快速指南
+
+对于对模型架构感兴趣的高级用户，请探索 **[PyTorch 中的 AlphaFold 模型实现](6-alphafold-model-implementation-in-pytorch)** 以了解技术实现细节。
+
+---
+
+- [入门指南/数据库准备与下载](https://zread.ai/dptech-corp/Uni-Fold/4-database-preparation-and-downloads)
+
+---
+slug:4-database-preparation-and-downloads
+blog_type:normal
+---
+
+
+
+Uni-Fold 需要多个大型生物数据库来执行准确的蛋白质结构预测。本指南涵盖了完整的数据库设置流程，从自动下载到单个数据库管理。
+
+## 先决条件和系统要求
+
+在下载数据库之前，请确保你的系统满足以下要求：
+
+- **aria2c**：多线程下载所需（`sudo apt install aria2`）
+- **rsync**：PDB mmCIF 同步所需（`sudo apt install rsync`）
+- **存储空间**：完整数据库最少需要 2.5 TB 可用空间，精简数据库约需 400 GB
+- **网络**：下载大文件需要稳定的网络连接
+
+<CgxTip>
+下载脚本包含内置依赖检查，如果缺少必需工具，将显示明确的错误消息并失败。请先安装 aria2c 和 rsync 再继续操作。
+</CgxTip>
+
+## 数据库下载模式
+
+Uni-Fold 提供两种数据库配置，以满足不同的存储和计算需求：
+
+| 模式 | 所需存储空间 | 使用场景 | 包含的数据库 |
+|------|------------------|----------|-------------------|
+| **full_dbs** | ~2.5 TB | 生产环境训练，最高精度 | 包含完整 BFD 的所有数据库 |
+| **reduced_dbs** | ~400 GB | 开发、测试、资源有限环境 | 使用小型 BFD 替代完整 BFD |
+
+## 自动化数据库设置
+
+数据库准备的主要方法是使用综合下载脚本：
+
+```bash
+# 完整数据库设置
+bash scripts/download/download_all_data.sh /path/to/download/directory
+
+# 精简数据库设置（更快，占用空间更少）
+bash scripts/download/download_all_data.sh /path/to/download/directory reduced_dbs
+```
+
+下载流程如下：
+
+```mermaid
+flowchart TD
+    A[开始运行 download_all_data.sh] --> B{检查下载模式}
+    B -->|full_dbs| C[下载 BFD]
+    B -->|reduced_dbs| D[下载小型 BFD]
+    C --> E[下载 MGnify]
+    D --> E
+    E --> F[下载 PDB70]
+    F --> G[下载 PDB mmCIF]
+    G --> H[下载 Uniclust30]
+    H --> I[下载 Uniref90]
+    I --> J[下载 UniProt]
+    J --> K[下载 PDB SeqRes]
+    K --> L[所有数据库准备就绪]
+```
+
+## 单个数据库下载
+
+对于选择性数据库管理或故障排除，每个数据库都可以单独下载：
+
+### 序列数据库
+
+**BFD (Big Fantastic Database)**
+- 完整版本：压缩后约 1.7 TB
+- 小型版本：压缩后约 50 GB
+- 来源：90% 一致性的 BFD metaclust 聚类
+- 用途：主要序列同源性搜索数据库
+
+```bash
+# 完整 BFD
+bash scripts/download/download_bfd.sh /path/to/download/directory
+
+# 小型 BFD（用于 reduced_dbs 模式）
+bash scripts/download/download_small_bfd.sh /path/to/download/directory
+```
+
+**UniRef90**
+- 大小：压缩后约 50 GB
+- 来源：90% 一致性的 UniProt 参考聚类
+- 用途：用于 MSA 生成的高质量序列数据库
+
+```bash
+bash scripts/download/download_uniref90.sh /path/to/download/directory
+```
+
+**UniProt**
+- 大小：压缩后约 200 GB（SwissProt + TrEMBL）
+- 来源：完整的 UniProt 知识库
+- 用途：用于多聚体预测的综合蛋白质序列数据库
+
+```bash
+bash scripts/download/download_uniprot.sh /path/to/download/directory
+```
+
+**MGnify**
+- 大小：压缩后约 40 GB
+- 来源：宏基因组蛋白质聚类
+- 用途：用于远源同源性检测的环境序列多样性
+
+```bash
+bash scripts/download/download_mgnify.sh /path/to/download/directory
+```
+
+**Uniclust30**
+- 大小：压缩后约 25 GB
+- 来源：UniClust30 聚类
+- 用途：用于 MSA 多样性的替代序列数据库
+
+```bash
+bash scripts/download/download_uniclust30.sh /path/to/download/directory
+```
+
+### 结构数据库
+
+**PDB70**
+- 大小：压缩后约 20 GB
+- 来源：来自 mmCIF 的 HHsuite PDB70 数据库
+- 用途：模板结构搜索数据库
+
+```bash
+bash scripts/download/download_pdb70.sh /path/to/download/directory
+```
+
+**PDB mmCIF 文件**
+- 大小：解压后约 200 GB
+- 来源：RCSB PDB mmCIF 格式结构
+- 用途：模板结构和训练数据
+- 处理：通过 rsync 下载，解压并展平目录结构
+
+```bash
+bash scripts/download/download_pdb_mmcif.sh /path/to/download/directory
+```
+
+**PDB SeqRes**
+- 大小：约 1 GB
+- 来源：PDB 序列残基
+- 用途：模板匹配的参考序列
+
+```bash
+bash scripts/download/download_pdb_seqres.sh /path/to/download/directory
+```
+
+### 模型参数
+
+Uni-Fold 包含自己的预训练参数，但可以下载 AlphaFold 参数用于基准测试：
+
+```bash
+bash scripts/download/download_alphafold_params.sh /path/to/download/directory
+```
+
+<CgxTip>
+PDB mmCIF 下载过程使用 rsync 进行增量更新，这对于维护最新结构数据库非常高效。脚本会自动处理解压和目录展平操作。
+</CgxTip>
+
+## 下载后的目录结构
+
+运行下载脚本后，你的数据库目录将具有以下结构：
+
+```
+/path/to/download/directory/
+├── bfd/                    # BFD 数据库文件
+├── small_bfd/             # 小型 BFD（reduced_dbs 模式）
+├── mgnify/                # MGnify 宏基因组数据
+├── pdb70/                 # PDB70 模板数据库
+├── pdb_mmcif/             # PDB mmCIF 结构文件
+│   ├── mmcif_files/       # 展平的 .cif 文件
+│   └── obsolete.dat       # 过时的 PDB 条目
+├── uniclust30/            # Uniclust30 数据库
+├── uniref90/              # UniRef90 数据库
+├── uniprot/               # UniProt 数据库
+├── pdb_seqres/            # PDB 序列残基
+└── params/                # AlphaFold 参数（可选）
+```
+
+## 配置集成
+
+下载完数据库后，请更新你的 Uni-Fold 配置以指向正确的路径。数据库路径通常在模型配置文件中配置，或者在运行推理或训练时通过命令行参数指定。
+
+## 常见问题排查
+
+**下载失败**
+- 检查网络连接和存储空间
+- 验证 aria2c 安装：`aria2c --version`
+- 某些下载可能因服务器负载需要重试
+
+**权限错误**
+- 确保对下载目录有写入权限
+- 使用绝对路径以避免歧义
+
+**存储空间**
+- 在下载过程中监控磁盘使用情况
+- 考虑在开发环境中使用 reduced_dbs 模式
+- 单个数据库脚本允许选择性下载
+
+## 后续步骤
+
+完成数据库准备后，请继续阅读[运行基础蛋白质结构预测](5-running-basic-protein-structure-prediction)，使用配置好的数据库与 Uni-Fold。要详细了解这些数据库在预测流程中的使用方式，请参阅[特征提取和 MSA 处理](9-feature-extraction-and-msa-processing)。
+
+全面的数据库设置确保 Uni-Fold 能够访问准确蛋白质结构预测所需的完整序列和结构信息范围，从同源序列到模板结构再到进化保守模式。
+
+---
+
+- [入门指南/运行基础蛋白质结构预测](https://zread.ai/dptech-corp/Uni-Fold/5-running-basic-protein-structure-prediction)
+
+---
+slug:5-running-basic-protein-structure-prediction
+blog_type:normal
+---
+
+
+
+Uni-Fold 提供了一个遵循 AlphaFold 方法的蛋白质结构预测综合流水线。本指南将引导你完成基本的蛋白质结构预测流程，从数据准备到最终模型推理。
+
+## 预测流水线概述
+
+Uni-Fold 中的蛋白质结构预测过程采用系统化的两阶段方法：首先进行**同源搜索**生成 MSA 和模板，随后通过**模型推理**进行结构预测。
+
+```mermaid
+flowchart TD
+    A[FASTA 输入] --> B[同源搜索]
+    B --> C[MSA 生成]
+    B --> D[模板搜索]
+    C --> E[特征处理]
+    D --> E
+    E --> F[模型推理]
+    F --> G[结构预测]
+    G --> H[PDB 输出]
+```
+
+## 使用 run_unifold.sh 快速开始
+
+运行蛋白质结构预测最直接的方式是使用提供的 shell 脚本。该脚本协调整个流水线，从 MSA 搜索到最终预测。
+
+### 基本用法
+
+```bash
+bash run_unifold.sh <fasta_path> <output_dir> <database_dir> <max_template_date> <model_name> <param_path>
+```
+
+### 必需参数
+
+| 参数 | 描述 | 示例 |
+|-----------|-------------|---------|
+| `fasta_path` | 包含蛋白质序列的输入 FASTA 文件路径 | `protein.fa` |
+| `output_dir` | 存储结果的目录 | `./results/` |
+| `database_dir` | 包含所有数据库的根目录 | `./databases/` |
+| `max_template_date` | 模板最大发布日期 | `2020-05-14` |
+| `model_name` | 模型配置名称 | `model_2` |
+| `param_path` | 训练好的模型参数路径 | `./params/monomer.unifold.pt` |
+
+该脚本执行两个主要操作：
+
+1. **同源搜索**：使用 `unifold/homo_search.py` 生成 MSA 并查找模板 [run_unifold.sh#L8-L25](run_unifold.sh#L8-L25)
+2. **预测**：运行 `unifold/inference.py` 进行结构预测 [run_unifold.sh#L27-L32](run_unifold.sh#L27-L32)
+
+## 数据库要求
+
+Uni-Fold 需要多个序列数据库来生成全面的 MSA。同源搜索模块期望以下数据库结构：
+
+```
+database_dir/
+├── uniref90/uniref90.fasta
+├── mgnify/mgy_clusters_2018_12.fa
+├── bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt
+├── uniclust30/uniclust30_2018_08/uniclust30_2018_08
+├── uniprot/uniprot.fasta
+├── pdb_seqres/pdb_seqres.txt
+└── pdb_mmcif/mmcif_files/
+```
+
+<CgxTip>确保所有数据库路径正确指定。缺失或错误的数据库路径是流水线失败的最常见原因。</CgxTip>
+
+## 高级推理选项
+
+要更好地控制预测过程，你可以直接运行推理模块并使用额外参数：
+
+### 关键推理参数
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `--model_device` | `cuda:0` | 模型执行设备 |
+| `--times` | `3` | 使用不同种子的预测次数 |
+| `--max_recycling_iters` | `3` | 最大回收迭代次数 |
+| `--num_ensembles` | `2` | 集成预测数量 |
+| `--bf16` | `False` | 使用 bfloat16 精度以提高内存效率 |
+| `--sample_templates` | `False` | 启用模板采样 |
+
+### 内存优化
+
+Uni-Fold 会根据序列长度和可用内存自动调整分块大小 [unifold/inference.py#L30-L48](unifold/inference.py#L30-L48)：
+
+```python
+def automatic_chunk_size(seq_len, device, is_bf16):
+    total_mem_in_GB = get_device_mem(device)
+    factor = math.sqrt(total_mem_in_GB/40.0*(0.55 * is_bf16 + 0.45))*0.95
+    if seq_len < int(1024*factor):
+        chunk_size = 256
+        block_size = None
+    elif seq_len < int(2048*factor):
+        chunk_size = 128
+        block_size = None
+    # ... 针对更长序列的更多配置
+```
+
+## 输出文件
+
+预测会在指定目录中生成多个输出文件：
+
+- **PDB 文件**：包含置信度分数的 3D 结构坐标
+- **结果 Pickles**：包含中间数据的完整预测结果
+- **置信度指标**：pLDDT 分数和其他质量评估
+
+### 理解 pLDDT 分数
+
+pLDDT（预测 LDDT）分数表示预测置信度：
+- **90-100**：非常高的置信度
+- **70-90**：良好的置信度  
+- **50-70**：低置信度
+- **<50**：非常低的置信度
+
+## 常见问题故障排除
+
+### 内存问题
+
+对于大型蛋白质或 GPU 内存有限的情况：
+1. 使用 `--bf16` 标志降低精度
+2. 将 `--num_ensembles` 从 2 减少到 1
+3. 使用 `--model_device cpu` 进行 CPU 推理
+
+### 数据库问题
+
+确保所有数据库文件可访问且格式正确。同源搜索模块在处理前会验证数据库路径 [unifold/homo_search.py#L50-L150](unifold/homo_search.py#L50-L150)。
+
+### 性能优化
+
+<CgxTip>对于较短蛋白质（<256 个残基）的更快预测，考虑使用 `--db_preset reduced_dbs` 减少数据库以缩短 MSA 搜索时间。</CgxTip>
+
+## 后续步骤
+
+掌握基本蛋白质结构预测后，你可能想要探索：
+
+- [PyTorch 中的 AlphaFold 模型实现](6-alphafold-model-implementation-in-pytorch) 以了解模型架构
+- [特征提取和 MSA 处理](9-feature-extraction-and-msa-processing) 以深入了解数据准备
+- [用于大型复合物预测的 UF-Symmetry](15-uf-symmetry-for-large-complex-prediction) 以实现高级对称性感知预测
+
+Uni-Fold 框架为蛋白质结构预测提供了坚实的基础，结合了最先进的模型架构和高效的推理流水线，适用于研究和生产环境。
+
+---
+
+# 深度解析
+
+## 核心架构
+
+- [深度解析/核心架构/AlphaFold模型在PyTorch中的实现](https://zread.ai/dptech-corp/Uni-Fold/6-alphafold-model-implementation-in-pytorch)
+
+---
+slug:6-alphafold-model-implementation-in-pytorch
+blog_type:normal
+---
+
+
+
+本页面全面概述了在 Uni-Fold 中使用 PyTorch 实现的 AlphaFold 模型架构。该实现忠实复现了原始的 AlphaFold2 架构，同时利用 PyTorch 生态系统来提升训练和推理效率。
+
+## 核心架构概述
+
+Uni-Fold 中的 AlphaFold 模型采用分层模块结构组织，与原始的 JAX 实现保持一致。主入口点是 `AlphafoldModel` 类，它封装了核心的 `AlphaFold` 神经网络模块 [unifold/model.py](unifold/model.py#L12-L54)。
+
+```mermaid
+graph TB
+    A[AlphafoldModel] --> B[AlphaFold 核心模块]
+    B --> C[输入嵌入器]
+    B --> D[模板处理]
+    B --> E[Evoformer 堆栈]
+    B --> F[结构模块]
+    B --> G[辅助头]
+    
+    C --> C1[InputEmbedder]
+    C --> C2[RecyclingEmbedder]
+    C --> C3[ExtraMSAEmbedder]
+    
+    D --> D1[TemplateAngleEmbedder]
+    D --> D2[TemplatePairEmbedder]
+    D --> D3[TemplatePairStack]
+    D --> D4[TemplatePointwiseAttention]
+    
+    E --> E1[EvoformerIteration]
+    E --> E2[ExtraMSAStack]
+    
+    F --> F1[InvariantPointAttention]
+    F --> F2[BackboneUpdate]
+    F --> F3[SidechainAngleResnet]
+    
+    G --> G1[DistogramHead]
+    G --> G2[PredictedLDDTHead]
+    G --> G3[PredictedAlignedErrorHead]
+```
+
+## 模型初始化与配置
+
+核心 `AlphaFold` 模块通过一个全面的配置进行初始化，该配置定义了所有架构参数 [unifold/modules/alphafold.py](unifold/modules/alphafold.py#L42-L102)：
+
+```python
+def __init__(self, config):
+    super(AlphaFold, self).__init__()
+    
+    # 不同输入模式的关键嵌入器
+    self.input_embedder = InputEmbedder(...)
+    self.recycling_embedder = RecyclingEmbedder(...)
+    self.extra_msa_embedder = ExtraMSAEmbedder(...)
+    
+    # 模板处理组件（条件性）
+    if config.template.enabled:
+        self.template_angle_embedder = TemplateAngleEmbedder(...)
+        self.template_pair_embedder = TemplatePairEmbedder(...)
+        self.template_pair_stack = TemplatePairStack(...)
+    
+    # 核心处理模块
+    self.evoformer = EvoformerStack(...)
+    self.structure_module = StructureModule(...)
+    self.aux_heads = AuxiliaryHeads(...)
+```
+
+<CgxTip>
+模型通过 `is_multimer` 标志支持单体和多聚体配置，该标志启用链相对位置编码和多聚体特定特征。
+</CgxTip>
+
+## 前向传播与循环机制
+
+前向传播实现了 AlphaFold 的标志性循环机制，模型通过该机制迭代优化其预测 [unifold/modules/alphafold.py](unifold/modules/alphafold.py#L418-L458)：
+
+```python
+def forward(self, batch):
+    num_iters = int(batch["num_recycling_iters"]) + 1
+    num_ensembles = int(batch["msa_mask"].shape[0]) // num_iters
+    
+    for cycle_no in range(num_iters):
+        is_final_iter = cycle_no == (num_iters - 1)
+        with torch.set_grad_enabled(is_grad_enabled and is_final_iter):
+            outputs, m_1_prev, z_prev, x_prev = self.iteration_evoformer_structure_module(
+                batch, m_1_prev, z_prev, x_prev, cycle_no, num_iters, num_ensembles
+            )
+    
+    outputs.update(self.aux_heads(outputs))
+    return outputs
+```
+
+循环机制允许模型在多次迭代中优化其表示，仅在最终迭代中计算梯度以提高内存效率。
+
+## 输入嵌入层
+
+### 输入嵌入器
+`InputEmbedder` 将原始序列特征和 MSA 数据处理为初始表示 [unifold/modules/embedders.py](unifold/modules/embedders.py#L12-L137)：
+
+- **目标特征**：转换为成对表示（`d_pair = 128`）
+- **MSA 特征**：嵌入为 MSA 表示（`d_msa = 256`）
+- **相对位置**：使用学习到的嵌入编码空间关系
+- **链相对编码**：为多聚体预测启用
+
+### 循环嵌入器
+整合来自先前循环迭代的预测以提供迭代优化 [unifold/modules/embedders.py](unifold/modules/embedders.py#L138-L201)：
+
+```python
+def forward(self, m: torch.Tensor, z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    # 将先前迭代的 MSA 和成对表示嵌入
+    # 到当前迭代的输入嵌入中
+```
+
+## 模板集成
+
+当模板信息可用时，模型通过多个专用模块处理它：
+
+### 模板处理流程
+1. **TemplateAngleEmbedder**：处理来自模板结构的主链角度 [unifold/modules/embedders.py](unifold/modules/embedders.py#L203-L225)
+2. **TemplatePairEmbedder**：创建成对模板表示 [unifold/modules/embedders.py](unifold/modules/embedders.py#L226-L267)
+3. **TemplatePairStack**：对模板特征应用三角形注意力 [unifold/modules/template.py](unifold/modules/template.py#L256-L341)
+4. **TemplatePointwiseAttention**：将模板信息与当前成对表示集成 [unifold/modules/template.py](unifold/modules/template.py#L34-L93)
+
+<CgxTip>
+模板处理是可选的，由 `template.enabled` 配置标志控制。禁用时，跳过这些模块以减少计算开销。
+</CgxTip>
+
+## Evoformer 架构
+
+Evoformer 是核心处理模块，通过注意力机制迭代优化 MSA 和成对表示。
+
+### Evoformer 堆栈
+由多个 `EvoformerIteration` 块组成，每个块包含：
+- **MSA-to-MSA 注意力**：处理 MSA 内的序列信息
+- **MSA-to-pair 通信**：使用 MSA 信息更新成对表示
+- **三角形注意力**：处理成对表示中的空间关系
+- **外积均值**：从 MSA 特征更新成对表示 [unifold/modules/evoformer.py](unifold/modules/evoformer.py#L29-L213)
+
+### 额外 MSA 堆栈
+处理额外的 MSA 序列以提供进化信息 [unifold/modules/evoformer.py](unifold/modules/evoformer.py#L310-L376)：
+
+```python
+class ExtraMSAStack(EvoformerStack):
+    def forward(self, m, z, ...):
+        # 处理额外 MSA 序列以丰富成对表示
+        # 仅返回更新的成对表示
+```
+
+## 结构模块
+
+结构模块使用几何深度学习将优化的成对表示转换为 3D 坐标。
+
+### 关键组件
+1. **InvariantPointAttention**：在 3D 空间中运行的注意力机制 [unifold/modules/structure_module.py](unifold/modules/structure_module.py#L165-L340)
+2. **BackboneUpdate**：从注意力输出更新主链坐标 [unifold/modules/structure_module.py](unifold/modules/structure_module.py#L341-L349)
+3. **SidechainAngleResnet**：预测侧链构象 [unifold/modules/structure_module.py](unifold/modules/structure_module.py#L123-L164)
+
+### 3D 坐标生成
+模块使用一系列几何变换将抽象表示转换为原子坐标：
+
+```python
+def forward(self, s, z, aatype, mask=None):
+    # 通过注意力迭代优化 3D 结构
+    # 返回最终坐标和置信度指标
+```
+
+## 辅助预测头
+
+模型包含多个辅助头用于置信度估计和中间预测 [unifold/modules/auxillary_heads.py](unifold/modules/auxillary_heads.py#L8-L81)：
+
+| 头 | 用途 | 输出维度 |
+|------|---------|-------------------|
+| DistogramHead | 预测残基间距离 | `num_bins = 64` |
+| PredictedLDDTHead | 估计每残基置信度 | `num_bins = 50` |
+| PredictedAlignedErrorHead | 预测对齐误差指标 | `num_bins = 64` |
+| MaskedMSAHead | 预测掩码 MSA 标记 | 20 个氨基酸类别 |
+| ExperimentallyResolvedHead | 预测实验分辨率 | 二元分类 |
+
+## 配置系统
+
+模型使用在 `unifold/config.py` 中定义的分层配置系统，关键参数包括：
+
+- **表示维度**：`d_pair=128`、`d_msa=256`、`d_single=384`
+- **循环迭代次数**：`max_recycling_iters=3`
+- **模板维度**：`d_template=64`
+- **内存效率的分块大小**：`chunk_size=4`
+
+## 精度与内存管理
+
+实现支持多种精度模式以适应不同用例：
+
+```python
+def half(self): self.model = self.model.half()
+def bfloat16(self): self.model = self.model.bfloat16()  
+def float(self): self.model = self.model.float()
+```
+
+这种灵活性允许针对不同硬件配置和内存约束进行优化。
+
+## 与训练流水线的集成
+
+模型通过 `AlphafoldModel` 包装器类与 Uni-Core 的分布式训练框架集成 [unifold/model.py](unifold/model.py#L12-L54)，该类处理：
+- 参数解析和配置
+- 分布式训练设置
+- 损失计算协调
+- 混合精度训练支持
+
+该实现在保持与原始 AlphaFold2 架构一致性的同时，提供了针对训练效率和部署灵活性的 PyTorch 特定优化。
+
+要更深入地了解注意力机制和几何处理，请继续阅读 [Evoformer 模块与注意力机制](7-evoformer-module-and-attention-mechanisms)。有关 3D 坐标生成的详细信息，请参阅 [结构模块与 3D 坐标预测](8-structure-module-and-3d-coordinate-prediction)。
+
+---
+
+- [深度解析/核心架构/Evoformer模块与注意力机制](https://zread.ai/dptech-corp/Uni-Fold/7-evoformer-module-and-attention-mechanisms)
+
+---
+slug:7-evoformer-module-and-attention-mechanisms
+blog_type:normal
+---
+
+
+
+Evoformer 模块是 AlphaFold 类蛋白质结构预测中的核心架构创新，它实现了一种复杂的注意力机制，通过协调的信息交换迭代地优化多序列比对（MSA）和成对表示。
+
+## Evoformer 架构概述
+
+Evoformer 由堆叠的迭代组成，通过精心编排的注意力操作序列和几何变换，逐步更新 MSA 表示（`m`）和成对表示（`z`）。每次迭代遵循特定的计算模式，旨在捕获基于序列的进化信息和残基之间的空间关系。
+
+### 核心组件
+
+```mermaid
+graph TD
+    A[EvoformerStack] --> B[EvoformerIteration x N]
+    B --> C[MSA Row Attention]
+    B --> D[MSA Column Attention]
+    B --> E[MSA Transition]
+    B --> F[Outer Product Mean]
+    B --> G[Triangle Multiplication]
+    B --> H[Triangle Attention]
+    B --> I[Pair Transition]
+    
+    C --> J[MSA Representation m]
+    D --> J
+    E --> J
+    F --> K[Pair Representation z]
+    G --> K
+    H --> K
+    I --> K
+```
+
+该架构维护两条并行的信息流：**MSA 表示**（`m`）捕获序列间的进化约束，**成对表示**（`z`）建模残基间的关系 [unifold/modules/evoformer.py#L116-L128](unifold/modules/evoformer.py#L116-L128)。
+
+## 注意力机制
+
+### MSA 注意力模式
+
+Evoformer 为 MSA 处理实现了专门的注意力机制：
+
+**带成对偏置的 MSA 行注意力**沿序列维度操作，通过偏置项整合成对信息 [unifold/modules/evoformer.py#L53-L58](unifold/modules/evoformer.py#L53-L58)：
+
+```python
+self.msa_att_row = MSARowAttentionWithPairBias(
+    d_msa=d_msa,
+    d_pair=d_pair,
+    d_hid=d_hid_msa_att,
+    num_heads=num_heads_msa,
+)
+```
+
+**MSA 列注意力**处理 MSA 中不同序列的信息，包含标准和全局注意力模式的变体 [unifold/modules/evoformer.py#L60-L73](unifold/modules/evoformer.py#L60-L73)。
+
+<CgxTip>
+MSA 注意力机制支持分块处理以提高内存效率，当序列长度超过 2560 个残基时自动切换到分块计算 [unifold/modules/attentions.py#L237-L244](unifold/modules/attentions.py#L237-L244)。
+</CgxTip>
+
+### 三角注意力机制
+
+三角注意力作用于成对表示以捕获几何关系：
+
+**三角注意力起始**和**三角注意力结束**从不同视角处理二维成对表示矩阵，使模型能够从行向和列向两个方向推理残基关系 [unifold/modules/evoformer.py#L95-L104](unifold/modules/evoformer.py#L95-L104)。
+
+三角注意力实现包含从成对表示自身生成复杂偏置 [unifold/modules/attentions.py#L388-L390](unifold/modules/attentions.py#L388-L390)：
+
+```python
+triangle_bias = (
+    permute_final_dims(self.linear(x), (2, 0, 1)).unsqueeze(-4).contiguous()
+)
+```
+
+## Evoformer 迭代中的信息流
+
+每个 Evoformer 迭代遵循精确的计算序列：
+
+1. **MSA 处理阶段**：
+   - 带成对偏置的行注意力整合空间信息
+   - 列注意力处理跨序列信息
+   - 过渡层应用前馈变换
+
+2. **成对表示更新**：
+   - 外积均值将 MSA 信息转换到成对空间
+   - 三角乘法操作捕获几何约束
+   - 三角注意力优化残基间关系
+   - 成对过渡应用最终变换
+
+前向传播通过精心设计的残差连接和 dropout 实现此序列 [unifold/modules/evoformer.py#L136-L210](unifold/modules/evoformer.py#L136-L210)：
+
+<CgxTip>
+外积均值操作可以置于 MSA 处理之前或之后，由 `outer_product_mean_first` 参数控制，提供信息流模式的灵活性 [unifold/modules/evoformer.py#L130-L168](unifold/modules/evoformer.py#L130-L168)。
+</CgxTip>
+
+## 三角乘法操作
+
+三角乘法通过出边和入边处理实现几何推理：
+
+**TriangleMultiplicationOutgoing** 处理从每个残基流向其他残基的信息，而 **TriangleMultiplicationIncoming** 处理流向每个残基的信息 [unifold/modules/triangle_multiplication.py#L154-L159](unifold/modules/triangle_multiplication.py#L154-L159)。
+
+这些操作使用二维分块处理大型蛋白质结构以提高内存效率 [unifold/modules/triangle_multiplication.py#L30-L35](unifold/modules/triangle_multiplication.py#L30-L35)。
+
+## 堆叠架构和训练
+
+**EvoformerStack** 通过梯度检查点协调多次迭代以提高内存效率 [unifold/modules/evoformer.py#L295-L298](unifold/modules/evoformer.py#L295-L298)：
+
+```python
+m, z = checkpoint_sequential(
+    blocks,
+    input=(m, z),
+)
+```
+
+对于标准堆叠，最终 MSA 表示通过对第一个序列的线性投影投影到单一序列表示 [unifold/modules/evoformer.py#L301-L305](unifold/modules/evoformer.py#L301-L305)。
+
+## 专用变体
+
+### ExtraMSAStack
+
+**ExtraMSAStack** 变体处理额外的 MSA 信息，使用全局注意力模式而非标准列注意力修改列注意力 [unifold/modules/evoformer.py#L310-L363](unifold/modules/evoformer.py#L310-L363)。这使得在保持计算可行性的同时高效处理大型 MSA。
+
+## 内存优化特性
+
+Evoformer 实现包含多种内存优化策略：
+
+- **分块处理**：自动对大型序列和成对矩阵进行分块
+- **梯度检查点**：在深度堆叠中以计算换内存
+- **二维分块**：为三角乘法操作专门设计的分块
+- **偏置共享**：跨注意力头高效计算偏置
+
+这些优化使训练大型蛋白质复合物成为可能，同时保持原始 AlphaFold 架构的完整表达能力。
+
+## 与整体模型的集成
+
+Evoformer 作为中央信息处理枢纽，接收来自输入处理模块的嵌入并生成精细的表示用于下游结构预测。其输出直接馈入结构模块以生成 3D 坐标 [unifold/modules/alphafold.py](unifold/modules/alphafold.py)。
+
+模块化设计允许灵活配置注意力头、隐藏维度和堆叠深度，以平衡计算资源与预测准确性要求。
+
+要了解 Evoformer 输出如何在 3D 结构预测中使用，参见[结构模块和 3D 坐标预测](8-structure-module-and-3d-coordinate-prediction)。有关输入处理和特征提取的详细信息，请参考[特征提取和 MSA 处理](9-feature-extraction-and-msa-processing)。
+
+---
+
+- [深度解析/核心架构/结构模块与3D坐标预测](https://zread.ai/dptech-corp/Uni-Fold/8-structure-module-and-3d-coordinate-prediction)
+
+---
+slug:8-structure-module-and-3d-coordinate-prediction
+blog_type:normal
+---
+
+
+
+结构模块是 Uni-Fold 蛋白质结构预测流程中的最后一个关键组件，它将抽象的序列嵌入转换为精确的 3D 原子坐标。该模块通过不变点注意力和基于坐标系的变换实现复杂的几何推理，从而生成物理上真实的蛋白质结构。
+
+## 架构概览
+
+结构模块作为一个迭代优化过程运行，通过多个注意力块逐步改进 3D 结构预测。每个块将序列级表示与几何约束相结合，以产生越来越精确的原子坐标。
+
+```mermaid
+graph TD
+    A[单一表示 s] --> B[结构模块]
+    C[配对表示 z] --> B
+    D[氨基酸类型] --> B
+    
+    B --> E[迭代循环]
+    E --> F[不变点注意力]
+    F --> G[转换层]
+    G --> H[骨架更新]
+    H --> I[侧链角度预测]
+    I --> J{最终迭代?}
+    J -->|否| E
+    J -->|是| K[扭转角度转换]
+    K --> L[原子位置生成]
+    
+    L --> M[最终 3D 坐标]
+    L --> N[坐标系表示]
+```
+
+## 核心组件
+
+### 不变点注意力 (IPA)
+
+结构模块的核心是不变点注意力机制，它通过将 3D 坐标信息直接整合到注意力计算中来实现几何感知的注意力 [unifold/modules/structure_module.py#L165-L338](unifold/modules/structure_module.py#L165-L338)。
+
+IPA 通过三个并行的注意力路径运行：
+
+1. **标量注意力**：使用序列嵌入 `s` 和配对表示 `z` 的标准注意力
+2. **点注意力**：使用从当前坐标导出的 3D 查询/关键点的几何注意力
+3. **配对偏差整合**：整合配对关系信息
+
+注意力机制同时计算标量和几何贡献：
+
+```python
+# 标量注意力组件
+attn = torch.matmul(
+    permute_final_dims(q, (1, 0, 2)),
+    permute_final_dims(k, (1, 2, 0)),
+)
+
+# 点注意力组件（几何）
+pt_att = q_pts.unsqueeze(-4) - k_pts.unsqueeze(-5)
+pt_att = pt_att.float() ** 2
+pt_att = pt_att.sum(dim=-1)
+```
+
+<CgxTip>
+IPA 的不变点表示确保了旋转和平移等变性，使预测独立于全局坐标系的方向。
+</CgxTip>
+
+### 基于坐标系的坐标系统
+
+Uni-Fold 使用 `Frame` 和 `Quaternion` 类采用复杂的基于坐标系的坐标系统 [unifold/modules/frame.py#L174-L442](unifold/modules/frame.py#L174-L442)。每个残基都由一个局部坐标系表示，该坐标系由以下部分定义：
+
+- **旋转分量**：使用四元数表示的 3D 方向
+- **平移分量**：3D 空间中的位置
+
+坐标系系统支持高效的组合和变换操作：
+
+```python
+# 用于分层坐标变换的坐标系组合
+chi1_frame_to_bb = all_frames[..., 4]
+chi2_frame_to_bb = chi1_frame_to_bb.compose(chi2_frame_to_frame)
+chi3_frame_to_bb = chi2_frame_to_bb.compose(chi3_frame_to_frame)
+```
+
+### 迭代优化过程
+
+结构模块执行多次优化迭代（通常为 8 个块）[unifold/modules/structure_module.py#L494-L541](unifold/modules/structure_module.py#L494-L541)：
+
+1. **IPA 处理**：几何感知注意力更新
+2. **转换层**：带 dropout 的前馈处理
+3. **骨架更新**：基于四元数的坐标调整
+4. **侧链预测**：基于 ResNet 的角度预测
+
+每次迭代逐步优化坐标预测，同时通过仔细的梯度停止机制保持梯度流。
+
+## 坐标生成流程
+
+### 扭转角度到坐标系的转换
+
+模块使用分层组合将预测的扭转角度转换为 3D 坐标系 [unifold/modules/structure_module.py#L30-74](unifold/modules/structure_module.py#L30-74)：
+
+1. **默认坐标系选择**：每种氨基酸类型的基于文献的参考坐标系
+2. **角度整合**：从预测角度构建旋转矩阵
+3. **坐标系组合**：骨架和侧链坐标系的分层组合
+
+```python
+def torsion_angles_to_frames(frame, alpha, aatype, default_frames):
+    default_frame = Frame.from_tensor_4x4(default_frames[aatype, ...])
+    # 从角度构建旋转矩阵
+    all_rots = Frame(Rotation(mat=all_rots), None)
+    # 与骨架坐标系组合
+    all_frames_to_global = frame[..., None].compose(all_frames_to_bb)
+```
+
+### 原子位置生成
+
+最终原子坐标通过将坐标系变换应用于基于文献的原子位置来生成 [unifold/modules/structure_module.py#L77-L100](unifold/modules/structure_module.py#L77-L100)：
+
+```python
+def frames_and_literature_positions_to_atom14_pos(frame, aatype, ...):
+    # 将文献位置转换为全局坐标
+    pred_positions = t_atoms_to_global.apply(lit_positions)
+    # 对残基特定原子应用原子掩码
+    pred_positions = pred_positions * atom_mask
+```
+
+## 与 AlphaFold 流程的集成
+
+结构模块通过 `iteration_evoformer_structure_module` 方法与主 AlphaFold 架构无缝集成 [unifold/modules/alphafold.py#L359-L416](unifold/modules/alphafold.py#L359-L416)：
+
+```python
+outputs["sm"] = self.structure_module(
+    s,  # 来自 Evoformer 的单一表示
+    z,  # 来自 Evoformer 的配对表示  
+    feats["aatype"],  # 氨基酸序列
+    mask=feats["seq_mask"],  # 序列掩码
+)
+```
+
+该模块接收来自 Evoformer 的处理后嵌入并生成最终预测，包括：
+- **原子位置**：所有原子的 3D 坐标（每个残基 14 个）
+- **坐标系表示**：每个残基的局部坐标系
+- **扭转角度**：预测的骨架和侧链角度
+
+## 关键设计原则
+
+### 几何一致性
+
+结构模块通过以下方式保持严格的几何一致性：
+- **等变操作**：所有变换保持旋转和平移对称性
+- **四元数表示**：数值稳定的旋转编码
+- **坐标系组合**：分层坐标系统维护
+
+### 梯度流优化
+
+仔细的梯度管理确保稳定的训练：
+- **梯度停止**：防止深度迭代堆栈中的梯度爆炸
+- **残差连接**：保持跨迭代的信息流
+- **混合精度**：支持训练和推理精度模式
+
+<CgxTip>
+模块的设计允许在推理期间使用可变的迭代次数，从而在预测准确性和计算成本之间进行权衡。
+</CgxTip>
+
+## 配置和参数
+
+结构模块通过其初始化参数支持广泛的配置 [unifold/modules/structure_module.py#L397-L462](unifold/modules/structure_module.py#L397-L462)：
+
+| 参数 | 描述 | 典型值 |
+|-----------|-------------|----------------|
+| `num_blocks` | 优化迭代次数 | 8 |
+| `d_ipa` | IPA 隐藏维度 | 256 |
+| `num_heads_ipa` | IPA 注意力头数 | 12 |
+| `num_qk_points` | 每个头的查询/关键点数 | 4 |
+| `num_v_points` | 每个头的值点数 | 8 |
+| `trans_scale_factor` | 平移缩放 | 0.38 |
+
+## 后续步骤
+
+要完成对 Uni-Fold 架构的理解，请探索：
+
+- [特征提取和 MSA 处理](9-feature-extraction-and-msa-processing)：了解如何为结构模块准备输入特征
+- [损失函数和训练目标](13-loss-functions-and-training-objectives)：了解如何在训练期间优化结构模块预测
+- [用于大型复合物预测的 UF-Symmetry](15-uf-symmetry-for-large-complex-prediction)：发现对称蛋白质复合物的扩展
+
+结构模块代表了 Uni-Fold 几何推理能力的顶点，通过复杂的注意力机制和基于坐标系的坐标变换，将学习的序列模式转换为物理上有意义的 3D 蛋白质结构。
+
+---
+
+## 数据处理流水线
+
+- [深度解析/数据处理流水线/特征提取与MSA处理](https://zread.ai/dptech-corp/Uni-Fold/9-feature-extraction-and-msa-processing)
+
+---
+slug:9-feature-extraction-and-msa-processing
+blog_type:normal
+---
+
+
+
+Uni-Fold 中的特征提取和 MSA 处理流水线将原始蛋白质序列和多序列比对转换为 AlphaFold 架构所需的丰富特征表示。该流水线包含序列编码、MSA 处理、特征工程和数据增强策略，使模型能够利用进化信息进行准确的蛋白质结构预测。
+
+## MSA 流水线架构
+
+MSA 处理流水线通过 [`unifold/msa/pipeline.py`](unifold/msa/pipeline.py#L107) 中的 `DataPipeline` 类进行协调，该类管理多个比对工具和特征生成过程。流水线集成了包括 Uniref90、BFD、Mgnify 在内的多个关键数据库以及各种模板搜索方法，以构建全面的进化谱系。
+
+```mermaid
+graph TD
+    A[输入 FASTA] --> B[Jackhmmer 搜索]
+    A --> C[HHblits 搜索]
+    B --> D[Uniref90 数据库]
+    B --> E[Mgnify 数据库]
+    C --> F[BFD 数据库]
+    C --> G[Uniclust30 数据库]
+    D --> H[MSA 特征]
+    E --> H
+    F --> H
+    G --> H
+    H --> I[特征工程]
+    I --> J[模型输入]
+```
+
+## 序列特征生成
+
+流水线首先通过 [`make_sequence_features()`](unifold/msa/pipeline.py#L35) 函数将原始蛋白质序列转换为数值表示。该函数创建基本的序列级特征，包括：
+
+- **One-hot 氨基酸编码**，使用标准 20 种氨基酸加未知残基
+- **残基索引**，用于位置信息
+- **序列长度元数据**，用于模型处理
+- **结构域名称编码**，用于识别目的
+
+one-hot 编码遵循 [`residue_constants.restype_order_with_x`](unifold/data/residue_constants.py) 中定义的残基顺序，确保整个流水线中表示的一致性。
+
+## MSA 特征构建
+
+核心 MSA 处理在 [`make_msa_features()`](unifold/msa/pipeline.py#L53) 中进行，该函数将多序列比对转换为结构化特征张量。该函数处理几个关键方面：
+
+- **序列去重**，移除冗余条目
+- **氨基酸整数编码**，使用 HHblits 映射
+- **删除矩阵处理**，处理比对间隙
+- **物种标识符提取**，用于多样性分析
+
+生成的特征包括整数编码的 MSA、删除矩阵、比对计数和物种标识符，为下游特征工程提供基础。
+
+## 特征工程流水线
+
+### MSA 特征增强
+
+[`make_msa_feat()`](unifold/data/data_ops.py#L685) 和 [`make_msa_feat_v2()`](unifold/data/data_ops.py#L718) 函数通过组合以下内容创建全面的 MSA 特征表示：
+
+- **One-hot 编码的 MSA 序列**（23 维：20 种氨基酸 + X + 间隙 + 掩码）
+- **删除指示符**，显示比对完整性
+- **删除值**，使用反正切变换处理间隙
+- **聚类谱系**，表示序列保守模式
+- **聚类删除均值**，用于间隙分布统计
+
+反正切变换 `torch.atan(deletion_matrix / 3.0) * (2.0 / np.pi)` 将删除值归一化到 [0, 1] 范围，在训练期间提供更好的数值稳定性。
+
+### MSA 采样和选择
+
+为了管理计算复杂性，流水线通过 [`sample_msa()`](unifold/data/data_ops.py#L220) 实现了复杂的 MSA 采样策略：
+
+- **均匀排列**，用于随机采样
+- **Gumbel 排列**，基于链信息进行有偏采样
+- **选定和额外 MSA 序列的分别存储**
+- **可配置的序列限制**，控制内存使用
+
+<CgxTip>
+Gumbel 排列采样支持多聚体预测的链感知 MSA 选择，确保采样序列中不同蛋白质链的更好表示。</CgxTip>
+
+### 聚类和谱系生成
+
+流水线通过 [`nearest_neighbor_clusters()`](unifold/data/data_ops.py#L336) 采用最近邻聚类来分组相似序列并生成共识谱系：
+
+- **加权相似度计算**，使用间隙一致性加权
+- **高效矩阵操作**，用于大规模聚类
+- **额外 MSA 序列的聚类分配**
+- **谱系汇总**，通过 [`summarize_clusters()`](unifold/data/data_ops.py#L371)
+
+## 数据增强策略
+
+### 掩码 MSA 生成
+
+[`make_masked_msa()`](unifold/data/data_ops.py#L560) 函数实现了 BERT 风格的掩码，用于自监督学习：
+
+- **基于概率的替换**，结合均匀、谱系和相同残基概率
+- **可配置的掩码分数**，通常设置为 15% 的位置
+- **实体感知掩码**，当 `share_mask=True` 时用于多聚体复合物
+- **Gumbel 采样**，用于随机掩码生成
+
+掩码策略通过混合真实 MSA 数据和掩码版本创建训练目标，使模型能够通过重建任务学习进化模式。
+
+## 模板集成
+
+虽然主要关注 MSA 处理，流水线还通过裁剪和选择函数处理模板特征：
+
+- [`crop_templates()`](unifold/data/data_ops.py#L1183) 管理模板数量限制
+- 模板特征与 MSA 特征集成，用于全面的输入表示
+
+## 处理流水线编排
+
+完整的特征处理流水线通过 [`process_features()`](unifold/data/process.py#L162) 进行协调，该函数应用一系列转换：
+
+1. **非集成转换**，在所有样本中一致应用
+2. **集成转换**，可以平均化以提高预测鲁棒性
+3. **裁剪和大小调整操作**，标准化输入维度
+4. **特征组合和堆叠**，用于最终模型输入
+
+## 数据类型处理和优化
+
+流水线包括通过 [`cast_to_64bit_ints()`](unifold/data/data_ops.py#L36) 等函数进行仔细的数据类型管理，以确保数值精度和跨不同计算后端的兼容性。
+
+<CgxTip>
+所有整数操作都转换为 int64，以保持与原始 AlphaFold 实现的一致性，避免训练和推理过程中的潜在数值问题。</CgxTip>
+
+## 与模型架构的集成
+
+处理后的特征通过标准化张量格式直接输入 Evoformer 模块。MSA 特征特别提供了进化上下文，使注意力机制能够捕获长程依赖性和结构约束。
+
+特征提取流水线确保所有输入都经过适当的归一化、掩码和格式化，以获得最佳模型性能，同时保持对不同预测场景（单体 vs 多聚体，有或无模板）的灵活性。
+
+## 后续步骤
+
+特征提取和 MSA 处理后，数据流入 Evoformer 模块进行基于注意力的处理。要全面了解特征到结构的流水线，请继续阅读 [模板集成和配对表示](10-template-integration-and-pair-representation)，然后阅读 [Evoformer 模块和注意力机制](7-evoformer-module-and-attention-mechanisms)。
+
+---
+
+- [深度解析/数据处理流水线/模板整合与配对表示](https://zread.ai/dptech-corp/Uni-Fold/10-template-integration-and-pair-representation)
+
+---
+slug:10-template-integration-and-pair-representation
+blog_type:normal
+---
+
+
+
+模板集成和配对表示构成了 Uni-Fold 架构的关键组成部分，使模型能够利用同源蛋白质的结构信息来提高预测准确性。该系统通过复杂的注意力机制处理模板特征，并将其转换为配对表示，从而指导结构预测过程。
+
+## 模板特征架构
+
+模板处理流水线由多个关键模块组成，它们协同工作以提取和集成模板信息：
+
+### 核心模板模块
+
+模板系统围绕 [`unifold/modules/template.py`](unifold/modules/template.py) 中的四个主要类构建：
+
+1. **TemplatePointwiseAttention**（第 34-93 行）：实现模板特征与配对表示之间的注意力机制
+2. **TemplateProjection**（第 94-112 行）：将模板特征投影到配对表示维度
+3. **TemplatePairStackBlock**（第 113-255 行）：具有三角形注意力和乘法运算的独立处理块
+4. **TemplatePairStack**（第 256-341 行）：协调多个模板处理块
+
+### 模块逐点注意力
+
+`TemplatePointwiseAttention` 模块作为模板特征与演化中的配对表示之间的接口：
+
+```python
+class TemplatePointwiseAttention(nn.Module):
+    def __init__(self, d_template, d_pair, d_hid, num_heads, inf, **kwargs):
+        super(TemplatePointwiseAttention, self).__init__()
+        self.inf = inf
+        self.mha = Attention(
+            d_pair, d_template, d_template, d_hid, num_heads, gating=False
+        )
+```
+
+该模块应用多头注意力，其中配对表示作为查询，模板特征作为键和值，使模型能够根据与当前预测状态的相关性有选择地整合模板信息 [来源](unifold/modules/template.py#L34-L76)。
+
+## 模板特征处理流水线
+
+### 特征提取与转换
+
+模板特征在集成前会经历多个转换步骤：
+
+1. **配对特征构建**：[`unifold/modules/featurization.py`](unifold/modules/featurization.py) 中的 `build_template_pair_feat` 函数从模板伪 beta 坐标创建基于距离的表示：
+
+```python
+def build_template_pair_feat(batch, min_bin, max_bin, num_bins, eps=1e-20, inf=1e8):
+    template_mask = batch["template_pseudo_beta_mask"]
+    template_mask_2d = template_mask[..., None] * template_mask[..., None, :]
+    
+    tpb = batch["template_pseudo_beta"]
+    dgram = torch.sum(
+        (tpb[..., None, :] - tpb[..., None, :, :]) ** 2, dim=-1, keepdim=True
+    )
+```
+
+此函数在模板残基之间创建距离直方图，将空间关系编码为分箱距离特征 [来源](unifold/modules/featurization.py#L84-L108)。
+
+2. **多链支持**：v2 特征实现（`build_template_pair_feat_v2`）通过非对称掩码添加对多链蛋白质复合物的支持：
+
+```python
+def build_template_pair_feat_v2(batch, min_bin, max_bin, num_bins, multichain_mask_2d=None, eps=1e-20, inf=1e8):
+    template_mask = batch["template_pseudo_beta_mask"]
+    template_mask_2d = template_mask[..., None] * template_mask[..., None, :]
+    if multichain_mask_2d is not None:
+        template_mask_2d *= multichain_mask_2d
+```
+
+这能够正确处理具有多条链的蛋白质复合物 [来源](unifold/modules/featurization.py#L129-L150)。
+
+### 模板堆栈处理
+
+`TemplatePairStack` 通过一系列注意力和转换块处理单个模板：
+
+```mermaid
+graph TD
+    A[输入模板特征] --> B[TemplatePairStack]
+    B --> C[TemplatePairStackBlock 1]
+    C --> D[三角形注意力起始]
+    D --> E[三角形注意力结束]
+    E --> F[三角形乘法传出]
+    F --> G[三角形乘法传入]
+    G --> H[配对转换]
+    H --> I[TemplatePairStackBlock N]
+    I --> J[层归一化]
+    J --> K[输出模板表示]
+```
+
+每个 `TemplatePairStackBlock` 应用三角形注意力机制来捕获模板表示中的行和列依赖关系 [来源](unifold/modules/template.py#L113-L200)。
+
+## 与 AlphaFold 模型的集成
+
+### 模板嵌入流水线
+
+模板系统通过 [`unifold/modules/alphafold.py`](unifold/modules/alphafold.py) 中的 `embed_templates_pair` 方法与主 AlphaFold 模型集成：
+
+```python
+def embed_templates_pair_core(self, batch, z, pair_mask, tri_start_attn_mask, tri_end_attn_mask, templ_dim, multichain_mask_2d):
+    if self.config.template.template_pair_embedder.v2_feature:
+        t = build_template_pair_feat_v2(
+            batch, inf=self.config.template.inf, eps=self.config.template.eps,
+            multichain_mask_2d=multichain_mask_2d, **self.config.template.distogram,
+        )
+        num_template = t[0].shape[-4]
+        single_templates = [
+            self.template_pair_embedder([x[..., ti, :, :, :] for x in t], z)
+            for ti in range(num_template)
+        ]
+```
+
+此方法处理 v1 和 v2 特征格式，处理单个模板，并应用模板堆栈进行特征优化 [来源](unifold/modules/alphafold.py#L147-L170)。
+
+### 条件模板处理
+
+系统支持基于训练模式和配置的条件模板激活：
+
+```python
+def embed_templates_pair(self, batch, z, pair_mask, tri_start_attn_mask, tri_end_attn_mask, templ_dim):
+    if self.config.template.template_pair_embedder.v2_feature and "asym_id" in batch:
+        multichain_mask_2d = (
+            batch["asym_id"][..., :, None] == batch["asym_id"][..., None, :]
+        )
+        multichain_mask_2d = multichain_mask_2d.unsqueeze(0)
+    else:
+        multichain_mask_2d = None
+
+    if self.training or self.enable_template_pointwise_attention:
+        t = self.embed_templates_pair_core(...)
+```
+
+这使训练和推理期间能够灵活使用模板 [来源](unifold/modules/alphafold.py#L185-L200)。
+
+## 数据处理与特征准备
+
+### 模板特征生成
+
+模板特征通过 [`unifold/data/process.py`](unifold/data/process.py) 中的数据处理流水线准备：
+
+```python
+def nonensembled_fns(common_cfg, mode_cfg):
+    operators = []
+    # ... 其他处理步骤
+    if common_cfg.use_templates:
+        operators.extend([
+            data_ops.make_template_mask,
+            data_ops.make_pseudo_beta("template_"),
+        ])
+        operators.append(
+            data_ops.crop_templates(
+                max_templates=mode_cfg.max_templates,
+                subsample_templates=mode_cfg.subsample_templates,
+            )
+        )
+```
+
+这确保了正确的模板掩码、伪 beta 坐标生成和为内存效率进行的模板裁剪 [来源](unifold/data/process.py#L30-L45)。
+
+<CgxTip>
+模板裁剪对于内存管理至关重要，尤其是在处理多个模板时。系统支持随机子采样和固定大小裁剪策略，以平衡信息内容与计算约束。
+</CgxTip>
+
+## 技术实现细节
+
+### 内存优化
+
+模板系统实现了多种内存优化策略：
+
+1. **分块处理**：`TemplatePointwiseAttention` 中的 `_chunk` 方法支持以内存高效的方式分块处理大型模板：
+
+```python
+def _chunk(self, z: torch.Tensor, t: torch.Tensor, mask: torch.Tensor, chunk_size: int) -> torch.Tensor:
+    mha_inputs = {"q": z, "k": t, "v": t, "mask": mask}
+    return chunk_layer(
+        self.mha, mha_inputs, chunk_size=chunk_size,
+        num_batch_dims=len(z.shape[:-2]),
+    )
+```
+
+2. **检查点**：`TemplatePairStack` 使用梯度检查点来减少反向传播期间的内存使用 [来源](unifold/modules/template.py#L289-L300)。
+
+### 维度管理
+
+`TemplateProjection` 模块处理模板特征与配对表示之间的维度对齐：
+
+```python
+class TemplateProjection(nn.Module):
+    def __init__(self, d_template, d_pair, **kwargs):
+        super(TemplateProjection, self).__init__()
+        self.d_pair = d_pair
+        self.act = nn.ReLU()
+        self.output_linear = Linear(d_template, d_pair, init="relu")
+
+    def forward(self, t, z) -> torch.Tensor:
+        if t is None:
+            # 处理无模板情况
+            shape = z.shape
+            shape[-1] = self.d_pair
+            t = torch.zeros(shape, dtype=z.dtype, device=z.device)
+        t = self.act(t)
+        z_t = self.output_linear(t)
+        return z_t
+```
+
+这确保了不同特征维度之间的兼容性，并为缺失的模板数据提供了优雅的处理 [来源](unifold/modules/template.py#L94-L112)。
+
+<CgxTip>
+模板系统包括对无模板可用情况的鲁棒处理，自动生成具有适当维度的零填充张量，以保持一致的模型行为。
+</CgxTip>
+
+## 配置与使用
+
+模板集成通过配置参数控制，这些参数指定：
+
+- **模板使用**：是否启用模板处理（`use_templates`）
+- **特征版本**：在 v1 和 v2 特征格式之间选择（`v2_feature`）
+- **模板限制**：最大模板数量（`max_templates`）
+- **子采样策略**：随机模板选择（`subsample_templates`）
+- **注意力配置**：逐点注意力启用（`enable_template_pointwise_attention`）
+
+这些参数允许针对不同用例（从单体预测到多聚体复合物建模）微调模板系统。
+
+模板集成系统代表了利用同源蛋白质进化和结构信息的复杂方法，提供了显著改善 Uni-Fold 中蛋白质结构预测准确性的关键空间约束。
+
+有关整体模型架构的更多信息，请参阅 [PyTorch 中的 AlphaFold 模型实现](6-alphafold-model-implementation-in-pytorch)。要了解模板特征如何补充其他输入特征，请参考 [特征提取与 MSA 处理](9-feature-extraction-and-msa-processing)。
+
+---
+
+- [深度解析/数据处理流水线/数据增强与集成策略](https://zread.ai/dptech-corp/Uni-Fold/11-data-augmentation-and-ensembling-strategies)
+
+---
+slug:11-data-augmentation-and-ensembling-strategies
+blog_type:normal
+---
+
+
+
+Uni-Fold 实现了一个精密的数据增强和集成框架，通过多样化的训练和推理策略来增强模型的鲁棒性和预测准确性。该系统结合了多种增强技术和集成平均方法，以提高蛋白质结构预测的性能。
+
+## 数据增强管道
+
+数据增强管道分为三个不同的处理阶段，每个阶段在特征转换工作流程中都有特定用途。
+
+### 非集成数据转换
+
+非集成转换应用确定性预处理步骤，确保所有集成成员之间的一致性。这些操作包括 MSA 校正、掩码生成和模板处理：
+
+```python
+def nonensembled_fns(common_cfg, mode_cfg):
+    """输入管道中不进行集成的数据转换器。"""
+    operators = []
+    if mode_cfg.random_delete_msa:
+        operators.append(data_ops.random_delete_msa(common_cfg.random_delete_msa))
+    operators.extend([
+        data_ops.cast_to_64bit_ints,
+        data_ops.correct_msa_restypes,
+        data_ops.squeeze_features,
+        data_ops.randomly_replace_msa_with_unknown(0.0),
+        data_ops.make_seq_mask,
+        data_ops.make_msa_mask,
+    ])
+```
+
+这些转换通过选择性 MSA 删除和未知残基替换引入受控的随机性，同时确保数据一致性 [unifold/data/process.py#L9-L54]。
+
+### 集成数据转换
+
+集成转换引入随机变化，在不同集成成员之间创建多样性。这是核心增强策略的实现之处：
+
+#### MSA 采样和聚类
+
+MSA 采样过程采用 Gumbel-max 采样进行概率序列选择，使不同集成成员能够获得多样化的 MSA 表示：
+
+```python
+operators.append(
+    data_ops.sample_msa(
+        max_msa_clusters,
+        keep_extra=True,
+        gumbel_sample=gumbel_sample,
+        biased_msa_by_chain=mode_cfg.biased_msa_by_chain,
+    )
+)
+```
+
+Gumbel-max 技巧提供了从概率分布中高效采样的方法，允许每个集成成员拥有不同的 MSA 子集，同时保持序列多样性 [unifold/data/process.py#L94-L161]。
+
+#### 块 MSA 删除
+
+对于单体预测，块删除随机移除连续的 MSA 区域以模拟不完整的序列信息：
+
+```python
+def block_delete_msa(protein, config):
+    num_seq = protein["msa"].shape[0]
+    block_num_seq = torch.floor(
+        torch.tensor(num_seq, dtype=torch.float32) * config.msa_fraction_per_block
+    ).to(torch.int32)
+    
+    del_block_starts = torch.from_numpy(np.random.randint(0, num_seq, [nb]))
+    del_blocks = del_block_starts[:, None] + torch.arange(0, block_num_seq)
+```
+
+该技术通过在部分可用的 MSA 上训练来提高模型对缺失序列数据的鲁棒性 [unifold/data/data_ops.py#L298-L334]。
+
+#### BERT 式训练的掩码 MSA
+
+掩码 MSA 实现通过策略性地掩码残基来创建 BERT 式训练目标：
+
+```python
+def make_masked_msa(protein, config, replace_fraction, gumbel_sample=False, share_mask=False):
+    categorical_probs = (
+        config.uniform_prob * random_aa
+        + config.profile_prob * protein["hhblits_profile"]
+        + config.same_prob * one_hot(protein["msa"], 22)
+    )
+    
+    mask_position = torch.from_numpy(np.random.rand(*sh) < replace_fraction)
+    mask_position &= protein["msa_mask"].bool()
+```
+
+该方法结合了均匀、基于谱和基于同一性的采样，为自监督学习创建真实的掩码模式 [unifold/data/data_ops.py#L560-L607]。
+
+### 裁剪和大小标准化
+
+裁剪策略适应不同的蛋白质类型和大小，实现了单链和多聚体特异的方法：
+
+#### 单链裁剪
+
+对于单体蛋白质，选择随机连续区域来创建固定大小的输入：
+
+```python
+def crop_to_size_single(protein, crop_size, shape_schema, seed):
+    num_res = protein["aatype"].shape[0] if "aatype" in protein else protein["msa_mask"].shape[1]
+    crop_idx = get_single_crop_idx(num_res, crop_size, seed)
+    protein = apply_crop_idx(protein, shape_schema, crop_idx)
+    return protein
+```
+
+#### 多聚体空间裁剪
+
+多聚体复合物使用空间感知裁剪来保留接口区域：
+
+```python
+def crop_to_size_multimer(protein, crop_size, shape_schema, seed, spatial_crop_prob, ca_ca_threshold):
+    """裁剪到指定大小。"""
+```
+
+这确保在裁剪过程中保持关键的相互作用接口 [unifold/data/data_ops.py#L1239-L1242]。
+
+## 集成策略
+
+### 推理时集成
+
+Uni-Fold 支持在推理期间配置集成大小，允许对多个随机预测进行平均以提高准确性：
+
+```python
+parser.add_argument("--num_ensembles", type=int, default=2)
+config.data.predict.num_ensembles = args.num_ensembles
+```
+
+每个集成成员使用不同的随机种子以确保多样化的采样和增强结果 [unifold/inference.py#L249-L251]。
+
+### 模板采样
+
+模板子采样引入了结构模板使用的多样性：
+
+```python
+if args.sample_templates:
+    config.data.predict.subsample_templates = True
+```
+
+这使每个集成成员能够获得不同的模板子集，增强结构预测的多样性 [unifold/inference.py#L85-L86]。
+
+### 回收迭代
+
+回收机制允许迭代优化预测，具有可配置的迭代次数：
+
+```python
+parser.add_argument("--max_recycling_iters", type=int, default=3)
+config.data.common.max_recycling_iters = args.max_recycling_iters
+config.globals.max_recycling_iters = args.max_recycling_iters
+```
+
+更多的回收迭代通常会提高预测准确性，但代价是增加计算量 [unifold/inference.py#L244-L246, L78-L80]。
+
+## 配置和实现
+
+### 增强参数
+
+关键增强参数可通过模型配置系统进行配置：
+
+- **MSA 采样**：控制 Gumbel 采样行为和对特定链的偏向
+- **块删除**：配置要删除的 MSA 块的数量和大小
+- **掩码**：设置 MSA 掩码的比例和策略
+- **裁剪**：确定裁剪大小和多聚体的空间偏好
+
+### 管道集成
+
+增强管道通过 `process_features` 函数与训练和推理工作流程无缝集成，该函数根据配置参数组合所有转换步骤 [unifold/data/process.py#L162-L210]。
+
+<CgxTip> 集成和非集成转换的分离对于在引入多样性的同时保持一致性至关重要。非集成操作确保所有集成成员获得相同的基础预处理，而集成操作则创建有效模型集成平均所需的变异。</CgxTip>
+
+<CgxTip> Gumbel-max 采样提供了一种高效且可微的方式来从分类分布中采样，使其成为集成管道中 MSA 和模板采样的理想选择。这种方法在保持不同集成成员所需的随机性的同时，在计算上也很高效。</CgxTip>
+
+## 性能考虑
+
+增强和集成策略旨在平衡计算效率和预测准确性。关键优化包括：
+
+- **分块处理**：大蛋白质被分块处理以管理内存使用
+- **选择性集成**：并非所有转换都进行集成以减少计算开销
+- **可配置多样性**：用户可根据可用计算资源调整集成大小和增强强度
+
+这些策略使 Uni-Fold 能够扩展到不同大小的蛋白质复合物，同时通过有效的数据增强和集成保持高预测准确性。
+
+有关模型架构以及这些增强如何与核心 AlphaFold 实现集成的更多详细信息，请参阅 [PyTorch 中的 AlphaFold 模型实现](6-alphafold-model-implementation-in-pytorch)。要了解这些特征如何提取和处理，请参阅 [特征提取和 MSA 处理](9-feature-extraction-and-msa-processing)。
+
+---
+
+## 训练与优化
+
+- [深度解析/训练与优化/基于Uni-Core的分布式训练](https://zread.ai/dptech-corp/Uni-Fold/12-distributed-training-with-uni-core)
+
+---
+slug:12-distributed-training-with-uni-core
+blog_type:normal
+---
+
+
+
+Uni-Fold 利用 Uni-Core 框架在多个 GPU 和节点间高效地分布式训练蛋白质结构预测模型。本综合指南涵盖了从单 GPU 到多节点部署扩展训练的架构、配置和优化策略。
+
+## 分布式训练架构
+
+Uni-Fold 的分布式训练基于 PyTorch 的分布式数据并行（DDP）框架构建，并与 Uni-Core 的训练基础设施集成。该架构支持跨多个 GPU 的数据并行和大规模蛋白质复合物的模型并行。
+
+```mermaid
+graph TB
+    A[主节点] --> B[GPU 工作节点]
+    A --> C[参数服务器]
+    B --> D[DDP 后端]
+    D --> E[梯度同步]
+    E --> F[模型更新]
+    C --> G[全局状态管理]
+    G --> H[检查点协调]
+    
+    subgraph "数据流水线"
+        I[特征加载] --> J[批次整理]
+        J --> K[分布式采样]
+        K --> L[GPU 内存缓冲区]
+    end
+    
+    L --> B
+    F --> L
+```
+
+训练过程使用 `no_c10d` DDP 后端进行优化通信，并支持使用 bfloat16 的混合精度训练以提高内存效率 [train_monomer.sh#L27](train_monomer.sh#L27)。
+
+## 训练配置
+
+### 环境设置
+
+分布式训练需要正确配置几个关键环境变量：
+
+- **MASTER_IP**: 主节点的 IP 地址（默认：127.0.0.1）
+- **MASTER_PORT**: 通信端口（默认：10087）
+- **OMPI_COMM_WORLD_SIZE**: 集群中的节点数
+- **OMPI_COMM_WORLD_RANK**: 当前节点的秩
+
+```bash
+export NCCL_ASYNC_ERROR_HANDLING=1
+export OMP_NUM_THREADS=1
+```
+
+### 训练参数
+
+训练脚本提供了全面的配置选项用于优化：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `n_gpu` | 自动检测 | 每节点 GPU 数 |
+| `total_step` | 80000 | 最大训练步数 |
+| `warmup_step` | 1000 | 学习率预热步数 |
+| `decay_step` | 50000 | 学习率衰减步数 |
+| `lr` | 1e-3 | 初始学习率 |
+| `update_freq` | 1 | 梯度累积频率 |
+| `sd_prob` | 0.75 (单体) / 0.5 (多聚体) | 自蒸馏概率 |
+
+## 任务和数据集管理
+
+### AlphafoldTask 集成
+
+[unifold/task.py](unifold/task.py#L16-L92) 中的 `AlphafoldTask` 类管理分布式训练工作流：
+
+- **数据集选择**：根据 `is_multimer` 配置自动选择单体训练的 `UnifoldDataset` 或复合物训练的 `UnifoldMultimerDataset`
+- **数据加载**：实现带缓存和内存优化的高效特征加载
+- **批次处理**：处理带回收维度的动态批次整理
+
+### 数据集架构
+
+数据集类支持分布式采样和高效数据加载：
+
+- **UnifoldDataset**：单体训练的基类，支持自蒸馏 ([unifold/dataset.py#L240-L399](unifold/dataset.py#L240-L399))
+- **UnifoldMultimerDataset**：多聚体复合物的扩展类，具有链组装逻辑 ([unifold/dataset.py#L399-L535](unifold/dataset.py#L399-L535))
+
+两个数据集都实现了 `collater` 方法，用于高效创建批次，以回收维度为第一轴，批次大小为第二轴 [unifold/dataset.py#L381](unifold/dataset.py#L381)。
+
+## 训练执行
+
+### 单体训练
+
+启动支持分布式的单体训练：
+
+```bash
+python -m torch.distributed.launch \
+    --nproc_per_node=$n_gpu \
+    --master_port $MASTER_PORT \
+    --nnodes=$OMPI_COMM_WORLD_SIZE \
+    --node_rank=$OMPI_COMM_WORLD_RANK \
+    --master_addr=$MASTER_IP \
+    $(which unicore-train) $data_path \
+    --user-dir unifold \
+    --task af2 --loss af2 --arch af2 \
+    --ddp-backend=no_c10d \
+    --bf16 --ema-decay 0.999
+```
+
+### 多聚体训练
+
+多聚体训练遵循类似模式，但使用修改的损失函数：
+
+```bash
+python -m torch.distributed.launch \
+    --nproc_per_node=$n_gpu \
+    --master_port $MASTER_PORT \
+    --nnodes=$OMPI_COMM_WORLD_SIZE \
+    --node_rank=$OMPI_COMM_WORLD_RANK \
+    --master_addr=$MASTER_IP \
+    $(which unicore-train) $data_path \
+    --user-dir unifold \
+    --task af2 --loss afm --arch af2 \
+    --ddp-backend=no_c10d \
+    --bf16 --ema-decay 0.999
+```
+
+## 优化策略
+
+### 内存优化
+
+Uni-Fold 为分布式训练实现了多种内存优化技术：
+
+- **混合精度**：bfloat16 训练减少内存使用同时保持数值稳定性
+- **梯度累积**：可配置的 `update_freq` 允许有效的更大批次大小
+- **数据缓冲**：32 样本缓冲区大小优化 I/O 操作 [train_monomer.sh#L41](train_monomer.sh#L41)
+
+### 通信优化
+
+- **No C10D 后端**：优化的 DDP 后端减少通信开销
+- **FP32 梯度 All-Reduce**：在梯度同步中保持精度 [train_monomer.sh#L27](train_monomer.sh#L27)
+- **异步错误处理**：NCCL 异步错误处理提高鲁棒性
+
+### 检查点管理
+
+训练系统包含复杂的检查点管理：
+
+- **间隔保存**：每 500 次更新保存模型并进行验证
+- **临时存储**：使用临时目录进行原子检查点操作
+- **历史管理**：保留 40 个最近的检查点用于恢复
+
+## 性能监控
+
+训练进度通过以下方式监控：
+
+- **TensorBoard 集成**：将指标记录到 `$save_dir/tsb/` 用于可视化
+- **日志间隔**：可配置的日志频率（默认：每 10 步）
+- **验证周期**：每 500 次更新进行定期验证
+
+<CgxTip>
+为获得最佳多节点性能，请确保节点间的正确网络配置，并考虑使用 InfiniBand 以降低梯度同步的延迟。
+</CgxTip>
+
+## 扩展考虑
+
+扩展到多个节点时，需考虑：
+
+1. **网络带宽**：梯度同步在大规模扩展时成为瓶颈
+2. **批次大小扩展**：增加 `update_freq` 以保持有效批次大小
+3. **内存分配**：监控跨节点的 GPU 内存使用以实现负载均衡
+4. **容错性**：为长时间运行的训练作业实现适当的检查点恢复
+
+<CgxTip>
+自蒸馏概率（`sd_prob`）应根据数据集大小和训练阶段进行调整——较小数据集适合使用较高值。
+</CgxTip>
+
+## 后续步骤
+
+要全面了解训练流水线，请探索：
+- [损失函数和训练目标](13-loss-functions-and-training-objectives) 了解详细优化策略
+- [内存优化和混合精度训练](17-memory-optimization-and-mixed-precision-training) 了解高级内存管理技术
+- [微调预训练模型](14-fine-tuning-pretrained-models) 了解适配策略
+
+---
+
+- [深度解析/训练与优化/损失函数与训练目标](https://zread.ai/dptech-corp/Uni-Fold/13-loss-functions-and-training-objectives)
+
+---
+slug:13-loss-functions-and-training-objectives
+blog_type:normal
+---
+
+
+
+Uni-Fold 实现了一个综合的多目标损失函数，结合了几何、结构和辅助损失，以实现高精度的蛋白质结构预测。损失架构旨在通过精心平衡的目标，同时优化局部原子排列和全局蛋白质折叠模式。
+
+## 核心损失架构
+
+主要损失函数在 `AlphafoldLoss` 类中实现，该类将九个不同的损失组件协调成一个统一的训练目标 [unifold/loss.py#L26-L199]。损失计算遵循系统性模式，每个组件根据其重要性加权，并贡献于最终累积损失。
+
+```mermaid
+graph TD
+    A[模型输出] --> B[AlphafoldLoss.forward]
+    B --> C[结构违规检查]
+    C --> D[真值计算]
+    D --> E[损失函数字典]
+    E --> F[加权损失聚合]
+    F --> G[序列长度加权]
+    G --> H[最终损失输出]
+    
+    E --> I[FAPE 损失]
+    E --> J[Distogram 损失]
+    E --> K[PAE 损失]
+    E --> L[PLDDT 损失]
+    E --> M[违规损失]
+    E --> N[链质心损失]
+    E --> O[监督 Chi 损失]
+    E --> P[掩码 MSA 损失]
+    E --> Q[表示范数损失]
+```
+
+## 结构损失组件
+
+### 帧对齐点误差 (FAPE)
+
+**FAPE 损失**作为主要的几何目标，测量预测坐标帧与真实坐标帧之间的对齐程度。它通过主干和侧链组件分别实现：
+
+- **主干 FAPE**：使用链内和链间掩码计算主干原子的帧对齐误差 [unifold/losses/fape.py#L9-L70]
+- **侧链 FAPE**：使用刚性组变换评估侧链定位精度 [unifold/losses/fape.py#L70-L115]
+- **限位机制**：使用可配置的限位距离（链内 10.0Å，链间 30.0Å）防止梯度爆炸 [unifold/losses/fape.py#L14-L17]
+
+<CgxTip>
+FAPE 损失使用序列长度加权 (seq_len^0.5) 来平衡不同长度蛋白质的贡献，确保在多样化数据集规模上的稳定训练。
+</CgxTip>
+
+### 结构违规损失
+
+违规损失通过多个子组件强制执行化学和几何约束：
+
+- **键长约束**：惩罚残基间理想 C-N 键长的偏差 [unifold/losses/violation.py#L9-L126]
+- **键角约束**：使用可配置权重保持适当的 CA-C-N 和 C-N-CA 角度 [unifold/losses/violation.py#L457-L485]
+- **冲突检测**：识别并惩罚残基内部和残基之间的原子重叠 [unifold/losses/violation.py#L127-L236]
+- **极长距离违规**：防止超过生物学约束的不现实 CA-CA 距离 [unifold/losses/violation.py#L390-L414]
+
+## 辅助损失函数
+
+### 基于距离的损失
+
+**Distogram 损失**：使用 64-bin 直方图方法预测成对 Cβ-Cβ 距离，范围从 2.3125Å 到 21.6875Å [unifold/losses/auxillary.py#L170-L192]。该损失使用预测距离分布与真实距离分布之间的交叉熵。
+
+**预测对齐误差 (PAE) 损失**：估计预测位置相对于真实坐标的期望误差，提供置信度校准 [unifold/losses/auxillary.py#L193-L226]。
+
+### 置信度和分辨率损失
+
+**PLDDT 损失**：训练模型基于结构准确度预测每个残基的置信度分数 (LDDT)，采用分辨率相关加权 [unifold/losses/auxillary.py#L42-L83]。
+
+**实验解析损失**：预测在 X 射线结构中哪些原子被实验解析，整合 0.1Å 到 3.0Å 之间的分辨率信息 [unifold/losses/auxillary.py#L16-L41]。
+
+### 序列和表示损失
+
+**掩码 MSA 损失**：在多序列比对上实现 BERT 风格的掩码语言建模， enabling 进化信息学习 [unifold/losses/auxillary.py#L227-L237]。
+
+**监督 Chi 损失**：使用 sin/cos 表示直接监督侧链二面角预测，确保适当的旋转异构体几何 [unifold/losses/auxillary.py#L84-L138]。
+
+**表示范数损失**：正则化内部表示（MSA 和配对特征），防止训练期间特征漂移 [unifold/losses/auxillary.py#L139-L169]。
+
+## 损失聚合和加权
+
+最终损失通过复杂的聚合方案计算：
+
+1. **单独损失计算**：每个损失函数返回形状为 [batch_size] 的每批次张量 [unifold/loss.py#L151-L157]
+2. **NaN/Inf 处理**：自动跳过损坏的损失组件以保持训练稳定性 [unifold/loss.py#L159-L162]
+3. **加权求和**：根据训练目标对每个组件应用可配置权重 [unifold/loss.py#L152-L163]
+4. **序列长度归一化**：乘以 seq_len^0.5 以考虑蛋白质长度变化 [unifold/loss.py#L168]
+
+```python
+# 损失聚合模式来自 unifold/loss.py#L151-L168
+for loss_name, loss_fn in loss_fns.items():
+    weight = config[loss_name].weight
+    if weight > 0.:
+        loss = loss_fn()
+        if any(torch.isnan(loss)) or any(torch.isinf(loss)):
+            loss = loss.new_tensor(0.0, requires_grad=True)
+        cum_loss = cum_loss + weight * loss
+
+loss = (cum_loss * seq_length_weight).mean()
+```
+
+## 多聚体特定损失
+
+对于蛋白质复合物预测，Uni-Fold 使用多聚体特定组件扩展损失架构：
+
+**链质心损失**：对齐每条链的质心，确保适当的四级结构排列 [unifold/losses/auxillary.py#L245-L287]。
+
+**多链排列对齐**：在损失计算前通过贪心对齐算法处理链顺序模糊性 [unifold/losses/chain_align.py#L123-L176]。
+
+<CgxTip>
+多聚体损失包括自动链排列对齐，解决相同链在预测与真实值中可能以不同顺序排列的对称性问题。
+</CgxTip>
+
+## 训练优化功能
+
+损失实现包含几个用于稳健训练的优化功能：
+
+- **梯度稳定性**：自动 NaN/inf 检测并用零梯度替换 [unifold/loss.py#L159-L162]
+- **分布式训练**：跨多个工作进程的高效指标归约，具有可求和的日志输出 [unifold/loss.py#L193-L199]
+- **可配置权重**：所有损失组件支持通过配置文件动态加权
+- **内存效率**：使用就地操作和最小张量复制进行大规模训练
+
+这种全面的损失架构使 Uni-Fold 能够通过几何准确性、化学有效性和进化信息整合的仔细平衡，在单体和多聚体蛋白质结构预测任务上实现最先进的性能。
+
+有关实际实现细节和配置示例，请参阅 [微调预训练模型](14-fine-tuning-pretrained-models) 和 [使用 Uni-Core 的分布式训练](12-distributed-training-with-uni-core)。
+
+---
+
+- [深度解析/训练与优化/微调预训练模型](https://zread.ai/dptech-corp/Uni-Fold/14-fine-tuning-pretrained-models)
+
+---
+slug:14-fine-tuning-pretrained-models
+blog_type:normal
+---
+
+
+
+在 Uni-Fold 中微调预训练模型，使你能够强大的 AlphaFold 架构适配到特定的蛋白质数据集或专门任务。本指南涵盖了单体和多聚体模型的完整微调工作流程，包含实用示例和配置细节。
+
+## 微调架构概述
+
+Uni-Fold 通过专用 shell 脚本和可配置模型架构，提供了系统化的微调方法。该框架支持从 Uni-Fold 预训练检查点和原始 AlphaFold 权重进行微调，为不同用例提供灵活的配置选项。
+
+```mermaid
+flowchart TD
+    A[预训练模型] --> B{模型类型}
+    B -->|单体| C[finetune_monomer.sh]
+    B -->|多聚体| D[finetune_multimer.sh]
+    C --> E[配置参数]
+    D --> E
+    E --> F[加载数据集]
+    F --> G[训练循环]
+    G --> H[保存检查点]
+    
+    I[AlphaFold 权重] --> J[convert_alphafold_to_unifold.py]
+    J --> K[Uni-Fold 格式]
+    K --> A
+    
+    L[模型配置] --> M[model_config 函数]
+    M --> N[架构变体]
+    N --> A
+```
+
+## 可用的模型配置
+
+Uni-Fold 提供多种针对不同场景优化的预训练模型配置。每个配置在 `model_config` 函数中定义，包含特定的超参数和架构设置。
+
+### 单体模型变体
+
+| 模型名称 | 用例 | 关键特性 | MSA 聚类 | 额外 MSA |
+|------------|----------|--------------|--------------|-----------|
+| `model_1_ft` | 从模型 1 微调 | 增强 MSA 容量 | 512 | 5120 |
+| `model_2_ft` | 从模型 2 微调 | 平衡性能 | 512 | 1024 |
+| `model_2_v2_ft` | V2 架构微调 | Gumbel 采样、V2 特性 | 512 | 1024 |
+
+### 多聚体模型变体
+
+| 模型名称 | 用例 | 关键特性 | MSA 聚类 | 额外 MSA |
+|------------|----------|--------------|--------------|-----------|
+| `multimer_ft` | 多聚体微调 | 链质心损失 | 256 | 1152 |
+| `multimer_af2` | AlphaFold 多聚体 | PAE 头部、实验分辨率 | 256 | 1152 |
+| `multimer_af2_v3` | 增强多聚体 | 更大 MSA 容量 | 512 | 2048 |
+
+配置系统根据选定的模型变体自动调整损失权重、模型架构和数据处理参数 [unifold/config.py#L480-L673](unifold/config.py#L480-L673)。
+
+## 微调脚本
+
+### 单体微调
+
+`finetune_monomer.sh` 脚本为单体蛋白质提供完整的训练流水线：
+
+```bash
+./finetune_monomer.sh <data_path> <save_dir> <pretrained_model> <model_name>
+```
+
+关键参数包括：
+- **学习率**：`lr=5e-4`（默认）
+- **训练步数**：`total_step=10000`（默认）
+- **预热步数**：`warmup_step=500`（默认）
+- **批次大小**：1，带梯度累积
+- **精度**：BF16，EMA 衰减率为 0.999
+
+脚本自动检测现有检查点，并使用 `--finetune-from-model` 和 `--load-from-ema` 标志恢复训练或开始新的微调 [finetune_monomer.sh#L35-L40](finetune_monomer.sh#L35-L40)。
+
+### 多聚体微调
+
+对于蛋白质复合物，使用 `finetune_multimer.sh` 配合类似参数，但采用多聚体特定的损失函数：
+
+```bash
+./finetune_multimer.sh <data_path> <save_dir> <pretrained_model> <model_name>
+```
+
+关键区别在于损失规范（`--loss afm`），该规范激活多聚体特定的损失组件，包括预测对齐误差（PAE）和链质心正则化 [finetune_multimer.sh#L35](finetune_multimer.sh#L35)。
+
+## 微调数据准备
+
+### 数据集结构
+
+微调需要格式正确的数据，包含特征、标签和样本权重：
+
+```
+data_directory/
+├── pdb_features/          # 处理后的蛋白质特征
+├── pdb_labels/           # 真实结构
+├── train_sample_weight.json  # 样本权重
+└── train_multi_label.json    # 多链映射（多聚体）
+```
+
+### 样本权重配置
+
+通过样本权重控制训练重点：
+
+```json
+{
+    "8d27_A": 1.0,
+    "protein_B": 2.0
+}
+```
+
+较高权重会增加训练期间的采样频率 [example_data/train_sample_weight.json](example_data/train_sample_weight.json)。
+
+### 多链标签映射
+
+对于多聚体训练，指定链关系：
+
+```json
+{
+    "8d27_A": ["8d27_A", "8d27_B"]
+}
+```
+
+这将训练复合物映射到其组成链 [example_data/train_multi_label.json](example_data/train_multi_label.json)。
+
+## 模型加载和初始化
+
+### 从 Uni-Fold 检查点加载
+
+直接从 Uni-Fold 检查点微调使用标准加载机制：
+
+```python
+# 自动检查点检测
+if [ -f "$2/checkpoint_last.pt" ]; then
+    echo "ckp exists."
+else
+    echo "finetuning from initial training..."
+    OPTION=" --finetune-from-model $3 --load-from-ema "
+fi
+```
+
+### 从 AlphaFold 权重加载
+
+将原始 AlphaFold 权重转换为 Uni-Fold 格式：
+
+```bash
+python scripts/convert_alphafold_to_unifold.py \
+    <alphafold_weights> <output_checkpoint> <model_name>
+```
+
+转换脚本处理参数映射并创建带有 EMA 参数的适当检查点结构 [scripts/convert_alphafold_to_unifold.py](scripts/convert_alphafold_to_unifold.py)。
+
+## 训练配置细节
+
+### 优化器设置
+
+微调使用带有特定参数的 Adam 优化器：
+- **Beta 值**：(0.9, 0.999)
+- **Epsilon**：1e-6
+- **梯度裁剪**：每样本范数为 0.1
+- **All-reduce 精度**：FP32 以确保稳定性
+
+### 学习率调度
+
+指数衰减调度器提供可控的学习率进展：
+- **初始学习率**：可配置（默认 5e-4）
+- **预热**：在指定步数内线性预热
+- **衰减**：带可配置比率的指数衰减
+- **阶梯衰减**：在定义间隔处逐步减少
+
+### 数据增强
+
+微调包含随机丢弃（SD）用于数据增强：
+- **SD 概率**：默认 0.5，可通过 `--sd-prob` 配置
+- **目的**：通过随机掩蔽特征提高泛化能力
+- **实现**：集成到数据流水线中 [unifold/task.py#L32-L38](unifold/task.py#L32-L38)
+
+## 高级微调特性
+
+### 内存优化
+
+微调脚本包含多种内存优化技术：
+- **BF16 训练**：减少内存占用
+- **梯度累积**：实现更大有效批次大小
+- **数据缓冲**：大小为 32 以提高 I/O 效率
+- **TensorBoard 日志记录**：实时训练监控
+
+### 检查点管理
+
+自动检查点保存和管理：
+- **保存间隔**：每 500 次更新
+- **验证间隔**：每 500 次更新
+- **保留**：保留最近 40 个检查点
+- **EMA 存储**：单独的指数移动平均权重
+
+<CgxTip>
+微调多聚体模型时，确保训练数据包含正确的链注释和组装信息。任务配置中的 `max_chains` 参数限制了每个复合物的最大链数 [unifold/task.py#L32](unifold/task.py#L32)。
+</CgxTip>
+
+<CgxTip>
+为获得最佳微调结果，建议从较低的学习率（1e-4 到 5e-4）开始，并使用预训练的 EMA 权重作为初始化。`--load-from-ema` 标志确保你从最稳定的权重开始。
+</CgxTip>
+
+## 后续步骤
+
+掌握微调后，探索这些相关主题：
+
+- **[用于大型复合物预测的 UF-Symmetry](15-uf-symmetry-for-large-complex-prediction)** - 高级对称感知建模
+- **[多聚体蛋白质复合物建模](16-multimer-protein-complex-modeling)** - 深入探索复合物预测
+- **[内存优化和混合精度训练](17-memory-optimization-and-mixed-precision-training)** - 性能优化技术
+
+Uni-Fold 中的微调框架为将蛋白质结构预测模型适配到专门领域和数据集提供了灵活基础，赋能计算生物学领域的研究和应用。
+
+---
+
+## 高级功能
+
+- [深度解析/高级功能/UF-Symmetry大复合体预测](https://zread.ai/dptech-corp/Uni-Fold/15-uf-symmetry-for-large-complex-prediction)
+
+---
+slug:15-uf-symmetry-for-large-complex-prediction
+blog_type:normal
+---
+
+
+
+UF-Symmetry 是 Uni-Fold 框架的高级扩展，专为预测具有对称排列的大型蛋白质复合物而设计。该模块利用对称约束显著提高了同寡聚组装和对称蛋白质复合物的预测准确性和计算效率。
+
+## 架构概述
+
+UF-Symmetry 基于核心 AlphaFold 架构构建，同时引入了专门用于对称感知建模的组件：
+
+```mermaid
+graph TB
+    A[输入特征] --> B[SymmInputEmbedder]
+    C[伪残基特征] --> D[PseudoResidueEmbedder]
+    B --> E[带对称性的 Evoformer]
+    D --> E
+    E --> F[SymmStructureModule]
+    F --> G[扩展对称性]
+    G --> H[最终组装]
+    
+    subgraph "对称组件"
+        B
+        D
+        F
+        G
+    end
+```
+
+UF-Symmetry 模型（[`UFSymmetry`](unifold/symmetry/model.py#L7)）继承自基础 AlphaFold 模型，但用对称感知替代方案替换了关键组件：
+
+- **SymmInputEmbedder**：增强的输入嵌入，融合了伪残基特征
+- **PseudoResidueEmbedder**：专门用于处理对称信息的神经网络
+- **SymmStructureModule**：修改后的结构模块，遵循对称约束
+- **Expand Symmetry**：生成完整非对称单元的后处理步骤
+
+## 核心组件
+
+### 伪残基系统
+
+UF-Symmetry 引入了新颖的伪残基概念，将对称信息直接编码到模型中。伪残基特征（[`get_pseudo_residue_feat()`](unifold/symmetry/dataset.py#L10)）编码了不同的对称群：
+
+| 对称类型 | 特征向量 | 描述 |
+|---------------|----------------|-------------|
+| C1 | `[1., 0., 0., 0., 0., 0., 1., 0.]` | 无对称（非对称） |
+| Cn | `[0., 1., 0., 0., 0., 0., cos(θ), sin(θ)]` | 循环对称 |
+| Dn | `[0., 0., 1., 0., 0., 0., cos(θ), sin(θ)]` | 二面体对称 |
+| T | `[1., 0., 0., 0., 0., 1., 1., 0.]` | 四面体 |
+| O | `[0., 0., 0., 0., 1., 0., 1., 0.]` | 八面体 |
+| I | `[0., 0., 0., 1., 0., 0., 1., 0.]` | 二十面体 |
+
+这些特征通过具有 48 个隐藏维度的 4 块 ResNet 架构（[`PseudoResidueEmbedder`](unifold/symmetry/modules.py#L43)）进行处理，生成引导对称感知预测过程的嵌入。
+
+### 对称感知模型架构
+
+UF-Symmetry 模型修改了几个关键组件：
+
+1. **增强的输入嵌入**：[`SymmInputEmbedder`](unifold/symmetry/modules.py#L95) 扩展了基础输入嵌入器，可接受伪残基特征以及标准序列和 MSA 特征。
+
+2. **修改的 Evoformer 处理**：Evoformer 迭代（[`iteration_evoformer()`](unifold/symmetry/model.py#L22)）将伪残基信息融入注意力机制，使模型能够在特征处理期间学习对称约束。
+
+3. **对称结构模块**：[`SymmStructureModule`](unifold/symmetry/modules.py#L149) 确保 3D 坐标生成遵循指定的对称操作。
+
+### 对称扩展
+
+生成非对称单元后，UF-Symmetry 应用对称操作生成完整的复合物。[`expand_symmetry()`](unifold/symmetry/assemble.py#L52) 函数处理此转换：
+
+- **坐标系扩展**：对刚体坐标系应用对称操作
+- **侧链坐标系扩展**：转换侧链坐标系
+- **原子位置扩展**：通过对称操作生成所有原子位置
+
+## 配置与使用
+
+### 模型配置
+
+UF-Symmetry 使用专门的配置（[`uf_symmetry_config()`](unifold/symmetry/config.py#L4)），扩展了多聚体配置：
+
+```python
+config.data.common.features.symmetry_opers = [None, 3, 3]
+config.data.common.features.num_asym = [None]
+config.data.common.features.pseudo_residue_feat = [None]
+
+config.model.pseudo_residue_embedder = {
+    "d_in": 8,
+    "d_hidden": 48,
+    "d_out": 48,
+    "num_blocks": 4,
+}
+```
+
+<CgxTip>伪残基嵌入器维度（48）经过精心调整，以平衡大型复合物的表征能力和计算效率。</CgxTip>
+
+### 运行 UF-Symmetry 预测
+
+UF-Symmetry 预测的工作流程遵循两步流程：
+
+```mermaid
+flowchart LR
+    A[FASTA 输入] --> B[同源搜索]
+    B --> C[特征生成]
+    C --> D[UF-Symmetry 预测]
+    D --> E[对称扩展]
+    E --> F[最终组装]
+```
+
+提供的脚本 [`run_uf_symmetry.sh`](run_uf_symmetry.sh#L1) 自动执行此过程：
+
+```bash
+# 步骤 1：同源搜索
+python unifold/homo_search.py --fasta_path=$fasta_path ...
+
+# 步骤 2：对称性预测
+python unifold/inference_symmetry.py \
+    --symmetry=$symmetry \
+    --param_path=$param_path \
+    --data_dir=$output_dir_base \
+    --target_name=$target_name
+```
+
+### 支持的对称群
+
+UF-Symmetry 目前支持：
+- **循环对称 (Cn)**：围绕单一轴的旋转对称
+- **二面体对称 (Dn)**：具有额外垂直 C2 轴的循环对称
+- **柏拉图立体**：四面体 (T)、八面体 (O)、二十面体 (I)
+- **非对称 (C1)**：标准单体预测
+
+<CgxTip>螺旋对称性已计划但尚未实现，需要特殊处理无限对称操作。</CgxTip>
+
+## 性能优势
+
+UF-Symmetry 为大型复合物预测提供了显著优势：
+
+1. **降低计算成本**：通过仅预测非对称单元并通过对称操作扩展，内存和计算需求随非对称单元大小而非完整复合物规模扩展。
+
+2. **提高准确性**：对称约束作为强先验，减少了构象搜索空间，从而为对称组装提供更准确的预测。
+
+3. **更好的物理真实性**：强制对称确保了符合基本生化约束的物理合理排列。
+
+## 与 Uni-Fold 生态系统的集成
+
+UF-Symmetry 与现有 Uni-Fold 流水线无缝集成：
+
+- **数据处理**：扩展标准数据流水线（[`load_and_process_symmetry()`](unifold/symmetry/dataset.py#L34)）以处理对称特定特征
+- **模型训练**：目前专注于推理，训练基础设施正在开发中
+- **评估**：与现有评估指标和可视化工具兼容
+
+## 未来发展
+
+UF-Symmetry 模块正在积极演进，计划增强功能：
+- 对称感知模型的训练支持
+- 扩展对称群支持（螺旋、非晶体学）
+- 改进异寡聚对称性处理
+- 与 cryo-EM 密度拟合工作流集成
+
+UF-Symmetry 代表了蛋白质复合物预测的重大进步，特别是对于传统方法具有挑战性的大型对称组装。通过利用对称约束，它能够准确高效地预测否则在计算上不可行的复合物。
+
+对于处理对称蛋白质复合物的用户，UF-Symmetry 提供了一个专门的工具，它在 Uni-Fold 的坚实基础之上构建，同时解决了对称组装预测的独特挑战。要开始使用，请参考[安装和环境设置](3-installation-and-environment-setup)和[运行基本蛋白质结构预测](5-running-basic-protein-structure-prediction)指南，然后按照上述对称特定工作流程进行。
+
+---
+
+- [深度解析/高级功能/多聚体蛋白质复合体建模](https://zread.ai/dptech-corp/Uni-Fold/16-multimer-protein-complex-modeling)
+
+---
+slug:16-multimer-protein-complex-modeling
+blog_type:normal
+---
+
+
+
+Uni-Fold 扩展了 AlphaFold 架构，通过复杂的多聚体建模能力来处理蛋白质复合物。该实现能够准确预测蛋白质-蛋白质相互作用和复合物结构，支持异源多聚体和同源多聚体组合。
+
+## 架构概览
+
+多聚体建模系统在单体基础上构建，配备用于处理多条蛋白质链的专用组件：
+
+```mermaid
+graph TD
+    A[单链特征] --> B[MSA 配对引擎]
+    B --> C[链特征合并]
+    C --> D[多聚体特定处理]
+    D --> E[Evoformer 多聚体模块]
+    E --> F[结构模块]
+    F --> G[链对齐与损失]
+    
+    H[模板整合] --> D
+    I[组装特征] --> D
+    
+    subgraph "核心处理"
+        B
+        C
+        D
+    end
+    
+    subgraph "模型架构"
+        E
+        F
+    end
+```
+
+## 数据处理流水线
+
+### 链特征处理
+
+多聚体流水线通过 `process_multimer.py` 模块从单链处理开始。每条链在多聚体特定操作之前先进行单体式特征提取：
+
+- **特征转换**：通过 `convert_monomer_features()` 将单体特征重塑和修改以适应多聚体兼容性 [unifold/data/process_multimer.py#L278-L320]
+- **模板处理**：当模板不可用时生成空模板特征 [unifold/data/process_multimer.py#L269-L277]
+- **组装整合**：添加组装特征以捕获四级结构信息 [unifold/data/process_multimer.py#L344-L384]
+
+### MSA 配对系统
+
+核心创新在于 `msa_pairing.py` 中实现的 MSA 配对机制：
+
+- **同源多聚体检测**：系统首先通过 `_is_homomer_or_monomer()` 确定链是否形成同源或异源多聚体 [unifold/data/process_multimer.py#L69-L84]
+- **序列配对**：对于异源多聚体，`create_paired_features()` 基于物种和序列相似性对齐跨链 MSA 序列 [unifold/data/msa_pairing.py#L72-L110]
+- **特征合并**：`merge_chain_features()` 使用块对角操作合并配对和未配对特征 [unifold/data/msa_pairing.py#L466-L496]
+
+<CgxTip>
+配对算法使用基于物种的匹配和序列相似性阈值（SEQUENCE_SIMILARITY_CUTOFF = 0.9）来识别不同链中对应的 MSA 行，实现相互作用蛋白质间的进化耦合信息传递。
+</CgxTip>
+
+## 模型配置
+
+### 多聚体特定参数
+
+多聚体模型通过 `config.py` 中的 `multimer()` 函数激活专用配置：
+
+```python
+def multimer(c):
+    recursive_set(c, "is_multimer", True)
+    recursive_set(c, "max_extra_msa", 1152)
+    recursive_set(c, "max_msa_clusters", 128)
+    c.model.heads.pae.enabled = True
+    c.model.heads.pae.disable_enhance_head = True
+    c.loss.chain_centre_mass.weight = 1.0
+    c.model.structure_module.trans_scale_factor = 20
+```
+
+关键的多聚体特定功能包括：
+
+- **预测对齐误差（PAE）**：启用用于链间距离预测 [unifold/config.py#L507-L508]
+- **链质心损失**：优化链的相对定位 [unifold/config.py#L513]
+- **增强的 MSA 处理**：增加 MSA 簇限制以处理复杂的进化信息
+
+### 训练配置
+
+多聚体训练脚本（`train_multimer.sh`、`finetune_multimer.sh`）实现了专用超参数：
+
+| 参数 | 训练 | 微调 | 用途 |
+|-----------|----------|-------------|---------|
+| 学习率 | 1e-3 | 5e-4 | 为复合物收敛优化 |
+| 总步数 | 80,000 | 10,000 | 针对多聚体复杂性的扩展训练 |
+| 随机深度概率 | 0.5 | 0.5 | 随机深度正则化 |
+
+## 链对齐和损失函数
+
+### 多链排列对齐
+
+`chain_align.py` 模块实现了复杂的链对齐机制，以处理训练期间的链排列模糊性：
+
+- **锚点选择**：`get_anchor_candidates()` 识别用于对齐的最优锚点链 [unifold/losses/chain_align.py#L90-L122]
+- **贪婪对齐**：`greedy_align()` 基于结构相似性执行最优链到标签匹配 [unifold/losses/chain_align.py#L123-L175]
+- **标签合并**：`merge_labels()` 根据对齐结果合并多个标签字典 [unifold/losses/chain_align.py#L176-L207]
+
+<CgxTip>
+对齐系统使用 Kabsch 算法进行最优叠加，并执行多次洗牌迭代以找到全局最优链排序，解决多聚体预测中的排列对称性问题。
+</CgxTip>
+
+## 评估和基准测试
+
+### 测试集配置
+
+多聚体评估使用了来自 PDB 的 164 个蛋白质复合物的精选集合，列在 `evaluation/multimer_list.json` 中。这些复合物代表了多样化的相互作用类型和拓扑结构，用于全面的基准测试。
+
+### 性能指标
+
+多聚体性能使用专用指标进行评估：
+
+- **界面 RMSD（iRMSD）**：测量蛋白质-蛋白质界面的准确性
+- **DockQ 分数**：结合多个界面质量度量
+- **预测对齐误差（PAE）**：评估链间距离预测准确性
+
+## 用法和集成
+
+### 训练流水线
+
+多聚体训练遵循以下工作流程：
+
+1. **数据准备**：通过单体流水线处理单个链
+2. **MSA 配对**：应用配对算法以获得进化耦合
+3. **特征合并**：将链特征与组装信息结合
+4. **模型训练**：使用多聚体特定配置和损失函数
+
+### 推理支持
+
+对于推理，多聚体系统支持：
+
+- **模板整合**：单体和复合物模板
+- **组装信息**：来自 PDB 的生物组装定义
+- **对称性处理**：与 UF-Symmetry 集成以处理对称复合物
+
+## 高级功能
+
+### 模板整合
+
+多聚体系统通过模板模块中的专用处理支持复杂模板整合，实现从已知复合物的结构信息传递。
+
+### 内存优化
+
+实现包括通过以下方式对大型复合物进行内存高效处理：
+
+- **MSA 裁剪**：限制 MSA 大小以防止内存溢出 [unifold/data/process_multimer.py#L119-L150]
+- **特征过滤**：移除不必要的特征以减少内存占用 [unifold/data/process_multimer.py#L226-L230]
+
+Uni-Fold 中的多聚体蛋白质复合物建模代表了 AlphaFold-Multimer 概念在 PyTorch 中的全面实现，为研究人员提供了理解蛋白质相互作用和复合物形成的强大工具。
+
+有关相关主题的更多信息，请参阅 [UF-Symmetry for Large Complex Prediction](15-uf-symmetry-for-large-complex-prediction) 和 [Feature Extraction and MSA Processing](9-feature-extraction-and-msa-processing)。
+
+---
+
+- [深度解析/高级功能/内存优化与混合精度训练](https://zread.ai/dptech-corp/Uni-Fold/17-memory-optimization-and-mixed-precision-training)
+
+---
+slug:17-memory-optimization-and-mixed-precision-training
+blog_type:normal
+---
+
+
+
+Uni-Fold 实现了全面的内存优化策略和混合精度训练能力，以在多样化的硬件配置上实现高效的蛋白质结构预测。这些优化对于处理大规模蛋白质建模的计算需求至关重要，同时保持数值稳定性和预测准确性。
+
+## 混合精度训练架构
+
+Uni-Fold 通过 AlphaFold 模型的 dtype 转换方法提供灵活的精度控制。该框架支持三种精度模式：半精度（FP16）、bfloat16 和全精度（FP32），允许用户根据特定需求和硬件能力平衡内存使用与数值精度。
+
+精度转换通过 AlphaFold 类中的专用方法实现 [unifold/modules/alphafold.py](unifold/modules/alphafold.py#L107-L122)：
+
+```python
+def half(self):
+    super().half()
+    if (not getattr(self, "inference", False)):
+        self.__make_input_float__()
+    self.dtype = torch.half
+    return self
+
+def bfloat16(self):
+    super().bfloat16()
+    if (not getattr(self, "inference", False)):
+        self.__make_input_float__()
+    self.dtype = torch.bfloat16
+    return self
+```
+
+<CgxTip>
+在推理模式下，整个模型以降低精度运行以实现最大内存效率。然而，在训练期间，关键的输入嵌入层保持 FP32 精度以确保数值稳定性，而核心计算则使用降低精度。
+</CgxTip>
+
+该框架通过 `__convert_input_dtype__` 方法 [unifold/modules/alphafold.py](unifold/modules/alphafold.py#L140-L145) 自动处理包含掩码的输入特征的 dtype 转换，确保不同精度模式之间的兼容性，同时保留必要的掩码信息。
+
+## 分块计算策略
+
+### 内存高效注意力机制
+
+Uni-Fold 实现了复杂的分块策略，以在有限的 GPU 内存中处理大型蛋白质序列。注意力机制通过各类注意力类中的 `_chunk` 方法 [unifold/modules/attentions.py](unifold/modules/attentions.py#L174-L225) 支持分块处理：
+
+```python
+@torch.jit.ignore
+def _chunk(
+    self,
+    m: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    bias: Optional[torch.Tensor] = None,
+    chunk_size: int = None,
+) -> torch.Tensor:
+    return chunk_layer(
+        self._attn_forward,
+        {"m": m, "mask": mask, "bias": bias},
+        chunk_size=chunk_size,
+        num_batch_dims=len(m.shape[:-2]),
+    )
+```
+
+分块策略以可配置的批量大小处理 MSA 序列，默认分块大小针对常见硬件配置进行了优化。这种方法使得训练包含数千个残基的蛋白质成为可能，同时保持可管理的内存占用。
+
+### 通用分块框架
+
+核心分块功能通过 `chunk_layer` 函数 [unifold/modules/common.py](unifold/modules/common.py#L299-L375) 实现，该函数提供了一个通用的框架，用于以内存高效的方式分块处理大型张量：
+
+```python
+def chunk_layer(
+    layer: Callable,
+    inputs: Dict[str, Any],
+    chunk_size: int,
+    num_batch_dims: int,
+) -> Any:
+    # 展平批次维度并分块处理
+    # 自动处理嵌套张量结构
+    # 保持与非分块执行的输出兼容性
+```
+
+该框架自动处理复杂的嵌套张量结构，使其适用于不同的模型组件，包括注意力机制、三角形乘法和转换层。
+
+<CgxTip>
+分块实现保留了与非分块执行完全相同的输出格式，确保分块处理对下游组件透明，且不影响模型行为或训练动态。
+</CgxTip>
+
+## 梯度检查点和内存管理
+
+### Evoformer 栈优化
+
+Evoformer 栈通过 `checkpoint_sequential` 函数 [unifold/modules/evoformer.py](unifold/modules/evoformer.py#L267-L310) 实现梯度检查点，该函数策略性地以计算换取内存节省：
+
+```python
+def forward(self, m, z, msa_mask, pair_mask, msa_row_attn_mask, 
+           msa_col_attn_mask, tri_start_attn_mask, tri_end_attn_mask,
+           chunk_size: int, block_size: int):
+    blocks = [partial(b, ...) for b in self.blocks]
+    m, z = checkpoint_sequential(blocks, input=(m, z))
+```
+
+这种方法通过在反向传播期间重新计算中间激活，而不是在整个前向传播期间存储它们，允许在有限的 GPU 内存中训练更深的模型。
+
+### 三角形乘法内存优化
+
+三角形乘法操作通过 `_chunk_2d` 方法 [unifold/modules/triangle_multiplication.py](unifold/modules/triangle_multiplication.py#L30-L108) 实现专门的 2D 分块策略。由于这些操作相对于序列长度具有二次复杂性，因此特别消耗内存，使得分块对于大型蛋白质至关重要。
+
+## 配置和用法
+
+### 内存优化参数
+
+关键的内存优化参数在配置系统中定义 [unifold/config.py](unifold/config.py#L18)：
+
+- `chunk_size`：控制分块处理的批量大小（默认值：4）
+- `d_pair`、`d_msa`、`d_template`：影响内存使用的模型维度参数
+- `max_recycling_iters`：控制回收迭代的次数
+
+### 实际实现
+
+用户可以通过模型配置和训练脚本启用内存优化。该框架根据可用内存和模型参数自动应用适当的优化策略：
+
+```python
+# 启用混合精度训练
+model = model.half()  # 或 model.bfloat16()
+
+# 为大型序列配置分块
+config.chunk_size = 8  # 根据可用内存调整
+
+# 启用梯度检查点
+config.use_checkpoint = True
+```
+
+## 性能权衡
+
+### 内存与速度考虑
+
+Uni-Fold 中的内存优化策略涉及内存使用与计算效率之间的谨慎权衡：
+
+- **混合精度**：将内存减少 50%，且对准确性的影响最小
+- **分块处理**：支持更大的序列，但增加计算时间
+- **梯度检查点**：显著减少内存使用，但代价是训练时间延长约 20-30%
+
+### 特定硬件优化
+
+该框架根据硬件能力调整其优化策略：
+
+- **NVIDIA Ampere 架构**：利用 bfloat16 获得最佳性能
+- **旧版 GPU**：使用带损失缩放的 FP16 以确保数值稳定性
+- **CPU 训练**：实现积极的分块和检查点
+
+## 与训练流水线的集成
+
+内存优化功能通过模型包装类 [unifold/model.py](unifold/model.py#L33-L43) 无缝集成到训练流水线中。训练脚本根据选定的模型大小和可用硬件资源自动配置适当的优化级别。
+
+该框架保持与分布式训练设置的兼容性，确保内存优化在多个 GPU 和节点上正确工作，而无需额外配置。
+
+---
+
+**后续步骤**：有关实际实现细节，请参阅 [使用 Uni-Core 进行分布式训练](12-distributed-training-with-uni-core) 以了解内存优化如何与大规模训练设置集成。有关模型特定配置，请参阅 [PyTorch 中的 AlphaFold 模型实现](6-alphafold-model-implementation-in-pytorch)。
+
+---
