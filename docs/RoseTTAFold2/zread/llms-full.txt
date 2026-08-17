@@ -1,0 +1,6013 @@
+# uw-ipd/RoseTTAFold2
+
+Source: https://zread.ai/uw-ipd/RoseTTAFold2
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/uw-ipd/RoseTTAFold2/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+RoseTTAFold2 是一个先进的深度学习系统，用于 **3D 蛋白质结构预测**，相比其前身，它在精度提升、内存效率优化以及对复杂蛋白质组装体的支持方面取得了显著进展。该系统实现了一套复杂的 **三轨神经网络架构**，通过迭代优化过程同时处理多重序列比对（MSA）数据、残基对表示和 3D 坐标。RoseTTAFold2 专为单体蛋白质和多链复合物设计，利用来自海量序列数据库和结构模板的进化信息，仅凭氨基酸序列即可生成精确的原子模型。
+
+来源：[README.md](README.md#L1-L5), [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L1-L30)
+
+## 核心架构
+
+RoseTTAFold2 的根本创新在于其 **三轨设计**，即三个不同但相互关联的表示在迭代优化周期中共同演进：
+
+- **MSA 轨道**：捕获多重序列比对中的进化信息，处理指示残基空间邻近性的共进化信号
+- **配对轨道**：在 2D 矩阵中表示残基间关系，整合共进化和结构距离预测
+- **结构轨道**：通过 SE(3)-等变 Transformer 层维护更新的 3D 原子坐标，确保旋转和平移不变性
+
+这些轨道通过双向信息流进行通信，允许模型迭代优化其预测。**回收机制**将上一周期的预测反馈回网络，从而逐步提高坐标精度和置信度估计。
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L30-L45), [Track_module.py](network/Track_module.py#L15-L25)
+
+### 系统架构
+
+```mermaid
+flowchart TB
+    subgraph Input[输入处理]
+        A[FASTA 序列] --> B[MSA 生成<br/>HHblits 搜索]
+        B --> C[模板搜索<br/>HHsearch]
+        C --> D[特征特征化]
+    end
+    
+    subgraph Network[三轨网络]
+        E["MSA 轨道<br/>d_msa=256"] --> G[轨道模块<br/>迭代更新]
+        F["配对轨道<br/>d_pair=128"] --> G
+        H[结构轨道<br/>SE3 等变] --> G
+        G --> I["回收循环<br/>n_recycles=3"]
+        I --> G
+    end
+    
+    subgraph Output[多头预测]
+        J[3D 坐标<br/>PDB 结构]
+        K["LDDT 置信度<br/>B-factors"]
+        L["距离/角度图"]
+        M["PAE 矩阵"]
+    end
+    
+    D --> E
+    D --> F
+    D --> H
+    G --> J
+    G --> K
+    G --> L
+    G --> M
+```
+
+## 关键特性和能力
+
+RoseTTAFold2 整合了多项使其区别于其他结构预测方法的先进功能：
+
+<CgxTip>SE(3)-等变 Transformer 网络是核心创新，它通过一个尊重分子结构物理对称性的复杂图神经网络，实现了对 3D 坐标的旋转不变性处理。</CgxTip>
+
+### 预测能力
+
+| 特性 | 描述 | 实现 |
+|---------|-------------|----------------|
+| **单体预测** | 单条蛋白质链结构预测 | 使用 HHblits 针对 UniRef30/BFD 数据库进行标准 MSA 生成 |
+| **异源复合物** | 使用配对 MSA 进行的多链预测 | 通过 `make_paired_MSA_simple.py` 基于分类学的 MSA 配对 |
+| **对称复合物** | Cn, Dn, T, I, O 对称群支持 | 使用 `symmids` 和 `symmRs` 参数进行对称感知预测 |
+| **环状肽** | N-C 环化肽建模 | 用于环化拓扑结构的特殊 `-cyclize` 标志 |
+| **模板整合** | 同源结构整合 | 针对 PDB100 数据库的 HHsearch |
+
+### 性能优化
+
+系统包含多项内存和计算效率改进：
+- **梯度检查点** 以减少训练期间的内存占用
+- **子裁剪** 技术用于配对对更新（`p2p_crop` 参数）
+- **Top-k 邻居选择** 默认将结构更新限制为 1536 个残基
+- **CPU 卸载** 选项适用于低显存环境（`-low_vram` 标志）
+- **条带化参数** 用于大系统的高效内存计算
+
+来源：[predict.py](network/predict.py#L31-L60), [predict.py](network/predict.py#L86-L100), [README.md](README.md#L3-L8)
+
+## 输入处理流水线
+
+预测工作流程始于全面的 **序列数据库搜索**，以提取进化信息。系统使用 HHblits 搜索两个主要数据库：用于特征明确序列的 **UniRef30_2020_06** (46GB)，以及用于更广泛覆盖的 **BFD** (272GB)。这些搜索生成具有深度迭代 E 值截断 (1e-10, 1e-6, 1e-3) 的多重序列比对 (MSA)，以平衡多样性和质量。
+
+对于基于模板的建模，HHsearch 查询 **PDB100_2021Mar03** 数据库以识别结构同源物，当存在近缘同源物时，提供额外的约束以提高预测精度。MSA 生成脚本根据序列深度自动选择适当的数据库，过滤阈值为 90% 一致性和 75% 或 50% 覆盖率。
+
+来源：[make_protein_msa.sh](input_prep/make_protein_msa.sh#L14-L18), [make_protein_msa.sh](input_prep/make_protein_msa.sh#L35-L60), [run_RF2.sh](run_RF2.sh#L22-L50)
+
+### 项目结构
+
+```
+RoseTTAFold2/
+├── network/                    # 核心神经网络实现
+│   ├── RoseTTAFoldModel.py    # 具有三轨架构的主模型类
+│   ├── predict.py             # 推理流水线
+│   ├── Track_module.py        # 带有轨道交互的迭代模拟
+│   ├── SE3_network.py         # SE(3)-等变 Transformer 包装器
+│   ├── Embeddings.py          # 输入嵌入模块
+│   ├── AuxiliaryPredictor.py  # 输出预测头
+│   └── loss.py                # FAPE 和多组件损失
+├── input_prep/                 # 数据预处理工具
+│   ├── make_protein_msa.sh    # HHblits MSA 生成
+│   └── make_paired_MSA_simple.py  # 多链 MSA 配对
+├── SE3Transformer/            # 外部 SE(3)-等变网络
+│   └── se3_transformer/       # 核心等变注意力模块
+├── examples/                   # 示例输入 FASTA 文件
+└── run_RF2.sh                 # 端到端预测脚本
+```
+
+## 模型配置和参数
+
+RoseTTAFoldModule 定义了一套全面的超参数来控制网络架构和行为：
+
+- **MSA 轨道维度** (`d_msa=256`)：用于进化信息的高容量表示
+- **配对轨道维度** (`d_pair=128`)：高效的残基间关系编码
+- **模板维度** (`d_templ=64`)：紧凑的结构模板表示
+- **注意力头数**：MSA 轨道 8 个头，配对和模板轨道各 4 个头
+- **块结构**：4 个额外块，36 个主块，4 个优化块用于深度处理
+- **SE(3) 参数**：两种配置（full 和 topk），具有不同的通道深度和边特征
+
+前向传播接受多个输入张量，包括 MSA 特征 (`msa_latent`, `msa_full`)、序列信息 (`seq`, `idx`)、模板数据 (`t1d`, `t2d`, `xyz_t`) 以及上一周期的输出用于回收。模型通过专门的头网络输出预测的 3D 坐标、置信度指标和辅助预测。
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L12-L28), [predict.py](network/predict.py#L62-L86), [AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L1-L30)
+
+## 输出和置信度指标
+
+RoseTTAFold2 提供了超越坐标的丰富输出，使用户能够评估预测质量：
+
+- **PDB 结构文件**，其 B-factors 编码了预测的 LDDT（局部距离差异测试）分数，指示每个残基的置信度
+- **JSON 文件**，包含额外的元数据和置信度指标
+- **NPZ 文件**，包含数值预测，包括：
+  - 距离和角度分布
+  - 用于域置信度的预测对齐误差 (PAE) 矩阵
+  - LDDT 概率分布
+  - 方向预测 (theta, phi, omega)
+
+辅助预测器网络包括针对不同输出的专门头：`DistanceNetwork` 预测对称距离/omega 和非对称 theta/phi 角度，`LDDTNetwork` 提供局部置信度估计，`PAENetwork` 生成全局域置信度矩阵。
+
+来源：[AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L11-L40), [AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L50-L65), [README.md](README.md#L55-L60)
+
+## 安装和快速开始
+
+设置过程涉及四个主要组件：conda 环境创建、SE(3)-Transformer 安装、模型权重下载和数据库准备。提供的 `RF2-linux.yml` conda 环境文件确保了不同系统间一致的依赖管理。
+
+`run_RF2.sh` 脚本为完整的预测流水线提供了统一接口，处理 MSA 生成、模板搜索和模型推理。用户可以通过命令行选项指定多条链、为复合物启用 MSA 配对、定义对称群以及控制输出目录。
+
+来源：[README.md](README.md#L7-L25), [run_RF2.sh](run_RF2.sh#L1-L20), [run_RF2.sh](run_RF2.sh#L100-L159)
+
+<CgxTip>从 FASTA 到结构预测的完整端到端流水线通过 `run_RF2.sh` 自动化，该脚本协调 HHblits MSA 生成、HHsearch 模板检测和最终的 RoseTTAFold2 推理，无需人工干预中间步骤。</CgxTip>
+
+## 下一步
+
+要继续探索 RoseTTAFold2：
+
+- [快速开始](2-quick-start)：通过分步示例学习运行你的第一个预测
+- [环境设置](3-environment-setup)：详细的安装说明和依赖解析
+- [三轨设计](6-three-track-design-msa-pair-and-3d-structure-tracks)：深入了解核心架构创新
+- [SE(3)-等变 Transformer](7-se-3-equivariant-transformer-network)：了解旋转不变的神经网络
+- [回收机制](8-recycling-mechanism-for-iterative-refinement)：探索迭代优化策略
+
+---
+
+- [入门指南/快速开始](https://zread.ai/uw-ipd/RoseTTAFold2/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+RoseTTAFold2 (RF2) 是一个先进的蛋白质结构预测系统，它采用三轨神经网络架构，并利用 SE(3)-equivariant transformers 从氨基酸序列预测原子结构。本指南将帮助你在几分钟内完成首次预测。
+
+![RoseTTAFold2 Architecture](https://github.com/uw-ipd/RoseTTAFold2/raw/main/SE3Transformer/images/se3-transformer.png)
+
+## 安装
+
+### 前置条件
+
+在安装 RoseTTAFold2 之前，请确保你具备以下条件：
+- 支持 CUDA 的 GPU（推荐 NVIDIA，计算能力 7.0+）
+- CUDA 12.1 工具包
+- Conda 包管理器
+- 至少 400 GB 的可用磁盘空间用于存储数据库
+
+### 第 1 步：克隆仓库
+
+首先克隆官方仓库：
+
+```bash
+git clone https://github.com/uw-ipd/RoseTTAFold2.git
+cd RoseTTAFold2
+```
+
+来源：[README.md](README.md#L14-L15)
+
+### 第 2 步：创建 Conda 环境
+
+创建一个包含所有必需依赖项的专用 conda 环境：
+
+```bash
+conda env create -f RF2-linux.yml
+conda activate RF2
+```
+
+该环境包含 Python 3.10、支持 CUDA 12.1 的 PyTorch 2.2、DGL、PyTorch Geometric 以及用于序列比对的 HH-suite [RF2-linux.yml](RF2-linux.yml#L1-L20)。
+
+### 第 3 步：安装 SE3-Transformer
+
+NVIDIA 的 SE(3)-Transformer 是进行等变神经网络操作的关键组件。请从包含的子目录中进行安装：
+
+```bash
+cd SE3Transformer
+pip install --no-cache-dir -r requirements.txt
+python setup.py install
+cd ..
+```
+
+SE3Transformer 包（v1.2.0）提供了进行 3D 坐标预测所需的几何深度学习基础模块 [SE3Transformer/setup.py](SE3Transformer/setup.py#L3-L11)。
+
+来源：[README.md](README.md#L21-L25), [SE3Transformer/setup.py](SE3Transformer/setup.py#L3-L11)
+
+### 第 4 步：下载预训练权重
+
+下载预训练模型权重（约 2 GB）：
+
+```bash
+cd network
+wget https://files.ipd.uw.edu/dimaio/RF2_jan24.tgz
+tar xvfz RF2_jan24.tgz
+cd ..
+```
+
+这些权重（RF2_jan24.pt）已在 PDB 上进行训练，可为蛋白质结构预测提供最先进的准确性 [README.md](README.md#L27-L29)。
+
+### 第 5 步：下载序列和结构数据库
+
+RoseTTAFold2 需要三个主要数据库用于 MSA 生成和模板搜索：
+
+**UniRef30 (46 GB)** - 综合蛋白质序列数据库
+```bash
+wget http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+mkdir -p UniRef30_2020_06
+tar xfz UniRef30_2020_06_hhsuite.tar.gz -C ./UniRef30_2020_06
+```
+
+**BFD (272 GB)** - 用于深度 MSA 覆盖的 Big Fantastic Database
+```bash
+wget https://bfd.mmseqs.com/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz
+mkdir -p bfd
+tar xfz bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz -C ./bfd
+```
+
+**结构模板 (~14 GB)** - 用于同源建模的 PDB100 数据库
+```bash
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
+tar xfz pdb100_2021Mar03.tar.gz
+```
+
+来源：[README.md](README.md#L31-L43)
+
+## 理解预测工作流程
+
+在运行预测之前，了解 RoseTTAFold2 的端到端管道非常重要：
+
+```mermaid
+flowchart TD
+    A[FASTA Input] --> B[MSA Generation<br/>HHblits against UniRef30/BFD]
+    B --> C{Template Search?}
+    C -->|Yes| D[HHsearch against PDB100]
+    C -->|No| E[Direct Prediction]
+    D --> E
+    E --> F{Multiple Chains?}
+    F -->|Yes| G[Pair MSA<br/>Based on Taxonomy ID]
+    F -->|No| H[Single Chain Prediction]
+    G --> I{Symmetry?}
+    H --> I
+    I -->|Yes| J[Symmetry-Aware Prediction<br/>Cn, Dn, T, I, O]
+    I -->|No| K[Standard Prediction]
+    J --> L[RoseTTAFold2 Model<br/>3-track + SE3-Transformer]
+    K --> L
+    L --> M[Output: PDB + JSON + NPZ<br/>B-factors = LDDT confidence]
+```
+
+该管道涉及四个主要阶段：MSA 生成、模板搜索（可选）、复合物的 MSA 配对，以及带有可选对称性约束的结构预测 [run_RF2.sh](run_RF2.sh#L31-L159)。
+
+## 运行你的首次预测
+
+### 基础单体预测
+
+激活你的环境并导航至示例目录：
+
+```bash
+conda activate RF2
+cd examples
+```
+
+对于简单的单链蛋白质预测，运行：
+
+```bash
+../run_RF2.sh rcsb_pdb_7UGF.fasta -o 7UGF
+```
+
+此命令根据 FASTA 序列预测含溴结构域蛋白质（107 个残基）的结构 [README.md](README.md#L52-L54), [examples/rcsb_pdb_7UGF.fasta](examples/rcsb_pdb_7UGF.fasta#L1-L3)。
+
+**预期输出：**
+- `rf2out/models/model_final.pdb` - 预测的 3D 坐标
+- `rf2out/models/model_final.json` - 额外的准确性指标
+- `rf2out/models/model_final.npz` - 数值预测数据
+
+PDB 文件中的 B-factors 代表预测的 LDDT（局部距离差异测试）得分，指示每个残基的置信度 [README.md](README.md#L70-L72)。
+
+来源：[run_RF2.sh](run_RF2.sh#L31-L159), [README.md](README.md#L52-L54)
+
+### 多链复合物预测
+
+对于具有多条链的蛋白质复合物，使用 `--pair` 标志基于分类学 ID 匹配生成配对的 MSA：
+
+```bash
+../run_RF2.sh rcsb_pdb_8HBN.fasta --pair -o 8HBN
+```
+
+这通过配对来自两条链的 MSA 来预测异源二聚体复合物（MEX67-MTR2 mRNA 输出因子）[README.md](README.md#L58-L60), [examples/rcsb_pdb_8HBN.fasta](examples/rcsb_pdb_8HBN.fasta#L1-L5)。
+
+配对的 MSA 方法通过基于共同进化历史比对来自两个伙伴的同源序列来提高准确性 [run_RF2.sh](run_RF2.sh#L105-L112)。
+
+### 高级预测选项
+
+#### 对称性感知预测
+
+对于对称复合物，指定对称群（Cn, Dn, T, O, I）：
+
+```bash
+../run_RF2.sh rcsb_pdb_7YTB.fasta --symm C6 -o 7YTB
+```
+
+此示例通过在结构生成过程中应用对称性约束来预测 C6 对称的同源二聚体 [README.md](README.md#L64-L66)。
+
+对于对称异源寡聚物（例如 A₃B₃ 复合物），结合对称性和配对使用：
+
+```bash
+../run_RF2.sh rcsb_pdb_7LAW.fasta --symm C3 --pair -o 7LAW
+```
+
+来源：[README.md](README.md#L64-L72), [network/predict.py](network/predict.py#L28)
+
+#### 基于模板的预测
+
+使用 hhsearch 启用模板搜索以结合结构同源信息：
+
+```bash
+../run_RF2.sh your_protein.fasta --hhpred -o output_name
+```
+
+这将针对 PDB100 数据库执行同源搜索，并使用顶级模板指导结构预测 [run_RF2.sh](run_RF2.sh#L41-L47)。
+
+## 命令行选项参考
+
+`run_RF2.sh` 脚本接受多个选项以自定义预测：
+
+| 选项 | 描述 | 示例 |
+|--------|-------------|---------|
+| `-o, --outdir` | 输出目录名称 | `-o my_prediction` |
+| `-s, --symm` | 对称群 (Cn, Dn, T, I, O) | `--symm C2` |
+| `-p, --pair` | 为多链复合物配对 MSA | `--pair` |
+| `-h, --hhpred` | 启用模板搜索 | `--hhpred` |
+
+可以提供多个 FASTA 文件用于多链预测。该脚本会自动拆分多序列 FASTA 文件并分别处理每条链 [run_RF2.sh](run_RF2.sh#L77-L104)。
+
+## 理解输出文件
+
+RoseTTAFold2 生成三个主要的输出文件：
+
+**model_final.pdb** - 包含原子坐标的标准 PDB 格式。B-factor 列包含预测的 LDDT 置信度得分（越高表示越确信）。
+
+**model_final.json** - 包含额外指标的 JSON 格式，包括：
+- 预测对齐误差（PAE）矩阵
+- 结构域间置信度得分
+- 模板使用信息
+
+**model_final.npz** - 压缩的 NumPy 数组，包含用于高级分析的原始预测数据 [network/predict.py](network/predict.py#L1-L100)。
+
+<CgxTip>
+预测质量很大程度上取决于 MSA 深度。MSA 中有效序列超过 2000 的蛋白质通常能达到更高的准确性。检查 `rf2out/log/` 中的日志文件以监控 MSA 生成进度。
+</CgxTip>
+
+## 常见问题故障排除
+
+**问题：CUDA 内存不足**
+- 解决方案：在直接调用 `predict.py` 时使用 `-nseqs` 和 `-nseqs_full` 参数以减少 MSA 采样
+- 替代方案：在 `predict.py` 中启用 `-low_vram` 标志以开启低显存模式
+
+**问题：MSA 生成缓慢**
+- 原因：大型蛋白质（>500 个残基）针对 BFD 进行搜索
+- 解决方案：确保有足够的 RAM（推荐 64 GB）并调整 `run_RF2.sh` 中的 CPU 计数（第 18 行）[run_RF2.sh](run_RF2.sh#L18)
+
+**问题：尽管 MSA 深度深但预测效果差**
+- 检查：使用 `--hhpred` 启用模板搜索
+- 考虑：如果蛋白质形成寡聚物，请尝试不同的对称群
+
+## 后续步骤
+
+既然你已经运行了首次预测，可以探索以下主题：
+
+- **[环境设置](3-environment-setup)** - 详细的硬件要求和高级安装选项
+- **[数据库下载](4-database-downloads)** - 完整的数据库设置，包含备用来源和验证步骤
+- **[模型权重安装](5-model-weights-installation)** - 模型权重选项、验证和故障排除
+- **[三轨设计](6-three-track-design-msa-pair-and-3d-structure-tracks)** - 深入探究 RoseTTAFold2 的创新架构
+- **[SE(3)-Equivariant Transformer 网络](7-se-3-equivariant-transformer-network)** - 理解几何深度学习基础
+
+对于生产工作流和批处理，考虑直接使用 `network/predict.py` 并配合自定义参数，以对预测设置进行细粒度控制 [network/predict.py](network/predict.py#L28-L52)。
+
+---
+
+## 安装与配置
+
+- [入门指南/安装与配置/环境配置](https://zread.ai/uw-ipd/RoseTTAFold2/3-environment-setup)
+
+---
+slug:3-environment-setup
+blog_type:normal
+---
+
+
+本页面提供了设置 RoseTTAFold2 环境的综合指南，包括系统要求、软件依赖项和安装程序。正确的环境配置对于使用整合了 MSA、成对表示和 3D 结构信息的三轨架构来运行准确的蛋白质结构预测至关重要。
+
+## 系统要求
+
+由于 RoseTTAFold2 的深度学习架构和大规模数据库处理需求，它对计算资源要求较高。系统规格反映了运行 SE(3)-等变 Transformer 网络和处理大量多序列比对的复杂性。
+
+| 资源类别 | 最低要求 | 推荐配置 |
+|------------------|---------------------|---------------------------|
+| GPU | 支持 CUDA 的 NVIDIA GPU | 显存 16GB+ 的 GPU（推荐 A100/V100） |
+| CUDA 版本 | 11.7 或 12.1 | 12.1 并支持 cuDNN |
+| 系统内存 | 64GB | 大型蛋白质需 128GB+ |
+| CPU 核心 | 8 核 | 并行 MSA 处理需 16+ 核 |
+| 磁盘空间 | 500GB+ | 完整数据库和模型需 2TB+ |
+| 操作系统 | Linux | Ubuntu 20.04/22.04 LTS |
+
+<CgxTip>对于数据库密集型操作，内存要求尤为关键。在生成 MSA 期间，HHblits 和 HHsearch 进程可能会消耗大量 RAM（在 [`run_RF2.sh`](run_RF2.sh#L16) 中指定为 64GB）。如果物理内存有限，请确保有足够的交换空间。</CgxTip>
+
+## 安装工作流
+
+安装过程遵循顺序架构：环境创建 → 依赖项安装 → 模型权重下载 → 数据库配置。这种分层方法确保所有组件在尝试预测之前正确集成。
+
+```mermaid
+flowchart TD
+    A[克隆仓库] --> B[创建 Conda 环境]
+    B --> C[安装 SE3 Transformer]
+    C --> D[下载模型权重]
+    D --> E[下载序列数据库]
+    E --> F[下载结构数据库]
+    F --> G[安装完成]
+    
+    style A fill:#e3f2fd
+    style B fill:#bbdefb
+    style C fill:#90caf9
+    style D fill:#64b5f6
+    style E fill:#42a5f5
+    style F fill:#2196f3
+    style G fill:#1976d2
+```
+
+## 获取仓库
+
+首先从 GitHub 克隆 RoseTTAFold2 仓库。这提供了预测和训练工作流所需的所有源代码、配置文件和实用程序脚本。
+
+来源：[README.md](README.md#L9-L12)
+
+```bash
+git clone https://github.com/uw-ipd/RoseTTAFold2.git
+cd RoseTTAFold2
+```
+
+仓库结构包括关键组件：
+- **网络模块**：位于 `network/` 目录，包含模型架构
+- **SE3Transformer**：子模块，用于等变转换
+- **输入准备**：用于 MSA 生成和模板处理的脚本
+- **示例序列**：用于测试安装
+
+![RoseTTAFold2 Repository](https://github.com/uw-ipd/RoseTTAFold2/blob/main/README.md?raw=true)
+
+## Conda 环境配置
+
+主要环境配置使用 [`RF2-linux.yml`](RF2-linux.yml#L1-L20)，它指定了 Python 3.10 和必要的机器学习框架。该 YAML 文件协调来自多个频道的依赖项以确保兼容性。
+
+来源：[RF2-linux.yml](RF2-linux.yml#L1-L20)
+
+### 核心依赖项
+
+```bash
+conda env create -f RF2-linux.yml
+conda activate RF2
+```
+
+环境包含以下关键组件：
+
+| 软件包 | 版本 | 用途 |
+|---------|---------|---------|
+| Python | 3.10 | 核心运行时环境 |
+| PyTorch | 2.2 | 深度学习框架 |
+| PyTorch CUDA | 12.1 | GPU 加速支持 |
+| DGL | 2.0.0.cu121 | 用于 SE(3) 操作的深度图库 |
+| PyG (PyTorch Geometric) | 最新版 | 图神经网络操作 |
+| HHsuite | 最新版 | 同源性搜索和 MSA 生成 |
+| Pandas | 最新版 | 数据处理 |
+
+存在一个替代配置文件 [`network/RF2na-linux.yml`](network/RF2na-linux.yml#L1-L24) 用于核酸预测，其 CUDA 版本略有不同（11.7），并包含额外的生物信息学工具，包括 MAFFT、BLAST、HMMER、Infernal 和 CD-HIT。
+
+来源：[network/RF2na-linux.yml](network/RF2na-linux.yml#L1-L24)
+
+## SE(3)-Transformer 安装
+
+SE(3)-Transformer 是实现旋转等变神经网络以进行 3D 坐标处理的关键组件。RoseTTAFold2 需要仓库子模块中包含的 NVIDIA 专用版本。
+
+来源：[SE3Transformer/setup.py](SE3Transformer/setup.py#L1-L12), [SE3Transformer/requirements.txt](SE3Transformer/requirements.txt#L1-L5)
+
+```bash
+cd SE3Transformer
+pip install --no-cache-dir -r requirements.txt
+python setup.py install
+cd ..
+```
+
+关键依赖项包括：
+
+| 软件包 | 版本 | 作用 |
+|---------|---------|------|
+| e3nn | 0.3.3 | 欧几里得神经网络 |
+| wandb | 0.12.0 | 实验跟踪 |
+| pynvml | 11.0.0 | NVIDIA GPU 监控 |
+| dllogger | git | NVIDIA 的日志记录工具 |
+
+<CgxTip>在 pip 安装期间使用 `--no-cache-dir` 标志可以防止与缓存的软件包发生潜在冲突。必须使用此仓库中的版本而不是公共 PyPI 版本来安装 SE(3)-Transformer，以确保与 RoseTTAFold2 的架构兼容。</CgxTip>
+
+## 模型权重安装
+
+预训练权重对于推理至关重要。当前推荐的模型权重文件大约 1.5GB，包含所有网络模块（包括三轨架构）的训练参数。
+
+来源：[README.md](README.md#L22-L25)
+
+```bash
+cd network
+wget https://files.ipd.uw.edu/dimaio/RF2_jan24.tgz
+tar xvfz RF2_jan24.tgz
+cd ..
+```
+
+提取的权重目录结构通过 [`network/predict.py`](network/predict.py#L34-L50) 与预测管道集成，后者指定了默认模型路径 `weights/RF2_jan24.pt`。权重包括以下参数：
+- MSA 轨道嵌入和注意力机制
+- 成对表示网络
+- SE(3) 结构模块
+- 辅助预测器（距离、角度、LDDT、PAE）
+
+<CgxTip>模型权重位置可通过预测脚本中的命令行参数配置，但默认路径假定在 `network/` 目录中提取。在运行预测之前，请确保提取的文件符合预期的结构。</CgxTip>
+
+## 数据库配置
+
+全面的蛋白质结构预测需要三个主要数据库：用于 MSA 生成的序列数据库、用于同源建模的结构模板，以及用于特征计算的辅助数据库。
+
+来源：[README.md](README.md#L27-L39)
+
+### 序列数据库
+
+**UniRef30 数据库 (46GB)** 提供 30% 一致性阈值下的聚类蛋白质序列，用于 MSA 生成：
+
+```bash
+mkdir -p UniRef30_2020_06
+wget http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+tar xfz UniRef30_2020_06_hhsuite.tar.gz -C ./UniRef30_2020_06
+```
+
+**BFD 数据库 (272GB)** 包含用于深度 MSA 的元聚类序列：
+
+```bash
+mkdir -p bfd
+wget https://bfd.mmseqs.com/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz
+tar xfz bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz -C ./bfd
+```
+
+### 结构模板数据库
+
+PDB100 数据库包含实验确定的蛋白质结构，用于基于模板的建模：
+
+```bash
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
+tar xfz pdb100_2021Mar03.tar.gz
+```
+
+该数据库包括结构文件（PDB 格式）和索引序列数据库（`.ffdata` 和 `.ffindex` 文件），HHsearch 使用它们进行同源性检测。脚本 [`run_RF2.sh`](run_RF2.sh#L14-L15) 将此数据库引用为指向 `pdb100_2021Mar03/pdb100_2021Mar03` 的 `HHDB` 变量。
+
+| 数据库 | 大小 | 用途 | 处理工具 |
+|----------|------|---------|-----------------|
+| UniRef30 | 46GB | MSA 生成 | HHblits |
+| BFD | 272GB | 深度 MSA 生成 | HHblits |
+| PDB100 | ~20GB | 模板搜索 | HHsearch |
+
+## 环境验证
+
+完成安装后，使用仓库中提供的示例序列验证环境。[`run_RF2.sh`](run_RF2.sh#L1-L159) 脚本编排完整的预测管道。
+
+来源：[README.md](README.md#L49-L65)
+
+```bash
+cd examples
+../run_RF2.sh rcsb_pdb_7UGF.fasta -o 7UGF
+```
+
+预期输出包括：
+- **结构文件**：`rf2out/7UGF/models/model_final.pdb`，包含预测坐标和代表预测 LDDT 置信度的 B 因子
+- **JSON 文件**：额外的精度指标和元数据
+- **NPZ 文件**：置信度分数和距离/角度分布的数值预测
+
+<CgxTip>第一次预测运行需要更长时间，因为 HHblits 会生成 MSA 并缓存中间结果。随后使用相似序列的运行将受益于缓存的比对。请监控 `rf2out/log/` 目录中的日志文件以进行故障排除。</CgxTip>
+
+## 项目架构概述
+
+已安装的环境支持 RoseTTAFold2 的三轨架构，该架构通过互补表示处理蛋白质信息：
+
+```mermaid
+flowchart LR
+    A[输入序列] --> B[MSA 轨道]
+    A --> C[成对轨道]
+    A --> D[3D 结构轨道]
+    
+    B --> E[MSA 注意力]
+    C --> F[成对注意力]
+    D --> G[SE3 Transformer]
+    
+    E --> H[坐标生成]
+    F --> H
+    G --> H
+    
+    H --> I[结构预测]
+    H --> J[置信度估算]
+```
+
+该环境支持：
+- **MSA 生成**：使用 HHblits 对抗 UniRef30 和 BFD 数据库
+- **模板搜索**：通过 HHsearch 对抗 PDB100
+- **结构预测**：通过回收迭代（默认 3 个周期）
+- **对称性约束**：用于同源寡聚复合物
+- **配对 MSA 模式**：用于异源寡聚物预测
+
+来源：[network/arguments.py](network/arguments.py#L1-L185), [network/predict.py](network/predict.py#L1-L50)
+
+## 常见配置调整
+
+[`run_RF2.sh`](run_RF2.sh#L16-L18) 脚本公开了可根据系统能力调整的关键运行时参数：
+
+```bash
+CPU="8"   # 并行处理的 CPU 数量
+MEM="64"  # HHsuite 工具的最大内存（GB）
+```
+
+对于低内存系统，请考虑：
+1. 减少 `CPU` 数量以降低内存压力
+2. 在 [`predict.py`](network/predict.py#L43-L44) 中使用 `--topk` 参数限制邻居计算
+3. 启用 `-low_vram` 标志将计算卸载到 CPU
+
+对于大蛋白质（>700 个残基）：
+1. 增加 `MEM` 分配以进行 MSA 处理
+2. 使用 `-subcrop` 参数管理成对更新的内存
+3. 考虑启用对称性约束以降低计算复杂性
+
+## 故障排除指南
+
+| 问题 | 可能原因 | 解决方案 |
+|-------|--------------|----------|
+| CUDA 内存不足 | GPU 显存不足 | 使用 `-low_vram` 标志或减少 `-topk` 参数 |
+| HHblits 崩溃 | 系统内存不足 | 增加交换空间或减少 `-maxseq` 参数 |
+| SE3 导入错误 | SE3 安装不正确 | 使用 `--no-cache-dir` 从仓库子模块重新安装 |
+| 未找到数据库 | 脚本中的路径不正确 | 验证数据库路径是否与提取位置匹配 |
+| MSA 生成缓慢 | CPU 核心有限 | 在 `run_RF2.sh` 中增加 `CPU` 变量 |
+
+## 后续步骤
+
+成功设置环境后，继续下载额外的数据库并配置模型权重：
+
+- **[数据库下载](4-database-downloads)** - 获取和配置大规模序列及结构数据库的详细说明
+- **[模型权重安装](5-model-weights-installation)** - 下载和验证预训练模型权重的完整指南
+
+配置好数据库后，探索预测功能：
+- **[快速入门](2-quick-start)** - 运行您的第一个蛋白质结构预测
+- **[三轨设计](6-three-track-design-msa-pair-and-3d-structure-tracks)** - 了解实现准确预测的架构创新
+
+对于对模型训练感兴趣的高级用户，该环境还支持多 GPU 分布式训练，如 [Multi-GPU Training Configuration](25-multi-gpu-training-configuration) 指南中所述。
+
+---
+
+- [入门指南/安装与配置/数据库下载](https://zread.ai/uw-ipd/RoseTTAFold2/4-database-downloads)
+
+---
+slug:4-database-downloads
+blog_type:normal
+---
+
+
+RoseTTAFold2 需要三个核心数据库来生成多重序列比对（MSAs）并识别结构模板。这些数据库使模型能够利用进化信息和已知蛋白质结构进行准确预测。本指南将引导你下载并为 RoseTTAFold2 安装设置这些数据库。
+
+![RoseTTAFold2 Architecture Overview](https://github.com/uw-ipd/RoseTTAFold2/raw/main/README.md)
+
+*RoseTTAFold2 整合了多个数据库来源，为结构预测生成全面的输入特征*
+
+## 必需数据库
+
+RoseTTAFold2 需要三个数据库，总计约 **318GB** 的存储空间。每个数据库在预测流程中都有特定用途。
+
+| 数据库名称 | 大小 | 用途 | 优先级 |
+|--------------|------|---------|----------|
+| **UniRef30** | ~46GB | 用于生成 MSA 的主要序列数据库 | 必需 |
+| **BFD** | ~272GB | 针对同源蛋白较少的蛋白质的扩展序列数据库 | 可选但建议安装 |
+| **pdb100_2021Mar03** | ~2GB | 用于同源搜索的结构模板数据库 | 必需 |
+
+### 数据库层次结构及使用
+
+数据库按分层方式工作。系统首先搜索 UniRef30，如果未找到足够的同源物，则回退到 BFD。结构模板针对 PDB 数据库进行搜索以指导预测。
+
+```mermaid
+graph TD
+    A[输入蛋白质序列] --> B[HHblits MSA 搜索]
+    B --> C{检查 UniRef30<br/>结果}
+    C -->|>2000 条序列| D[MSA 完成]
+    C -->|不足| E[搜索 BFD 数据库]
+    E --> F{检查 BFD 结果}
+    F -->|找到同源物| D
+    F -->|仍然不足| G[使用最小 MSA]
+    D --> H[HHsearch 模板搜索]
+    H --> I[pdb100 数据库]
+    I --> J[模板特征]
+    D --> K[MSA 特征]
+    J --> L[RoseTTAFold2 模型]
+    K --> L
+```
+
+这种分层方法确保了具有许多进化亲属的蛋白质可以使用 UniRef30 快速处理，而来自稀有家族的蛋白质仍然可以从全面的 BFD 数据库中受益 [input_prep/make_protein_msa.sh](input_prep/make_protein_msa.sh#L9-L10)。
+
+<CgxTip>
+虽然 BFD 数据库很大（272GB），但它显著提高了在 UniRef30 中同源物较少的蛋白质的预测准确性。如果存储空间有限，你可以仅从 UniRef30 和 pdb100 开始，但需预期对表征较少的蛋白质家族的预测准确性会降低。
+</CgxTip>
+
+## 下载说明
+
+### 第一步：准备目录结构
+
+导航至你的 RoseTTAFold2 安装目录：
+
+```bash
+cd /path/to/RoseTTAFold2
+```
+
+### 第二步：下载 UniRef30 数据库
+
+UniRef30 数据库以 30% 的同一性聚类 UniProt 序列，提供全面而紧凑的序列资源。
+
+```bash
+# 下载 UniRef30 [46GB]
+wget http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+
+# 创建目标目录
+mkdir -p UniRef30_2020_06
+
+# 解压文件到目录
+tar xfz UniRef30_2020_06_hhsuite.tar.gz -C ./UniRef30_2020_06
+```
+
+**解压后的预期内容：**
+- `UniRef30_2020_06/UniRef30_2020_06` - HHsuite 数据库文件
+- 用于快速序列查找的索引文件
+
+UniRef30 数据库将作为通过迭代 HHblits 搜索生成 MSA 的主要搜索空间，使用递增的 E-value 截止值（1e-10, 1e-6, 1e-3）[input_prep/make_protein_msa.sh](input_prep/make_protein_msa.sh#L27-L41)。
+
+### 第三步：下载 BFD 数据库
+
+BFD（Big Fantastic Database）提供更广泛的序列覆盖范围，对于寻找远缘同源物至关重要。
+
+```bash
+# 下载 BFD [272GB]
+wget https://bfd.mmseqs.com/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz
+
+# 创建目标目录
+mkdir -p bfd
+
+# 解压文件到目录
+tar xfz bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz -C ./bfd
+```
+
+**解压后的预期内容：**
+- `bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt` - HHsuite 数据库文件
+
+当 UniRef30 搜索产生的序列不足（满足 90% 同一性和 75% 覆盖率的序列少于 2000 条，或满足 90% 同一性和 50% 覆盖率的序列少于 4000 条）时，BFD 数据库将作为后备选项 [input_prep/make_protein_msa.sh](input_prep/make_protein_msa.sh#L49-L81)。
+
+### 第四步：下载结构模板
+
+PDB 模板数据库提供来自已知蛋白质结构的结构信息。
+
+```bash
+# 下载结构模板 [~2GB]
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
+
+# 解压到根目录
+tar xfz pdb100_2021Mar03.tar.gz
+```
+
+**解压后的预期内容：**
+- `pdb100_2021Mar03/pdb100_2021Mar03_a3m.ffdata` - 模板序列数据
+- `pdb100_2021Mar03/pdb100_2021Mar03_a3m.ffindex` - 模板索引文件
+- `pdb100_2021Mar03/pdb100_2021Mar03_pdb.ffdata` - 模板结构数据
+- `pdb100_2021Mar03/pdb100_2021Mar03_pdb.ffindex` - 模板结构索引
+
+这些文件由 HHsearch 算法使用，以查找指导 RoseTTAFold2 预测的结构模板 [run_RF2.sh](run_RF2.sh#L16) 和 [network/predict.py](network/predict.py#L608-L614)。
+
+## 数据库配置
+
+脚本根据标准目录结构自动定位数据库。环境变量 `$PIPEDIR` 指向 RoseTTAFold2 根目录，数据库相对于此位置进行引用。
+
+### 数据库路径配置
+
+下表显示了数据库路径在流程中是如何配置的：
+
+| 数据库 | 环境变量 | 脚本引用 | 路径 |
+|----------|---------------------|------------------|------|
+| UniRef30 | `$DB_UR30` | [make_protein_msa.sh](input_prep/make_protein_msa.sh#L9) | `$PIPEDIR/UniRef30_2020_06/UniRef30_2020_06` |
+| BFD | `$DB_BFD` | [make_protein_msa.sh](input_prep/make_protein_msa.sh#L10) | `$PIPEDIR/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt` |
+| PDB 模板 | `$HHDB` | [run_RF2.sh](run_RF2.sh#L16) | `$PIPEDIR/pdb100_2021Mar03/pdb100_2021Mar03` |
+
+### 验证
+
+下载后，通过检查数据库目录来验证你的安装：
+
+```bash
+# 检查 UniRef30
+ls -lh UniRef30_2020_06/UniRef30_2020_06*
+
+# 检查 BFD
+ls -lh bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt*
+
+# 检查 PDB 模板
+ls -lh pdb100_2021Mar03/
+```
+
+你应该会看到每个数据库的多个文件，包括 `.hhm`、`.a3m` 和索引文件。
+
+## 完整设置流程
+
+以下是显示数据库下载和设置过程的完整流程图：
+
+```mermaid
+flowchart TD
+    Start([开始安装]) --> Prep[导航至 RoseTTAFold2 目录]
+    Prep --> UR30[下载 UniRef30<br/>~46GB]
+    UR30 --> ExtractUR30[解压至 UniRef30_2020_06/]
+    ExtractUR30 --> BFD[下载 BFD<br/>~272GB]
+    BFD --> ExtractBFD[解压至 bfd/]
+    ExtractBFD --> PDB[下载 PDB 模板<br/>~2GB]
+    PDB --> ExtractPDB[解压至根目录]
+    ExtractPDB --> Verify[验证数据库文件]
+    Verify --> Test{测试安装}
+    Test -->|成功| Done([数据库就绪])
+    Test -->|错误| Troubleshoot[检查路径和文件完整性]
+    Troubleshoot --> Verify
+```
+
+## 故障排除
+
+### 磁盘空间不足
+
+如果遇到磁盘空间问题：
+
+1. **检查可用空间：**
+   ```bash
+   df -h .
+   ```
+
+2. **最低要求：**
+   - 仅 UniRef30：总计 ~50GB
+   - UniRef30 + PDB：总计 ~55GB
+   - 完整设置：总计 ~330GB
+
+3. **考虑下载到外部驱动器或不同分区：**
+
+   ```bash
+   # 如果数据库位于其他驱动器，则创建符号链接
+   ln -s /path/to/external/drive/UniRef30_2020_06 ./UniRef30_2020_06
+   ln -s /path/to/external/drive/bfd ./bfd
+   ln -s /path/to/external/drive/pdb100_2021Mar03 ./pdb100_2021Mar03
+   ```
+
+### 下载失败
+
+由于网络中断，大文件下载可能会失败：
+
+1. **使用 `wget -c` 恢复中断的下载：**
+   ```bash
+   wget -c http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+   ```
+
+2. **下载后验证文件完整性：**
+   ```bash
+   # 检查文件大小是否与预期值匹配
+   ls -lh *.tar.gz
+   ```
+
+### 权限错误
+
+如果在解压过程中遇到权限问题：
+
+```bash
+# 确保目录中的写入权限
+chmod +w .
+
+# 或根据需要使用 sudo（不推荐用于开发目录）
+sudo tar xfz filename.tar.gz -C ./target_directory
+```
+
+### 找不到数据库错误
+
+如果 RoseTTAFold2 报告找不到数据库：
+
+1. **验证 [run_RF2.sh](run_RF2.sh#L16) 中的 `$PIPEDIR` 设置正确：**
+   ```bash
+   # 脚本应自动设置此变量：
+   SCRIPT=`realpath -s $0`
+   export PIPEDIR=`dirname $SCRIPT`
+   ```
+
+2. **检查数据库路径是否匹配预期结构：**
+   ```bash
+   # UniRef30 应位于：
+   echo $PIPEDIR/UniRef30_2020_06/UniRef30_2020_06
+   
+   # BFD 应位于：
+   echo $PIPEDIR/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt
+   
+   # PDB 应位于：
+   echo $PIPEDIR/pdb100_2021Mar03/pdb100_2021Mar03
+   ```
+
+3. **如果路径不同，请更新 [input_prep/make_protein_msa.sh](input_prep/make_protein_msa.sh#L9-L10) 中的变量：**
+   ```bash
+   # 更新这些行以匹配你的实际路径：
+   DB_UR30="/path/to/your/UniRef30_2020_06/UniRef30_2020_06"
+   DB_BFD="/path/to/your/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt"
+   ```
+
+<CgxTip>
+数据库下载过程可能需要几个小时，具体取决于你的网络连接。考虑使用 `aria2c` 等下载管理器进行并行下载，或在夜间运行大文件（如 BFD，272GB）的下载。
+</CgxTip>
+
+## 后续步骤
+
+成功下载并验证所有数据库后，你可以继续执行后续设置步骤：
+
+1. **[模型权重安装](5-model-weights-installation)** - 下载预训练的 RoseTTAFold2 模型权重（~1.5GB）
+2. **[快速入门](2-quick-start)** - 使用示例文件运行你的第一个蛋白质结构预测
+
+安装了数据库并加载了模型权重后，你将能够利用 RoseTTAFold2 进化和结构信息集成能力的全部功能来预测蛋白质结构。
+
+## 设置后的目录结构
+
+完成数据库下载后，你的 RoseTTAFold2 目录结构应包括：
+
+```
+RoseTTAFold2/
+├── UniRef30_2020_06/           # 46GB
+│   └── UniRef30_2020_06/       # HHsuite 数据库文件
+│       ├── UniRef30_2020_06.hhm
+│       ├── UniRef30_2020_06.a3m
+│       └── ...
+├── bfd/                        # 272GB
+│   └── bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt/
+│       ├── bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.hhm
+│       ├── bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.a3m
+│       └── ...
+├── pdb100_2021Mar03/            # ~2GB
+│   ├── pdb100_2021Mar03_a3m.ffdata
+│   ├── pdb100_2021Mar03_a3m.ffindex
+│   ├── pdb100_2021Mar03_pdb.ffdata
+│   └── pdb100_2021Mar03_pdb.ffindex
+├── network/
+│   ├── predict.py
+│   └── ...
+├── input_prep/
+│   ├── make_protein_msa.sh
+│   └── ...
+├── run_RF2.sh
+└── examples/
+    └── *.fasta
+```
+
+此结构确保预测管道可以自动定位并使用所有必需的数据库，而无需手动配置。
+
+---
+
+- [入门指南/安装与配置/模型权重安装](https://zread.ai/uw-ipd/RoseTTAFold2/5-model-weights-installation)
+
+---
+slug:5-model-weights-installation
+blog_type:normal
+---
+
+
+本页面提供了关于下载、安装和管理 RoseTTAFold2 预训练模型权重的全面指南。正确安装权重对于运行蛋白质结构预测以及理解自定义训练工作流的检查点格式至关重要。
+
+## 理解模型权重
+
+RoseTTAFold2 使用预训练的神经网络参数，这些参数捕获了蛋白质序列、MSA（多序列比对）和 3D 结构关系中的复杂模式。权重文件包含 `RoseTTAFoldModule` 的完整状态，该模块实现了整合 MSA、Pair 和 3D 结构表示的三轨道架构 [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L11-L19)。模型架构包括用于潜在 MSA 特征 (`latemt_emb`)、完整 MSA 序列 (`full_emb`)、模板信息 (`templ_emb`) 的嵌入层，一个循环机制 (`recycle`)，以及执行核心预测计算的迭代模拟器 [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L23-L46)。此外，权重还包含用于距离和角度预测 (`c6d_pred`)、掩码 Token 预测 (`aa_pred`)、置信度估计 (`lddt_pred`, `pae_pred`) 以及复合物结合网络 (`bind_pred`) 的辅助预测器网络 [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L47-L53)。
+
+预训练权重以 PyTorch 检查点格式 (`.pt` 文件) 存储，当用于继续训练时，包含模型参数和训练元数据。权重对某些层使用混合精度 (float16)，以优化内存使用和推理速度，同时保持预测准确性 [predict.py](network/predict.py#L233-L249)。
+
+## 架构概览
+
+```mermaid
+flowchart TD
+    A[模型权重<br/>RF2_jan24.pt] --> B[嵌入层]
+    A --> C[核心模拟器]
+    A --> D[辅助预测器]
+    
+    B --> B1[MSA 潜在嵌入<br/>d_msa=256]
+    B --> B2[MSA 完整嵌入<br/>d_msa_full=64]
+    B --> B3[模板嵌入<br/>d_templ=64]
+    B --> B4[循环层]
+    
+    C --> C1[额外块<br/>4 层]
+    C --> C2[主块<br/>48 层]
+    C --> C3[精炼块<br/>4 层]
+    
+    D --> D1[距离网络]
+    D --> D2[掩码 Token 网络]
+    D --> D3[LDDT 网络]
+    D --> D4[PAE 网络]
+    D --> D5[结合网络]
+```
+
+## 下载与安装
+
+安装过程包括下载预训练权重存档、将其解压到正确位置并验证安装。RoseTTAFold2 提供了在包括 PDB 数据库在内的多样化蛋白质结构数据集上训练的预训练权重，使其适用于通用蛋白质结构预测任务 [README.md](README.md#L20-L24)。
+
+**分步安装：**
+
+```mermaid
+flowchart LR
+    A[开始] --> B[激活 RF2 conda 环境]
+    B --> C[导航至 network 目录]
+    C --> D[下载权重存档<br/>RF2_jan24.tgz]
+    D --> E[解压存档<br/>tar xvfz RF2_jan24.tgz]
+    E --> F[验证权重文件<br/>weights/RF2_jan24.pt]
+    F --> G[安装完成]
+```
+
+在你的终端中执行以下命令：
+
+```bash
+# 激活 RoseTTAFold2 conda 环境
+conda activate RF2
+
+# 导航至 network 目录
+cd network
+
+# 下载预训练权重存档
+wget https://files.ipd.uw.edu/dimaio/RF2_jan24.tgz
+
+# 解压存档以创建 weights 子目录
+tar xvfz RF2_jan24.tgz
+
+# 返回根目录
+cd ..
+```
+
+来源：[README.md](README.md#L20-L24)
+
+解压后，权重文件应位于 `network/weights/RF2_jan24.pt`。解压操作会在 `network/` 目录内创建一个 `weights/` 子目录，其中包含预训练模型参数 [README.md](README.md#L20-L24)。
+
+<CgxTip>权重文件压缩后大约 2.5 GB，解压后约为 5 GB。下载前请确保你有足够的磁盘空间。解压操作会自动创建所需的目录结构。</CgxTip>
+
+## 文件结构与位置
+
+RoseTTAFold2 项目根据你调用预测脚本的方式，期望模型权重位于特定位置。了解这些位置有助于解决路径相关问题，并实现自定义权重管理策略。
+
+**默认位置：**
+
+| 组件 | 默认路径 | 描述 |
+|-----------|--------------|-------------|
+| 预训练权重 | `network/weights/RF2_jan24.pt` | predict.py 的当前默认值 [predict.py](network/predict.py#L28) |
+| 旧版权重 | `network/weights/RF2_apr23.pt` | run_RF2.sh 中引用的旧版本 [run_RF2.sh](run_RF2.sh#L147) |
+| 训练检查点 | `models/{model_name}_{suffix}.pt` | 自定义训练输出 [train_multi_deep.py](network/train_multi_deep.py#L366) |
+
+**可视化项目结构：**
+
+```
+RoseTTAFold2/
+├── network/
+│   ├── weights/
+│   │   └── RF2_jan24.pt          ← 预训练模型权重
+│   ├── predict.py                ← 主预测脚本
+│   ├── RoseTTAFoldModel.py       ← 模型架构定义
+│   └── train_multi_deep.py       ← 训练脚本 (保存检查点)
+├── models/                       ← 自定义训练检查点
+│   ├── BFF_last.pt              ← 示例训练检查点
+│   └── BFF_best.pt              ← 最佳验证检查点
+└── run_RF2.sh                   ← 包装脚本
+```
+
+`predict.py` 脚本通过编程方式定义默认模型路径，从而允许灵活的自定义部署 [predict.py](network/predict.py#L28)。当使用包装脚本 `run_RF2.sh` 时，权重路径通过传递给预测脚本的命令行参数显式指定 [run_RF2.sh](run_RF2.sh#L144-L151)。
+
+## 在预测中使用模型权重
+
+当你调用预测脚本时，RoseTTAFold2 预测流水线会自动从指定位置加载模型权重。加载过程会处理设备映射 (GPU/CPU) 并应用推理所需的必要精度优化 [predict.py](network/predict.py#L616-L621)。
+
+**自动加载：**
+
+`run_RF2.sh` 包装脚本会自动将权重位置传递给预测脚本：
+
+```bash
+# 摘自 run_RF2.sh，第 144-151 行
+python $PIPEDIR/network/predict.py \
+    -inputs $argstring \
+    -prefix $WDIR/models/model \
+    -model $PIPEDIR/network/weights/RF2_apr23.pt \
+    -db $HHDB \
+    -symm $symm
+```
+
+来源：[run_RF2.sh](run_RF2.sh#L144-L151)
+
+**手动指定：**
+
+直接运行预测脚本时，你可以使用 `-model` 命令行参数覆盖默认的权重位置：
+
+```bash
+python network/predict.py \
+    -inputs path/to/input.a3m \
+    -prefix output_prefix \
+    -model /custom/path/to/RF2_jan24.pt \
+    -db path/to/pdb_database \
+    -symm C1
+```
+
+来源：[predict.py](network/predict.py#L27-L52)
+
+`predict.py` 中的 `Predictor` 类实现了权重加载逻辑：
+
+```python
+def load_model(self, model_weights):
+    if not os.path.exists(model_weights):
+        return False
+    checkpoint = torch.load(model_weights, map_location=self.device, weights_only=False)
+    self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    # 将特定层转换为半精度以提高内存效率
+    for m_i in self.model.simulator.extra_block:
+        m_i.pair2pair = m_i.pair2pair.half()
+        m_i.msa2msa = m_i.msa2msa.half()
+        m_i.msa2pair = m_i.msa2pair.half()
+    # ... 其他精度转换
+    return True
+```
+
+来源：[predict.py](network/predict.py#L231-L250)
+
+加载器使用 `map_location` 确保权重在正确的设备 (GPU 或 CPU) 上加载，且 `strict=False` 参数允许在检查点架构略有差异时进行部分加载 [predict.py](network/predict.py#L234)。将特定层转换为半精度 (`half()`) 可在推理过程中减少内存占用，而不会显著降低准确性 [predict.py](network/predict.py#L236-L249)。
+
+## 模型权重格式与内容
+
+了解模型权重的内部结构可以实现高级用例，例如检查点检查、权重迁移和自定义训练工作流。RoseTTAFold2 使用 PyTorch 的标准检查点格式，该格式存储模型状态字典以及可选的训练元数据 [train_multi_deep.py](network/train_multi_deep.py#L368-L382)。
+
+**检查点内容：**
+
+| 键 | 描述 | 用途 |
+|-----|-------------|---------|
+| `model_state_dict` | 模型参数 | 用于推理和训练的核心网络权重 |
+| `epoch` | 训练周期数 | 从特定检查点恢复训练 |
+| `optimizer_state_dict` | 优化器内部状态 | 带有优化器动量的继续训练 |
+| `scheduler_state_dict` | 学习率调度器状态 | 维持学习率计划 |
+| `scaler_state_dict` | AMP 缩放器状态 | 混合精度训练状态 |
+
+训练脚本演示了在恢复训练时如何加载这些组件：
+
+```python
+def load_model(self, model, optimizer, scheduler, scaler, model_name, rank, suffix='last', resume_train=True):
+    chk_fn = "models/%s_%s.pt"%(model_name, suffix)
+    loaded_epoch = -1
+    if not os.path.exists(chk_fn):
+        return -1, 999999.9
+    map_location = {"cuda:%d"%0: "cuda:%d"%rank}
+    checkpoint = torch.load(chk_fn, map_location=map_location, weights_only=False)
+    # 将权重加载到主模型和 EMA 影子模型中
+    model.module.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    model.module.shadow.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if resume_train:
+        loaded_epoch = checkpoint['epoch']
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        # 处理调度器状态兼容性
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        else:
+            scheduler.last_epoch = loaded_epoch + 1
+    return loaded_epoch, best_valid_loss
+```
+
+来源：[train_multi_deep.py](network/train_multi_deep.py#L365-L382)
+
+训练检查点使用指数移动平均 (EMA) 来提高推理质量。`Trainer` 类维护一个主模型和一个影子模型 (EMA 副本)，两者都根据检查点状态进行更新 [train_multi_deep.py](network/train_multi_deep.py#L60-L103), [train_multi_deep.py](network/train_multi_deep.py#L371-L372)。
+
+<CgxTip>当仅将预训练权重用于推理时，只需要 `model_state_dict`。训练检查点元数据 (optimizer、scheduler、scaler) 仅在从保存的状态恢复训练时需要。</CgxTip>
+
+## 自定义权重管理
+
+对于高级用户，RoseTTAFold2 支持自定义权重管理场景，包括自定义训练、微调和权重迁移。模块化架构允许对加载和初始化的组件进行细粒度控制 [arguments.py](network/arguments.py#L13-L14), [train_multi_deep.py](network/train_multi_deep.py#L414-L420)。
+
+**自定义训练工作流：**
+
+训练自定义模型时，`Trainer` 类会自动以指定的时间间隔保存带有描述性后缀的检查点：
+
+```python
+def checkpoint_fn(self, model_name, description):
+    if not os.path.exists("models"):
+        os.mkdir("models")
+    name = "%s_%s.pt"%(model_name, description)
+    return os.path.join("models", name)
+```
+
+来源：[train_multi_deep.py](network/train_multi_deep.py#L387-L391)
+
+常见的检查点后缀包括 `last` (最新)、`best` (最佳验证) 以及表示中间状态的周期数。
+
+**微调预训练模型：**
+
+要在自定义数据集上微调预训练权重，你可以加载预训练权重并使用你的数据继续训练：
+
+```python
+# 加载预训练权重
+predictor = Predictor('network/weights/RF2_jan24.pt', device='cuda:0')
+
+# 访问模型以进行微调
+model = predictor.model
+
+# 初始化训练组件
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+# ... 设置数据加载器和损失函数
+
+# 从预训练状态继续训练
+# (训练循环实现类似于 train_multi_deep.py)
+```
+
+来源：[predict.py](network/predict.py#L204-L206), [train_multi_deep.py](network/train_multi_deep.py#L752-L882)
+
+训练脚本使用分布式数据并行进行多 GPU 训练，并包含涵盖距离、角度、方向和置信度预测的综合损失函数 [train_multi_deep.py](network/train_multi_deep.py#L150-L156), [train_multi_deep.py](network/train_multi_deep.py#L398-L413)。
+
+## 故障排除
+
+**问题：找不到模型权重文件**
+
+症状：指示无法定位权重文件的错误消息。
+
+解决方案：验证权重文件是否存在于预期路径。检查你是否正确解压了存档，以及路径是否与预测命令中指定的路径匹配 [predict.py](network/predict.py#L232-L233)。
+
+```bash
+# 验证权重文件是否存在
+ls -lh network/weights/RF2_jan24.pt
+
+# 检查文件大小 (应约为 5 GB)
+```
+
+**问题：加载期间 CUDA 内存不足**
+
+症状：加载模型权重时 GPU 内存耗尽。
+
+解决方案：预测脚本包含一个 `-low_vram` 选项，可将部分计算卸载到 CPU，以便在有限的 GPU 内存上运行更大的系统 [predict.py](network/predict.py#L42)。
+
+```bash
+python network/predict.py \
+    -inputs input.a3m \
+    -prefix output \
+    -low_vram \
+    # ... 其他参数
+```
+
+**问题：权重加载到错误的设备上**
+
+症状：加载权重时关于 CUDA 设备不匹配的错误。
+
+解决方案：`load_model` 函数使用 `map_location` 自动处理设备映射。确保你在正确的设备上下文中加载权重：
+
+```python
+# 加载器自动处理设备映射
+if torch.cuda.is_available():
+    pred = Predictor(args.model, torch.device("cuda:0"))
+else:
+    pred = Predictor(args.model, torch.device("cpu"))
+```
+
+来源：[predict.py](network/predict.py#L616-L621)
+
+## 后续步骤
+
+随着模型权重的成功安装，你可以探索 RoseTTAFold2 的高级功能：
+
+- **[三轨道设计：MSA、Pair 和 3D 结构轨道](6-three-track-design-msa-pair-and-3d-structure-tracks)** - 了解加载的权重如何实现同时处理不同蛋白质表示的三轨道架构
+- **[用于迭代精炼的循环机制](8-recycling-mechanism-for-iterative-refinement)** - 了解模型如何使用循环层迭代改进预测
+- **[使用分布式数据并行的训练流水线](19-training-pipeline-with-distributed-data-parallel)** - 探索如何使用检查点格式和训练基础设施来训练自定义模型
+
+---
+
+# 深入解析
+
+## 模型架构
+
+- [深入解析/模型架构/三轨设计：MSA、Pair 和 3D 结构轨](https://zread.ai/uw-ipd/RoseTTAFold2/6-three-track-design-msa-pair-and-3d-structure-tracks)
+
+---
+slug:6-three-track-design-msa-pair-and-3d-structure-tracks
+blog_type:normal
+---
+
+
+三轨道架构代表了 RoseTTAFold2 的核心创新，它能够同时处理进化信息（MSA 轨道）、残基对关系（pair 轨道）和三维结构坐标（3D 轨道）。这种设计在每个迭代过程中促进了轨道间深度的双向通信，使得模型能够逐步利用互补的信息源。该架构为每个轨道初始化独立的嵌入，然后通过跨轨道信息交换迭代优化它们，最终收敛于准确的蛋白质结构预测。
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L11-L50), [Track_module.py](network/Track_module.py#L701-L735)
+
+## 架构概述
+
+三轨道架构由三个并行的信息处理流组成，它们通过精心设计的通信通路进行交互。MSA 轨道处理多重序列比对信息以捕获进化约束，pair 轨道通过二维表示维护残基-残基关系特征，而 3D 轨道使用 SE(3)-等变操作直接操纵原子坐标。这些轨道并非独立的孤岛；相反，它们在每个迭代块中通过专用模块进行持续的信息交换。
+
+基础模型类 `RoseTTAFoldModule` 实例化了三个嵌入层，用于创建初始轨道表示：用于潜在 MSA 轨道的 `MSA_emb`，用于额外 MSA 序列的 `Extra_emb`，以及用于基于模板的结构信息的 `Templ_emb`。核心迭代处理发生在 `IterativeSimulator` 内部，它编排了轨道交互的三个不同阶段：使用完整 MSA 表示的 extra block 更新，使用潜在 MSA 的 main block 更新，以及通过结构聚焦操作进行的最终精修。
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L24-L30), [Track_module.py](network/Track_module.py#L701-L735)
+
+```mermaid
+graph TB
+    subgraph Input["输入处理"]
+        MSA[MSA 特征<br/>d_msa=256]
+        EXTRA[额外序列<br/>d_msa_full=64]
+        TMPL[模板特征]
+    end
+    
+    subgraph Emb["初始嵌入"]
+        LATEMB[潜在 MSA 嵌入]
+        FULLEMB[完整 MSA 嵌入]
+        PAIREMB[Pair 嵌入]
+        STATE[状态特征]
+    end
+    
+    subgraph Recycle["循环循环"]
+        RECYCLE[循环模块]
+    end
+    
+    subgraph Sim["迭代模拟器"]
+        subgraph Extra["额外块"]
+            EX1[IterBlock 1]
+            EX2[IterBlock 2]
+            EX3[IterBlock 3]
+            EX4[IterBlock 4]
+        end
+        
+        subgraph Main["主块"]
+            M1[IterBlock 1]
+            M2[IterBlock 2]
+            M3[IterBlock 3]
+            M4[IterBlock 4]
+            M5[IterBlock 5]
+            M6[IterBlock 6]
+            M7[IterBlock 7]
+            M8[IterBlock 8]
+        end
+        
+        subgraph Refine["精修块"]
+            STR1[Str2Str 1]
+            STR2[Str2Str 2]
+            STR3[Str2Str 3]
+            STR4[Str2Str 4]
+        end
+    end
+    
+    MSA --> LATEMB
+    EXTRA --> FULLEMB
+    LATEMB --> PAIREMB
+    LATEMB --> STATE
+    
+    STATE --> RECYCLE
+    PAIREMB --> RECYCLE
+    RECYCLE --> STATE
+    
+    FULLEMB --> Sim
+    STATE --> Sim
+    PAIREMB --> Sim
+    
+    FULLEMB --> EX1
+    EX1 --> EX2
+    EX2 --> EX3
+    EX3 --> EX4
+    EX4 --> M1
+    
+    LATEMB --> M1
+    M1 --> M2
+    M2 --> M3
+    M3 --> M4
+    M4 --> M5
+    M5 --> M6
+    M6 --> M7
+    M7 --> M8
+    
+    M8 --> STR1
+    STR1 --> STR2
+    STR2 --> STR3
+    STR3 --> STR4
+    
+    classDef msa fill:#e1f5fe,stroke:#01579b
+    classDef pair fill:#fce4ec,stroke:#880e4f
+    classDef str fill:#e8f5e9,stroke:#1b5e20
+    
+    class MSA,LATEMB,FULLEMB msa
+    class PAIREMB pair
+    class EX1,EX2,EX3,EX4,M1,M2,M3,M4,M5,M6,M7,M8,STR1,STR2,STR3,STR4 str
+```
+
+## MSA 轨道：进化信息处理
+
+MSA 轨道作为进化信息的主要通道，捕获同源蛋白质之间的序列保守性和协同进化模式。`MSA_emb` 模块通过线性投影（`d_init=48` 到 `d_msa=256` 维度）处理初始多重序列比对，并通过学习的嵌入融入查询序列信息。这创建了一个形状为 `(B, N, L, 256)` 的表示，其中 B 是批次大小，N 是 MSA 中的序列数量，L 是序列长度。
+
+MSA 轨道维护两个并行的表示：用于深度处理的高维潜在 MSA，以及用于高效处理额外序列的降维完整 MSA（`d_msa_full=64`）。潜在 MSA 使用查询序列嵌入通过广播加法通知所有序列，而完整 MSA 经过类似但计算量更轻的处理。`MSAFeaturize` 函数创建结合氨基酸类型（22）、轮廓信息（22）、插入统计（2）和末端标志（2）的 48 维特征，并在训练期间应用 15% 的随机掩码以提高鲁棒性。
+
+来源：[Embeddings.py](network/Embeddings.py#L54-L105), [featurizing.py](network/featurizing.py#L33-L100), [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L24-L25)
+
+**MSA 轨道处理流程：**
+
+1. **初始特征化**：原始 MSA 序列被转换为结合氨基酸身份、进化轮廓和结构上下文特征的 48 维特征
+2. **潜在嵌入**：通过带有查询序列条件的线性投影创建 256 维表示
+3. **额外序列处理**：使用全局注意力机制为额外序列创建 64 维嵌入
+4. **迭代精修**：带有 pair 和结构偏差的行和列注意力更新
+5. **跨轨道更新**：信息通过外积聚合从 MSA 流向 pair 轨道
+
+关键模块 `MSAPairStr2MSA` 实现了从 pair 和结构轨道回到 MSA 轨道的双向通信。它将 pair 表示与当前 3D 坐标的径向基函数（RBF）距离特征结合，以偏置 MSA 注意力操作。查询序列嵌入通过状态特征投影从结构轨道接收直接更新，而行注意力引入 pair 级偏差，列注意力捕获列向保守模式。
+
+来源：[Track_module.py](network/Track_module.py#L49-L130)
+
+## Pair 轨道：残基-残基关系建模
+
+Pair 轨道维护残基-残基关系的全面 2D 表示，捕获几何约束和进化耦合。通过查询序列嵌入的对称左右投影（`d_pair=128`）初始化，pair 表示的形状为 `(B, L, L, 128)`，并存储关于序列中所有残基对之间潜在相互作用的信息。
+
+位置编码对于 pair 轨道至关重要，通过 `PositionalEncoding2D` 模块实现，该模块添加相对位置信息以帮助模型区分局部和远程相互作用。这个初始 pair 嵌入从三个来源获得大量丰富：通过 `Templ_emb` 模块的模板结构，通过 `Recycling` 模块的先前迭代信息，以及在迭代处理期间来自 MSA 和 3D 轨道的持续更新。
+
+来源：[Embeddings.py](network/Embeddings.py#L54-L100), [Embeddings.py](network/Embeddings.py#L337-L364)
+
+`MSA2Pair` 模块通过外积操作实现从 MSA 轨道到 pair 轨道的信息流。它将 MSA 特征投影到隐藏维度（`d_hidden=32`），沿序列维度计算均值，并应用学习的投影以生成 pair 更新。该操作有效地将协同进化信号从 MSA 聚合为成对约束，使 pair 轨道能够学习哪些残基对在进化上是耦合的。
+
+来源：[Track_module.py](network/Track_module.py#L297-L349)
+
+`PairStr2Pair` 模块使用多种互补操作实现复杂的 pair 轨道精修：
+
+- **三角形乘法**：传出和传入三角形乘法操作都通过考虑残基三元组来捕获高阶关系
+- **轴向注意力**：沿 pair 矩阵每个维度的有偏行和列注意力，偏置由 RBF 距离特征和状态投影提供
+- **结构门控**：来自结构轨道特征的学习门控调节几何信息对 pair 表示的影响
+
+结构门控机制特别值得注意：它从状态特征的左右投影的外积计算门控值，应用 sigmoid 激活，并将此门控与 RBF 嵌入的距离特征相乘。这允许模型根据预测置信度学习何时信任几何信息而非进化信息。
+
+来源：[Track_module.py](network/Track_module.py#L132-L295)
+
+**Pair 轨道操作摘要：**
+
+| 操作 | 输入维度 | 输出维度 | 目的 |
+|-----------|-----------------|------------------|---------|
+| 三角形乘法输出 | (B, L, L, 128) | (B, L, L, 128) | 捕获传出残基关系 |
+| 三角形乘法输入 | (B, L, L, 128) | (B, L, L, 128) | 捕获传入残基关系 |
+| 行注意力 | (B, L, L, 128) + 偏置 | (B, L, L, 128) | 行向残基关系建模 |
+| 列注意力 | (B, L, L, 128) + 偏置 | (B, L, L, 128) | 列向残基关系建模 |
+| 前馈网络 | (B, L, L, 128) | (B, L, L, 128) | 非线性变换 |
+
+来源：[Track_module.py](network/Track_module.py#L132-L295)
+
+## 3D 结构轨道：坐标生成和精修
+
+3D 结构轨道代表架构的空间维度，使用 SE(3)-等变操作直接操纵原子坐标。状态特征（`d_state=16`）作为该轨道中的主要表示，封装了每个残基的几何信息和预测置信度。
+
+`Str2Str` 模块编排结构轨道更新，实现了一个复杂的流程，集成来自 MSA 和 pair 轨道的信息。它使用 top-k 最近邻方法（默认 `top_k=64`）从当前坐标构建图表示，从查询 MSA 序列和结构状态创建节点，并从 pair 特征与几何距离特征的组合创建边。
+
+来源：[Track_module.py](network/Track_module.py#L490-L617)
+
+**节点特征构建：**
+
+节点特征结合来自两个来源的信息：MSA 轨道（查询序列）和结构轨道（先前状态）。每个都被标准化并投影到 SE(3) transformer 所需的输入维度（`l0_in_features=32`），然后相加并通过带有层归一化的前馈层。这创建了一个丰富的表示，既编码了来自 MSA 的进化信号，也编码了来自先前坐标预测的几何信息。
+
+**边特征构建：**
+
+边特征通过连接两个来源构建：（1）投影到 `num_edge_features=32` 维度的标准化 pair 特征，和（2）RBF 编码的 Cα 距离与序列分离信息的组合。序列分离提供了关于残基是否处于同一二级结构元件或不同结构域的关键上下文，指导 SE(3) transformer 的注意力机制。
+
+SE(3)-等变 transformer 更新标量特征（类型-0）和向量特征（类型-1）。标量更新产生状态偏移（`shift['0']`），该偏移被加到先前状态，而向量更新产生旋转和平移偏移。平移偏移按 10.0 的因子缩放，以确保坐标精修期间的适当步长，旋转偏移表示为归一化并转换为 3×3 旋转矩阵的四元数（4D）。
+
+来源：[Track_module.py](network/Track_module.py#L490-L617), [SE3_network.py](network/SE3_network.py#L12-L87)
+
+<CgxTip>SE(3)-等变设计是 3D 轨道有效性的基础：它保证对输入坐标应用旋转或平移会导致输出坐标的等效变换，确保无论方向如何，预测结构的物理一致性。</CgxTip>
+
+## 迭代跨轨道通信
+
+三轨道架构的真正力量源于轨道间的迭代通信模式。`IterBlock` 类实现了跨轨道更新的单次迭代，编排一系列精确的操作，使每个轨道都能从其他轨道的精修表示中受益。
+
+来源：[Track_module.py](network/Track_module.py#L619-L699)
+
+```mermaid
+sequenceDiagram
+    participant M as MSA 轨道
+    participant P as Pair 轨道
+    participant S as 结构轨道
+    
+    Note over M,P,S: IterBlock 执行
+    
+    M->>S: 查询序列和状态信息
+    P->>S: Pair 关系
+    S->>S: SE(3) Transformer
+    S->>M: 状态投影（反馈）
+    S->>P: 状态投影（偏置）
+    
+    P->>P: 三角形操作
+    P->>P: 轴向注意力（带有 S 偏置）
+    
+    M->>M: 行注意力（带有 P 偏置）
+    M->>M: 列注意力
+    M->>P: MSA2Pair 外积
+    
+    Note over M,P,S: 迭代结束
+```
+
+**每个 IterBlock 内的迭代流程：**
+
+1. **坐标重计算**：将当前旋转矩阵和平移应用于初始坐标以生成更新的 3D 结构
+2. **RBF 特征计算**：从 Cα 位置计算基于距离的特征，并与序列分离结合
+3. **结构轨道更新**：SE(3) transformer 处理节点和边特征以生成新的旋转/平移和状态更新
+4. **Pair 轨道更新**：三角形乘法和轴向注意力操作，带有结构生成的偏置
+5. **MSA 轨道更新**：带有 pair 偏置的行注意力、列注意力，以及通过状态投影的直接结构反馈
+
+`IterativeSimulator` 在三个不同阶段编排 `IterBlock` 的多次迭代：extra block 阶段（`n_extra_block=4`）使用全局注意力处理完整 MSA，main block 阶段（`n_main_block=8`）使用局部注意力模式处理潜在 MSA，而精修阶段（`n_ref_block=4`）应用具有降维状态维度的额外 SE(3) 变换以进行最终抛光。
+
+来源：[Track_module.py](network/Track_module.py#L753-L820)
+
+**内存优化策略：**
+
+该架构实现了几种内存优化技术，以实现长序列的处理：
+
+- **梯度分离**：旋转和平移矩阵在每次迭代前被分离，以防止梯度爆炸并稳定训练
+- **检查点**：可选的激活检查点以额外的计算为代价减少内存使用
+- **条带处理**：大型 pair 矩阵可以按条带处理以减少峰值内存需求
+- **CPU 卸载**：在推理期间，MSA 特征可以在内存密集的 pair 轨道操作期间临时移动到 CPU
+
+来源：[Track_module.py](network/Track_module.py#L787-L792), [Track_module.py](network/Track_module.py#L671-L688)
+
+## 循环机制
+
+循环机制使模型能够使用先前迭代的信息迭代地精修预测。`Recycling` 模块通过学习的投影将先前迭代的 MSA、pair 和状态表示与当前序列和坐标信息结合，生成添加到初始嵌入的校正。
+
+在第一次迭代（当不存在先前信息时）时，使用零值张量作为占位符。在后续迭代中，循环机制提供了关键的连续性，允许模型在其先前预测的基础上构建，同时融入来自更新 3D 坐标的新信息。
+
+来源：[Embeddings.py](network/Embeddings.py#L337-L364), [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L80-L98)
+
+<CgxTip>循环机制对于实现高精度至关重要：它通常需要 3-4 次循环迭代才能收敛到最佳结构，每次迭代随着模型精修其对蛋白质折叠的理解而提供增量改进。</CgxTip>
+
+## 默认配置参数
+
+默认架构参数在模型容量和计算效率之间提供平衡：
+
+| 参数 | 默认值 | 描述 |
+|-----------|--------------|-------------|
+| `d_msa` | 256 | MSA 轨道特征维度（潜在） |
+| `d_msa_full` | 64 | MSA 轨道特征维度（额外序列） |
+| `d_pair` | 128 | Pair 轨道特征维度 |
+| `d_state` | 16 | 3D 轨道状态特征维度 |
+| `n_extra_block` | 4 | 额外块迭代次数 |
+| `n_main_block` | 8 | 主块迭代次数 |
+| `n_ref_block` | 4 | 精修块迭代次数 |
+| `n_head_msa` | 8 | MSA 操作的注意力头数 |
+| `n_head_pair` | 4 | Pair 操作的注意力头数 |
+| `top_k` | 64 | SE(3) 图的最近邻数 |
+| `p_drop` | 0.15 | Dropout 概率 |
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L12-L19), [Track_module.py](network/Track_module.py#L702-L707)
+
+## 信息流摘要
+
+三轨道架构通过以下通路实现丰富的双向信息交换：
+
+- **MSA → Pair**：MSA 特征的外积聚合捕获协同进化约束
+- **MSA ← Pair**：Pair 和几何偏置 MSA 注意力操作，特别是行注意力
+- **Pair ← Structure**：状态特征生成门控，调节几何信息的影响
+- **Structure ← MSA**：查询序列嵌入有助于 SE(3) transformer 中的节点特征
+- **Structure ← Pair**：Pair 特征有助于 SE(3) 图中的边特征
+- **Structure → MSA**：状态投影向查询序列提供直接反馈
+
+这种全面的通信模式确保每个轨道都能从其他轨道的优势中受益：MSA 轨道提供进化上下文，pair 轨道捕获几何约束，3D 轨道生成物理上合理的结构。
+
+来源：[Track_module.py](network/Track_module.py#L619-L699), [Track_module.py](network/Track_module.py#L490-L617)
+
+---
+
+**后续步骤**：要加深你对 RoseTTAFold2 架构的理解，请探索 [SE(3)-Equivariant Transformer Network](7-se-3-equivariant-transformer-network) 以了解几何变换的详细信息，或 [Recycling Mechanism for Iterative Refinement](8-recycling-mechanism-for-iterative-refinement) 以了解模型如何在迭代中逐步改进预测。
+
+---
+
+- [深入解析/模型架构/SE(3)-等变 Transformer 网络](https://zread.ai/uw-ipd/RoseTTAFold2/7-se-3-equivariant-transformer-network)
+
+---
+slug:7-se-3-equivariant-transformer-network
+blog_type:normal
+---
+
+
+SE(3)-等变 Transformer 网络是 RoseTTAFold2 的几何引擎，使结构轨道能够处理 3D 坐标，同时保持旋转和平移等变性。该网络基于 NVIDIA SE3Transformer 库构建，通过一系列保持蛋白质结构几何性质的 SE(3)-等变操作来变换主干坐标。
+
+## 核心架构原则
+
+### SE(3) 等变性基础
+
+该网络基于 **SE(3)-等变性** 原则运行：如果输入坐标经过旋转 R 和平移 T，输出特征将可预测地变换为 f(R·x + T) = R·f(x) + T。这种几何约束对于蛋白质结构预测至关重要，因为支配分子相互作用的物理定律对全局坐标变换具有不变性。该实现通过 **张量场网络** 实现这一点，该网络将特征分解为旋转群 SO(3) 的不可约表示。
+来源：[SE3_network.py](network/SE3_network.py#L12-L14), [transformer.py](SE3Transformer/se3_transformer/model/transformer.py#L1-L50)
+
+### 基于 Fiber 的特征表示
+
+**Fiber 系统**提供了表示不同几何阶数的数学框架。每种特征类型都有特定的阶数 ℓ，维度为 2ℓ+1：
+
+- **Type-0 (ℓ=0)**：维度为 1 的不变标量（例如，氨基酸身份、注意力分数）
+- **Type-1 (ℓ=1)**：维度为 3 的等变 3D 向量（例如，位移向量、键方向）
+- **Type-2 (ℓ=2)**：维度为 5 的等变对称无迹矩阵（高阶几何信息）
+- **Type-3+ (ℓ≥3)**：用于复杂几何关系的高阶表示
+
+这种多阶表示允许网络在保持其不同变换性质的同时，同时维护标量信息（如置信度分数）和向量信息（如坐标更新）。
+来源：[fiber.py](SE3Transformer/se3_transformer/model/fiber.py#L21-L50)
+
+### 网络架构概述
+
+```mermaid
+flowchart TB
+    subgraph Input[输入准备]
+        MSA[MSA 特征]
+        State[先前的状态特征]
+        Pair[配对特征]
+        Coord[3D 坐标]
+    end
+    
+    subgraph Embedding[特征嵌入]
+        NodeEmbed[节点嵌入]
+        EdgeEmbed[边嵌入]
+    end
+    
+    subgraph Graph[图构建]
+        TopKGraph[Top-K 图构建器]
+    end
+    
+    subgraph SE3Layers[SE3 Transformer 层]
+        Attention[SE3 注意力]
+        Norm[SE3 归一化]
+        Conv[SE3 卷积]
+    end
+    
+    subgraph Output[坐标更新]
+        Shift[位移预测]
+        L0[标量更新 l=0]
+        L1[向量更新 l=1]
+        Rot[旋转]
+        Trans[平移]
+        NewCoords[新坐标]
+    end
+    
+    MSA --> NodeEmbed
+    State --> NodeEmbed
+    Pair --> EdgeEmbed
+    Coord --> TopKGraph
+    
+    NodeEmbed --> TopKGraph
+    EdgeEmbed --> TopKGraph
+    
+    TopKGraph --> SE3Layers
+    SE3Layers --> Shift
+    
+    Shift --> L0
+    Shift --> L1
+    L0 --> NewCoords
+    L1 --> Rot
+    L1 --> Trans
+    Rot --> NewCoords
+    Trans --> NewCoords
+```
+
+## 数学基础
+
+### 基函数和球谐函数
+
+该网络使用球谐函数 Y^ℓ_m(r̂) 计算**成对基矩阵**，其中 r̂ = (x - x')/||x - x'|| 是节点之间的单位向量。对于每一对输入阶数 ℓ_in 和输出阶数 ℓ_out，基 K^{ℓ_out,ℓ_in}_J 通过将球谐函数与 **Clebsch-Gordon 系数** Q^{ℓ_out,ℓ_in}_J 缩并来构造：
+
+K^{ℓ_out,ℓ_in}_J = Y^J · Q^{ℓ_out,ℓ_in}_J
+
+其中 J 的范围从 |ℓ_in - ℓ_out| 到 ℓ_in + ℓ_out。这些基函数提供了 SE(3)-等变操作的数学基础。该实现使用 LRU 缓存来缓存这些系数以提高效率，并支持部分和完全融合的基计算以进行优化。
+来源：[basis.py](SE3Transformer/se3_transformer/model/basis.py#L34-L49), [basis.py](SE3Transformer/se3_transformer/model/basis.py#L79-L102)
+
+### 径向剖面函数
+
+**径向剖面函数** φ^{ℓ_out,ℓ_in}(r) 根据节点间距离 r 调制基矩阵的贡献。这是通过一个 MLP 实现的，该 MLP 接受不变的边特征（包括距离 ||r||）并输出权重：
+
+φ^{ℓ_out,ℓ_in}(r) = MLP([||r||, additional_edge_features])
+
+径向函数使网络能够学习依赖于距离的相互作用模式，同时保持等变性，因为它仅对不变量进行操作。MLP 架构通常包括两个带有层归一化和 ReLU 激活的隐藏层。
+来源：[convolution.py](SE3Transformer/se3_transformer/model/layers/convolution.py#L54-L88)
+
+### SE(3)-等变卷积
+
+对于具有多重数 C_in 的节点特征 f^{ℓ_in}，卷积输出 f^{ℓ_out} 的多重数为 C_out：
+
+f^{ℓ_out}_i = Σ_{j∈N(i)} Σ_J Σ_{ℓ_in} φ^{ℓ_out,ℓ_in}_J(||r_{ij}||) · K^{ℓ_out,ℓ_in}_J(r̂_{ij}) · f^{ℓ_in}_j
+
+其中 N(i) 是节点 i 的邻域。该方程展示了网络如何结合径向调制和旋转基函数来实现等变性。该实现支持三种融合级别：FULL（所有操作融合以适应 Tensor Cores）、PARTIAL（选择性融合）和 NONE（成对操作），在内存与速度之间进行权衡。
+来源：[convolution.py](SE3Transformer/se3_transformer/model/layers/convolution.py#L21-L52), [transformer.py](SE3Transformer/se3_transformer/model/transformer.py#L94-L99)
+
+## 组件架构
+
+### SE3TransformerWrapper 接口
+
+`SE3TransformerWrapper` 提供了 RoseTTAFold2 和 SE3Transformer 库之间的集成点。它管理 fiber 配置并处理 RoseTTAFold2 的表示与 SE3Transformer 的预期输入格式之间的转换。该包装器支持针对不同特征维度的灵活配置：
+
+- `l0_in_features`：输入标量特征维度（默认：32）
+- `l0_out_features`：输出标量特征维度（默认：16）
+- `num_edge_features`：边特征维度（默认：32）
+- `num_layers`：SE3 transformer 层数（默认：2）
+- `num_channels`：每个阶数的隐藏维度（默认：32）
+- `num_degrees`：最大阶数（默认：3，支持 ℓ=0,1,2）
+
+该包装器实现了专门的初始化策略，对大多数权重使用 LeCun 正态初始化，并对最后一层输出进行零初始化，以便从一开始就实现稳定的训练。
+来源：[SE3_network.py](network/SE3_network.py#L12-L56), [SE3_network.py](network/SE3_network.py#L57-L75)
+
+### 注意力机制
+
+SE(3)-等变注意力机制遵循多头注意力模式，但在具有边特征的图结构数据上操作：
+
+- **查询**：通过线性投影从节点特征计算得出
+- **键**：通过 SE(3)-等变卷积从节点特征计算得出，然后投影到边上
+- **值**：计算方式与键类似，但使用不同的投影权重
+
+注意力权重计算如下：
+
+α_{ij} = softmax(Σ_ℓ (key_{ij}^{ℓ} · query_i^{ℓ}) / √d_model)
+
+其中点积在所有阶数上执行。然后输出计算为值的加权和，使用 DGL 的消息传递原语聚合邻居。这种设计保持了等变性，因为键/值计算和注意力加权聚合都是等变操作。
+来源：[attention.py](SE3Transformer/se3_transformer/model/layers/attention.py#L66-L115), [attention.py](SE3Transformer/se3_transformer/model/layers/attention.py#L117-L165)
+
+### SE(3)-等变归一化
+
+`NormSE3` 模块通过将特征幅度与其方向分离来实现 SE(3)-等变非线性：
+
+1. 计算每个阶数的特征的 L2 范数：||f^{ℓ}||
+2. 对范数应用标准归一化和非线性：σ(LN(||f^{ℓ}||))
+3. 重新缩放原始特征以匹配新范数：f^{ℓ}_out = σ(LN(||f^{ℓ}||)) · (f^{ℓ} / ||f^{ℓ}||)
+
+这种方法保留了等变特征的相位（方向）信息，同时对其幅度应用可学习的变换。该实现使用钳位来防止小范数的数值不稳定性，特别是在 FP16 精度下。
+来源：[norm.py](SE3Transformer/se3_transformer/model/layers/norm.py#L33-L68), [norm.py](SE3Transformer/se3_transformer/model/layers/norm.py#L70-L93)
+
+<CgxTip>
+基于范数的非线性对于稳定训练至关重要。与直接对等变特征应用 ReLU（这会破坏等变性）不同，这种设计在允许特征幅度的可学习调制的同时保持方向信息，确保网络能够学习有意义的表示而不牺牲几何约束。
+</CgxTip>
+
+## 在 RoseTTAFold2 中的集成
+
+### 结构到结构轨道
+
+SE(3) transformer 作为 RoseTTAFold2 中 **Str→Str (Structure to Structure) 轨道**的核心组件集成。该组件通过处理当前结构信息来更新 3D 坐标和状态特征。Str2Str 模块遵循三阶段流程：
+
+**阶段 1 - 节点特征准备**：
+1. 从 MSA 特征的第一行提取查询序列：`seq = msa[:, 0]`
+2. 归一化并投影 MSA 和状态特征：`node = embed_node1(seq) + embed_node2(state)`
+3. 应用前馈变换和层归一化
+4. 重塑为图格式：对于 type-0（标量）特征为 `(B*L, n_node, 1)`
+
+**阶段 2 - 边特征准备**：
+1. 计算 Cα 原子之间的成对距离：`rbf_feat = rbf(||xyz_CA - xyz_CA'||)`
+2. 提取序列分离嵌入：`seqsep = SeqSep(idx)`
+3. 与配对特征结合：`edge = embed_edge1(pair) + embed_edge2([rbf_feat, seqsep])`
+4. 应用前馈变换和归一化
+
+**阶段 3 - 图构建和处理**：
+1. 使用当前 Cα 位置构建 top-k 图（默认：k=64 个最近邻）
+2. 提取等变 l=1 特征：CA-N 和 CA-C 向量
+3. 应用 SE(3) transformer：`shift = se3(G, node, l1_feats, edge_feats)`
+4. 将输出转换为坐标更新：
+   - 标量更新：`state += shift['0']`（不变特征更新）
+   - 向量更新：`offset = shift['1']`（等变坐标更新）
+   - 平移：`T = offset[:,:,0,:] * 10.0`（缩放平移向量）
+   - 旋转：`Q = offset[:,:,1,:]`（四元数表示）
+   - 变换：`Rs = Qs2Rs(Q)`（将四元数转换为旋转矩阵）
+
+这种设计允许网络直接预测坐标调整，同时更新用于后续迭代的内部状态表示。
+来源：[Track_module.py](network/Track_module.py#L472-L530), [Track_module.py](network/Track_module.py#L530-L590)
+
+### 迭代优化循环
+
+SE(3) transformer 在 RoseTTAFold2 的迭代优化循环内运行，其中每个 `IterBlock` 在所有三个轨道上执行协调更新：
+
+```mermaid
+sequenceDiagram
+    participant MSA as MSA 轨道
+    participant Pair as 配对轨道
+    participant Str as 结构轨道
+    participant SE3 as SE(3) Transformer
+    
+    Note over MSA,Str: 迭代 t
+    
+    MSA->>MSA: MSA→MSA (偏置注意力)
+    MSA->>Pair: MSA→Pair (协同进化提取)
+    
+    Pair->>Pair: Pair→Pair (三角操作)
+    
+    Pair->>Str: 配对特征 → 边嵌入
+    MSA->>Str: MSA 特征 → 节点嵌入
+    Str->>Str: 从坐标构建 top-k 图
+    Str->>SE3: 传递图、节点、边、l1 特征
+    SE3->>SE3: 注意力 + 卷积 + 归一化
+    SE3->>Str: 返回位移 [l=0, l=1]
+    Str->>Str: 更新状态 (l=0) 和坐标 (l=1)
+    
+    Note over MSA,Str: 迭代 t+1，特征已更新
+```
+
+每次迭代都通过这种三方交互来优化结构：MSA 轨道提供序列上下文，配对轨道提供成对约束，结构轨道生成实际的 3D 坐标。SE(3) transformer 是将成对信息转换为坐标更新同时保持几何一致性的引擎。
+来源：[Track_module.py](network/Track_module.py#L630-L680)
+
+## 配置和优化
+
+### 边特征填充策略
+
+该网络支持多种将距离信息纳入边特征的策略，由 `populate_edge` 参数控制：
+
+| 策略 | 公式 | 属性 | 用例 |
+|----------|---------|------------|----------|
+| **lin** | `r = ||r_ij||` | 线性距离，保留单位 | 通用，可解释的尺度 |
+| **arcsin** | `r = arcsinh(max(r-4, 0)) / 3` | 压缩大距离，在 4Å 处截断 | 处理异常值，有界范围 |
+| **log** | `r = log(1 + ||r_ij||)` | 对数压缩，平滑 | 强调短程相互作用 |
+| **zero** | `r = 0` | 无距离信息 | 消融研究，基线 |
+
+RoseTTAFold2 默认使用 arcsin 策略，在短程接触的敏感性和对异常值的鲁棒性之间取得了平衡。
+来源：[transformer.py](SE3Transformer/se3_transformer/model/transformer.py#L153-L164)
+
+### 融合级别优化
+
+该实现提供了三种融合级别，在内存消耗和计算速度之间进行权衡：
+
+- **FULL 融合**：融合所有阶数和通道的所有操作。需要统一的通道数和连续的阶数（0,1,2,...max_degree）。执行速度最快，但内存使用量最高。
+- **PARTIAL 融合**：按输出阶数或输入阶数融合操作。更灵活的要求。平衡速度和内存。
+- **NONE**：没有融合的成对操作。最节省内存，但执行最慢。
+
+RoseTTAFold2 默认使用 PARTIAL 融合（除非有 Tensor Cores 可用），在适应三个轨道的不同通道配置的同时提供良好的性能。
+来源：[convolution.py](SE3Transformer/se3_transformer/model/layers/convolution.py#L21-L52), [transformer.py](SE3Transformer/se3_transformer/model/transformer.py#L94-L99)
+
+### 低内存优化
+
+该网络支持几种用于训练大型蛋白质复合物的内存优化策略：
+
+1. **梯度检查点**：通过在反向传播期间重新计算前向传播来交换计算以换取内存
+2. **激活卸载**：在配对轨道操作期间将 MSA 特征临时移动到 CPU 以释放 GPU 内存
+3. **跨步处理**：分块处理特征以减少峰值内存使用量
+4. **混合精度**：使用 FP16 进行前向传播，并使用 FP32 主权重
+
+<CgxTip>
+`low_vram` 标志启用了一项关键优化，即在内存密集型的配对轨道操作期间将 MSA 特征卸载到 CPU，然后在结构处理时带回 GPU。这使得可以推理大型复合物（例如，>1000 个残基），否则这些复合物将超过 GPU 内存限制。
+</CgxTip>
+
+来源：[Track_module.py](network/Track_module.py#L666-L674), [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L37-L100)
+
+### 参数配置
+
+RoseTTAFold2 中的默认 SE(3) transformer 参数：
+
+```python
+SE3_param_full = {
+    'l0_in_features': 32,      # 输入标量特征
+    'l0_out_features': 16,     # 输出标量特征（状态）
+    'num_edge_features': 32,   # 边特征（配对 + 几何）
+    'num_layers': 2,           # Transformer 层数
+    'num_channels': 32,        # 每个阶数的隐藏维度
+    'num_degrees': 3,          # 最大阶数（ℓ=0,1,2）
+    'n_heads': 4,              # 注意力头数
+    'div': 4                   # 值的通道除数
+}
+```
+
+选择这些维度是为了平衡表示能力和计算效率。状态特征的较小输出维度（16 对 32）反映了将几何信息压缩为其他轨道使用的紧凑表示。
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L15-L20), [SE3_network.py](network/SE3_network.py#L14-L20)
+
+## 输出解释
+
+### 坐标更新
+
+SE(3) transformer 将坐标更新输出为平移和旋转分量：
+
+- **平移向量 T ∈ ℝ³**：每个残基坐标系的直接位移
+- **旋转矩阵 R ∈ ℝ³×³**：应用于残基局部坐标系的旋转
+- **组合更新**：`X_new = R · X_old + T`
+
+旋转被参数化为四元数（4D 向量）以获得数值稳定性，并转换为旋转矩阵以进行应用。平移按因子 10.0 缩放以匹配坐标系中使用的单位。
+来源：[Track_module.py](network/Track_module.py#L581-L590)
+
+### 状态更新
+
+标量 (l=0) 输出更新内部状态表示：
+
+- `state_new = state_old + shift['0']`
+- 状态特征在后续迭代中被用于：
+  - 通过偏置注意力向 MSA 轨道提供几何信息
+  - 通过门控机制促进配对轨道更新
+  - 作为侧链扭转预测的输入
+
+这种状态表示编码了学习到的几何和进化信息，指导后续的优化步骤。
+来源：[Track_module.py](network/Track_module.py#L579-L580), [Track_module.py](network/Track_module.py#L591-L593)
+
+### 侧链预测
+
+更新后的状态特征被传递到 `SCPred` 模块以预测侧链扭转角：
+
+- 输入：序列嵌入 + 状态特征
+- 输出：10 个扭转角（φ, ψ, ω, χ₁-χ₄, Cβ bend, Cβ twist, CG），具有 sin 和 cos 分量
+- 这使得网络能够预测完整的原子坐标，而不仅仅是主干
+
+侧链预测器是一个小型 ResNet，通过几个残差层处理组合的序列和状态信息。
+来源：[Track_module.py](network/Track_module.py#L350-L394)
+
+## 性能和实现注意事项
+
+### 计算复杂度
+
+计算成本主要取决于：
+- **图构建**：成对距离计算的 O(N²)（但对于 top-k 图减少到 O(N·k)）
+- **注意力**：O(E · d_model)，其中 E 是边数（k-NN 图的 N·k）
+- **基计算**：O(E · max_degree⁴) 但计算一次并缓存
+- **卷积**：O(E · Σ_{ℓ_in,ℓ_out} C_in · C_out · Σ_J dim(J))
+
+使用 top-k 图（k=64）对于扩展到大型蛋白质至关重要，将全成对相互作用的二次复杂度降低到接近线性的复杂度。
+
+### GPU 优化
+
+该实现包括几种特定的 GPU 优化：
+
+1. **Tensor Core 利用率**：将奇数维度填充到 8 的倍数以进行高效的张量核心操作
+2. **NVTX 标记**：用于性能分析的配置区域
+3. **JIT 编译**：对关键路径进行 TorchScript 编译（基计算、归一化）
+4. **融合操作**：将多个内核组合成单个操作以减少内核启动开销
+
+这些优化使得在使用分布式数据并行训练时，能够在多 GPU 系统上进行接近线性的扩展训练。
+来源：[basis.py](SE3Transformer/se3_transformer/model/basis.py#L110-L131), [convolution.py](SE3Transformer/se3_transformer/model/layers/convolution.py#L140-L180)
+
+### 等变性验证
+
+该实现在 `tests/test_equivariance.py` 中包含等变性测试，以验证输入坐标的随机旋转在数值精度内产生输出特征的相应旋转。这种测试对于确保架构修改不会无意中破坏几何约束至关重要。
+来源：[test_equivariance.py](SE3Transformer/tests/test_equivariance.py)
+
+## 后续步骤
+
+要全面了解 RoseTTAFold2 的架构：
+
+- **[迭代优化的回收机制](8-recycling-mechanism-for-iterative-refinement)**：了解网络如何通过多个周期的回收迭代优化预测
+- **[三轨道设计](6-three-track-design-msa-pair-and-3d-structure-tracks)**：了解集成 MSA、配对和结构轨道的整体架构
+- **[轨道模块设计和交互](13-track-module-design-and-interaction)**：探索每次迭代中轨道之间详细的交互模式
+- **[使用 SE3 层进行坐标生成](14-coordinate-generation-with-se3-layers)**：深入了解如何将 SE(3) 层输出转换为原子坐标
+
+---
+
+- [深入解析/模型架构/用于迭代优化的循环机制](https://zread.ai/uw-ipd/RoseTTAFold2/8-recycling-mechanism-for-iterative-refinement)
+
+---
+slug:8-recycling-mechanism-for-iterative-refinement
+blog_type:normal
+---
+
+
+循环机制使 RoseTTAFold2 能够通过多次迭代逐步优化蛋白质结构预测，利用每一轮的预测输出作为下一轮的输入。这种迭代优化策略允许模型在每个周期中融入已学习的结构约束并提高预测精度，遵循与 AlphaFold 2 循环机制类似的范式。
+
+## 循环架构概述
+
+循环系统在两个不同的层面上运行：（1）跨迭代循环，在独立的前向传播之间传递信息；（2）迭代内细化块，在单次前向传播内逐步更新表示。跨迭代循环通过 [Embeddings.py](network/Embeddings.py#L337-L358) 中的 `Recycling` 模块实现，而迭代内细化发生在 [Track_module.py](network/Track_module.py#L701-L841) 中的 `IterativeSimulator` 中。
+
+```mermaid
+flowchart TD
+    subgraph Iteration_N_minus_1["迭代 N-1"]
+        A[输入 MSA<br/>配对特征<br/>状态] --> B[IterativeSimulator]
+        B --> C[输出 MSA<br/>配对特征<br/>状态<br/>坐标]
+    end
+    
+    subgraph Iteration_N["迭代 N"]
+        D[新输入<br/>特征] --> E[Recycling 模块]
+        C --> E
+        E --> F[组合特征<br/>+ 循环信息]
+        F --> G[IterativeSimulator]
+        G --> H[优化后的输出]
+        H -.->|下一次迭代| E
+    end
+    
+    subgraph IterBlock_Detail["IterBlock 结构"]
+        I[MSA→MSA<br/>注意力] --> J[MSA→Pair<br/>协同进化]
+        J --> K[Pair→Pair<br/>三角形更新]
+        K --> L[Str→Str<br/>SE3 层]
+        L --> M[更新的 R, T, 状态]
+    end
+    
+    G --> IterBlock_Detail
+```
+
+## 跨迭代循环
+
+跨迭代循环机制在每次模型前向传播开始时通过 [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L79-L98) 中的 `RoseTTAFoldModule.forward()` 方法运行。此过程转换上一迭代的输出，并将其作为扰动添加到当前输入嵌入中。
+
+在第一次迭代中，当不存在先前的输出时，循环输入初始化为与目标特征形状相同的零张量：
+
+```python
+if msa_prev == None:
+    msa_prev = torch.zeros_like(msa_latent[:,0])
+    pair_prev = torch.zeros_like(pair)
+    state_prev = torch.zeros_like(state)
+```
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L80-L83)
+
+`Recycling` 模块接收上一迭代的 MSA、配对和状态特征以及 3D 坐标（`xyz`），并生成循环更新，这些更新按元素添加到当前嵌入中：
+
+```python
+msa_recycle, pair_recycle, state_recycle = self.recycle(
+  seq, msa_prev, pair_prev, state_prev, xyz, recycl_stripe, mask_recycle)
+msa_latent[:,0] += msa_recycle
+pair += pair_recycle
+state += state_recycle
+```
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L92-L98)
+
+这种加性更新方案保留了原始输入特征，同时融入了从先前迭代中学习到的结构信息。循环特征捕获了关于原子几何结构、骨干扭转角和残基间空间关系的隐含知识，而这些在原始 MSA 和序列数据中未能充分体现。
+
+## 使用 IterativeSimulator 进行迭代内细化
+
+在每次前向传播中，`IterativeSimulator` 通过一系列专用处理块执行多轮特征细化。模拟器实例化时包含三种可配置的块类型：额外块（`n_extra_block`）、主块（`n_main_block`）和细化块（`n_ref_block`），如 [Track_module.py](network/Track_module.py#L702-L711) 所示。
+
+| 块类型 | 默认数量 | 主要功能 | 关键操作 |
+|------------|---------------|-------------------|----------------|
+| 额外块 | 4 | 使用完整特征处理深度 MSA | 全局注意力，SE3 更新 |
+| 主块 | 8 | 核心结构预测循环 | 三角形注意力，局部 SE3 更新 |
+| 细化块 | 4 | 最终坐标细化 | 结构到结构细化 |
+
+迭代过程系统地更新每个残基的旋转矩阵（`R_in`）和平移向量（`T_in`）。在每个块开始时，这些参数从计算图中分离，以防止梯度跨块流动并确保数值稳定性：
+
+```python
+R_in = R_in.detach()
+T_in = T_in.detach()
+xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
+```
+来源：[Track_module.py](network/Track_module.py#L787-L790)
+
+当前骨干坐标由旋转矩阵和平移向量重建，提供了一个不断演化的结构假设，指导后续层中的注意力机制。
+
+## IterBlock：单步细化单元
+
+每个迭代块（`IterBlock`）实现三轨信息流的完整循环，如 [Track_module.py](network/Track_module.py#L619-L700) 中所定义。该块协调四个顺序更新操作，反映三轨架构：
+
+1. **MSA→MSA 更新**（`MSAPairStr2MSA`）：偏置自注意力，其中注意力偏置源自配对表示和结构特征，允许 MSA 轨道融入来自配对和结构轨道的空间约束。
+
+2. **MSA→Pair 更新**（`MSA2Pair`）：从 MSA 中提取协同进化信号以更新残基间配对特征，捕获指示物理接触的相关突变。
+
+3. **Pair→Pair 更新**（`PairStr2Pair`）：三角形乘法运算，使用源自结构的 RBF（径向基函数）距离特征更新配对特征，实现对残基关系的几何推理。
+
+4. **Str→Str 更新**（`Str2Str`）：SE(3) 等变 Transformer 层，基于 MSA 和配对表示更新旋转矩阵、平移向量和状态特征。
+
+该块根据当前坐标计算基于距离的 RBF 特征，结合空间距离和序列分离信息：
+
+```python
+rbf_feat = (
+  rbf(torch.cdist(xyz[:,rows,1], xyz[:,cols,1])).reshape(B,NR,NC,-1)
+  + self.pos(idx[:,rows],idx[:,cols], B, L, nc_cycle)
+)
+```
+来源：[Track_module.py](network/Track_module.py#L665-L668)
+
+这些 RBF 特征编码了从演化结构中学习到的残基间距离，并作为配对到配对和结构到结构更新操作的几何先验。
+
+<CgxTip>
+循环机制的有效性取决于结构更新层的 SE(3) 等变性质。通过在迭代间保持几何等变性，模型确保旋转和平移更新一致累积而不引入系统偏差，从而实现向正确结构的稳定收敛。
+</CgxTip>
+
+## 状态特征管理和投影
+
+状态特征在不同迭代阶段之间进行投影变换，以匹配各种 SE3 层的维度要求。`IterativeSimulator` 通过线性层 `proj_state` 和 `proj_state2` 管理这些投影：
+
+```python
+state = self.proj_state(state)
+# ... 主块和额外块处理 ...
+state = self.proj_state2(state)
+# ... 细化块处理 ...
+```
+来源：[Track_module.py](network/Track_module.py#L780, L819)
+
+第一个投影（`proj_state`）将状态特征从 SE3 top-k 维度（默认 16 个特征）转换为完整的 SE3 维度，用于额外块和主块。第二个投影（`proj_state2`）逆转此转换，为使用更高效的 top-k SE3 参数化的细化块准备状态特征。
+
+## 坐标收集和多尺度输出
+
+所有中间坐标预测在迭代过程中被系统收集，使模型能够生成多尺度结构候选集合。每个块的旋转矩阵和平移向量被附加到列表中：
+
+```python
+R_s.append(R_in)
+T_s.append(T_in)
+alpha_s.append(alpha)
+```
+来源：[Track_module.py](network/Track_module.py#L798-L800)
+
+完成所有块后，这些列表被堆叠成张量：
+
+```python
+R_s = torch.stack(R_s, dim=0)
+T_s = torch.stack(T_s, dim=0)
+alpha_s = torch.stack(alpha_s, dim=0)
+```
+来源：[Track_module.py](network/Track_module.py#L836-L838)
+
+[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L145-L146) 中的最终坐标变换使用收集的旋转矩阵和平移向量重建所有中间骨干结构：
+
+```python
+xyz = einsum('rblij,blaj->rblai', R, xyz-xyz[:,:,1].unsqueeze(-2)) + T.unsqueeze(-2)
+```
+
+这产生了一组不同细化程度的结构预测，可用于基于集成的置信度估计，或根据 LDDT 分数等辅助指标选择最可靠的预测。
+
+## 内存效率和低显存优化
+
+循环和迭代细化机制包括针对内存受限环境的优化。`IterBlock.forward()` 方法支持 `low_vram` 模式，该模式在配对到配对注意力计算期间将大型 MSA 张量临时传输到 CPU 内存：
+
+```python
+if (low_vram and not self.training):
+    msa = msa.cpu()
+pair = self.pair2pair(pair, rbf_feat, state, strides, crop)
+rbf_feat = None
+if (low_vram and not self.training):
+    msa = msa.to(pair.device)
+```
+来源：[Track_module.py](network/Track_module.py#L683-L688)
+
+此外，系统通过 `use_checkpoint` 参数支持梯度检查点，通过在反向传播期间重新计算中间激活来牺牲计算时间以减少内存。`striping` 参数允许在嵌入和循环操作期间对特征进行子采样，以进一步减少内存占用。
+
+## 与训练和预测的集成
+
+在训练期间，循环机制允许网络通过在多次循环迭代中将其输出与真实结构进行比较，学习系统地减少预测误差。损失函数计算每次迭代的预测精度，提供梯度以指导循环模块如何在周期间最有效地传输信息。
+
+<CgxTip>
+在推理期间，可以调整循环次数以在预测准确性和计算成本之间进行权衡。虽然默认配置使用 3-4 次循环迭代，但研究表明，对于大多数蛋白质目标，超过此点的收益递减，尽管 MSA 信号较弱的困难目标可能会从额外周期中受益。
+</CgxTip>
+
+循环参数通过 [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L12-L19) 中模型初始化期间的 `n_extra_block`、`n_main_block` 和 `n_ref_block` 参数控制。这些超参数决定了迭代内细化的深度，并可根据特定用例进行调整——用于快速预测的块较少的轻量级模型，或用于最大准确性的块较多的深层模型。
+
+## 后续步骤
+
+要了解在循环期间实现轨道内部和轨道之间信息流动的注意力机制，请阅读 [注意力机制 (MSA 行/列、三角形乘法)](9-attention-mechanisms-msa-row-column-triangle-multiplication)。有关如何通过 SE3 层实际生成坐标的详细信息，请参阅 [使用 SE3 层生成坐标](14-coordinate-generation-with-se3-layers)。要了解作为循环基础的三轨架构，请参考 [三轨设计：MSA、Pair 和 3D 结构轨道](6-three-track-design-msa-pair-and-3d-structure-tracks)。
+
+---
+
+- [深入解析/模型架构/注意力机制（MSA 行/列、三角形乘法）](https://zread.ai/uw-ipd/RoseTTAFold2/9-attention-mechanisms-msa-row-column-triangle-multiplication)
+
+---
+slug:9-attention-mechanisms-msa-row-column-triangle-multiplication
+blog_type:normal
+---
+
+
+RoseTTAFold2 采用了一种复杂的多轨道注意力架构，结合了来自多序列比对（MSA）的进化信息和来自成对表示的几何推理。注意力机制作为核心计算引擎，在迭代优化过程中实现了 MSA 轨道、成对轨道和 3D 结构轨道之间的信息流动。该架构设计利用 **带成对偏置的 MSA 行注意力**、**MSA 列注意力** 和 **三角形乘法** 操作来捕获协同进化信号，并在残基对之间强制执行几何一致性。
+
+来源：[network/Attention_module.py](network/Attention_module.py#L168-L643), [network/Track_module.py](network/Track_module.py#L48-L296)
+
+## 架构概述
+
+注意力机制在分层更新方案中运行，该方案转换三个轨道上的表示：MSA 轨道（B×N×L×d_msa）、成对轨道（B×L×L×d_pair）和 3D 坐标轨道。核心创新在于使用成对表示来偏置 MSA 轨道中的注意力模式，允许进化耦合指导序列信息的聚合。同时，成对轨道上的三角形乘法操作通过三角闭合约束推理残基对之间的关系，强制执行几何一致性。
+
+```mermaid
+graph TB
+    subgraph Input["输入表示"]
+        MSA["MSA 轨道<br/>B×N×L×256"]
+        PAIR["成对轨道<br/>B×L×L×128"]
+        RBF["RBF 特征<br/>B×L×L×64"]
+        STATE["SE3 状态<br/>B×L×16"]
+    end
+    
+    subgraph MSATrack["MSA 轨道更新"]
+        ROW["带成对偏置的<br/>MSA 行注意力"]
+        COL["MSA 列注意力<br/>(全局/局部)"]
+        FF_MSA["前馈层"]
+    end
+    
+    subgraph PairTrack["成对轨道更新"]
+        TRI_OUT["三角形乘法<br/>(出向)"]
+        TRI_IN["三角形乘法<br/>(入向)"]
+        AXIAL["偏置轴向注意力"]
+        FF_PAIR["前馈层"]
+    end
+    
+    subgraph Coordination["跨轨道协调"]
+        M2P["MSA → 成对<br/>协同进化聚合"]
+        P2M["成对 → MSA<br/>成对偏置注入"]
+        S2M["状态 → MSA<br/>结构反馈"]
+        S2P["状态 → 成对<br/>结构门控"]
+    end
+    
+    MSA --> ROW
+    PAIR --> ROW
+    STATE -.->|反馈| ROW
+    
+    MSA --> COL
+    
+    ROW --> M2P
+    PAIR <--> M2P
+    
+    STATE --> S2M
+    S2M -.->|注入| ROW
+    
+    RBF -->|偏置| AXIAL
+    PAIR --> TRI_OUT
+    PAIR --> TRI_IN
+    TRI_OUT --> AXIAL
+    TRI_IN --> AXIAL
+    STATE -->|门控| S2P
+    S2P -.->|门控| RBF
+    RBF --> AXIAL
+    
+    AXIAL --> FF_PAIR
+    FF_PAIR --> PAIR
+```
+
+## 带成对偏置的 MSA 行注意力
+
+MSA 行注意力对 MSA 维度（N 个序列）中的每个位置（L 个残基）执行跨序列注意力，其关键创新在于成对表示为注意力分数提供可学习的偏置。这使得模型能够利用来自成对表示的进化耦合信息来指导在信息聚合期间哪些序列位置相互关注。
+
+该实现扩展了标准多头注意力，包含三个关键增强：**序列依赖权重**用于缩放查询贡献，**成对偏置注入**用于将残基间耦合信息添加到注意力分数，以及控制信息流的**门控机制**。注意力机制计算分数如下：
+
+```
+attn[i,j,h] = sum_k(query[i,k,h] * key[j,k,h]) + bias[i,j,h]
+```
+
+其中 bias[i,j,h] 源自成对表示，反映了残基 i 和 j 之间的协同进化强度。
+来源：[network/Attention_module.py](network/Attention_module.py#L168-L281)
+
+行注意力集成了多个信息流。序列权重根据序列保守性模式缩放查询表示，成对表示被投影以为每个注意力头生成偏置项，来自 SE3 轨道的状态特征被注入到第一个 MSA 行（查询序列）中，以提供结构感知更新。在推理过程中，该实现使用了内存高效的跨步处理，将 MSA 分块处理以减少峰值内存使用。
+来源：[network/Track_module.py](network/Track_module.py#L78-L130)
+
+| 组件 | 输入形状 | 输出形状 | 用途 |
+|-----------|-------------|--------------|---------|
+| Query/Key/Value 投影 | B×N×L×256 | B×N×L×h×32 | 多头 Q/K/V 计算 |
+| 成对偏置投影 | B×L×L×128 | B×L×L×h | 注入协同进化偏置 |
+| 序列权重 | B×N×L×256 | B×N×L×h×32 | 按序列保守性缩放查询 |
+| 门控 | B×N×L×256 | B×N×L×h×32 | 控制每个头的信息流 |
+
+<CgxTip>行注意力对残差连接使用零初始化的输出投影，这确保该模块在训练早期表现为恒等映射，并稳定通过深层注意力堆叠的梯度流动。</CgxTip>
+
+## MSA 列注意力
+
+MSA 列注意力对 MSA 中的每个序列（N 个序列）在序列维度（L 个残基）上执行注意力，允许同一序列内不同残基位置之间的信息传播。该机制与行注意力互补：行注意力聚合每个残基跨序列的信息，而列注意力在每个序列内跨残基传播信息。
+
+实现了两种变体：**局部列注意力**使用基于跨步的内存优化的标准多头注意力，以及 **全局列注意力**使用每个位置单个学习查询来同时关注所有序列。全局变体在序列维度上计算平均池化查询，然后使用此全局查询关注所有序列。这种设计在捕获序列级模式方面特别有效，同时计算效率高。
+来源：[network/Attention_module.py](network/Attention_module.py#L284-L416)
+
+列注意力模式在几个关键方面与行注意力不同。行注意力在序列维度（N）上操作并使用来自成对轨道的成对偏置，而列注意力在残基维度（L）上操作，没有显式的成对偏置。行注意力跨序列关注以聚合协同进化信息，而列注意力跨残基关注以传播位置信息。两种机制都使用相同的门控架构，具有 sigmoid 激活的门控，控制信息从注意力输出通过投影层的流动。
+
+行和列注意力的组合实现了 MSA 轨道内的双向信息流动。行注意力通知每个残基关于 MSA 中的保守模式，而列注意力通知每个序列关于跨位置的模式。这种双向流动对于捕获表征蛋白质进化的序列保守性和位置变化之间的复杂依赖关系至关重要。
+来源：[network/Track_module.py](network/Track_module.py#L121-L122)
+
+## 三角形乘法
+
+三角形乘法在成对轨道上操作，并通过三角闭合推理残基对之间的关系来强制执行几何一致性。基本见解是，对于任意三个残基 i、j、k，残基对 i-k 之间的关系应与残基对 i-j 和 j-k 之间关系的组合一致。三角形乘法通过计算左右成对特征的逐元素乘积并在共享维度上聚合来实现这一点。
+
+实现了两种变体：**出向三角形乘法**计算：
+
+```
+out[i,j] = sum_k(left[i,k] * right[j,k]) / L
+```
+
+以及 **入向三角形乘法**计算：
+
+```
+out[i,j] = sum_k(left[k,i] * right[k,j]) / L
+```
+
+其中左右投影应用于成对表示并在乘法前独立进行门控。出向变体沿从共享中间节点出发的出向边传播信息，而入向变体沿入向边传播。
+来源：[network/Attention_module.py](network/Attention_module.py#L531-L643)
+
+该实现在推理过程中具有内存高效的跨步处理，将 L×L 成对矩阵分块处理以减少峰值内存使用。每个块独立计算三角形乘法，并通过索引操作聚合结果。对于大型蛋白质，这一点尤为重要，因为 L×L 成对矩阵可能消耗大量 GPU 内存。该实现还在投影之前和聚合步骤之后使用单独的归一化层，对成对输入和中间表示应用 LayerNorm，然后再进行最终投影。
+来源：[network/Track_module.py](network/Track_module.py#L283-L284)
+
+| 操作 | 爱因斯坦求和符号 | 几何直觉 | 更新方向 |
+|-----------|------------------|---------------------|------------------|
+| 出向 | `bikd,bjkd->bijd` | 通过共享目标传播 | 通过中间节点向前 |
+| 入向 | `bkid,bkjd->bijd` | 通过共享源传播 | 通过中间节点向后 |
+
+<CgxTip>三角形乘法对投影层使用 LeCun 正态初始化，这非常适合逐元素乘法操作，因为它通过乘法门保持方差，并防止深层三角形堆叠中的梯度消失或爆炸。</CgxTip>
+
+## 成对轨道的偏置轴向注意力
+
+偏置轴向注意力通过使用源自坐标的偏置处理行或列注意力模式，提供高效的成对轨道更新。该实现通过置换操作支持行和列变体，该操作在行操作时转置成对矩阵，从而实现两个方向的代码重用。关键创新在于注意力是“绑定”的——沿被关注维度的所有查询使用相同的键矩阵，这将计算复杂度从 O(L³) 降低到 O(L²)。
+
+注意力机制使用成对表示作为查询、键和值，而 RBF 距离特征提供偏置项。RBF 特征编码从当前 3D 坐标计算的残基间距离，允许结构信息指导成对轨道上的注意力模式。来自 SE3 轨道的状态特征对 RBF 特征进行门控，实现对哪些几何信息注入注意力计算的结构感知控制。
+来源：[network/Attention_module.py](network/Attention_module.py#L419-L529), [network/Track_module.py](network/Track_module.py#L249-L256)
+
+偏置轴向注意力包括几个架构优化。键按 1/L 归一化，以考虑绑定注意力模式，其中每个键被多个查询重用。来自 RBF 特征的偏置项按头投影，并在 softmax 归一化之前添加到注意力分数中，允许几何邻近性调节注意力模式。门控机制对成对特征的投影使用 sigmoid 激活来控制最终输出，确保根据局部成对表示上下文对注意力更新进行门控。
+
+三角形乘法和偏置轴向注意力的组合创建了一个强大的成对轨道更新机制。三角形乘法通过对整个成对矩阵的三角闭合推理强制执行全局几何一致性，而偏置轴向注意力提供受当前 3D 坐标引导的高效局部更新。这种双重机制使成对轨道能够在迭代优化期间整合全局协同进化约束和局部几何信息。
+来源：[network/Track_module.py](network/Track_module.py#L146-L150)
+
+## 迭代块中的集成
+
+所有注意力机制都集成到 IterBlock 类中，该类在回收机制的每次迭代期间协调跨轨道的信息流动。该块遵循系统的更新顺序：使用带成对偏置的行和列注意力进行 MSA 到 MSA 更新，聚合序列信息的 MSA 到成对更新，使用三角形乘法和轴向注意力的成对到成对更新，以及使用 SE(3)-transformer 层的结构到结构更新。
+来源：[network/Track_module.py](network/Track_module.py#L619-L700)
+
+MSA 到 MSA 块（MSAPairStr2MSA）依次应用带成对偏置的行注意力、列注意力和前馈变换，并带有残差连接。来自 SE3 轨道的状态特征通过 index_add 操作注入到第一个 MSA 行中，为 MSA 轨道提供直接的结构反馈。成对到成对块（PairStr2Pair）应用出向和入向三角形乘法，然后是行和列偏置轴向注意力，最后以前馈变换结束。两个块都对注意力输出使用 dropout，并带有广播维度以防止过拟合。
+
+在训练期间，块使用标准的残差连接，将变换的输出添加到输入。在内存受限的推理期间，块实现就地更新并使用可选跨步来分块处理张量。跨步配置通过跨步字典传递，该字典指定不同操作的跨步值（msarow_n、msarow_l、msacol、trimult、biasedax 等），从而允许在推理期间对内存精度权衡进行细粒度控制。
+来源：[network/Track_module.py](network/Track_module.py#L680-692)
+
+## 内存优化策略
+
+注意力机制实现了几种内存优化策略，使大型蛋白质的高效推理成为可能。跨步处理将大型张量操作划分为适合 GPU 内存的小块，不同的跨步值应用于不同的注意力模式。检查点在反向传播期间重新计算中间激活，而不是存储它们，以计算换取内存节省。CPU 卸载在启用低 VRAM 模式时，在成对轨道操作期间将 MSA 张量临时移动到 CPU 内存。
+
+跨步实现使用条件逻辑，根据是否指定了跨步值以及跨步是否小于张量维度，来选择分块和全张量操作。对于每个分块操作，实现按指定大小的跨步遍历张量，在块上计算操作，并通过 index_add 操作累积结果。这种方法通过一次处理一个块来保持数值准确性，同时减少峰值内存使用。
+来源：[network/Attention_module.py](network/Attention_module.py#L211-258), [network/Track_module.py](network/Track_module.py#L683-688)
+
+| 优化 | 节省的内存 | 计算成本 | 用例 |
+|--------------|---------------|------------------|----------|
+| 跨步处理 | 50-90% | 10-30% 开销 | 大型蛋白质（>500 个残基） |
+| 激活检查点 | 30-60% | 2x 反向传播 | GPU 内存有限的训练 |
+| CPU 卸载 | 40-70% | 传输延迟 | VRAM 极低的推理 |
+
+注意力机制共同形成了一个强大的架构，用于在蛋白质结构预测期间整合进化和几何信息。MSA 行和列注意力实现跨序列和位置的双向信息流动，三角形乘法通过三角闭合推理强制执行几何一致性，偏置轴向注意力提供受当前 3D 坐标引导的高效成对轨道更新。这些机制在迭代回收框架内协同工作，逐步将预测从初始 MSA 和模板特征优化为高精度原子模型。
+
+---
+
+## 输入处理
+
+- [深入解析/输入处理/MSA 生成与特征化](https://zread.ai/uw-ipd/RoseTTAFold2/10-msa-generation-and-featurization)
+
+---
+slug:10-msa-generation-and-featurization
+blog_type:normal
+---
+
+
+本页面解释了 RoseTTAFold2 如何生成和处理多序列比对（MSAs），以提取用于蛋白质结构预测的进化信息。MSA 处理流水线将原始序列比对转化为丰富的特征表示，这些表示将输入到三轨道架构中。
+
+## MSA 生成流水线
+
+RoseTTAFold2 通过使用 HHblits 对 UniRef30 和 BFD 序列数据库进行迭代数据库搜索来生成 MSAs。`make_protein_msa.sh` 脚本协调这一过程，并采用逐步放宽的搜索标准。
+
+```mermaid
+flowchart TD
+    A[Input FASTA] --> B[HHblits UniRef30<br/>E-value: 1e-10]
+    B --> C{Coverage Check}
+    C -->|>2000 seqs<br/>75% cov| D[Output MSA]
+    C -->|<2000 seqs| E[HHblits UniRef30<br/>E-value: 1e-6]
+    E --> F{Coverage Check}
+    F -->|>2000 seqs<br/>75% cov| D
+    F -->|<2000 seqs| G[HHblits UniRef30<br/>E-value: 1e-3]
+    G --> H{Coverage Check}
+    H -->|>2000 seqs<br/>75% cov| D
+    H -->|<2000 seqs| I[HHblits BFD<br/>E-value: 1e-3]
+    I --> J[Filter 90% ID<br/>75%/50% coverage]
+    J --> D
+```
+
+该脚本对 UniRef30 执行三次迭代搜索，E-value 阈值逐渐增加（1e-10 → 1e-6 → 1e-3），并在每次迭代后应用 `hhfilter` 以保留与查询序列具有 90% 一致性且覆盖率为 75% 或 50% 的序列 [来源：input_prep/make_protein_msa.sh#L23-L27]。如果 UniRef30 无法产生足够的序列（75% 覆盖率下 >2000 条或 50% 覆盖率下 >4000 条），流水线将回退到更大的 BFD 数据库 [来源：input_prep/make_protein_msa.sh#L40-L64]。
+
+<CgxTip>双重覆盖率阈值（75% 和 50%）提供了灵活性：更严格的 75% 覆盖率确保高质量的比对，而 50% 阈值允许在需要深度 MSA 时包含更远的同源序列。</CgxTip>
+
+## 蛋白质复合物的配对 MSA 生成
+
+在预测蛋白质复合物时，RoseTTAFold2 通过匹配不同链中具有相同分类学 ID（Taxonomic IDs）的序列来创建配对 MSAs。`make_paired_MSA_simple.py` 脚本通过读取单个链的 A3M 文件并组合共享相同进化起源的序列来执行此配对。
+
+该算法读取每个 A3M 文件，提取查询序列和带 TaxID 标记的同源序列，然后通过连接所有链中匹配的序列来创建配对序列 [来源：input_prep/make_paired_MSA_simple.py#L24-L78]。不匹配的序列用间隙字符填充。输出根据具有匹配序列的链数进行排序，优先考虑深度保守的序列 [来源：input_prep/make_paired_MSA_simple.py#L137-L138]。
+
+这种配对确保模型接收跨越相互作用链的共进化信号，这对于预测链间接触和复合物结构至关重要。
+
+## MSA 解析与预处理
+
+`parse_a3m()` 函数将 A3M 格式文件转换为适合神经网络处理的数值张量。此解析处理几个关键转换：
+
+```mermaid
+flowchart LR
+    A[A3M File] --> B[Read Sequences<br/>Skip headers]
+    B --> C[Lowercase Filtering<br/>Remove insertions]
+    C --> D[Multi-chain Split<br/>By / separator]
+    D --> E[Insertion Tracking<br/>0=match/gap, 1=insertion]
+    E --> F[Letter to Number<br/>ARNDCQ...→ 0-20]
+    F --> G[Unknown→Gap<br/>>20 → 20]
+    G --> H[Output<br/>MSA tensor, Insertion tensor]
+```
+
+解析器区分大写字母（比对位置）和小写字母（插入），通过删除小写字母获得比对后的 MSA [来源：network/parsers.py#L26-L40]。对于多链复合物，可以使用 '/' 作为分隔符分割序列，每条链单独存储并在最后连接 [来源：network/parsers.py#L28-L45]。插入被跟踪为单独的信息：对于每个比对位置，解析器记录插入残基的数量 [来源：network/parsers.py#L46-L58]。
+
+氨基酸字母使用字母表 "ARNDCQEGHILKMFPSTWYV-" 转换为整数（标准残基为 0-19，间隙/未知为 20）[来源：network/parsers.py#L63-L68]。
+
+## MSA 特征化架构
+
+`MSAFeaturize()` 函数是将原始 MSA 数据转换为丰富特征表示的核心转换。此过程在 `network/featurizing.py` 和 `network/data_loader.py` 中实现，后者支持用于迭代细化机制的多次回收迭代。
+
+### 种子和额外序列选择
+
+特征化将 MSA 分为两个流：
+
+- **种子 MSA（latent MSA）**：限制为 `MAXLAT` 条序列（默认 128），始终包含查询序列加上随机选择的同源序列。这种紧凑的表示在 MSA 轨道中经过密集处理。
+- **额外序列**：最多 `MAXSEQ` 条序列（默认 1024）提供额外的进化背景，而无需完整的 MSA 轨道处理开销。
+
+种子序列采用复杂的 15% 掩码策略，该策略结合了多种 token 来源 [来源：network/featurizing.py#L60-L68]：
+
+| 掩码类型 | 概率 | 描述 |
+|--------------|-------------|-------------|
+| 随机氨基酸 | 10% | 从 20 个残基中均匀采样 |
+| 轮廓采样 | 10% | 从 MSA 位置频率中采样 |
+| 原始残基 | 10% | 保留原始氨基酸 |
+| 掩码 token | 70% | 替换为特殊的 "mask" token |
+
+这种掩码策略提供了类似于掩码语言建模的训练信号，教导网络从进化和结构背景中预测被掩码的残基。
+
+### 特征提取组件
+
+特征化为种子和额外序列生成全面的特征：
+
+**种子 MSA 特征（每个位置 48 个通道）**：
+- One-hot 氨基酸：22 个通道（20 个残基 + 间隙 + 掩码）
+- 聚类轮廓：22 个通道，来自将额外序列与种子序列聚类
+- 插入统计：2 个通道（局部插入 + 平均聚类插入）
+- 末端信息：2 个通道（N 端和 C 端标志）[来源：network/featurizing.py#L33-L36]
+
+**额外序列特征（每个位置 25 个通道）**：
+- One-hot 氨基酸：22 个通道
+- 插入信息：1 个通道（arctan 变换）
+- 末端信息：2 个通道 [来源：network/featurizing.py#L138-L140]
+
+### 汉明距离聚类
+
+额外序列使用汉明距离聚类到种子序列上，以高效捕捉进化关系。该算法通过将额外序列和种子序列的 one-hot 编码相乘来计算它们之间的一致性矩阵，然后将每个额外序列分配给其最近的种子 [来源：network/featurizing.py#L104-L109]。
+
+聚类轮廓聚合分配给每个种子的所有额外序列的特征，并根据分配进行加权，并忽略掩码 token [来源：network/featurizing.py#L112-L118]。这种聚类在保留进化信息丰富性的同时降低了计算复杂性。
+
+<CgxTip>插入统计使用 `arctan(x/3.0) * (2.0/π)` 进行变换，将动态范围从 0 压缩到 1，防止大的插入计数主导特征空间 [来源：network/featurizing.py#L124-L125]。</CgxTip>
+
+## MSA 下采样与合并
+
+### 大型 MSA 的块删除
+
+对于超过 `BLOCKCUT` 阈值（默认 5 条序列）的 MSAs，`MSABlockDeletion()` 函数随机删除 MSA 中 30% 序列的块。这防止模型过度拟合非常深的 MSAs，并在序列多样性和计算效率之间保持平衡 [来源：network/data_loader.py#L49-L60]。
+
+该函数选择 5 个随机起始位置，从每个位置开始删除序列块，并返回下采样的 MSA 和插入张量。
+
+### 复合物和寡聚物的 MSA 合并
+
+RoseTTAFold2 支持两种类型的 MSA 合并：
+
+1. **异源寡聚物**（`merge_a3m_hetero`）：合并来自具有不同 TaxID 的不同蛋白质的 MSAs。查询序列被连接，额外序列在相反链上用间隙填充 [来源：network/data_loader.py#L511-L528]。
+2. **同源寡聚物**（`merge_a3m_homo`）：在相同链上复制 MSA 信息。对于 n 聚体，查询序列重复 n 次，同源物分布在所有副本中 [来源：network/data_loader.py#L563-L578]。
+
+这种合并使模型能够通过提供配对的进化信息来预测蛋白质复合物和对称寡聚物的结构。
+
+## MSA 特征的回收支持
+
+`data_loader.py` 中的 `MSAFeaturize()` 函数通过支持多次回收迭代（`MAXCYCLE` 参数，默认 4）扩展了 `featurizing.py`。对于每次迭代，该函数生成独立采样的种子序列和掩码位置，在迭代间创建批处理特征 [来源：network/data_loader.py#L88-L121]。
+
+这允许三轨道架构中的回收机制在每个周期使用 MSA 的不同视图细化预测，从而提高收敛性和最终结构质量。
+
+## 与数据加载器的集成
+
+MSA 处理流水线与几个专门的数据加载器集成：
+
+- `loader_pdb()`：加载带有 MSA、模板和结构信息的单链 PDB 示例，支持单链和同源寡聚物模式 [来源：network/data_loader.py#L778-L800]。
+- `loader_complex()`：加载来自不同 TaxID 的配对 MSA 的异源寡聚复合物。
+- `loader_fb()`：加载来自 AlphaFold 预测的蒸馏数据。
+
+`featurize_single_chain()` 函数协调完整的特征提取流水线，调用 `MSAFeaturize()`、用于模板特征的 `TemplFeaturize()`，并应用残基裁剪以在训练期间管理内存 [来源：network/data_loader.py#L583-L620]。
+
+## 关键参数和配置
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| MAXLAT | 128 | 种子 MSA 中的最大序列数 |
+| MAXSEQ | 1024 | 最大额外序列数 |
+| MAXCYCLE | 4 | 回收迭代次数 |
+| BLOCKCUT | 5 | 块删除的最小序列数 |
+| p_mask | 0.15 | 种子 MSA 的掩码概率 |
+
+这些参数可通过参数系统配置，并可根据可用的计算资源和特定的预测任务进行调整。
+
+来源：[input_prep/make_protein_msa.sh](input_prep/make_protein_msa.sh#L1-L87), [input_prep/make_paired_MSA_simple.py](input_prep/make_paired_MSA_simple.py#L1-L141), [network/parsers.py](network/parsers.py#L20-L109), [network/featurizing.py](network/featurizing.py#L1-L151), [network/data_loader.py](network/data_loader.py#L49-L230)
+
+## 后续步骤
+
+理解 MSA 特征化为探索如何在模型架构中使用这些特征奠定了基础。继续阅读 [基于模板的结构特征](11-template-based-structure-features) 以了解结构模板如何补充 MSA 信息，或继续阅读 [嵌入模块](12-embedding-modules-msa-template-pair-representations) 以查看这些 MSA 特征如何嵌入到神经网络中。
+
+---
+
+- [深入解析/输入处理/基于模板的结构特征](https://zread.ai/uw-ipd/RoseTTAFold2/11-template-based-structure-features)
+
+---
+slug:11-template-based-structure-features
+blog_type:normal
+---
+
+
+基于模板的结构特征为 RoseTTAFold2 提供了来自同源蛋白结构的进化和结构约束，当存在合适模板时，能显著提高预测准确性。这些特征编码了来自已知蛋白结构的距离图、取向角、残基级信息和置信度分数，使模型能够利用通过 HHsearch 等工具进行的同源搜索结果，从蛋白质数据库（PDB）中获取结构信息。
+
+## 模板发现与解析
+
+模板处理流程从解析 HHsearch 输出文件开始，这些文件包含目标序列与结构数据库中潜在模板结构之间的比对信息。系统读取 `.atab` 文件（包含位置评分的表格化比对信息）和 `.hhr` 文件（包含概率评分和比对统计数据的 HHsearch 命中结果），以识别并排序候选模板 [parsers.py#L172-L244](network/parsers.py#L172-L244)。
+
+`parse_templates_raw` 函数从以 FFindex 数据库格式存储的 PDB 文件中提取模板信息，包括匹配的残基位置、比对置信度分数和实际 3D 坐标 [parsers.py#L245-L295](network/parsers.py#L245-L295)。每个模板都会经过过滤——剔除比对残基少于 10 个的模板，以确保有足够的结构信息用于有意义的推断。
+
+```mermaid
+flowchart LR
+    A[目标序列] --> B[HHsearch 搜索]
+    B --> C[解析 .atab 文件]
+    B --> D[解析 .hhr 文件]
+    C --> E[提取比对位置]
+    D --> F[提取评分统计]
+    E --> G[从 FFindex DB 获取模板 PDB]
+    F --> G
+    G --> H[解析 PDB 坐标]
+    H --> I[过滤模板 最小 10 个比对残基]
+    I --> J[候选模板]
+```
+
+模板选择过程为每个模板命中提取了几个关键统计数据：查询和模板位置、来自 HHsearch 的位置置信度分数，以及包括概率、E 值、同一性百分比、相似性评分和有效序列计数 (Neff) 在内的全局指标 [parsers.py#L172-L244](network/parsers.py#L172-L244)。这些统计数据指导预测过程中的模板排序和加权。
+
+## 几何特征提取
+
+模板结构经过几何变换，转换为 6D 坐标表示，以捕捉残基对之间的距离和取向信息。`get_coords6d` 函数从指定距离截止内的 Cβ-Cβ 对计算四个互补的几何描述符 [coords6d.py#L36-L81](network/coords6d.py#L36-L81)。
+
+| 特征 | 描述 | 计算方法 |
+|---------|-------------|-------------------|
+| **距离** | Cβ-Cβ 欧几里得距离 | 使用 k-d tree 的 k 近邻搜索 |
+| **Omega** | Ca-Cβ-Cβ-Ca 二面角 | 4 点二面角计算 |
+| **Theta** | N-Ca-Cβ-Cb 二面角 | 4 点二面角计算 |
+| **Phi** | Ca-Cβ-Cb 平面角 | 3 点角度计算 |
+
+使用标准蛋白质几何从 N、Ca 和 C 坐标重建 Cβ 原子位置，从而在所有模板之间实现一致的坐标表示 [coords6d.py#L48-L50](network/coords6d.py#L48-L50)。k 维树能够在距离截止内进行高效的邻域搜索，避免对大蛋白进行 O(L²) 计算 [coords6d.py#L52-L58](network/coords6d.py#L52-L58)。
+
+## 模板特征组合
+
+模板特征被组织为两种主要表示形式：1D（每个残基）和 2D（每个残基对）张量 [Embeddings.py#L188-L196](network/Embeddings.py#L188-L196)。1D 模板特征 (t1d) 包含氨基酸类型信息（20 种标准氨基酸加空位共 21 维）和置信度分数（1 维），而 2D 特征 (t2d) 编码距离图分箱（37 个距离分箱）和取向信息（6 个角度）以及用于缺失或未比对区域的掩码通道（1 维）。
+
+模板 2D 特征被离散化为 37 个距离分箱，覆盖从极短（<2.5 Å）到长距离（>31.5 Å）的各种空间范围，中间范围采用指数间距以捕捉对蛋白质折叠至关重要的细粒度距离信息 [Embeddings.py#L190-L191](network/Embeddings.py#L190-L191)。六个取向特征提供了超越纯距离测量的互补结构上下文，捕捉了残基对在 3D 空间中的相对排列。
+
+<CgxTip>距离图分箱策略使用非线性间距方案——在原子堆积至关重要的短距离处使用紧密分箱，在较粗略约束即可满足的长距离处使用较宽分箱——从而在信息密度和计算效率之间实现最佳平衡。</CgxTip>
+
+## 模板嵌入架构
+
+`Templ_emb` 模块将原始模板特征转换为高维表示，这些表示与三轨架构（MSA、pair 和 3D 结构轨道）集成 [Embeddings.py#L187-L337](network/Embeddings.py#L187-L337)。该模块通过单独的通路处理成对几何信息和 1D 扭转角特征，然后再将它们与查询序列的 pair 和 state 表示合并。
+
+成对特征通路首先将 2D 模板特征与每一对中两个残基的平铺 1D 特征连接起来，创建一个 88 维输入向量（44 来自 t2d + 22 来自左侧 t1d + 22 来自右侧 t1d）[Embeddings.py#L232-L236](network/Embeddings.py#L232-L236)。线性投影将其转换为模板嵌入维度（默认为 64），然后通过 `TemplatePairStack` 进行结构偏置的注意力处理。
+
+```mermaid
+flowchart LR
+    subgraph Input[模板特征]
+        T1D[t1d: B,T,L,22]
+        T2D[t2d: B,T,L,L,44]
+        XYZ[xyz_t: B,T,L,3]
+        MASK[mask_t: B,T,L,L]
+        ALPHA[alpha_t: B,T,L,30]
+    end
+    
+    subgraph PairwisePathway[成对处理]
+        CAT1[连接 t2d + 平铺 t1d]
+        EMB[线性投影]
+        RBF[距离 RBF 特征]
+        STACK[TemplatePairStack]
+    end
+    
+    subgraph TorsionPathway[扭转处理]
+        CAT2[连接 t1d + alpha_t]
+        PROJ1[线性投影]
+        ATT1[State Attention]
+    end
+    
+    T1D --> CAT1
+    T2D --> CAT1
+    T1D --> CAT2
+    ALPHA --> CAT2
+    XYZ --> RBF
+    MASK --> RBF
+    
+    CAT1 --> EMB
+    EMB --> STACK
+    RBF --> STACK
+    STACK --> ATT2
+    
+    CAT2 --> PROJ1
+    PROJ1 --> ATT1
+    
+    subgraph Output[集成]
+        PAIR[查询 Pair 特征]
+        STATE[查询 State 特征]
+        ATT2
+        ATT1
+    end
+    
+    PAIR --> ATT2
+    STATE --> ATT1
+    
+    ATT2 --> PAIR_OUT[更新后的 Pair 特征]
+    ATT1 --> STATE_OUT[更新后的 State 特征]
+```
+
+## 结构偏置模板处理
+
+`TemplatePairStack` 应用结构偏置注意力机制，利用提取的 RBF（径向基函数）距离特征作为结构偏置来处理模板成对特征 [Embeddings.py#L140-L186](network/Embeddings.py#L140-L186)。该堆栈包含多个块（默认为 2 个）的 pair-str-to-pair 注意力操作，其中注意力权重由来自模板结构的几何距离信息调制。
+
+堆栈中的每个注意力块都包含源自 1D 模板信息的 state 特征，允许模型根据每个残基的模板特征对成对相互作用进行条件化处理 [Embeddings.py#L155-L156](network/Embeddings.py#L155-L156)。注意力机制使用多头架构（默认 4 个头）和隐藏维度（默认 16），以捕捉整个模板中的复杂结构模式。
+
+<CgxTip>在推理过程中，模板处理模块采用内存高效的步进计算——以条带状处理模板矩阵而不是一次性处理——从而在不显著影响预测准确性的情况下减少大蛋白的内存占用。</CgxTip>
+
+## 模板-查询集成
+
+模板特征处理的最后阶段涉及通过交叉注意力机制将处理后的模板信息与查询序列不断演变的表示集成。对于 state 特征（1D 每个残基），模型在查询 state 和模板的 1D 特征（氨基酸类型和扭转角）之间应用注意力 [Embeddings.py#L272-L294](network/Embeddings.py#L272-L294)。这允许查询中的每个残基位置选择性地整合来自多个模板中相应位置的信息。
+
+对于 pair 特征（2D 残基-残基相互作用），一个单独的注意力机制在查询 pair 表示和处理后的模板成对特征之间运作 [Embeddings.py#L296-L312](network/Embeddings.py#L296-L312)。这种交叉注意力使模型能够学习哪些模板结构约束与查询中的每个残基对最相关，并可能根据比对质量和置信度分数对不同的模板进行不同的加权。
+
+集成使用残差连接，将注意力处理后的模板信息添加到现有的查询表示中 [Embeddings.py#L291-L293](network/Embeddings.py#L291-L293)。这种设计选择保留了查询自身的信息，同时允许源自模板的结构指导来调节预测，模型在训练过程中学习平衡这些互补的信息来源。
+
+## 模板坐标 RBF 特征
+
+系统从模板 Cα 坐标计算径向基函数 (RBF) 特征，以提供与离散化距离分箱互补的连续距离表示 [Embeddings.py#L248-L270](network/Embeddings.py#L248-L270)。这些 RBF 特征使用以各种距离为中心的 64 个基函数，将成对欧几里得距离转换为适合神经网络处理的平滑、可微分表示。
+
+RBF 计算在推理过程中是内存高效的，应用步进计算来处理大模板，而无需同时在内存中保存完整的 L×L 距离矩阵 [Embeddings.py#L254-L257](network/Embeddings.py#L254-L257)。指示有效残基对的掩码应用于 RBF 特征，确保缺失或未比对的区域不会向预测提供虚假的结构信息。
+
+## 后续步骤
+
+提取并集成模板特征后，它们将输入到更广泛的模型架构中。要了解模板特征如何与其他信息流交互，请探索 [嵌入模块 (MSA、模板、Pair 表示)](12-embedding-modules-msa-template-pair-representations)。有关使用回收的结构信息完善预测的迭代过程，请参阅 [用于迭代完善的回收机制](8-recycling-mechanism-for-iterative-refinement)。
+
+---
+
+- [深入解析/输入处理/嵌入模块（MSA、模板、Pair 表示）](https://zread.ai/uw-ipd/RoseTTAFold2/12-embedding-modules-msa-template-pair-representations)
+
+---
+slug:12-embedding-modules-msa-template-pair-representations
+blog_type:normal
+---
+
+
+RoseTTAFold2中的嵌入模块充当了原始输入数据与三轨架构之间的关键桥梁。这些模块将稀疏的生物信息——多序列比对（MSA）、模板结构和序列信息——转化为网络可以高效处理的密集、可学习的表示。理解这些嵌入对于掌握模型如何将进化和结构约束编码到其特征空间中至关重要。
+
+## MSA嵌入架构
+
+MSA嵌入模块（`MSA_emb`）负责协调将原始MSA特征转化为高维表示。该模块处理由`MSAFeaturize`选定的种子MSA（比对序列的子集），通过一个多阶段特征化流程，捕获进化信息、序列多样性和位置关系。
+
+该模块接受维度为`d_init=48`的MSA特征，包括独热编码的氨基酸（22维）、聚类序列谱（22维）、插入统计（2维）和末端信息（2维）[network/featurizing.py#L33-L149]。转换首先通过一个线性投影，将这些稀疏特征映射到密集的`d_msa=256`维空间[network/Embeddings.py#L59]。
+
+一个关键的架构洞察是双重嵌入策略：MSA接收一个线性变换（`self.emb`），而查询序列接收一个专门的嵌入（`self.emb_q`），该嵌入被加到所有MSA序列上[network/Embeddings.py#L92-L94]。这种设计确保了查询序列的特定特征被注入到整个MSA表示中，同时保留了同源序列的多样性。
+
+<CgxTip>
+将特定于查询的嵌入添加到所有MSA序列中，创建了一个通信通道，使网络能够区分目标序列及其同源物，这对于准确的结构预测至关重要。
+</CgxTip>
+
+## 成对表示生成
+
+成对表示通过一种非对称构造产生，该构造通过序列内容和相对位置编码残基对残基的关系。该模块通过组合左右序列嵌入来生成这种表示，创建了一个外积结构，捕获行和列的残基信息[network/Embeddings.py#L97-L99]。
+
+关键创新在于位置编码注入：`PositionalEncoding2D`将相对序列分离信息添加到成对特征中，编码序列空间中残基对之间的几何关系[network/Embeddings.py#L15-L52]。这种编码使用跨越-32到+32个位置的65个bin，允许网络学习序列空间中依赖于距离的模式。对于非共价复合物（nc_cycle=True），编码在链边界处环绕，使模型能够处理圆形或对称结构[network/Embeddings.py#L32-L33]。
+
+最终的成对表示组合了这些组件：
+```
+pair[i,j] = emb_left(seq[i]) + emb_right(seq[j]) + positional_encoding(i-j)
+```
+
+这种加法结构保留了序列和位置信息的可分离性，同时使网络能够在后续处理中学习复杂的、非线性的交互。
+
+## 状态表示
+
+状态表示（`d_state=32`）提供了一个紧凑的每个残基的编码，作为2D成对特征和3D SE(3)-等变网络之间的主要接口[network/Embeddings.py#L63, #L103]。与捕获成对关系的成对表示不同，状态编码了将被转换为3D坐标的单个残基特征。
+
+状态嵌入直接从查询序列通过学习的嵌入层初始化，使其成为三个核心表示中最具序列特异性的表示。在迭代优化循环中，状态从成对表示和3D坐标接收信息，创建一个反馈循环，使模型能够收敛到物理上现实的结构。
+
+## 模板嵌入集成
+
+模板结构通过`Templ_emb`模块提供显式的结构信息，该模块处理两个互补的信息流：2D成对特征和1D扭转角特征[network/Embeddings.py#L187-L336]。2D特征包括编码残基间距离的37个距离直方图bins、描述相对几何形状的6个方向参数以及一个掩码通道[network/Embeddings.py#L190-L192]。
+
+模板嵌入流程遵循一个复杂的多阶段架构：
+
+1. **特征融合**：该模块将2D模板特征（`t2d`）与来自行和列残基的平铺1D特征（`t1d`）连接起来，为每个残基对创建一个全面的88维表示[network/Embeddings.py#L233-L237]。
+
+2. **结构偏向处理**：`TemplatePairStack`应用结构偏向的注意力机制，在通过从模板CA坐标计算的径向基函数（RBF）距离特征对查询结构进行条件处理的同时处理模板特征[network/Embeddings.py#L248-L270, #L297-L300]。
+
+3. **基于注意力的信息传递**：该模块采用两种注意力机制——用于成对特征的`self.attn`和用于状态特征的`self.attn_tor`——将模板信息传递给查询表示[network/Embeddings.py#L206, #L210]。
+
+注意力机制遵循交叉注意力模式，其中查询表示关注模板特征。对于成对特征，查询成对表示重塑为`(B*L*L, 1, d_pair)`并关注重塑为`(B*L*L, T, d_templ)`的模板特征，其中T是模板的数量[network/Embeddings.py#L321-L333]。这种设计使查询中的每个残基对能够从所有可用模板中提取相关信息，并通过学习的注意力分数进行加权。
+
+<CgxTip>
+模板嵌入中基于条带的计算在推理过程中通过分块处理特征矩阵来减少内存占用，从而能够在不超出GPU内存限制的情况下预测更大的蛋白质。
+</cgt_tip>
+
+## MSA特征化流程
+
+在嵌入层接收MSA数据之前，`MSAFeaturize`函数执行关键预处理，将原始序列比对转化为结构化特征[network/featurizing.py#L33-L149]。该流程实现了几种复杂的数据增强策略：
+
+1. **块删除**：随机删除连续块模拟了缺失序列区域的效果，提高了模型对不完整比对的鲁棒性。
+
+2. **基于聚类的谱生成**：该算法根据汉明距离将额外的序列分配给聚类，然后计算加权的氨基酸频率，捕获进化保守模式[network/featurizing.py#L117-L132]。
+
+3. **随机掩码策略**：遵循BERT范式，15%的位置经历随机替换：10%替换为均匀随机氨基酸，10%替换为MSA谱样本，80%替换为特殊的掩码令牌[network/featurizing.py#L74-L88]。
+
+生成的种子MSA特征由四个部分组成：独热编码的氨基酸、聚类序列谱、插入统计和末端位置标志[network/featurizing.py#L143]。这种丰富的特征化使嵌入网络能够学习捕获进化约束和序列特定特征的复杂表示。
+
+## 循环机制
+
+循环机制通过将先前的预测反馈到嵌入网络中来实现迭代优化[network/Embeddings.py#L337-L412]。这个过程创建了一个自洽循环，模型通过多次迭代逐步改进其预测。
+
+在循环期间，该模块使用层归一化对MSA和成对表示进行归一化，然后结合来自预测3D结构的几何信息[network/Embeddings.py#L366-L378]。关键创新在于使用几何关系从N、Cα和C原子重建Cβ坐标[network/Embeddings.py#L384-L385]，随后计算基于距离的RBF特征：
+
+```python
+dist_CB = rbf(torch.cdist(Cb, Cb))
+```
+
+这些距离特征与来自行和列视角（左右）的状态表示连接，然后通过学习的线性变换投影回成对表示空间[network/Embeddings.py#L401-L408]。这种设计允许模型基于物理上现实的3D约束优化成对关系，逐渐收敛到类似天然的结构。
+
+## 与三轨架构的集成
+
+嵌入模块通过`RoseTTAFoldModule.forward`方法与RoseTTAFold主模型直接接口，该方法协调三轨信息流[network/RoseTTAFoldModel.py#L52-L100]。模型为潜在MSA（`msa_latent`）和完整MSA（`msa_full`）维护单独的嵌入，其中潜在嵌入被循环，完整嵌入提供额外的序列上下文。
+
+嵌入过程遵循以下顺序：
+
+1. **初始嵌入**：`self.latent_emb`将种子MSA转化为潜在表示，而`self.full_emb`处理完整MSA[network/RoseTTAFoldModel.py#L71, #L76]。
+
+2. **循环集成**：先前的迭代预测通过`self.recycle`被合并，向成对表示添加几何约束[network/RoseTTAFoldModel.py#L92-L98]。
+
+3. **模板集成**：模板特征通过`self.templ_emb`集成，该模块更新成对和状态表示，并包含来自同源蛋白质的结构信息。
+
+这种模块化设计使每种嵌入类型能够专门捕获蛋白质结构的不同方面：MSA嵌入捕获进化约束，成对表示编码几何关系，状态表示维持每个残基的特征，模板嵌入提供显式的结构先验。
+
+## 特征维度和内存优化
+
+嵌入模块实现了复杂的内存优化策略，以实现大型蛋白质的训练和推理：
+
+- **基于条带的计算**：对于大序列，模块分块（条带）处理特征，而不是全矩阵，减少推理期间的峰值内存使用[network/Embeddings.py#L38-L48, #L228-L244]。
+
+- **梯度检查点**：可选的激活重新计算以额外计算为代价减少训练期间的内存[network/Embeddings.py#L309-L310, #L323-L324]。
+
+- **精度处理**：模块维护谨慎的数据类型管理，在计算和全精度之间转换半精度（bfloat16/float16），并在需要时保持稳定性[network/Embeddings.py#L96-L98, #L377-L378]。
+
+这些优化对于模板嵌入尤为重要，后者处理多个模板，每个模板都需要完整的（L×L）成对特征矩阵。基于条带的方法能够在单GPU系统上预测长达数百个残基的蛋白质。
+
+## 后续步骤
+
+随着嵌入模块建立了基础表示，网络继续通过迭代的三轨架构处理这些特征。下一个逻辑步骤是理解这些嵌入如何通过[轨道模块设计和交互](13-track-module-design-and-interaction)交互和演变，随后是[使用SE3层的坐标生成](14-coordinate-generation-with-se3-layers)，将状态表示转化为3D原子坐标。
+
+要更深入地理解处理这些嵌入的注意力机制，请参阅[注意力机制（MSA行/列，三角形乘法）](9-attention-mechanisms-msa-row-column-triangle-multiplication)文档，该文档解释了嵌入如何通过网络层转换。[用于迭代优化的循环机制](8-recycling-mechanism-for-iterative-refinement)提供了关于这些嵌入如何通过多次迭代演变的额外背景。
+
+---
+
+## 迭代模拟
+
+- [深入解析/迭代模拟/轨道模块设计与交互](https://zread.ai/uw-ipd/RoseTTAFold2/13-track-module-design-and-interaction)
+
+---
+slug:13-track-module-design-and-interaction
+blog_type:normal
+---
+
+
+本文档全面分析了 RoseTTAFold2 中的三轨架构，探讨了 MSA（多序列比对）、Pair（残基对）和 3D Structure（三维结构）轨道如何通过迭代细化相互作用，以实现高精度的蛋白质结构预测。该架构实现了复杂的信息流，每个轨道通过专门的注意力机制和 SE(3) 等变变换既接收来自其他轨道的信号，也为其他轨道提供信号。
+
+来源：[Track_module.py](network/Track_module.py#L1-L841), [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L52-L149)
+
+## 架构概览
+
+三轨设计代表了一项根本性的架构创新，使 RoseTTAFold2 能够对进化信息（MSA）、残基关系和空间几何（3D Structure）进行联合推理。该设计允许模型利用互补的信息来源，其中进化约束引导结构形成，而几何观察则辅助解释序列信号。
+
+```mermaid
+graph TB
+    subgraph Input_Layer
+        MSA[MSA Embeddings<br/>B,N,L,d_msa=256]
+        Pair[Pair Features<br/>B,L,L,d_pair=128]
+        XYZ[Initial Coordinates<br/>B,L,3,3]
+        State[State Features<br/>B,L,d_state=16]
+    end
+    
+    subgraph Iteration_Block
+        direction TB
+        MSA2MSA[MSA←Pair+3D]
+        MSA2Pair[Pair←MSA]
+        Pair2Pair[Pair←3D]
+        Str2Str[3D←MSA+Pair]
+        
+        MSA -.bias.-> MSA2MSA
+        Pair -.bias.-> MSA2MSA
+        State -.feedback.-> MSA2MSA
+        
+        MSA -.update.-> MSA2Pair
+        
+        Pair -.update.-> Pair2Pair
+        State -.gate.-> Pair2Pair
+        RBF -.distance.-> Pair2Pair
+        
+        MSA -.embed.-> Str2Str
+        Pair -.embed.-> Str2Str
+        State -.node.-> Str2Str
+        RBF -.edge.-> Str2Str
+    end
+    
+    subgraph Output_Layer
+        R[Rotation Matrices<br/>B,L,3,3]
+        T[Translation Vectors<br/>B,L,3]
+        Alpha[Sidechain Angles<br/>B,L,10,2]
+    end
+    
+    Input_Layer --> Iteration_Block
+    Iteration_Block --> Output_Layer
+    
+    style MSA fill:#e3f2fd
+    style Pair fill:#f3e5f5
+    style XYZ fill:#e8f5e9
+    style State fill:#fff3e0
+```
+
+迭代模拟架构通过分层块结构协调这些交互。`IterativeSimulator` 实现了三个不同的阶段：额外块（4 次迭代，d_msa_full=64）、主块（12 次迭代，d_msa=256）和细化块（4 次迭代）。每个阶段都有特定的用途——额外块高效处理大型 MSA，主块执行深度特征集成，而细化块应用 SE(3) 等变变换进行最终的坐标优化。
+
+来源：[Track_module.py](network/Track_module.py#L701-L841)
+
+## 轨道交互机制
+
+### 利用多轨偏置更新 MSA 轨道
+
+`MSAPairStr2MSA` 模块实现了使用 Pair 和 3D 轨道信息更新 MSA 表示的基本机制。该模块采用有偏自注意力（biased self-attention），其中注意力偏置将 Pair 特征与从坐标导出的径向基函数（RBF）编码相结合，使 MSA 行能够在关注彼此时感知空间关系。
+
+偏置准备过程将标准化的 Pair 特征与从 Ca-Ca 坐标计算出的嵌入式 RBF 距离特征拼接起来：`pair_rbf = norm_pair(pair) + emb_rbf(rbf_feat)`。该偏置调节行注意力中的权重，允许 MSA 中的进化模式受到当前结构假设的影响。此外，查询序列通过状态投影从 3D 轨道接收直接反馈：`state_proj = proj_state(norm_state(state))`，该反馈在每次迭代时被索引加到第一行 MSA 上。
+
+前向传播遵循一致的模式：带偏置的行注意力 → 列注意力 → 前馈网络，所有操作均带有残差连接。在训练期间，行注意力应用 Dropout 正则化，而推理模式使用原位操作以提高内存效率。
+
+来源：[Track_module.py](network/Track_module.py#L49-L130)
+
+### MSA 到 Pair 的信息聚合
+
+`MSA2Pair` 模块通过外积操作后跟线性投影，将 MSA 信息转换为 Pair 表示。该设计捕获了 MSA 深度维度上的共进化信号，通过平均序列位置来减少噪声并提取一致的模式。
+
+计算遵循以下顺序：标准化 MSA → 分别投影左右维度 → 跨序列计算外积 → 对 MSA 深度求平均 → 投影到 Pair 维度。具体为：`out = proj_out(reshape(einsum('bsli,bsmj->blmij', proj_left(msa), proj_right(msa)/N)))`。初始化策略对于该模块至关重要——输出投影权重初始化为零，偏置也为零，确保初始的 MSA 到 Pair 信息流从零开始，并随着训练逐渐建立。这种残差设计允许模型学习何时以及有多少 MSA 信息应该影响 Pair 表示。
+
+来源：[Track_module.py](network/Track_module.py#L297-L350)
+
+### 使用三角形操作的 Pair 轨道演化
+
+`PairStr2Pair` 模块使用三角形乘法操作和有偏轴向注意力实现核心的 Pair 轨道更新，使模型能够推理残基关系中的几何一致性。该模块接收 Pair 特征、RBF 距离编码和状态特征作为输入，产生更新后的 Pair 表示。
+
+三角形乘法操作通过传出和传入的三角形操作捕获高阶几何关系。这些操作使信息能够沿残基对图中的三角形路径传播，从而强制执行一致性约束。有偏轴向注意力使用从坐标导出的偏置特征来调节这些更新，并由门控机制控制信息流：`gate = sigmoid(to_gate(einsum('bli,bmj->blmij', proj_left(state), proj_right(state))))`。该门控允许模型根据当前状态的置信度动态加权结构信息。
+
+该模块支持条带（内存高效）和全矩阵操作。在条带模式下，操作应用于重叠的子块，并进行仔细的平均以保持跨块边界的连续性。该设计能够在有限的内存约束内处理更长的序列，同时保持 Pair 表示的全局一致性。
+
+来源：[Track_module.py](network/Track_module.py#L132-L296)
+
+## 具有 SE(3) 等变性的 3D 结构轨道
+
+### 结构到结构变换
+
+`Str2Str` 模块实现 SE(3) 等变坐标更新，确保应用于输入结构的几何变换导致预测输出发生相应的变换。该模块将 MSA 和 Pair 特征转换为图表示，应用 SE(3) Transformer 层，并生成旋转/平移更新。
+
+节点特征将来自 MSA 轨道的查询序列与来自上一次迭代的 State 特征相结合：`node = norm_msa(msa[:,0])` 和 `node = embed_node1(seq) + embed_node2(state)`。边缘特征整合 Pair 表示与 RBF 距离编码和序列分离信息：`edge = embed_edge1(norm_pair(pair)) + embed_edge2(concat(rbf_feat, seqsep))`。图构建使用 top-k 邻居选择机制（`make_topk_graph`）来保持计算效率，同时保留局部结构上下文。
+
+SE(3) Transformer 包装器应用多层等变操作，产生类型 0（标量）和类型 1（向量）特征。类型 1 特征被分离为平移分量（`Ts = offset[:,:,0,:] * 10.0`）和旋转分量（`Rs = Qs2Rs(normQ(cat(ones, Qs)))`），它们通过矩阵乘法与输入旋转矩阵组合。
+
+来源：[Track_module.py](network/Track_module.py#L490-L618)
+
+### 侧链角度预测
+
+`SCPred` 模块预测主链和侧链扭转角作为 3D 轨道的最终输出。它以查询序列嵌入和更新的 State 特征作为输入，生成 10 个角度对（cos/sin 表示），覆盖 phi、psi、omega、chi1-4、Cb bend、Cb twist 和 CG 角度。这种全面的角度表示能够从主链坐标重建完整的原子细节。
+
+来源：[Track_module.py](network/Track_module.py#L351-L410)
+
+## 迭代块协调
+
+### 单次迭代架构
+
+`IterBlock` 在单次迭代中编排完整的轨道交互周期。它首先根据当前的 Ca 坐标结合序列分离编码计算 RBF 距离特征：`rbf_feat = rbf(cdist(xyz[:,rows,1], xyz[:,cols,1])) + pos(idx[:,rows], idx[:,cols])`。该距离特征作为所有轨道更新的共享资源。
+
+该块按特定顺序执行操作：MSA 更新（使用 Pair 和 RBF 特征）→ 来自 MSA 的 Pair 更新 → 带三角形操作的 Pair 更新 → 3D 结构更新（使用 MSA、Pair 和 RBF 特征）。此顺序确保先前的更新为后续更新提供信息，从而在轨道间创建级联信息流。可以在训练期间启用梯度检查点以提高内存效率：`msa = checkpoint(msa2msa, msa, pair, rbf_feat, state, strides)`。
+
+来源：[Track_module.py](network/Track_module.py#L619-L700)
+
+### 多相位迭代模拟
+
+`IterativeSimulator` 实现了完整的迭代细化过程，包含三个不同的阶段。额外块（默认 4，d_msa_full=64）以较低的维度处理额外的 MSA 序列，以提高计算效率。主块（默认 12，d_msa=256）以全维度执行深度特征集成。细化块（默认 4）应用 SE(3) 等变变换进行最终的坐标优化。
+
+模拟在每次迭代时维护中间旋转矩阵（`R_s`）、平移向量（`T_s`）和侧链角度（`alpha_s`）的列表，从而支持基于集成的预测和不确定性估计。对于具有对称性的低聚复合物，模拟通过 `update_symm_subs` 和 `update_symm_Rs` 函数应用对称约束，确保预测的结构符合指定的对称操作。
+
+<CgxTip>
+在每次迭代前应用于旋转和平移矩阵的 detach 操作（`R_in = R_in.detach()`, `T_in = T_in.detach()`）对于训练稳定性至关重要。这些操作阻止梯度跨多次迭代流动，将每次迭代视为一个独立的优化步骤，同时通过特征表示保持信息流。
+</CgxTip>
+
+来源：[Track_module.py](network/Track_module.py#L701-L841)
+
+## 轨道交互中的注意力机制
+
+### 用于 Pair 更新的有偏轴向注意力
+
+`BiasedAxialAttention` 模块实现绑定轴向注意力，其中注意力偏置源自坐标特征。该机制使 Pair 表示能够根据空间关系的调节关注行或列邻居。注意力计算遵循以下模式：`attn = einsum('bnihk,bnjhk->bijh', query, key) + bias`，其中键归一化包括除以序列长度（`key = key / L`）以进行绑定注意力。
+
+门控机制允许动态控制信息流：`gate = sigmoid(to_g(pair))` 和 `out = gate * out`。这使得模型能够根据特征置信度选择性地合并信息。在推理期间，具有可配置步幅值的条带操作实现了对大序列的内存高效处理。
+
+来源：[Attention_module.py](network/Attention_module.py#L419-L530)
+
+### 带有 Pair 偏置的 MSA 行注意力
+
+`MSARowAttentionWithBias` 模块允许 MSA 行在 Pair 特征的偏置下彼此关注。这使得 Pair 轨道中捕获的残基对关系能够为 MSA 中的进化模式提供信息。基于行的注意力机制对于检测跨序列位置的共进化信号特别有效，其中 Pair 偏置为这些进化模式提供了结构上下文。
+
+来源：[Attention_module.py](network/Attention_module.py#L168-L283)
+
+## 内存优化和计算效率
+
+### 用于长序列的条带操作
+
+轨道模块通过可配置的步幅参数支持条带操作，以实现长序列的内存高效处理。此模式处理序列的分块（由步幅定义），并仔细处理重叠和边界。例如，在 `MSA2Pair` 中：`for i in range((L-1)//STRIDE+1): rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))`。low_vram 模式通过在计算期间将大型张量临时移动到 CPU 提供了额外的内存节省（在 Pair 操作前 `msa = msa.cpu()`，然后 `msa = msa.to(pair.device)`）。
+
+来源：[Track_module.py](network/Track_module.py#L328-L349)
+
+### 特征维度配置
+
+该架构使用精心设计的维度参数，平衡表示能力与计算效率。默认配置包括主 MSA 轨道的 d_msa=256，额外 MSA 处理的 d_msa_full=64，Pair 表示的 d_pair=128，以及 3D 轨道节点特征的 d_state=16。这些维度反映了不同轨道的相对信息密度——Pair 轨道需要中等维度来高效捕获 L×L 关系，而 3D State 使用专注于局部结构信息的紧凑表示。
+
+来源：[Track_module.py](network/Track_module.py#L620-L643)
+
+| 参数 | 描述 | 默认值 | 用途 |
+|-----------|-------------|---------------|---------|
+| n_extra_block | 额外 MSA 处理迭代次数 | 4 | 高效处理额外的 MSA 序列 |
+| n_main_block | 主迭代细化迭代次数 | 12 | 具有全维度的深度特征集成 |
+| n_ref_block | 最终 SE(3) 细化迭代次数 | 4 | 具有 SE(3) 等变性的最终坐标优化 |
+| d_msa | MSA 轨道特征维度 | 256 | 进化信息的丰富表示 |
+| d_msa_full | 额外 MSA 轨道特征维度 | 64 | 大型 MSA 的高效处理 |
+| d_pair | Pair 轨道特征维度 | 128 | 残基关系的平衡表示 |
+| d_state | 3D 轨道节点特征维度 | 16 | 紧凑的结构状态表示 |
+
+## 与模型管道的集成
+
+轨道模块通过 `RoseTTAFoldModule.forward` 方法集成到更广泛的 RoseTTAFold2 管道中。在初始嵌入（MSA、pair、state、template）和循环连接之后，模拟器执行迭代细化：`msa, pair, R, T, alpha, state, symmsub = self.simulator(seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, ...)`。输出被馈送到辅助预测器中，包括距离图、PAE（预测对齐误差）、LDDT 置信度分数以及蛋白质复合物的结合/不结合预测。
+
+<CgxTip>
+来自所有迭代的旋转矩阵都被保留并堆叠（`R_s = torch.stack(R_s, dim=0)`），从而实现基于集成的预测，其中多个中间结构有助于最终输出。这种设计允许模型表示不确定性，并为下游分析提供多种结构假设。
+</CgxTip>
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L115-L149)
+
+轨道模块架构代表了进化、关系和几何推理的复杂集成，使 RoseTTAFold2 能够通过互补信息轨道的迭代细化实现最先进的蛋白质结构预测精度。
+
+---
+
+- [深入解析/迭代模拟/使用 SE3 层生成坐标](https://zread.ai/uw-ipd/RoseTTAFold2/14-coordinate-generation-with-se3-layers)
+
+---
+slug:14-coordinate-generation-with-se3-layers
+blog_type:normal
+---
+
+
+RoseTTAFold2 中的坐标生成利用 **SE(3)-等变 Transformer 层** 来迭代优化 3D 蛋白质结构，同时保持几何一致性。该机制构成了 3D 结构轨道的核心，通过等变神经网络操作，从序列和成对表示中精确预测原子坐标。
+
+## SE(3)-等变架构概览
+
+坐标生成系统通过一个复杂的流水线运行，该流水线将序列嵌入转换为精确的 3D 原子坐标，同时保持旋转和平移不变性。这是通过 **SE(3)-Transformer 架构** 实现的，该架构将蛋白质结构处理为具有等变消息传递的残基图。
+
+```mermaid
+flowchart TB
+    A[输入特征] --> B[特征准备]
+    B --> C[图构建]
+    C --> D[SE3 Transformer 处理]
+    D --> E[坐标更新]
+    E --> F[侧链预测]
+    F --> G[刚体变换]
+    G --> H[更新后的坐标]
+    
+    A --> A1[MSA 嵌入<br/>(B, N, L, d_msa)]
+    A --> A2[成对表示<br/>(B, L, L, d_pair)]
+    A --> A3[初始坐标<br/>(B, L, 3, 3)]
+    A --> A4[状态特征<br/>(B, L, d_state)]
+    
+    D --> D1[基于 Fiber 的处理<br/>Type-0: 不变量<br/>Type-1: 等变向量]
+    D --> D2[基函数<br/>球谐函数<br/>Clebsch-Gordan 系数]
+    D --> D3[径向分布函数<br/>距离加权核]
+    
+    E --> E1[Type-0 特征<br/>→ 状态更新]
+    E --> E2[Type-1 特征<br/>→ 旋转和平移]
+    
+    G --> G1[四元数归一化]
+    G --> G2[旋转矩阵组合]
+    G --> G3[平移累积]
+```
+
+该架构通过仔细设计特征类型和基函数来保持 **SE(3)-等变性**——确保旋转或平移输入结构会导致产生同等旋转/平移的输出。系统使用 **Fiber 结构**来表示特征，其中 Type-0 特征是旋转不变标量，Type-1 特征是在旋转下协变变换的 3D 向量 [se3_transformer/model/fiber.py](/SE3Transformer/se3_transformer/model/fiber.py#L34-L44)。
+
+来源：[network/Track_module.py](/network/Track_module.py#L490-L618), [network/SE3_network.py](/network/SE3_network.py#L12-L87)
+
+## 特征准备与图构建
+
+在进行 SE3 处理之前，系统准备多尺度特征并构建一个稀疏图表示，以捕获局部和长程残基相互作用。
+
+### 节点特征嵌入
+
+节点特征将来自多个轨道的信息组合为每个残基的统一表示：
+
+```python
+# MSA 和状态特征融合
+seq = self.norm_msa(msa[:,0])  # 提取查询序列
+state = self.norm_state(state)
+node = self.embed_node1(seq) + self.embed_node2(state)
+node = node + self.ff_node(node)
+node = self.norm_node(node)
+```
+
+节点特征的形状为 `(B, L, l0_in_features)`，其中默认 `l0_in_features=32`，表示每个残基位置上的旋转不变信息 [network/Track_module.py](/network/Track_module.py#L543-L549)。
+
+### 边特征生成
+
+边特征使用成对表示和几何信息的组合来编码残基对关系：
+
+**距离编码**：径向基函数（RBF）将成对距离转换为平滑、可微的表示：
+
+```python
+rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1])).reshape(B,L,L,-1)
+```
+
+RBF 使用 64 个分箱，覆盖 0.0 到 20.0 Å 的距离，标准差为 0.5 Å，从而创建详细的距离分布 [network/util_module.py](/network/util_module.py#L81-L85) [network/Track_module.py](/network/Track_module.py#L557-L558)。
+
+**序列间隔**：有符号序列间隔特征帮助模型区分局部和非局部相互作用，Sergey 发现包含符号可以提供轻微的改进 [network/util_module.py](/network/util_module.py#L87-L99)。
+
+**特征融合**：最终的边特征将成对表示与几何编码结合起来：
+
+```python
+edge = self.embed_edge1(pair) + self.embed_edge2(rbf_feat)
+edge = edge + self.ff_edge(edge)
+edge = self.norm_edge(edge)
+```
+
+这将产生形状为 `(B, L, L, num_edge_features)` 的边特征，其中 `num_edge_features=32` [network/Track_module.py](/network/Track_module.py#L556-L560)。
+
+### 稀疏图构建
+
+系统基于几何邻近性和序列邻接性创建一个连接残基的稀疏图：
+
+```mermaid
+graph LR
+    A[距离计算] --> B[Top-K 选择]
+    B --> C[序列邻接<br/>kmin=32]
+    C --> D[边合并]
+    D --> E[相对位置存储]
+    
+    B --> B1[为每个残基选择 K 个<br/>最近邻]
+    C --> C1[连接残基<br/>|i-j| ≤ 32]
+    D --> D1[Top-k 边与<br/>序列边的并集]
+    E --> E1[从基计算中<br/>分离梯度]
+```
+
+图构建遵循以下步骤：
+
+1. **距离计算**：使用 `torch.cdist` 计算 CA 原子之间的成对距离
+2. **Top-K 选择**：对于每个残基，选择 `top_k=64` 个最近邻
+3. **序列邻接**：始终连接 `kmin=32` 位置范围内的残基
+4. **边合并**：将 top-k 边与序列边合并
+5. **相对位置**：将相对位置向量作为分离的梯度存储，用于基函数计算 [network/util_module.py](/network/util_module.py#L218-L242)。
+
+生成的图使用 DGL (Deep Graph Library) 进行高效的消息传递，边索引和预计算的相对位置作为边数据存储。
+
+来源：[network/Track_module.py](/network/Track_module.py#L552-L569), [network/util_module.py](/network/util_module.py#L218-L242)
+
+## SE(3)-Transformer 处理
+
+坐标生成的核心发生在 **SE3Transformer** 中，它通过保持几何一致性的等变消息传递操作来处理图。
+
+### 基于 Fiber 的特征表示
+
+特征被组织成 **Fibers**——描述每个度（不可约表示类型）特征多样性的结构：
+
+| 特征类型 | 度 | 维度 | 变换属性 |
+|-------------|--------|-----------|------------------------|
+| Type-0 | 0 | 1 | 旋转不变标量 |
+| Type-1 | 1 | 3 | 等变 3D 向量 |
+| Type-2 | 2 | 5 | 对称无迹矩阵 |
+
+Fiber 类管理这些表示，实现不同特征类型的灵活组合 [se3_transformer/model/fiber.py](/SE3Transformer/se3_transformer/model/fiber.py#L34-L44)。
+
+### 基函数计算
+
+等变操作依赖于 **球谐函数** 和 **Clebsch-Gordan 系数** 来构造在旋转下正确变换的基矩阵：
+
+```python
+def get_basis_script(max_degree, use_pad_trick, spherical_harmonics, 
+                     clebsch_gordon, amp):
+    """计算高达 max_degree 度的成对基矩阵"""
+    basis = {}
+    for d_in in range(max_degree + 1):
+        for d_out in range(max_degree + 1):
+            key = f'{d_in},{d_out}'
+            K_Js = []
+            for J in range(abs(d_in - d_out), d_in + d_out + 1):
+                Q_J = clebsch_gordon[idx][freq_idx]
+                # 爱因斯坦求和以组合谐波和 CG 系数
+                K_Js.append(torch.einsum('n f, k l f -> n l k', 
+                                        spherical_harmonics[J], Q_J))
+            basis[key] = torch.stack(K_Js, 2)
+```
+
+球谐函数从相对位置捕获方向信息，而 Clebsch-Gordan 系数实现不同度的耦合，所有这些都进行了缓存以提高计算效率 [se3_transformer/model/basis.py](/SE3Transformer/se3_transformer/model/basis.py#L73-L93)。
+
+### 径向分布函数
+
+**径向分布函数**充当距离相关的调制器，根据残基之间的几何关系对等变核进行加权：
+
+```mermaid
+flowchart LR
+    A[相对距离<br/>||x-y||] --> B[额外不变量<br/>边特征]
+    B --> C[MLP 网络<br/>在边之间共享]
+    C --> D[径向权重<br/>R^{l,k}]
+    D --> E[加权基<br/>矩阵]
+    
+    C --> C1[线性层]
+    C1 --> C2[层归一化]
+    C2 --> C3[ReLU 激活]
+    C3 --> C4[线性层]
+    C4 --> C5[层归一化]
+    C5 --> C6[ReLU 激活]
+    C6 --> C7[线性层]
+```
+
+径向函数是一个多层感知机，它接收不变的边特征（距离加上额外的不变信息）并产生等变核的权重。这种距离依赖性允许网络对几何约束进行建模，而不会破坏等变性 [se3_transformer/model/layers/convolution.py](/SE3Transformer/se3_transformer/model/layers/convolution.py#L67-L102)。
+
+### 卷积操作
+
+**ConvSE3** 模块通过组合以下内容执行等变消息传递：
+- 源节点的输入特征
+- 编码几何关系的基函数
+- 调制贡献的径向权重
+
+为了进行推理，系统实现了 **内存优化处理**，当边数超过阈值时，将边分块为 65,536 个一批，以减少内存占用，代价是额外的计算 [se3_transformer/model/layers/convolution.py](/SE3Transformer/se3_transformer/model/layers/convolution.py#L104-L165)。
+
+来源：[SE3Transformer/se3_transformer/model/basis.py](/SE3Transformer/se3_transformer/model/basis.py#L1-L100), [SE3Transformer/se3_transformer/model/layers/convolution.py](/SE3Transformer/se3_transformer/model/layers/convolution.py#L1-L200)
+
+## 坐标更新机制
+
+SE3 transformer 产生两种类型的输出来驱动坐标更新：用于状态更新的 **Type-0 特征**（不变量）和用于刚体变换的 **Type-1 特征**（等变量）。
+
+### 状态特征更新
+
+Type-0 特征更新每个残基的不变状态表示：
+
+```python
+shift = self.se3(G, node, l1_feats, edge_feats)
+state = state + shift['0'].reshape(B, L, -1)  # (B, L, C)
+```
+
+这种残差连接在结合新的几何上下文的同时保留了先前学习的信息 [network/Track_module.py](/network/Track_module.py#L571-L573)。
+
+### 刚体变换
+
+Type-1 特征编码被解释为增量刚体变换的 3D 向量：
+
+```python
+offset = shift['1'].reshape(B, L, 2, 3)
+Ts = offset[:,:,0,:] * 10.0  # 平移
+Qs = offset[:,:,1,:]         # 旋转（四元数分量）
+```
+
+系统对平移分量应用 **10.0 的缩放因子** 以提高数值稳定性，因为预测的平移通常很小 [network/Track_module.py](/network/Track_module.py#L574-L576)。
+
+### 四元数归一化与转换
+
+旋转向量被转换为四元数并归一化以确保有效的旋转：
+
+```python
+Qs = torch.cat((torch.ones((B,L,1),device=Qs.device), Qs), dim=-1)
+Qs = normQ(Qs)  # 归一化为单位四元数
+Rs = Qs2Rs(Qs)  # 转换为旋转矩阵
+```
+
+`normQ` 函数除以范数以确保单位四元数属性，`Qs2Rs` 执行从四元数到 3×3 旋转矩阵的代数转换 [network/util_module.py](/network/util_module.py#L54-L72) [network/kinematics.py](/network/kinematics.py#L14-L21) [network/kinematics.py](/network/kinematics.py#L54-L72)。
+
+### 刚体组合
+
+预测的变换与当前的刚体状态组合：
+
+```python
+Rs = einsum('bnij,bnjk->bnik', Rs, R_in)  # 旋转组合
+Ts = Ts + T_in                             # 平移累积
+```
+
+这种组合允许模型增量地细化坐标，每次回收迭代应用微小的修正，这些修正累积起来提高了结构精度 [network/Track_module.py](/network/Track_module.py#L582-L583)。
+
+来源：[network/Track_module.py](/network/Track_module.py#L571-L583), [network/kinematics.py](/network/kinematics.py#L14-L72)
+
+## 侧链预测
+
+坐标生成包括通过 **SCPred 模块** 进行侧链方向预测，该模块基于序列和更新的状态特征预测扭转角。
+
+### 扭转角预测
+
+侧链预测器输出全面的扭转角信息：
+
+```python
+# 输出：(B, L, 10, 2) - 10 个角度，带有 sin/cos 分量
+# - phi, psi, omega: 骨架扭转角
+# - chi1~4: 侧链 chi 角  
+# - CB bend, CB twist, CG: 附加侧链描述符
+alpha = self.sc_predictor(seqfull, state)
+```
+
+每个角度都用正弦和余弦分量表示，以确保优化期间适当的角连续性 [network/Track_module.py](/network/Track_module.py#L584-L585) [network/Track_module.py](/network/Track_module.py#L351-L399)。
+
+### 特征整合
+
+侧链预测器使用序列嵌入和来自 SE3 处理的更新状态特征的组合：
+
+```python
+def forward(self, seq, state):
+    # seq: 隐藏嵌入 (B, L, d_msa)
+    # state: SE3 type-0 特征 (B, L, d_state)
+    # 输出: 预测的扭转角 (B, L, 10, 2)
+```
+
+这种整合允许模型利用序列信息和细化的几何上下文进行准确的侧链放置 [network/Track_module.py](/network/Track_module.py#L391-L399)。
+
+来源：[network/Track_module.py](/network/Track_module.py#L351-L399), [network/Track_module.py](/network/Track_module.py#L584-L585)
+
+## 通过回收进行迭代细化
+
+坐标生成在 **迭代回收机制** 内运行，其中多次 SE3 层应用逐步细化结构。
+
+### 回收循环结构
+
+**IterativeSimulator** 协调多个回收迭代：
+
+```python
+class IterativeSimulator(nn.Module):
+    def __init__(self, n_extra_block=4, n_main_block=12, n_ref_block=4, ...):
+        # Extra blocks: 具有有限上下文的初始细化
+        # Main blocks: 具有完整信息的完整 SE3 处理
+        # Ref blocks: 用于高精度细节的最终细化
+```
+
+这种三阶段设计平衡了计算效率和预测准确性，在早期阶段使用较少的参数，在后期阶段使用更复杂的处理 [network/Track_module.py](/network/Track_module.py#L701-L715)。
+
+### 梯度检查点
+
+为了提高内存效率，系统支持 **梯度检查点**：
+
+```python
+def forward(self, seq, msa, msa_full, pair, xyz_in, state, idx, ...,
+            use_checkpoint=False, ...):
+    if use_checkpoint:
+        # 在反向传播期间重新计算中间激活
+        # 以额外的计算为代价减少内存
+```
+
+这使得在有限的 GPU 内存上处理更大的蛋白质成为可能 [network/Track_module.py](/network/Track_module.py#L753-L759)。
+
+来源：[network/Track_module.py](/network/Track_module.py#L701-L759)
+
+## 实现细节与优化
+
+### 内存优化策略
+
+坐标生成系统采用了几种内存优化技术：
+
+| 技术 | 目的 | 实现 |
+|-----------|---------|----------------|
+| 跨步处理 | 减少长序列的内存 | 以 `STRIDE` 个残基的块进行处理 |
+| 梯度检查点 | 用计算换取内存 | 在反向传播中重新计算激活 |
+| 边分块 | 限制密集图的内存 | 每次处理 65,536 条边 |
+| 关键操作使用 Float32 | 确保数值稳定性 | 强制 SE3 前向传播使用 float32 |
+
+跨步机制分块处理蛋白质序列，对每个块分别应用嵌入和前馈层，同时通过图操作维护全局上下文 [network/Track_module.py](/network/Track_module.py#L531-L551) [network/SE3_network.py](/network/SE3_network.py#L78-L87)。
+
+### 初始化策略
+
+适当的权重初始化对于稳定训练至关重要：
+
+```python
+def reset_parameter(self):
+    # 线性层的 LeCun 正态初始化
+    for n, p in self.se3.named_parameters():
+        if "bias" in n:
+            nn.init.zeros_(p)
+        elif len(p.shape) == 1:
+            continue
+        else:
+            if "radial_func" not in n:
+                p = init_lecun_normal_param(p)
+            else:
+                # 零初始化最终的径向函数层
+                if "net.6" in n:
+                    nn.init.zeros_(p)
+                else:
+                    nn.init.kaiming_normal_(p, nonlinearity='relu')
+    
+    # 零初始化最终的 SE3 层权重
+    nn.init.zeros_(self.se3.graph_modules[-1].weights['0'])
+    if self.l1_out > 0:
+        nn.init.zeros_(self.se3.graph_modules[-1].weights['1'])
+```
+
+最终 SE3 层的零初始化确保网络最初预测恒等变换（零位移），为迭代细化提供了稳定的起点 [network/SE3_network.py](/network/SE3_network.py#L57-L74)。
+
+来源：[network/SE3_network.py](/network/SE3_network.py#L57-L74), [network/Track_module.py](/network/Track_module.py#L531-L551)
+
+## 配置与超参数
+
+### SE3 层配置
+
+SE3 transformer 参数平衡模型容量与计算效率：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------------|-------------|
+| `num_layers` | 2 | SE3 transformer 层数 |
+| `num_channels` | 32 | 每个度的隐藏通道 |
+| `num_degrees` | 3 | 最大度 (0, 1, 2) |
+| `n_heads` | 4 | 注意力头数 |
+| `l0_in_features` | 32 | 输入 Type-0 通道 |
+| `l0_out_features` | 16 | 输出 Type-0 通道 |
+| `num_edge_features` | 32 | 边特征维度 |
+
+Type-1 特征被配置为将 3D 向量表示（N-CA 和 CA-C 向量）作为输入处理，并输出旋转/平移信息 [network/SE3_network.py](/network/SE3_network.py#L14-L40)。
+
+### 图构建参数
+
+图拓扑参数控制连接性和内存使用：
+
+| 参数 | 默认值 | 影响 |
+|-----------|---------------|--------|
+| `top_k` | 64 | 每个残基的最近邻 |
+| `kmin` | 32 | 序列邻接范围 |
+| `STRIDE` | 可变 | 用于内存优化的块大小 |
+
+较大的 `top_k` 值捕获更多的长程相互作用，但会增加内存和计算 [network/util_module.py](/network/util_module.py#L218-L242)。
+
+来源：[network/SE3_network.py](/network/SE3_network.py#L14-L40), [network/util_module.py](/network/util_module.py#L218-L242)
+
+## 数学基础
+
+坐标生成机制依赖于 **等变神经网络理论**，其中操作经过仔细设计以保持 SE(3) 对称性。
+
+### 等变性属性
+
+函数 **f** 是 SE(3)-等变的，如果：
+
+```
+f(g · x) = g · f(x)
+```
+
+其中 **g** 是 SE(3) 群中的任何旋转或平移，**x** 表示输入特征。SE3 transformer 通过以下方式保持此属性：
+- **Type-0 操作**：不受旋转影响的完全不变标量
+- **Type-1 操作**：协变旋转的向量
+- **基函数**：在旋转下正确变换的球谐函数
+- **径向函数**：不受旋转影响的距离相关标量
+
+### 刚体变换
+
+更新机制通过仔细的组合保持适当的刚体变换：
+
+1. **预测增量变换**：来自 SE3 输出的 ΔR, Δt
+2. **归一化旋转**：转换为单位四元数以确保数值稳定性
+3. **与当前状态组合**：R_new = ΔR · R_old, t_new = Δt + t_old
+
+这确保每次回收迭代都产生有效的刚体变换 [network/Track_module.py](/network/Track_module.py#L571-L583)。
+
+## 后续步骤
+
+了解使用 SE3 层生成坐标可深入了解 RoseTTAFold2 的几何核心。要更深入地了解相关概念：
+
+- 了解 **[三轨设计：MSA、成对和 3D 结构轨道](6-three-track-design-msa-pair-and-3d-structure-tracks)** 以查看 3D 轨道如何与其他表示轨道集成
+- 探索 **[SE(3)-等变 Transformer 网络](7-se-3-equivariant-transformer-network)** 以获取详细的理论基础
+- 了解 **[用于迭代细化的回收机制](8-recycling-mechanism-for-iterative-refinement)** 以查看坐标更新如何在迭代中传播
+- 查看 **[FAPE (帧对齐点误差) 损失](16-fape-frame-aligned-point-error-loss)** 以了解如何在训练期间测量坐标精度
+
+---
+
+- [深入解析/迭代模拟/对称性感知预测](https://zread.ai/uw-ipd/RoseTTAFold2/15-symmetry-aware-prediction)
+
+---
+slug:15-symmetry-aware-prediction
+blog_type:normal
+---
+
+
+RoseTTAFold2 融入了先进的对称感知预测功能，能够精确建模各种对称类型的蛋白质复合物。该系统既支持从结构数据中自动检测对称性，也支持用户指定对称性约束，从而使预测结果符合已知的生物学对称模式。
+
+## 架构概述
+
+对称感知预测系统通过多阶段流水线运行，该流水线在结构预测过程中检测、表示并应用对称性约束。该架构与 RoseTTAFold2 的三轨道设计（MSA、Pair 和 3D Structure 轨道）相结合，确保对称性约束在所有表示层级间保持一致的传播。
+
+```mermaid
+flowchart TB
+    A[输入: MSA + 模板] --> B{对称性规范}
+    B -->|自动检测| C[get_symmetry 检测]
+    B -->|用户指定| D[symm_subunit_matrix]
+    C --> E[对称群 ID<br/>Cn, Dn, T, O, I]
+    D --> E
+    E --> F[生成变换矩阵<br/>symmRs, symmids, symmmeta]
+    F --> G[对称化输入特征]
+    G --> H[RoseTTAFold 前向传播<br/>含对称性约束]
+    H --> I[迭代循环<br/>SE3 坐标更新]
+    I --> J[应用最终对称<br/>变换]
+    J --> K[输出: 完整对称复合物]
+    
+    style E fill:#e1f5ff
+    style F fill:#fff4e1
+    style H fill:#e8f5e9
+```
+
+对称检测模块分析坐标几何以识别旋转对称轴，计算在对称相关亚基之间进行映射的变换矩阵，并通过 SE(3)-等变网络层传播这些约束。
+
+来源: [network/symmetry.py](network/symmetry.py#L105-L220), [network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L52-L58)
+
+## 对称性检测与分类
+
+对称检测系统通过几何分析流水线，从结构坐标中自动识别蛋白质对称性。`get_symmetry()` 函数执行两轮分析：首先识别单个对称轴，然后组合轴以对完整的对称群进行分类。
+
+### 检测算法
+
+该算法系统性地检查坐标对以识别旋转对称操作：
+
+1. **轴识别**: 使用 Kabsch 对齐寻找坐标集之间的最佳旋转，并通过 RMSD 阈值过滤（默认 `rms_cut=2.5` Å）
+
+2. **旋转表征**: 从旋转矩阵中提取旋转角度和轴，验证整数倍对称性（`nfold_cut=0.1`），并确保没有显著平移的纯旋转（`trans_cut=2.0` Å）
+
+3. **对称群分类**: 遵循多面体对称规则组合检测到的轴，以识别 Cn（循环）、Dn（二面）、T（四面体）、O（八面体）或 I（二十面体）对称性
+
+检测利用几何约束来区分真正的生物学对称性与坐标伪影：
+
+```mermaid
+flowchart LR
+    A[坐标对分析] --> B{RMSD < 2.5Å?}
+    B -->|否| C[舍弃该对]
+    B -->|是| D[Kabsch 对齐]
+    D --> E[提取旋转矩阵]
+    E --> F{整数倍?}
+    F -->|否| C
+    F -->|是| G{纯旋转?}
+    G -->|否| C
+    G -->|是| H[存储对称轴]
+    H --> I[检查冗余]
+    I --> J[添加至轴列表]
+    J --> K[组合轴]
+    K --> L{两轴相交?}
+    L -->|是| M[分类为 Dn/多面体]
+    L -->|否| N[分类为 Cn]
+```
+
+<CgxTip>
+`angle_cut=0.05` 参数（约 3°）控制轴对齐检测的灵敏度，在减少误报与检测由实验噪声引起的微小对称偏差之间取得平衡。
+</CgxTip>
+
+来源: [network/symmetry.py](network/symmetry.py#L105-L220)
+
+### 支持的对称群
+
+| 对称类型 | 符号 | 亚基数 | 描述 | 变换数量 |
+|---------------|----------|----------|-------------|---------------------|
+| 非对称 | C1 | 1 | 无旋转对称性 | 1 |
+| 循环 | Cn | n | 单个 n 重旋转轴 | n |
+| 二面 | Dn | 2n | n 重轴 + n 个垂直 2 重轴 | 2n |
+| 四面体 | T | 12 | 四个 3 重 + 三个 2 重轴 | 12 |
+| 八面体 | O | 24 | 三个 4 重 + 四个 3 重轴 | 24 |
+| 二十面体 | I | 60 | 六个 5 重 + 十个 3 重轴 | 60 |
+
+系统基于特定的轴间角对多面体对称性进行分类：T（3 重+2 重位于 109.47°）、O（4 重+3 重位于 54.74° 或 3 重+2 重位于 35.26°）以及 I（5 重+2 重或 5 重+3 重位于特征角度）。
+
+来源: [network/symmetry.py](network/symmetry.py#L145-L220), [network/symmetry.py](network/symmetry.py#L222-L400)
+
+## 对称变换矩阵
+
+`symm_subunit_matrix()` 函数为每个支持的对称群生成表示所有对称操作的完整变换矩阵。这些矩阵编码了旋转（如适用）和反射，将非对称单元映射到所有对称相关位置。
+
+### 循环对称性 (Cn)
+
+对于 n 重循环对称性，系统围绕 z 轴生成旋转矩阵：
+
+```python
+angles = torch.linspace(0, 2*np.pi, nsub+1)[:nsub]
+Rs = generateC(angles)  # n 个旋转矩阵
+```
+
+变换矩阵通过 `(j-i) mod n` 旋转步骤将亚基 i 映射到亚基 j。偏移量估算将亚基放置在一个圆上：`D = est_radius / sin(π/n)`。
+
+来源: [network/symmetry.py](network/symmetry.py#L7-L12), [network/symmetry.py](network/symmetry.py#L222-L244)
+
+### 二面对称性 (Dn)
+
+二面对称性结合了围绕主轴的 n 重旋转与 n 个垂直的 2 重轴：
+
+```python
+angles = torch.linspace(0, 2*np.pi, nsub+1)[:nsub]
+Rs = generateD(angles)  # 2n 个旋转矩阵（包含 C2 反射）
+```
+
+变换矩阵在四个象限中组织 2n 个亚基，其中对称操作在象限内映射（Cn 操作）以及象限间映射（C2 操作）。
+
+来源: [network/symmetry.py](network/symmetry.py#L16-L25), [network/symmetry.py](network/symmetry.py#L246-L270)
+
+### 多面对称性 (T, O, I)
+
+多面对称群使用带有硬编码变换矩阵的预计算旋转矩阵：
+
+- **四面体 (T)**: 12 个操作，对称群 Td 包含反射
+- **八面体 (O)**: 24 个操作，对称群 Oh 包含反射  
+- **二十面体 (I)**: 60 个操作，对称群 Ih 包含反射
+
+这些矩阵表示点群中所有唯一的对称操作，条目定义到小数点后 6 位以确保数值稳定性。
+
+来源: [network/symmetry.py](network/symmetry.py#L272-L400)
+
+## 与预测流水线的集成
+
+### 模型接口
+
+`RoseTTAFoldModule` 在其前向传播中接受对称参数：
+
+```python
+def forward(self, msa_latent=None, ..., symmids=None, symmsub=None, 
+            symmRs=None, symmmeta=None, ...):
+    if symmids is None:
+        symmids = torch.tensor([[0]], device=xyz.device)  # 默认 C1
+    oligo = symmids.shape[0]
+```
+
+- `symmids`: 对称群标识符矩阵（大小为 O×O，其中 O = 亚基数）
+- `symmsub`: 将模板亚基映射到对称相关位置的索引
+- `symmRs`: 所有对称操作的旋转矩阵 (O×3×3)
+- `symmmeta`: 元数据，包括用于对称感知的邻域列表
+
+来源: [network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L52-L58)
+
+### 用户指定的对称性
+
+预测接口接受 `symm` 参数用于显式指定对称性：
+
+```python
+pred.predict(inputs, out_prefix, symm="C3", ...)
+```
+
+特殊的伪对称符号 `X{n}` 创建 n 个副本用于寡聚体预测，而无需几何约束：
+
+```python
+# 创建具有独立链的三聚体预测
+pred.predict(inputs, out_prefix, symm="X3", ...)
+# 内部扩展为: msa_orig, ins_orig = merge_a3m_homo(msa_orig, ins_orig, 3)
+```
+
+这对于预测对称性未知或预期具有柔性的寡聚体非常有用。
+
+来源: [network/predict.py](network/predict.py#L251-L320), [network/predict.py](network/predict.py#L320-L345)
+
+### 对称化过程
+
+预测流水线在多个阶段应用对称变换：
+
+1. **MSA 扩展**: `merge_a3m_homo()` 跨对称等效位置扩展 MSA 特征
+2. **模板对称化**: 模板坐标和掩膜跨亚基复制
+3. **初始坐标**: 起始坐标经变换以反映对称性
+4. **前向传播约束**: 网络通过 SE3-等变层维持对称性
+5. **最终组装**: 预测的非对称单元坐标经变换生成完整复合物
+
+```python
+# 对称化初始坐标
+xyz_prev, symmsub = find_symm_subs(xyz_prev[:,:L], symmRs, symmmeta)
+Osub = symmsub.shape[0]
+xyz_t = xyz_t.repeat(1, 1, Osub, 1, 1)
+```
+
+来源: [network/predict.py](network/predict.py#L340-L360), [network/predict.py](network/predict.py#L560-L580)
+
+## 使用对称性约束进行训练
+
+在训练期间，`featurize_homo()` 函数使用自动对称检测准备同源寡聚体样本：
+
+```python
+symmgp, symmsubs = get_symmetry(xyz, mask)
+nsubs = len(symmsubs) + 1
+```
+
+系统处理几种训练场景：
+
+1. **对称寡聚体**: 对于 Cn/Dn 对称性，在所有亚基上裁剪一致区域以保持对应关系
+2. **非对称二聚体**: 视为 C1 情况，预测完整二聚体而无对称约束
+3. **残基裁剪**: 在所有亚基上选择相同的残基位置以确保一致性
+   ```python
+   crop_idx = get_crop(L, mask[0,:L], device, params['CROP']//cropsub, unclamp=False)
+   crop_idx_complete = torch.cat([crop_idx + i*L for i in range(nsub)])
+   ```
+
+训练使用对称感知裁剪来平衡计算效率与维持界面区域：
+- C1: cropsub=2
+- Cn: cropsub=min(3, n)
+- Dn: cropsub=min(5, 2n)
+- 多面体: cropsub=6
+
+来源: [network/data_loader.py](network/data_loader.py#L625-L760)
+
+## 输出生成
+
+预测完成后，通过将对称变换应用于预测的非对称单元来组装完整的对称复合物：
+
+```python
+best_xyzfull = torch.zeros((B, O*Lasu, 27, 3))
+best_xyzfull[:, :Lasu] = best_xyz[:, :Lasu]
+for i in range(1, O):
+    best_xyzfull[:, (i*Lasu):((i+1)*Lasu)] = 
+        torch.einsum('ij,braj->brai', symmRs[i], best_xyz[:, :Lasu])
+```
+
+输出包括：
+- 所有对称相关链的完整坐标
+- 跨对称拷贝传播的置信度分数
+- 链内和链间接触的预测对齐误差 (PAE)
+- 带有适当链注释和代表置信度的 B 因子的 PDB 文件
+
+来源: [network/predict.py](network/predict.py#L580-L605)
+
+## 实际应用
+
+对称感知预测实现了几个重要的用例：
+
+1. **生物复合物建模**: 精确预测具有已知对称性的同源寡聚复合物（例如，病毒衣壳、酶复合物）
+2. **界面一致性**: 确保对称等效界面在几何上是一致的
+3. **计算效率**: 仅预测非对称单元，减少计算需求
+4. **模板整合**: 组合覆盖不同对称相关亚基的部分模板
+
+要获得对称感知预测的最佳结果，建议查阅 [三轨道设计](6-three-track-design-msa-pair-and-3d-structure-tracks) 以了解对称约束如何通过网络架构传播，以及 [SE(3)-等变 Transformer 网络](7-se-3-equivariant-transformer-network) 以理解在坐标更新期间如何维持几何约束。
+
+---
+
+## 损失函数与训练
+
+- [深入解析/损失函数与训练/FAPE（帧对齐点误差）损失](https://zread.ai/uw-ipd/RoseTTAFold2/16-fape-frame-aligned-point-error-loss)
+
+---
+slug:16-fape-frame-aligned-point-error-loss
+blog_type:normal
+---
+
+
+帧对齐点误差（FAPE）损失是一种旋转不变的几何损失函数，通过在局部坐标系中比较预测的原子位置与真实位置来衡量结构精度。这种方法使得蛋白质结构预测的精确训练不受整个分子全局旋转和平移的影响。
+
+## 数学基础
+
+FAPE 损失通过将原子坐标从全局笛卡尔空间转换到局部残基坐标系，然后在此帧对齐表示中计算预测点与真实点之间的距离来运作。对于每个残基，利用主链 N、Cα 和 C 原子构建一个局部坐标系，该坐标系随蛋白质结构移动。
+
+数学公式遵循以下模式：
+
+```
+FAPE = (1/Z) × mean(min(‖Rᵀ(x - T) - Rₙₐₜᵀ(xₙₐₜ - Tₙₐₜ)‖, d_clamp))
+```
+
+其中 R、T 是定义局部坐标系的旋转矩阵和平移向量，x 表示原子坐标，d_clamp 限制大误差的最大贡献，以防止异常值主导。
+
+## 坐标系生成
+
+FAPE 损失的基础在于利用主链原子构建稳健的局部坐标系。`rigid_from_3_points()` 函数利用 N、Cα 和 C 位置实现了这一点，为每个残基创建标准正交基向量：
+
+来源：[util.py](/network/util.py#L75-L103)
+
+```python
+def rigid_from_3_points(N, Ca, C, non_ideal=False, eps=1e-8):
+    # 从三个主链原子创建标准正交基
+    v1 = C - Ca
+    v2 = N - Ca
+    e1 = v1 / (torch.norm(v1, dim=-1, keepdim=True) + eps)
+    u2 = v2 - (torch.einsum('bli, bli -> bl', e1, v2)[...,None] * e1)
+    e2 = u2 / (torch.norm(u2, dim=-1, keepdim=True) + eps)
+    e3 = torch.cross(e1, e2, dim=-1)
+    R = torch.cat([e1[...,None], e2[...,None], e3[...,None]], axis=-1)
+    return R, Ca  # 旋转矩阵和原点
+```
+
+坐标系构建创建了一个右手坐标系，其中 e1 从 Cα 指向 C，e2 位于 N-Cα-C 平面内，e3 与两者正交。这提供了一个一致的局部参考坐标系，能够捕捉每个残基的局部结构几何特征。
+
+## FAPE 损失实现
+
+### 主链 FAPE 计算
+
+`calc_str_loss()` 中的主要实现专门处理主链原子，这是蛋白质折叠的核心结构损失：
+
+来源：[loss.py](/network/loss.py#L62-L110)
+
+```python
+def calc_str_loss(pred, true, logit_pae, mask_2d, same_chain, 
+                  negative=False, d_clamp=10.0, d_clamp_inter=30.0, 
+                  A=10.0, gamma=1.0, eps=1e-6):
+    '''
+    计算主链 FAPE 损失
+    输入:
+        - pred: 预测坐标 (I, B, L, n_atom, 3)
+        - true: 真实坐标 (B, L, n_atom, 3)
+    输出: str loss
+    '''
+    # 获取预测值和真实值的帧对齐点向量
+    t_tilde_ij = get_t(true[:,:,:,0], true[:,:,:,1], true[:,:,:,2], non_ideal=True)
+    t_ij = get_t(pred[:,:,:,0], pred[:,:,:,1], pred[:,:,:,2])
+    
+    # 计算对齐向量之间的欧几里得距离
+    difference = torch.sqrt(torch.square(t_tilde_ij-t_ij).sum(dim=-1) + eps)
+    
+    # 应用距离截断（链内 vs 链间）
+    clamp = torch.where(same_chain.bool(), d_clamp, d_clamp_inter)
+    clamp = clamp[None]
+    difference = torch.clamp(difference, max=clamp)
+    
+    # 归一化并应用掩码
+    loss = difference / A
+    mask = mask_2d if not negative else mask_2d * same_chain
+    loss = (mask[None]*loss).sum(dim=(1,2,3)) / (mask.sum()+eps)
+    
+    # 在循环迭代中应用指数加权
+    w_loss = torch.pow(torch.full((I,), gamma, device=pred.device), 
+                      torch.arange(I, device=pred.device))
+    w_loss = torch.flip(w_loss, (0,))
+    w_loss = w_loss / w_loss.sum()
+    tot_loss = (w_loss * loss).sum()
+    
+    return tot_loss, loss.detach()
+```
+
+<CgxTip>距离截断参数（链内 d_clamp=10.0Å，链间 d_clamp_inter=30.0Å）防止大的结构误差主导损失，允许模型专注于局部结构精度，同时仍然惩罚全局错误折叠。</CgxTip>
+
+### 帧对齐向量计算
+
+`get_t()` 函数计算残基对之间的帧对齐向量：
+
+来源：[loss.py](/network/loss.py#L54-L60)
+
+```python
+def get_t(N, Ca, C, non_ideal=False, eps=1e-5):
+    I,B,L = N.shape[:3]
+    Rs, Ts = rigid_from_3_points(N.view(I*B,L,3), Ca.view(I*B,L,3), 
+                                 C.view(I*B,L,3), non_ideal=non_ideal, eps=eps)
+    Rs = Rs.view(I,B,L,3,3)
+    Ts = Ts.view(I,B,L,3)
+    t = Ts[:,:,None] - Ts[:,:,:,None]  # 从残基 i 到残基 j 的向量
+    return einsum('iblkj, iblmk -> iblmj', Rs, t)  # 变换到局部坐标系
+```
+
+该实现计算所有残基对之间的位移向量，并将其旋转到源残基的局部坐标系中，产生用于比较的帧不变表示。
+
+### 通用 FAPE 计算
+
+`compute_FAPE()` 中更通用的实现提供了核心数学运算：
+
+来源：[loss.py](/network/loss.py#L262-L269)
+
+```python
+def compute_FAPE(Rs, Ts, xs, Rsnat, Tsnat, xsnat, Z=10.0, dclamp=10.0, eps=1e-4):
+    # 将点变换到局部坐标系
+    xij = torch.einsum('rji,rsj->rsi', Rs, xs[None,...] - Ts[:,None,...])
+    xij_t = torch.einsum('rji,rsj->rsi', Rsnat, xsnat[None,...] - Tsnat[:,None,...])
+    
+    # 计算截断距离
+    diff = torch.sqrt(torch.sum(torch.square(xij-xij_t), dim=-1) + eps)
+    loss = (1.0/Z) * (torch.clamp(diff, max=dclamp)).mean()
+    
+    return loss
+```
+
+该函数直接实现了 FAPE 公式，将任意点集变换到局部坐标系并计算它们的帧不变距离。
+
+## 在训练流程中的集成
+
+FAPE 损失通过 `Trainer.calc_loss()` 方法集成到训练流程中，该方法结合了多个损失组件：
+
+来源：[train_multi_deep.py](/network/train_multi_deep.py#L231-L240)
+
+```python
+# 结构损失 - 主链 FAPE
+if unclamp: 
+    tot_str, str_loss, pae_loss = calc_str_loss(pred, true, logit_pae,
+                                               mask_2d, same_chain, 
+                                               negative=negative,
+                                               A=10.0, d_clamp=None)
+else:
+    tot_str, str_loss, pae_loss = calc_str_loss(pred, true, logit_pae,
+                                               mask_2d, same_chain, 
+                                               negative=negative,
+                                               A=10.0, d_clamp=10.0)
+tot_loss += (1.0-w_all)*w_str*tot_str
+```
+
+训练支持截断和非截断版本，默认配置使用距离截断以防止大误差在训练早期主导。
+
+## 关键设计特性
+
+### 循环迭代加权
+
+实现对循环迭代应用指数加权，更加重视发生结构精修的后续迭代。加权因子 `gamma`（默认 1.0）控制这种衰减：
+
+来源：[loss.py](/network/loss.py#L95-L97)
+
+```python
+w_loss = torch.pow(torch.full((I,), gamma, device=pred.device), 
+                  torch.arange(I, device=pred.device))
+w_loss = torch.flip(w_loss, (0,))
+w_loss = w_loss / w_loss.sum()
+```
+
+### 掩码策略
+
+FAPE 损失采用复杂的掩码来处理缺失区域和链边界：
+
+- **Mask_2d**：指示有效残基对的 2D 成对掩码
+- **Same_chain**：区分链内和链间对的布尔掩码
+- **Negative mode**：在负样本（非相互作用蛋白质）上训练时，仅考虑链内对
+
+### 参数配置
+
+关键 FAPE 参数及其典型值：
+
+| 参数 | 默认值 | 用途 |
+|-----------|---------|---------|
+| `d_clamp` | 10.0 Å | 最大链内误差贡献 |
+| `d_clamp_inter` | 30.0 Å | 最大链间误差贡献 |
+| `A` | 10.0 | 归一化缩放因子 |
+| `gamma` | 1.0 | 循环迭代加权 |
+| `eps` | 1e-6 | 数值稳定性常数 |
+
+<CgxTip>链内（10Å）与链间（30Å）不同的截断值反映了与局部折叠相对于结构域间相互作用相关的不同距离尺度，允许损失在不同的范围内适当地加权结构精度。</CgxTip>
+
+## 架构背景
+
+FAPE 损失在 RoseTTAFold2 更广泛的三轨道架构内运作：
+
+```mermaid
+flowchart TD
+    A[SE3 网络输出] --> B[3D 坐标生成]
+    B --> C[坐标系构建<br/>rigid_from_3_points]
+    C --> D[FAPE 损失计算<br/>calc_str_loss]
+    D --> E[反向传播]
+    
+    F[真实结构] --> G[坐标系构建<br/>non_ideal=True]
+    G --> D
+    
+    H[训练流程] --> I[损失聚合]
+    D --> I
+    I --> E
+```
+
+FAPE 损失接收来自 SE3 网络的预测坐标，并将其与真实结构进行比较，两种表示在比较前都被转换到各自的局部坐标系中。
+
+## FAPE 损失的优势
+
+FAPE 损失为蛋白质结构预测提供了几个关键优势：
+
+1. **旋转不变性**：通过在局部坐标系中运作，损失对整个结构的全局旋转不敏感，纯粹专注于局部几何精度。
+
+2. **距离截断**：防止异常误差主导训练，使模型能够首先专注于局部结构保真度，然后再解决全局拓扑结构。
+
+3. **多尺度敏感性**：链内和链对的不同截断值允许适当地加权局部折叠相对于结构域排列。
+
+4. **迭代精修**：循环迭代的指数加权强调了后续周期中改进的预测。
+
+5. **掩码计算**：高效处理缺失区域和链边界，使得能够在部分结构和多链复合物上进行训练。
+
+这些特性的组合使 FAPE 损失特别适合于训练蛋白质结构预测模型，这些模型必须同时学习局部主链几何和全局三级结构。
+
+## 后续步骤
+
+要了解 FAPE 损失如何与其他训练目标集成，请探索 [多组件损失（距离、角度、LDDT、PAE）](17-multi-component-loss-distance-angle-lddt-pae) 中的综合损失架构。如需深入了解生成由 FAPE 评估的坐标的结构预测流程，请参阅 [使用 SE3 层生成坐标](14-coordinate-generation-with-se3-layers)。
+
+---
+
+- [深入解析/损失函数与训练/多分量损失（距离、角度、LDDT、PAE）](https://zread.ai/uw-ipd/RoseTTAFold2/17-multi-component-loss-distance-angle-lddt-pae)
+
+---
+slug:17-multi-component-loss-distance-angle-lddt-pae
+blog_type:normal
+---
+
+
+RoseTTAFold2 采用了一种复杂的多组件损失函数，结合了几何、结构和置信度估计损失。这种复合损失同时优化主链结构预测和辅助置信度指标，使模型能够生成准确的蛋白质结构，并提供可靠的残基间和残基内置信度估计。
+
+## 架构概述
+
+多组件损失通过专用的辅助网络整合了四种不同的预测模态，这些网络在不同的特征表示上运行。距离和角度预测利用来自 Pair 轨道的成对表示，而 LDDT 利用来自 3D 轨道的结构状态特征，PAE 则在成对距离信息上运行以预测残基间对齐误差。
+
+```mermaid
+graph TB
+    subgraph Input_Tracks
+        MSA[MSA Track]
+        Pair[Pair Track]
+        ThreeD[3D Structure Track]
+    end
+    
+    subgraph Auxiliary_Predictors
+        DN[DistanceNetwork]
+        LN[LDDTNetwork]
+        PN[PAENetwork]
+    end
+    
+    subgraph Loss_Components
+        DL[Distance & Angle Loss]
+        LL[LDDT Loss]
+        PL[PAE Loss]
+    end
+    
+    Pair --> DN
+    ThreeD --> LN
+    Pair --> PN
+    
+    DN --> DL
+    LN --> LL
+    PN --> PL
+    
+    DL --> Total[Multi-Component Loss]
+    LL --> Total
+    PL --> Total
+    
+    style DN fill:#e1f5ff
+    style LN fill:#fff4e1
+    style PN fill:#ffe1f5
+    style Total fill:#ffe1e1,stroke:#ff0000,stroke-width:3px
+```
+
+## 距离和角度损失
+
+距离和角度损失组件评估 6D 坐标预测的准确性——包括残基间距离、主链二面角 (omega) 和极向角度 (theta, phi)。这些预测共同编码了残基对之间的完整相对几何关系。
+
+### 6D 坐标表示
+
+6D 坐标捕获残基对之间的四个几何参数：(1) Cβ-Cβ 距离，(2) ω 二面角 (Ca-Cb-Cb-Ca)，(3) θ 二面角 (N-Ca-Cb-Cb)，以及 (4) φ 平面角 (Ca-Cb-Cb)。这些坐标通过 [network/coords6d.py](network/coords6d.py#L36-L81) 中的 `get_coords6d` 函数计算，该函数从 N、Ca、C 主链原子重建 Cβ 位置，并计算指定距离阈值内残基对之间的空间关系。
+
+### DistanceNetwork 架构
+
+[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L5-L36) 中的 `DistanceNetwork` 类实现了用于对称和非对称角度预测的双重投影头。对称头预测距离 (37 个 bin) 和 omega (37 个 bin) 分布，通过 logits 平均强制执行成对对称性，而非对称头预测 theta (37 个 bin) 和 phi (19 个 bin) 而无对称约束。这种设计反映了物理现实：距离和 omega 角在残基对之间是对称的，而极坐标取决于所选的参考系。
+
+### 损失计算
+
+距离-角度损失通过 [network/loss.py](network/loss.py#L44-L52) 中的 `calc_c6d_loss` 计算，该函数对四个角度分量中的每一个独立应用交叉熵损失。对于每个分量，损失进行掩码处理以考虑缺失的残基，并且在负训练情况（非相互作用链）中，忽略链间相互作用。来自所有四个分量的损失值作为堆叠张量返回，用于下游加权。
+
+<CgxTip>
+DistanceNetwork 中投影层权重的零初始化对于稳定训练至关重要。这确保网络从均匀预测开始，逐渐学习专门的分布，而不会对任何特定距离或角度范围产生初始偏差。
+</CgxTip>
+
+### 预测 Bin
+
+距离预测使用跨越距离范围的 37 个 bin，而角度分布根据角度类型离散化为不同数量的 bin。Bin 离散化使模型能够输出概率分布而非点估计，这自然地编码了预测不确定性，并支持基于预测置信度的下游损失加权。
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L5-L36), [network/loss.py](network/loss.py#L44-L52), [network/coords6d.py](network/coords6d.py#L36-L81)
+
+## LDDT 损失
+
+局部距离差分测试 (LDDT) 损失通过将预测的原子间距离误差与真实 LDDT 分数进行比较，来优化每残基置信度估计。该组件确保模型学习准确预测结构的哪些区域是可靠的。
+
+### LDDTNetwork 架构
+
+[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L54-L77) 中的 `LDDTNetwork` 通过具有层归一化和 ReLU 激活的两层 MLP 架构处理单轨道特征（3D 结构状态）。网络在 50 个 bin 上输出 logits，表示范围从 0 到 1 的 LDDT 分数，这些 logits 被置换为形状 (B, n_bin, L) 以与损失计算兼容。该架构对隐藏层使用 Kaiming 初始化，对最终投影使用零初始化，反映了其他辅助预测器的设计理念。
+
+### 基于 CA 的 LDDT 计算
+
+[network/loss.py](network/loss.py#L569-L594) 中基于 CA 的 LDDT 实现仅使用 Cα 原子评估主链几何结构，提供整体折叠准确性的快速评估。对于真实结构中彼此距离在 15Å 内的每个残基对，算法计算预测的 Cα-Cα 距离与真实距离之间的绝对差值。该差值在四个距离 bin（0.5Å、1.0Å、2.0Å、4.0Å）上进行阈值处理，每个 bin 对最终 LDDT 分数贡献 25%。每残基 LDDT 通过对有效配对的成对分数进行平均计算，然后对整个蛋白质进行平均以产生全局指标。
+
+### 包含预测损失的全原子 LDDT
+
+[network/loss.py](network/loss.py#L596-L641) 中的综合全原子 LDDT 实现将基于 CA 的方法扩展到每个残基的所有 14 个标准重原子。该函数从完整的原子结构计算真实的 LDDT 值，并同时评估 LDDT 预测网络的准确性。预测损失通过将真实 LDDT 值离散化为 50 个 bin 并对网络预测的 bin 概率应用交叉熵损失来计算。该双重用途函数返回预测损失（用于反向传播）和真实 LDDT 值（用于监控和验证）。
+
+<CgxTip>
+LDDT 计算中的 15Å 距离截止将损失函数集中在局部结构准确性上，这对于对接和界面预测等下游应用至关重要。该阈值确保全局域移动不会过分惩罚其他方面准确的局部结构。
+</CgxTip>
+
+### 掩码策略
+
+LDDT 损失计算实现了复杂的掩码以处理缺失数据和训练场景。成对掩码排除：(1) 真实结构中超过 15Å 的残基对，(2) 涉及缺失原子的对，(3) 同一残基内的对，以及 (4) 在负训练情况中，链间对。这确保损失仅评估真实结构信息可用且相关的区域。
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L54-L77), [network/loss.py](network/loss.py#L569-L594), [network/loss.py](network/loss.py#L596-L641)
+
+## PAE 损失
+
+预测对齐误差 (PAE) 损失通过训练模型估计当结构最佳叠加时残基对之间的预期对齐误差，来优化残基间置信度预测。该组件对于评估全局折叠可靠性和识别潜在的域级误差至关重要。
+
+### PAENetwork 架构
+
+[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L100-L112) 中的 `PAENetwork` 提供了从成对特征到 PAE bin 预测的轻量级单层投影。网络在 64 个 bin 上输出 logits，跨度从 0.5Å 到 32Å 的误差范围（每个 bin 间距 0.5Å）。与其他辅助预测器一样，它使用零初始化权重以确保从均匀初始预测开始的稳定训练。
+
+### PAE 损失计算
+
+PAE 损失集成在 [network/loss.py](network/loss.py#L62-L111) 的 `calc_str_loss` 函数中，该函数共同计算主链 FAPE (Frame-Aligned Point Error) 损失和 PAE 预测损失。FAPE 组件通过比较预测和真实主链坐标框架来量化结构准确性，而 PAE 组件训练置信度估计器。
+
+PAE 标签生成过程计算所有循环迭代中预测结构和真实结构之间的真实对齐误差。对于每个残基对，算法从最终循环迭代中提取最佳对齐框架并将其应用于所有中间预测。PAE 标签计算为框架对齐后对应点之间的最小距离，这捕获了 PAE 网络应该预测的真实误差。
+
+### 与结构损失的集成
+
+PAE 损失展示了与结构训练目标的复杂集成。FAPE 损失使用跨循环迭代的指数加权（由 gamma 参数控制），给予后期、更精细的预测更高的重要性。相比之下，PAE 损失使用最终迭代的对齐来评估所有中间预测，创建了一个丰富的训练信号，教导模型在多个细化阶段预测对齐误差。
+
+### 距离限制和链处理
+
+FAPE 组件实现了依赖距离的限制以限制大误差的影响。链内对使用默认的 10Å 限制，而链间对使用 30Å，反映了跨链的域移动通常更大的预期。对于负训练情况（非相互作用链），损失仅评估链内对，确保模型不学习预测不正确的相互作用。
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L100-L112), [network/loss.py](network/loss.py#L62-L111)
+
+## 损失集成和加权
+
+完整的多组件损失在 [network/train_multi_deep.py](network/train_multi_deep.py#L150-L332) 中 Trainer 类的 `calc_loss` 方法中组装。该函数协调所有损失组件的评估，采用适当的加权和掩码策略。
+
+### 损失组件摘要
+
+| 组件 | 权重参数 | 描述 | 关键函数 |
+|-----------|-----------------|-------------|--------------|
+| 距离和角度 | `w_dist` (默认 1.0) | 6D 坐标准确性 | `calc_c6d_loss` |
+| LDDT | `w_lddt` (默认 1.0) | 每残基置信度 | `calc_allatom_lddt_w_loss` |
+| PAE | `w_pae` (默认 1.0) | 残基间对齐误差 | 集成在 `calc_str_loss` 中 |
+| 主链 FAPE | `w_str` (默认 1.0) | 主链结构准确性 | `calc_str_loss` |
+| 全原子 FAPE | `w_all` (默认 0.5) | 全原子准确性 | `compute_FAPE` |
+| 扭转角 | `w_str` (默认 1.0) | 侧链构象 | `torsionAngleLoss` |
+
+### 损失计算流程
+
+损失计算遵循精心编排的顺序，利用共享的中间计算。首先，使用主链原子评估基于坐标的损失 (FAPE, PAE)。接下来，重建全原子结构以进行全原子 FAPE 和 LDDT 评估。最后，使用重建的原子坐标计算辅助损失（扭转角、键几何、基于物理的项）。
+
+### 掩码协调
+
+所有损失组件使用协调的掩码策略来处理缺失数据和特殊训练场景。`mask_2d` 张量识别有效的残基对，`mask_BB` 识别有效的主链残基，`mask_crds` 识别有效的原子。对于负训练情况（蛋白质-蛋白质相互作用负样本），`same_chain` 张量确保损失仅评估链内相互作用，防止模型学习不正确的链间接触。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L150-L332)
+
+## 训练动态
+
+多组件损失函数在训练迭代中演变，不同组件在学习的不同阶段占主导地位。
+
+### 早期训练动态
+
+在早期训练期间，距离和角度损失通常占主导地位，因为模型学习建立正确的粗粒度几何结构。这些损失的交叉熵公式即使在预测远未正确时也能提供强梯度，使折叠拓扑结构能够快速改进。
+
+### 中期细化
+
+随着训练的进行，FAPE 和 LDDT 损失对于细化结构细节变得越来越重要。跨循环迭代的指数加权鼓励模型专注于改进后期迭代，而 LDDT 预测损失在结构准确性提高时教授置信度估计。
+
+### 后期专业化
+
+在训练的最后阶段，基于物理的损失（Lennard-Jones、氢键）和扭转角损失微调原子级细节。PAE 损失继续为置信度估计提供信号，确保对局部和全局不确定性的准确预测。
+
+### 监控和验证
+
+训练器返回包含所有组件损失和指标（包括真实 LDDT 分数）的综合损失向量用于监控。这 enables 详细分析哪些损失组件正在驱动优化并识别潜在的故障模式。验证周期在训练周期内跟踪总损失和单个组件。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L150-L332), [network/train_multi_deep.py](network/train_multi_deep.py#L673-L752)
+
+## 后续步骤
+
+了解了多组件损失架构后，读者应详细探索 [FAPE (Frame-Aligned Point Error) Loss](16-fape-frame-aligned-point-error-loss) 中的 FAPE 损失实现，以了解如何量化主链结构准确性。对于实际应用，[LDDT and PAE Confidence Estimation](21-lddt-and-pae-confidence-estimation) 解释了如何在结构评估和模型选择中使用这些置信度预测。完整的训练流水线在 [Training Pipeline with Distributed Data Parallel](19-training-pipeline-with-distributed-data-parallel) 中描述。
+
+---
+
+- [深入解析/损失函数与训练/基于物理的损失（Lennard-Jones、氢键）](https://zread.ai/uw-ipd/RoseTTAFold2/18-physics-based-losses-lennard-jones-hydrogen-bonds)
+
+---
+slug:18-physics-based-losses-lennard-jones-hydrogen-bonds
+blog_type:normal
+---
+
+
+本页面记录了 RoseTTAFold2 在训练过程中基于物理的能量项实现。Lennard-Jones 和氢键损失弥补了数据驱动的结构预测与基础物理化学原理之间的差距，鼓励模型学习符合物理现实的原子相互作用。这些损失通过强制执行对稳定蛋白质结构必不可少的适当范德华堆积和氢键模式，补充了几何和基于距离的损失。
+
+## 架构集成
+
+基于物理的损失在训练流程的全原子级别运行，集成在 SE(3) 网络生成 3D 坐标之后、最终损失聚合之前。Lennard-Jones 势能惩罚原子冲突，同时奖励适当的范德华接触，而氢键损失则明确模拟稳定二级和三级结构的方向性静电相互作用。
+
+```mermaid
+graph TD
+    A[SE3 Network Output] --> B[All-Atom Coordinate Generation]
+    B --> C[Lennard-Jones Loss Calculation]
+    B --> D[Hydrogen Bond Loss Calculation]
+    C --> E[Physics-Based Loss Term]
+    D --> E
+    F[Geometric Losses<br/>FAPE, Distance, Angle] --> G[Total Loss Aggregation]
+    E --> G
+    G --> H[Backpropagation]
+    
+    style C fill:#e1f5fe
+    style D fill:#e1f5fe
+    style E fill:#b3e5fc
+```
+
+基于物理的损失从最终循环迭代接收预测坐标，并应用源自 Rosetta 力场参数的参数化能量函数。与主要的 FAPE 和距离损失相比，这些损失在训练早期通常权重较低，但为细粒度的原子堆积提供了关键的正则化。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L314-L327), [network/loss.py](network/loss.py#L365-L567)
+
+## Lennard-Jones 势能损失
+
+### 数学公式
+
+Lennard-Jones 损失实现了带有线性切换函数的修正 12-6 势能，以处理标准 LJ 势能在极短距离下变得数值不稳定的情况。势能函数定义为：
+
+```
+ljE = epsilon × [(σ/d)^12 - 2 × (σ/d)^6]
+```
+
+其中 σ (sigma) 代表组合的范德华半径，ε (epsilon) 代表相互作用原子对的组合势阱深度。实现在 `lj_lin × σ` 以下的距离处添加了线性修正项，以确保平滑的梯度：
+
+```python
+linpart = dist < lj_lin * sigma
+deff[linpart] = lj_lin * sigma[linpart]
+# Linear correction term
+ljE[linpart] += epsilon[linpart] × (-12×sd12 + 12×sd6) × (dist - deff)
+```
+
+线性切换点由 `lj_lin=0.75` 控制，该值决定了势能惩罚原子冲突的剧烈程度。较小的值会产生更激进的冲突惩罚。
+
+来源：[network/loss.py](network/loss.py#L370-L388)
+
+### 参数系统和原子类型
+
+Lennard-Jones 势能使用来自 Rosetta 的 `fa_atr`（吸引）和 `fa_rep`（排斥）项的原子特定参数。20 种标准氨基酸中的每一种都使用原子特定的 σ 和 ε 值进行参数化：
+
+| 参数 | 描述 | 来源 |
+|-----------|-------------|--------|
+| `ljlk_parameters[seq, atom, 0]` | σ (sigma) - 范德华半径 | [network/chemical.py](network/chemical.py) |
+| `ljlk_parameters[seq, atom, 1]` | ε (epsilon) - 势阱深度 | [network/chemical.py](network/chemical.py) |
+| `lj_correction_parameters[seq, atom, 0]` | 氢键受体标志 | [network/train_multi_deep.py](network/train_multi_deep.py#L133) |
+| `lj_correction_parameters[seq, atom, 1]` | 氢键供体标志 | [network/train_multi_deep.py](network/train_multi_deep.py#L133) |
+| `lj_correction_parameters[seq, atom, 2]` | 氢原子标志 | [network/train_multi_deep.py](network/train_multi_deep.py#L133) |
+| `lj_correction_parameters[seq, atom, 3]` | 二硫键能力标志 | [network/train_multi_deep.py](network/train_multi_deep.py#L133) |
+
+原子对的组合参数使用 Lorentz-Berthelot 组合规则计算：
+- σij = σi + σj (算术平均)
+- εij = √(εi × εj) (几何平均)
+
+来源：[network/loss.py](network/loss.py#L434-L449)
+
+### 特殊距离修正
+
+该实现包括针对生物学相关相互作用的几种特殊距离修正：
+
+**氢键修正**：当潜在的氢键供体和受体相互作用时，范德华距离被调整为 `lj_hb_dis=3.0` Å，允许比标准非键合接触更接近的距离：
+
+```python
+use_hb_dis = ljcorr[seq[si],ai,0]*ljcorr[seq[sj],aj,1] + ljcorr[seq[si],ai,1]*ljcorr[seq[sj],aj,0]
+ljrs[use_hb_dis] = lj_hb_dis
+```
+
+**羟基供体修正**：对于既可作为供体又可作为受体的 OH 基团，使用特定的距离 `lj_OHdon_dis=2.6` Å：
+
+```python
+use_ohdon_dis = ljcorr[seq[si],ai,0]*ljcorr[seq[si],ai,1]*ljcorr[seq[sj],aj,0] 
+              + ljcorr[seq[si],ai,0]*ljcorr[seq[sj],aj,0]*ljcorr[seq[sj],aj,1]
+```
+
+**氢-氢修正**：当包含氢原子时 (`use_H=True`)，H-H 相互作用对适当的供体-受体对使用 `lj_hbond_hdis=1.75` Å。
+
+**二硫键修正**：对于能够形成二硫键的半胱氨酸-半胱氨酸对，排斥项 (σ) 设置为零，允许模拟共价键的极近距离：
+
+```python
+potential_disulf = ljcorr[seq[si],ai,3]*ljcorr[seq[sj],aj,3]
+ljss[potential_disulf] = 0.0
+```
+
+来源：[network/loss.py](network/loss.py#L425-L449)
+
+### 掩蔽和排除策略
+
+Lennard-Jones 损失使用复杂的掩蔽来避免计算无关或可能产生误导的相互作用的能量：
+
+**自相互作用排除**：排除下三角对：
+```python
+idxes1r = torch.tril_indices(L,L,-1)
+mask[idxes1r[0],:,idxes1r[1],:] = False
+```
+
+**残基内排除**：同一残基内的原子对被掩蔽，除非被 >3 个化学键隔开：
+```python
+mask[idxes2r,:,idxes2r,:] *= num_bonds[seq,:,:] > 3  # intra-residue
+```
+
+**残基间排除**：相邻残基对遵循类似的基于键的排除：
+```python
+mask[idxes2r[:-1],:,idxes2r[1:],:] *= (
+    num_bonds[seq[:-1],:,2:3] + num_bonds[seq[1:],0:1,:] + 1 > 3
+)
+```
+
+**二硫键对排除**：CYS-CYS 对完全从 LJ 计算中排除，以避免惩罚共价二硫键：
+```python
+is_CYS = (seq == aa2num['CYS'])
+is_CYS_pair = is_CYS[:,None]*is_CYS[None,:]
+mask *= ~is_CYS_pair.view(L,1,L,1)
+```
+
+**链隔离**：对于负训练样本（诱饵），忽略链间相互作用：
+```python
+if negative:
+    mask *= same_chain.bool()[:,None,:,None]
+```
+
+<CgxTip>
+使用 `num_bonds[seq] > 3` 的基于键的排除策略对于防止 LJ 损失惩罚共价键合或 1,3-相互作用原子至关重要。这种排除反映了物理力场设计，其中键合项与非键合范德华相互作用分开处理。
+</CgxTip>
+
+来源：[network/loss.py](network/loss.py#L390-L421)
+
+### 逐残基聚合模式
+
+Lennard-Jones 损失可以由 `reswise` 参数控制的两种模式下运行：
+
+**逐原子模式** (`reswise=False`，默认)：返回所有成对相互作用的归一化和：
+```python
+if normalize:
+    return torch.sum(ljval) / torch.sum(aamask[seq])
+else:
+    return torch.sum(ljval)
+```
+
+**逐残基模式** (`reswise=True`)：按残基对聚合能量，返回 L×L 矩阵，对于识别有问题的残基-残基接触非常有用：
+```python
+if reswise:
+    ljval_res = torch.zeros_like(mask.float())
+    ljval_res[si,ai,sj,aj] = ljval
+    ljval_res = ljval_res.sum(dim=(1,3))  # Sum over atoms
+    ljval_res = ljval_res + ljval_res.permute(1,0)  # Symmetrize
+    return ljval_res.sum(dim=-1)
+```
+
+来源：[network/loss.py](network/loss.py#L453-L464)
+
+## 氢键损失
+
+### 几何模型概述
+
+氢键损失实现了一个方向性势能，奖励最佳的 D-H···A (供体-氢···受体) 几何形状。与简化的基于距离的氢键评分不同，该模型明确考虑了三个几何自由度：
+
+1. **距离 (AH)**：受体-氢分离
+2. **受体角 (AHD)**：受体-氢-供体之间的角度
+3. **基角 (BAH)**：涉及受体基原子的角度，以考虑杂化
+
+总氢键能量计算为：
+```
+E_hb = E_distance(AH) + E_angle(AHD) + E_hybrid(BAH, hybridization)
+```
+
+来源：[network/loss.py](network/loss.py#L466-L567)
+
+### 特定杂化处理
+
+该损失处理三种不同的杂化状态，每种都需要不同的几何处理：
+
+| 杂化 | 典型原子 | 角度处理 | 特殊处理 |
+|--------------|---------------|-------------------|------------------|
+| **SP2** | 羰基 O，芳香 N，平面羰基 C | 带有 χ 修正的单个 BAH 角 | 实现依赖于 BAH 的各向异性 |
+| **SP3** | Sp3 N (胺)，sp3 O (醇) | 双 BAH 角 (B 和 B₀) | 两个基向量的 Softmax 组合 |
+| **RING** | 芳香杂环 | 平均基向量 (Bₘ) | 单个平均基角 |
+
+杂化状态在 `hbtypes[seq, atom, 2]` 中编码，使用来自评分模块的 `HbHybType` 枚举。
+
+来源：[network/loss.py](network/loss.py#L509-L559)
+
+### 多项式评估框架
+
+氢键能量分量使用 9 次多项式计算，并在距离边界处进行钳位：
+
+```python
+def evalpoly(ds, xrange, yrange, coeffs):
+    v = coeffs[...,0]
+    for i in range(1,10):
+        v = v * ds + coeffs[...,i]
+    minmask = ds < xrange[...,0]
+    v[minmask] = yrange[minmask][...,0]  # Clamp to minimum
+    maxmask = ds > xrange[...,1]
+    v[maxmask] = yrange[maxmask][...,1]  # Clamp to maximum
+    return v
+```
+
+多项式按氢键类型对存储在 `hbpolys[donor_type, acceptor_type]` 中，距离、角度和杂化项具有单独的系数集。每个多项式具有相关的范围和钳位参数 `[x_min, x_max]` 和 `[y_min, y_max]`。
+
+来源：[network/loss.py](network/loss.py#L471-L479)
+
+### SP2 杂化：χ 各向异性
+
+对于 SP2 杂化受体（羰基氧、芳香氮），该损失实现了基于平面外二面角（χ 或 B₀BAH）的复杂各向异性修正：
+
+```python
+BAH = torch.acos(cosBAH)
+B0BAH = get_dih(B0_xs[:,hyb==HbHybType.SP2], B_xs[:,hyb==HbHybType.SP2], 
+                A_xs[:,hyb==HbHybType.SP2], H_xs)
+```
+
+该修正使用分段函数，根据 χ 调制基角惩罚：
+
+- **区域 1** (BAH > 120°)：使用基于余弦调制因子 H = 0.5 × (cos(2χ) + 1) 的最大值 和基线 之间的插值
+- **区域 2** (BAH 在过渡区)：实现宽度为 `l = 0.357` 的外部上升函数
+- **区域 3** (BAH < 120° - l)：常数基线值
+
+这种各向异性考虑了羰基孤对电子的首选方向性，其中氢键大致垂直于羰基平面接近。
+
+<CgxTip>
+带有 `hb_sp2_outer_width` 参数的 SP2 各向异性实现控制了模型执行孤对电子方向性的严格程度。默认值 0.357 提供了一个平滑的过渡区，在严格的几何偏好与对观察到的结构变异的容忍度之间取得平衡。
+</CgxTip>
+
+来源：[network/loss.py](network/loss.py#L541-L559)
+
+### SP3 杂化：Softmax 组合
+
+SP3 受体（胺、醇）由于四面体对称性具有两个等效的基原子。该损失计算两个基向量的能量并使用软最大值组合它们：
+
+```python
+cosBAH1 = cosangle(B_xs, A_xs, H_xs)    # Using base atom B
+cosBAH2 = cosangle(B0_xs, A_xs, H_xs)   # Using base atom B₀
+Esp3_1 = polys[...,2,0] * evalpoly(cosBAH1, ...)
+Esp3_2 = polys[...,2,0] * evalpoly(cosBAH2, ...)
+Es[:,hyb==HbHybType.SP3] += torch.log(
+    torch.exp(Esp3_1 * hb_sp3_softmax_fade) 
+    + torch.exp(Esp3_2 * hb_sp3_softmax_fade)
+) / hb_sp3_softmax_fade
+```
+
+`hb_sp3_softmax_fade=2.5` 参数控制软最大值的锐度，决定了模型优先选择两个基角中较好者的严格程度。
+
+来源：[network/loss.py](network/loss.py#L517-L532)
+
+### 能量压缩函数
+
+为了防止氢键损失过度惩罚边缘相互作用，对中间能量值（在 -0.1 和 +0.1 之间）应用压缩函数：
+
+```python
+tosquish = torch.logical_and(Es > -0.1, Es < 0.1)
+Es[tosquish] = -0.025 + 0.5 * Es[tosquish] - 2.5 * torch.square(Es[tosquish])
+Es[Es > 0.1] = 0.  # Cap positive energies
+```
+
+该二次函数：
+- 压缩有利和不利之间的过渡区域
+- 将下限设置在 -0.025（略微有利）
+- 将不利能量上限限制在 0.0
+- 保留强有利能量 (< -0.1)
+
+这种设计防止氢键损失对模糊相互作用产生大梯度，同时为形成良好的氢键保持强指导。
+
+来源：[network/loss.py](network/loss.py#L561-L563)
+
+## 训练配置和加权
+
+### 损失权重参数
+
+基于物理的损失通过独立的权重参数集成到训练损失中，这些参数可以在训练期间调整：
+
+```python
+def calc_loss(..., w_lj=0.0, w_hb=0.0, lj_lin=0.75, use_H=False, ...):
+    # ... other loss calculations
+    
+    # LJ potential
+    lj_loss = calc_lj(seq[0], pred_all[0,...,:3], self.aamask, same_chain[0],
+                     self.ljlk_parameters, self.lj_correction_parameters, 
+                     self.num_bonds, lj_lin=lj_lin, use_H=use_H)
+    if w_lj > 0.0:
+        tot_loss += w_lj * lj_loss
+    
+    # Hydrogen bond
+    hb_loss = calc_hb(seq[0], pred_all[0,...,:3], self.aamask, 
+                      self.hbtypes, self.hbbaseatoms, self.hbpolys)
+    if w_hb > 0.0:
+        tot_loss += w_hb * hb_loss
+```
+
+**关键配置参数**：
+
+| 参数 | 默认值 | 描述 | 典型训练计划 |
+|-----------|---------|-------------|--------------------------|
+| `w_lj` | 0.0 | Lennard-Jones 损失权重 | 从 0 逐渐增加到 0.1-0.5 |
+| `w_hb` | 0.0 | 氢键损失权重 | 通常保持较低 (0-0.2) |
+| `lj_lin` | 0.75 | 线性切换阈值 | 降低（例如 0.75→0.6）以进行更严格的冲突检测 |
+| `use_H` | False | 包含氢原子 | 使用全原子结构进行微调时启用 |
+
+0.0 的默认权重反映了基于物理的损失通常在训练后期引入，此时模型已经从 FAPE 和距离损失中学到了粗粒度结构。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L154-L327)
+
+### 坐标选择和掩蔽
+
+基于物理的损失对特定的坐标子集进行操作：
+
+**仅骨架模式**（默认）：仅使用骨架原子 (N, CA, C) 进行 LJ 和氢键评估：
+```python
+lj_loss = calc_lj(seq[0], pred_all[0,...,:3], ...)  # First 3 atoms are N, CA, C
+hb_loss = calc_hb(seq[0], pred_all[0,...,:3], ...)
+```
+
+这种方法将基于物理的损失集中在骨架几何和堆积上，这些从 cryo-EM 和 X 射线数据中学习更可靠。
+
+**全原子模式**：当使用预测的侧链坐标时，每个残基可以包含所有 14 个重原子：
+```python
+lj_loss = calc_lj(seq[0], pred_all[0,...,:14], ...)  # All heavy atoms
+```
+
+**侧链冲突掩蔽**：如果真实侧链导致显着的 LJ 能量（高于 `clashcut`），则将其掩蔽，防止模型从低质量侧链密度中学习：
+```python
+lj_nat = calc_lj(seq[0], true[0,..., :3], ..., reswise=True, atom_mask=xs_mask[0])
+mask_clash = (lj_nat < clashcut) * mask_BB[0]
+xs_mask[:,:,5:] *= mask_clash.view(1,L,1)  # Ignore clashed side-chains
+```
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L196-L205, L314-L327)
+
+### 参数初始化和存储
+
+Trainer 类从 `network/chemical.py` 初始化所有基于物理的损失参数：
+
+```python
+class Trainer:
+    def __init__(self, ...):
+        # Atom-level parameters
+        self.ljlk_parameters = ljlk_parameters
+        self.lj_correction_parameters = lj_correction_parameters
+        self.hbtypes = hbtypes
+        self.hbbaseatoms = hbbaseatoms
+        self.hbpolys = hbpolys
+        
+        # Structural parameters
+        self.num_bonds = num_bonds
+        self.aamask = allatom_mask
+```
+
+这些参数源自 Rosetta 力场并编码：
+- 原子范德华半径和势阱深度 (LJ)
+- 氢键供体/受体分类
+- 杂化状态和基原子索引
+- 氢键评分的多项式系数
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L129-L137), [network/chemical.py](network/chemical.py#L93-L167)
+
+## 与其他损失组件的关系
+
+### 与几何损失的互补性
+
+基于物理的损失与主要的几何损失发挥着不同的作用：
+
+| 损失类型 | 主要目标 | 空间尺度 | 物理基础 |
+|-----------|------------------|---------------|---------------|
+| **FAPE** | 将预测的框架与天然结构对齐 | 局部到全局 | 基于框架的距离 |
+| **距离/角度** | 残基间几何 | 中等到长 | 统计势 |
+| **LJ** | 原子堆积 | 短程 | 范德华力 |
+| **H-Bond** | 方向性静电 | 短到中 | 静电相互作用 |
+
+基于物理的损失对于以下方面特别有价值：
+1. **原子细节细化**：优化侧链堆积和骨架冲突
+2. **立体化学强制执行**：确保符合物理现实的原子重叠
+3. **二级结构稳定**：奖励适当的氢键网络
+4. **异常值检测**：识别仅靠几何损失不足的有问题区域
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L150-L332)
+
+### 与训练阶段的集成
+
+```mermaid
+timeline
+    title Physics-Based Loss Integration During Training
+    section Early Training
+        Geometric Focus : FAPE, Distance, Angle losses dominant<br/>w_lj = 0.0, w_hb = 0.0
+        Structure Learning : Coarse-grained fold emerges
+    section Mid Training
+        Physics Introduction : w_lj increased (0.0 → 0.1)<br/>w_hb introduced (0.0 → 0.05)
+        Refinement Begins : Better atomic packing
+    section Late Training
+        Full Physics : w_lj = 0.3-0.5<br/>w_hb = 0.1-0.2
+        Fine-tuning : All-atom quality optimization
+```
+
+来源：[Training Pipeline documentation](19-training-pipeline-with-distributed-data-parallel)
+
+## 高级考虑因素
+
+### 负训练（诱饵）
+
+对于负训练样本（错误结构），基于物理的损失在受限模式下运行：
+
+```python
+if negative:
+    mask *= same_chain.bool()[:,None,:,None]
+```
+
+此限制防止 LJ 和氢键损失惩罚诱饵中的链间接触，这些接触可能任意差。损失完全专注于链内物理，确保模型不会从故意的不良示例中学习错误的堆积模式。
+
+来源：[network/loss.py](network/loss.py#L407-L409)
+
+### 氢包含策略
+
+包含氢原子 (`use_H=True`) 显著增加了 LJ 损失的计算成本和复杂性，但提供了对氢键几何和空间位阻冲突的更细粒度控制。该实现：
+
+1. 扩展原子掩蔽以包括氢位置（全原子表示中的原子 14-26）
+2. 对 H 键 H···H 相互作用应用氢-氢距离修正
+3. 将成对相互作用数量增加约 2-3 倍
+
+此模式通常保留用于最终微调，使用可以可靠推断或从中子晶体学获得的高分辨率结构。
+
+来源：[network/loss.py](network/loss.py#L397-L398, L438-L443)
+
+### 键长和角度协同
+
+基于物理的损失与显式键几何损失协同工作，以强制执行适当的立体化学：
+
+```python
+blen_loss, bang_loss = calc_BB_bond_geom(pred[-1,:,:], idx)
+if w_blen > 0.0:
+    tot_loss += w_blen * blen_loss
+if w_bang > 0.0:
+    tot_loss += w_bang * bang_loss
+```
+
+键几何损失 (`w_blen`, `w_bang`) 强制执行局部共价几何，而 LJ 和氢键损失强制执行原子级别的非键合相互作用。这种分层方法——共价几何 → 非键合物理 → 三级结构——反映了物理力场设计，并确保每个空间尺度都获得适当的指导。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L307-L311), [network/loss.py](network/loss.py#L326-L335)
+
+## 实现说明
+
+### 计算效率考虑
+
+基于物理的损失涉及 N 个原子的 O(N²) 成对计算，这对于大蛋白质来说变得昂贵。实现了几种优化：
+
+1. **稀疏对选择**：仅计算非零掩码条目：
+   ```python
+   si, ai, sj, aj = mask.nonzero(as_tuple=True)
+   ds = torch.sqrt(torch.sum(torch.square(xs[si,ai]-xs[sj,aj]), dim=-1) + eps)
+   ```
+
+2. **距离阈值**：氢键损失仅计算 `threshold_distance=6.0` Å 内的对
+
+3. **骨架优先策略**：默认仅对每个残基的 3 个骨架原子进行操作，在保持核心物理指导的同时提供大幅加速
+
+<CgxTip>
+在训练大型蛋白质（>500 个残基）时，考虑将基于物理的损失保持在降低的权重或限制为仅骨架模式，直到模型在几何损失上表现出稳定的收敛。如果不仔细管理，LJ 计算的二次缩放可能会主导计算成本。
+</CgxTip>
+
+来源：[network/loss.py](network/loss.py#L422-L423, L469)
+
+### 数值稳定性
+
+两个损失实现都包含广泛的数值保护措施：
+
+- **Epsilon 值**：距离计算使用 `eps=1e-8` 防止除以零
+- **裁剪**：余弦值在 acos 之前被裁剪为 `[-0.999, 0.999]` 以避免 NaN
+- **线性切换**：LJ 线性区域防止 dist → 0 时的无限梯度
+- **能量上限**：氢键压缩函数限制最大惩罚
+
+这些保护措施确保即使在预测结构在训练早期包含严重原子重叠时也能获得稳定的梯度。
+
+---
+
+- [深入解析/损失函数与训练/基于分布式数据并行的训练流程](https://zread.ai/uw-ipd/RoseTTAFold2/19-training-pipeline-with-distributed-data-parallel)
+
+---
+slug:19-training-pipeline-with-distributed-data-parallel
+blog_type:normal
+---
+
+
+RoseTTAFold2 采用 PyTorch 的分布式数据并行（DDP）框架来实现高效的多 GPU 训练，支持单节点内多 GPU 扩展或通过 SLURM 跨多节点扩展。本文档探讨了架构设计、初始化过程以及关键优化，这些因素使得三轨道 RoseTTAFold 模型能够进行具有指数移动平均（EMA）权重更新的可扩展训练。
+
+## 分布式训练架构
+
+分布式训练系统围绕两种不同的执行模式构建：单节点上的交互式多 GPU 训练和基于 SLURM 的多节点训练。该架构利用 PyTorch 的 NCCL 后端在 GPU 之间进行高效的梯度同步，并采用自定义加权采样策略来平衡不同的训练数据来源，包括 PDB 结构、AlphaFold 蒸馏模型、蛋白质复合物和负样本。
+
+```mermaid
+flowchart TD
+    A["Training Launch"] --> B{"Execution Mode?"}
+    B -->|Interactive| C["mp.spawn with<br/>world_size = CUDA device count"]
+    B -->|SLURM| D["Use SLURM_NTASKS &<br/>SLURM_PROCID for world_size & rank"]
+    
+    C --> E["torch.distributed.run"]
+    D --> E
+    
+    E --> F["dist.init_process_group<br/>backend='nccl'"]
+    F --> G["Set CUDA device per rank"]
+    G --> H["Initialize DistributedWeightedSampler"]
+    H --> I["Create DDP-wrapped model"]
+    I --> J["Training loop with gradient sync"]
+    J --> K["All-reduce for metrics"]
+    K --> L["Checkpoint on rank 0"]
+    
+    subgraph Data_Pipeline [Data Pipeline]
+        H --> H1["PDB: 75% weight"]
+        H --> H2["Complex: 12.5% weight"]
+        H --> H3["Negative: 12.5% weight"]
+        H --> H4["AlphaFold: 0% default"]
+    end
+    
+    subgraph Model_Wrapper [Model Wrapper]
+        I --> I1["EMA decay=0.99"]
+        I1 --> I2["DDP wrapper<br/>find_unused_parameters=False"]
+    end
+```
+
+训练流程的核心是 `train_multi_deep.py` 中的 `Trainer` 类，它负责编排整个分布式训练过程。`run_model_training` 方法作为主入口，检测训练是通过 SLURM 还是交互模式启动的，并相应地初始化分布式进程组。
+来源: [train_multi_deep.py](/network/train_multi_deep.py#L398-L413)
+
+## 进程初始化与环境设置
+
+分布式训练需要在初始化前正确配置进程环境变量。如果未指定关键环境变量，系统会自动设置默认值，其中 `MASTER_ADDR` 默认为 'localhost'，`MASTER_PORT` 派生自训练配置。对于通过 SLURM 进行的多节点训练，这些必须在提交脚本中设置，以启用正确的节点间通信。
+
+初始化逻辑区分了 SLURM 启动的作业和交互式会话。当通过 SLURM 启动时，每个 GPU 对应一个单独的进程，world size（全局进程数）由 `SLURM_NTASKS` 环境变量决定，rank（进程排名）来自 `SLURM_PROCID`。在交互模式下，系统使用 `torch.multiprocessing.spawn` 为每个可用的 GPU 启动一个进程，自动管理 rank 分配。
+来源: [train_multi_deep.py](/network/train_multi_deep.py#L398-L413)
+
+```mermaid
+sequenceDiagram
+    participant Main
+    participant run_model_training
+    participant mp.spawn
+    participant train_model
+    participant dist.init_process_group
+    
+    Main->>run_model_training: Launch with world_size
+    run_model_training->>run_model_training: Check MASTER_ADDR/PORT
+    
+    alt SLURM Mode
+        run_model_training->>train_model: Direct call with SLURM rank
+    else Interactive Mode
+        run_model_training->>mp.spawn: Launch nprocs=device_count()
+        mp.spawn->>train_model: Call with rank 0..N-1
+    end
+    
+    train_model->>dist.init_process_group: backend='nccl', world_size, rank
+    dist.init_process_group-->>train_model: Process group initialized
+    train_model->>train_model: Set CUDA device per rank
+```
+
+## 分布式数据采样策略
+
+训练数据通过 `DistributedWeightedSampler` 类中实现的复杂加权采样策略分布到各个 GPU。该采样器管理具有不同采样优先级的多样化训练数据集，确保所有分布式工作节点在各种结构预测任务上都有均衡的接触。
+
+采样器支持四种不同的数据来源，并具有可配置的采样比例：
+- **PDB 结构**：默认占训练样本的 75%（当 fb_fraction=0, compl_fraction=0.25 时）
+- **蛋白质复合物**：默认占训练样本的 12.5%
+- **负样本复合物**：默认占训练样本的 12.5%
+- **AlphaFold 蒸馏模型**：可配置比例（默认 0%）
+
+每种数据类型采用基于长度的加权，长度在 256-512 之间的蛋白质获得更高的采样概率，并进行归一化以确保在训练集中的公平表示。这种策略防止了训练过程中偏向非常长或非常短的蛋白质。
+来源: [data_loader.py](/network/data_loader.py#L1094-L1167), [data_loader.py](/network/data_loader.py#L400-L438)
+
+| **Dataset** | **Default Fraction** | **Weight Calculation** | **Purpose** |
+|-------------|---------------------|------------------------|-------------|
+| PDB structures | 75% | (1/512) × clamp(len, 256, 512) | Main structural predictions |
+| Protein complexes | 12.5% | (1/512) × clamp(total_len, 256, 512) | Complex formation modeling |
+| Negative complexes | 12.5% | (1/512) × clamp(total_len, 256, 512) | Discriminative learning |
+| AlphaFold models | 0% | (1/512) × clamp(len, 256, 512) | Distillation from AF2 |
+
+采样器使用以 epoch 编号作为种子的生成器来实现 epoch 感知的混洗，确保了跨工作节点的可重现数据排序。每个 GPU 通过对混洗后的索引进行跨步接收总训练样本的确定性子集：`indices = indices[self.rank:self.total_size:self.num_replicas]`。这种方法保证了在分布式系统中每个样本在每个 epoch 只被处理一次。
+来源: [data_loader.py](/network/data_loader.py#L1125-L1160)
+
+## 带有 EMA 的模型并行化
+
+RoseTTAFold 模型在封装到 PyTorch 的 DDP 包装器之前，先被指数移动平均（EMA）跟踪器包装。`EMA` 类维护模型参数的影子副本，这些副本使用指数衰减更新：`shadow_variable -= (1 - decay) × (shadow_variable - variable)`。衰减率为 0.99 时，影子模型跟踪训练权重的平滑版本，这通常在推理时提供更好的泛化能力。
+
+EMA 包装器实现了关键的训练/验证模式切换：在训练期间，前向传播使用实时模型权重以启用梯度计算；在验证期间，它使用 EMA 影子权重进行评估。这种设计确保模型检查点既包含最终训练状态（用于潜在恢复），也包含稳定的 EMA 状态（用于推理）。
+来源: [train_multi_deep.py](/network/train_multi_deep.py#L60-L103)
+
+<CgxTip>
+DDP 包装器使用 `find_unused_parameters=False` 初始化以进行性能优化。这要求所有模型参数都参与前向/后向传播。如果你修改后的架构有未使用的参数，请将其设置为 True（会有性能损失）或从模型中删除未使用的参数。
+</CgxTip>
+
+DDP 初始化为每个 GPU 创建一个进程组，并具有自动设备放置功能：`gpu = rank % torch.cuda.device_count()` 确保了即使在 rank 可能超过本地 GPU 数量的多节点场景中也能正确绑定设备。模型首先移动到适当的 GPU，用 EMA 包装，然后用指定设备 ID 的 DDP 包装，以便进行高效的梯度缩减。
+来源: [train_multi_deep.py](/network/train_multi_deep.py#L480-L488)
+
+## 带有梯度同步的训练循环
+
+训练循环实现了复杂的梯度累积和混合精度训练，以在保持数值稳定性的同时最大化吞吐量。每次训练迭代通过 RoseTTAFold 架构处理可变数量的循环迭代（1-4 个周期），其中中间的循环步骤在不跟踪梯度的情况下执行，以减少内存占用和计算成本。
+
+关键优化模式涉及使用 `no_sync()` 上下文管理器进行选择性梯度同步。对于除了最后一次循环之外的所有循环迭代，模型在不跨 GPU 同步梯度的情况下执行前向/后向传递。只有最后一次循环迭代才会触发跨整个计算图的梯度同步和反向传播。这种方法结合梯度累积，使得有效批量大小能够超过 GPU 内存容量。
+来源: [train_multi_deep.py](/network/train_multi_deep.py#L752-L820)
+
+```mermaid
+flowchart LR
+    subgraph Recycling Loop
+        A[Input] --> B{Recycle iteration i}
+        B -->|i < N-1| C["No gradient tracking"]
+        C --> D["No gradient sync"]
+        D --> E["Intermediate prediction"]
+        E --> B
+        B -->|i = N-1| F["Gradient tracking enabled"]
+    end
+    
+    F --> G["Compute loss"]
+    G --> H["Scale loss by ACCUM_STEP"]
+    H --> I["Backward pass"]
+    I --> J{"Accumulation complete?"}
+    J -->|No| K["Accumulate gradients"]
+    K --> L["Next batch"]
+    J -->|Yes| M["Unscale gradients"]
+    M --> N["Clip gradients to 0.2"]
+    N --> O["Optimizer step"]
+    O --> P["Update EMA shadow"]
+    P --> Q["Scheduler step"]
+    Q --> R["Zero gradients"]
+    R --> L
+```
+
+训练循环结合了几个关键的优化：
+- **混合精度训练**：使用 `torch.cuda.amp.autocast` 和 bfloat16 精度进行前向传递，减少内存需求并提高计算吞吐量
+- **梯度裁剪**：在反缩放后以 0.2 范数阈值进行裁剪，防止梯度爆炸
+- **梯度累积**：在更新前累积 `ACCUM_STEP` 批次的梯度，允许更大的有效批量大小
+- **EMA 更新**：影子 EMA 模型在每次优化器步骤后更新：`shadow_params[name].sub_((1. - 0.99) × (shadow_params[name] - param))` 来源: [train_multi_deep.py](/network/train_multi_deep.py#L770-L820)
+
+## 损失计算与同步
+
+损失计算聚合了 RoseTTAFold 架构中的多个预测目标，包括距离/方向预测、掩码序列恢复、结合剂置信度、全原子结构准确性以及各种基于物理学的项。每个损失分量根据配置参数进行加权，从而允许对训练目标进行细粒度控制。
+
+至关重要的是，训练损失在每个 epoch 结束时使用 `dist.all_reduce()` 操作在所有 GPU 上进行平均。这种同步确保了分布式系统中一致的梯度统计数据，并能够进行准确的损失监控。All-reduce 操作使用 SUM 运算聚合来自所有 rank 的张量，然后除以 `counter × world_size` 得到全局平均值。
+来源: [train_multi_deep.py](/network/train_multi_deep.py#L150-L349), [train_multi_deep.py](/network/train_multi_deep.py#L856-L872)
+
+<CgxTip>
+损失计算假设批量大小为 1（在第 152 行断言），多 GPU 扩展是通过梯度累积而不是真正的小批量处理实现的。这种设计选择适应了蛋白质结构的可变长度性质和内存密集型 SE(3) transformer 操作。
+</CgxTip>
+
+## 检查点管理
+
+检查点仅在 rank 0 上执行，以避免文件系统争用并确保状态一致。系统保存两种类型的检查点：'best' 检查点（当验证损失改善时保存）和 'last' 检查点（在每个 epoch 后保存）。两种检查点类型都包含完整的训练状态：epoch 编号、优化器状态、调度器状态、AMP 缩放器状态和模型权重。
+
+重要的是，检查点保存的是 EMA 影子模型权重（`ddp_model.module.shadow.state_dict()`），而不是实时模型权重，因为影子权重提供更好的推理性能。对于 'last' 检查点，同时保留影子和实时模型状态，以便在需要时能够完全恢复训练。来源: [train_multi_deep.py](/network/train_multi_deep.py#L489-L527)
+
+## 配置和命令行参数
+
+训练过程接受众多配置参数，这些参数被组织成逻辑组：训练参数（批量大小、学习率、epochs）、数据加载参数（最大序列长度、模板计数、分辨率截止值）、模型架构参数（层数、特征维度）和损失权重（不同预测目标的权重）。
+
+关键的分布式训练参数包括：
+- `--port`：用于 DDP 通信的 TCP 端口（默认 12319，应随机化）
+- `--interactive`：交互式多 GPU 模式与 SLURM 模式的标志
+- `--accum`：梯度累积步数（默认 1）
+- `--batch_size`：每 GPU 批量大小（默认 1）
+- `--seed`：用于可重现性的随机种子
+
+学习率调度使用带预热的步进衰减，初始化为 1000 个预热步长，每 15000 步以 0.95 的速率衰减。此调度由 `get_stepwise_decay_schedule_with_warmup()` 管理，它实现了一个 lambda 调度器，在预热期后指数级降低学习率。
+来源: [arguments.py](/network/arguments.py#L1-L185), [scheduler.py](/network/scheduler.py#L154-L181)
+
+| **Parameter** | **Default** | **Description** |
+|---------------|-------------|-----------------|
+| --port | 12319 | DDP communication port (randomize for parallel jobs) |
+| --batch_size | 1 | Per-GPU batch size |
+| --lr | 1.0e-3 | Initial learning rate |
+| --num_epochs | 200 | Total training epochs |
+| --accum | 1 | Gradient accumulation steps |
+| --interactive | False | Interactive mode (vs SLURM) |
+| --maxcycle | 4 | Maximum recycling iterations |
+
+## 下一步
+
+要全面了解 RoseTTAFold2 分布式训练流程，请探索以下相关文档主题：
+
+- [Three-Track Design: MSA, Pair, and 3D Structure Tracks](6-three-track-design-msa-pair-and-3d-structure-tracks) - 了解正在训练的模型架构
+- [FAPE (Frame-Aligned Point Error) Loss](16-fape-frame-aligned-point-error-loss) - 深入研究主要的结构损失函数
+- [Multi-Component Loss (Distance, Angle, LDDT, PAE)](17-multi-component-loss-distance-angle-lddt-pae) - 多目标损失计算的详细信息
+- [Memory Optimization Strategies](23-memory-optimization-strategies) - 训练期间管理 GPU 内存的技巧
+- [Multi-GPU Training Configuration](25-multi-gpu-training-configuration) - 硬件和软件设置指南
+
+---
+
+## 辅助预测器
+
+- [深入解析/辅助预测器/距离与角度预测](https://zread.ai/uw-ipd/RoseTTAFold2/20-distance-and-angle-prediction)
+
+---
+slug:20-distance-and-angle-prediction
+blog_type:normal
+---
+
+
+RoseTTAFold2 中的距离和角度预测作为一个关键的辅助任务，在训练过程中提供中间结构监督。该组件作用于配对表示轨道，预测残基间的几何约束，从而引导 3D 坐标生成过程。6D 坐标系通过距离和三个角度分量捕获了残基对之间的完整方向关系，使模型能够学习全面的结构模式。
+
+## 架构概述
+
+距离和角度预测架构的核心是 `DistanceNetwork` 类，它将配对表示转换为四个几何维度上的概率预测。该模块作为一个监督学习组件，接收来自迭代模拟器的丰富配对特征，并输出残基间关系的结构化预测。
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L5-L36), [network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L43-L43)
+
+预测流程如下：
+
+```mermaid
+graph LR
+    A[Pair Representations<br/>B×L×L×d_pair] --> B[DistanceNetwork]
+    B --> C[Symmetric Projection<br/>37 dist + 19 omega bins]
+    B --> D[Asymmetric Projection<br/>37 theta + 19 phi bins]
+    C --> E[Distance Logits<br/>37 bins]
+    C --> F[Omega Logits<br/>19 bins]
+    D --> G[Theta Logits<br/>37 bins]
+    D --> H[Phi Logits<br/>19 bins]
+    E --> I[Cross-Entropy Loss]
+    F --> I
+    G --> I
+    H --> I
+```
+
+## 6D 坐标系
+
+RoseTTAFold2 采用了一套复杂的 6D 坐标表示，编码了残基对之间的平移和旋转关系。这种表示捕获了重建相对定位所需的完整几何关系，而不依赖于全局坐标系。
+
+### 组件定义
+
+| 坐标 | 物理含义 | 公式 | 分箱数 | 对称性 |
+|------------|-----------------|---------|------|----------|
+| **Distance (距离)** | Cβ-Cβ 欧几里得距离 | ∥Cbᵢ - Cbⱼ∥ | 37 | 对称 (i↔j) |
+| **Omega** | Ca-Cβ-Cβ-Ca 二面角 | ω = dihedral(Caᵢ, Cbᵢ, Cbⱼ, Caⱼ) | 19 | 对称 (i↔j) |
+| **Theta** | N-Ca-Cβ-Cβ 二面角 | θ = dihedral(Nᵢ, Caᵢ, Cbᵢ, Cbⱼ) | 37 | 非对称 (i→j) |
+| **Phi** | Ca-Cβ-Cβ 平面角 | φ = angle(Caᵢ, Cbᵢ, Cbⱼ) | 19 | 非对称 (i→j) |
+
+来源：[network/kinematics.py](network/kinematics.py#L138-L174), [network/coords6d.py](network/coords6d.py#L36-L80)
+
+坐标计算涉及利用理想化几何从骨架 N、Ca、C 原子重建 Cβ 位置，然后计算最大距离阈值（DMAX=20.0Å）内所有残基对的四个几何描述符。
+
+### Cβ 重建
+
+Cβ 位置是基于理想化肽几何，通过固定的线性变换从骨架坐标推导出来的：
+
+```
+Cb = -0.58273431 × (b × c) + 0.56802827 × b - 0.54067466 × c + Ca
+```
+
+其中 b = Ca - N 和 c = C - Ca 代表骨架键向量。
+
+来源：[network/coords6d.py](network/coords6d.py#L46-L50)
+
+## 网络架构
+
+### DistanceNetwork 实现
+
+`DistanceNetwork` 使用双投影架构来分别处理对称和非对称预测：
+
+**对称投影（距离和 Omega）：**
+- 单线性层：`proj_symm: d_pair → 37 + 19`
+- 强制对称性：`logits_symm = logits_symm + logits_symm.permute(0,2,1,3)`
+- 确保 (i,j) 和 (j,i) 对的预测完全相同
+
+**非对称投影（Theta 和 Phi）：**
+- 单线性层：`proj_asymm: d_pair → 37 + 19`
+- 不需要强制对称性
+- 有向预测捕获从 i 到 j 的方向
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L5-L35)
+
+### 参数初始化
+
+所有投影层使用零初始化策略以提供稳定的训练梯度：
+
+```python
+nn.init.zeros_(self.proj_symm.weight)
+nn.init.zeros_(self.proj_symm.bias)
+nn.init.zeros_(self.proj_asymm.weight)
+nn.init.zeros_(self.proj_asymm.bias)
+```
+
+这种初始化确保预测从接近均匀分布开始，允许模型在训练期间逐渐学习有意义的几何模式。
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L14-L19)
+
+## 标签生成
+
+### 坐标转换流程
+
+训练标签是通过系统的转换流程从真实结构生成的：
+
+1. **提取骨架坐标**：从实验结构中提取 N、Ca、C 原子
+2. **重建 Cβ 位置**：使用理想化几何变换
+3. **计算成对几何**：计算所有残基对的 dist、omega、theta、phi
+4. **距离过滤**：仅包含 Cβ-Cβ 距离 < DMAX (20.0Å) 的残基对
+5. **离散化分箱**：将连续值转换为离散分箱索引
+
+来源：[network/kinematics.py](network/kinematics.py#L138-L174)
+
+### 分箱策略
+
+连续几何值使用固定分箱范围进行离散化：
+
+**距离分箱：**
+- 范围：2.0Å 至 20.0Å
+- 37 个分箱（约 0.49Å/分箱）
+- 将范围外的距离钳制在分箱边界上
+
+**角度分箱：**
+- 范围：-π 至 +π 弧度
+- 36 个分箱（10°/分箱）用于 theta
+- 18 个分箱（20°/分箱）用于 omega 和 phi
+- 同时编码 sin 和 cos 分量以实现旋转不变性
+
+来源：[network/kinematics.py](network/kinematics.py#L6-L11)
+
+### 基于模板的特征
+
+模板结构通过 `xyz_to_t2d` 提供额外的距离和方向特征，该函数将模板坐标处理为具有以下内容的 2D 映射：
+- 独热编码的距离（37 个分箱）
+- Sin/cos 编码的方向（6 个值：每个角度 2 个）
+- 有效性掩码
+
+这些模板特征在距离预测之前被整合到配对表示中。
+
+来源：[network/kinematics.py](network/kinematics.py#L176-L200)
+
+## 损失计算
+
+### 交叉熵损失公式
+
+距离和角度预测使用多任务交叉熵损失进行训练：
+
+```python
+loss = nn.CrossEntropyLoss(reduction='none')(logit_s[i], label_s[...,i])
+loss = (mask_2d * loss).sum() / (mask_2d.sum() + eps)
+```
+
+该公式：
+- 为每个几何分量（共 4 个）计算独立损失
+- 应用成对掩码以排除无效残基对
+- 按有效残基对数量归一化以实现稳定训练
+
+来源：[network/loss.py](network/loss.py#L44-L51)
+
+### 链间处理
+
+对于蛋白质复合物预测，损失计算区分链内和链间残基对：
+
+**正样本（天然复合物）：**
+- 对所有有效残基对（包括链内和链间）计算完整损失
+
+**负样本（诱饵复合物）：**
+- 仅对链内残基对计算掩码损失
+- 防止在非相互作用系统中学习虚假的链间相互作用
+
+这种差异化掩码策略确保模型学习天然界面几何结构，同时避免随机链向带来的混淆。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L165-L172)
+
+## 模型集成
+
+### 前向传播集成
+
+距离预测模块集成到主要的 RoseTTAFoldModel 前向传播中：
+
+1. **配对表示生成**：模拟器输出丰富的配对特征 (B×L×L×d_pair)
+2. **距离预测**：`self.c6d_pred(pair)` 处理配对特征
+3. **Logit 提取**：返回 dist、omega、theta、phi 的 4 个张量
+4. **损失计算**：与离散化的真实标签进行比较
+5. **反向传播**：梯度流经整个网络
+
+来源：[network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L130-L131)
+
+### 回收机制
+
+在迭代优化期间，来自每个回收步骤的距离预测都会受到监督：
+
+```python
+# 应用于所有回收步骤（通常 3-4 个周期）
+logit_s[i]  # 来自周期 i 的预测
+label_s     # 真实标签（所有周期相同）
+```
+
+这种多阶段监督鼓励模型在回收迭代中逐步优化几何预测，随着 3D 结构变得更加精细，后期的周期通常表现出更高的准确性。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L739-L745)
+
+<CgxTip>
+距离预测损失权重（默认 `w_dist=1.0`）在几何监督与其他损失组件之间取得平衡。调整此值会影响模型学习中间结构约束与最终 3D 准确性的相对强度。增加此权重通常会提高残基间接触准确性，但可能会以骨架精度为代价。</CgxTip>
+
+## 训练配置
+
+### 损失权重
+
+多组件损失函数结合了距离预测和其他辅助任务：
+
+```python
+w_dist=1.0   # 距离和角度预测权重
+w_aa=1.0     # 掩码氨基酸预测权重
+w_str=1.0    # FAPE 结构损失权重
+w_all=0.5    # 全原子结构损失权重
+w_pae=1.0    # 预测对齐误差权重
+w_lddt=1.0   # LDDT 置信度预测权重
+```
+
+`w_dist` 参数控制 6D 几何监督相对于基于坐标的损失的贡献。默认值 (1.0) 提供了平衡的训练，但对于特定应用，调优可能是有益的。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L150-L156)
+
+### 准确性指标
+
+在验证期间，距离预测准确性使用以下指标衡量：
+
+1. **Top-L 精度**：在前 L 个预测接触中正确预测的比例
+2. **接触数比较**：预测接触分布与参考接触分布的对比
+3. **逐分箱准确性**：每个距离分箱的分类准确性
+
+这些指标提供了与最终结构质量相关性良好的中间监督信号，特别是对于残基间接触预测。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L334-L364)
+
+## 下一步
+
+理解距离和角度预测为探索其他辅助预测组件奠定了基础：
+
+- **[LDDT 和 PAE 置信度估计](21-lddt-and-pae-confidence-estimation)** - 了解 RoseTTAFold2 如何预测每个残基和残基间的置信度分数
+- **[多组件损失](17-multi-component-loss-distance-angle-lddt-pae)** - 探索距离预测在训练期间如何与其他损失组件集成
+- **[三轨道设计](6-three-track-design-msa-pair-and-3d-structure-tracks)** - 了解距离预测在配对轨道上运行的架构背景
+
+---
+
+- [深入解析/辅助预测器/LDDT 和 PAE 置信度估计](https://zread.ai/uw-ipd/RoseTTAFold2/21-lddt-and-pae-confidence-estimation)
+
+---
+slug:21-lddt-and-pae-confidence-estimation
+blog_type:normal
+---
+
+
+RoseTTAFold2 采用两种互补的置信度评估指标——局部距离差异测试（LDDT）和预测对齐误差（PAE）——来量化残基级别和成对级别的预测可靠性。这些辅助预测源于三轨架构的学习表征，为下游应用（如结构选择和实验解读）提供了必要的质量评估。
+
+## 架构基础
+
+置信度评估模块直接集成到 RoseTTAFold2 的三轨设计中，每个预测器从不同的信息轨道中消费专门的表征。LDDT 网络作用于包含 SE(3) 等变特征的 3D 状态轨道，而 PAE 网络消费通过注意力机制和三角形乘法机制捕获残基间关系的成对表征。
+
+```mermaid
+flowchart LR
+    subgraph ThreeTrackInput["三轨表征"]
+        MSA[MSA 轨道]
+        Pair[成对轨道]
+        State[3D 状态轨道]
+    end
+    
+    subgraph AuxPredictors["辅助预测器"]
+        LDDT[LDDT网络<br/>状态 → 50 个分箱]
+        PAE[PAE网络<br/>成对 → 64 个分箱]
+    end
+    
+    State --> LDDT
+    Pair --> PAE
+    
+    LDDT --> LDDTOut[逐残基<br/>置信度 0-1]
+    PAE --> PAEOut[成对误差<br/>0-32Å]
+    
+    subgraph LossComputation["训练损失计算"]
+        LDDTLoss[LDDT 交叉熵]
+        PAELoss[PAE 交叉熵]
+    end
+    
+    LDDT --> LDDTLoss
+    PAE --> PAELoss
+```
+
+## LDDT 网络架构
+
+LDDT 预测网络采用三层前馈架构，将 SE(3) 等变状态表征转换为分箱为 50 个离散类别的逐残基置信度分数，覆盖范围 [0, 1]。该网络架构通过顺序的 ReLU 激活和归一化实现渐进的特征提取，并精心设置权重初始化以确保稳定的训练动态。
+
+**网络结构：**
+- **输入：** 状态张量 (B, L, d_state)，其中 d_state = 16（SE3 输出维度）
+- **第 1 层：** LayerNorm → Linear(d_state, 128)，使用 Kaiming 初始化
+- **第 2 层：** Linear(128, 128)，使用 ReLU 激活
+- **输出：** Linear(128, 50)，使用零初始化的权重/偏置
+
+最终投影层的零初始化策略至关重要——它鼓励网络在从结构特征学习判别模式之前，最初预测均匀的置信度分布。前向传播在前两次线性变换后应用顺序的 ReLU 激活，生成 50 个置信度分箱的 logit 分布，随后在损失计算期间转换为概率。
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L54-L73), [network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L39)
+
+## PAE 网络架构
+
+与深度 LDDT 网络相比，PAE 预测器采用最小化架构，仅包含单个线性投影，从成对表征投影到 64 个分箱，覆盖 0.5Å 到 32Å、间隔为 0.5Å 的预期对齐误差。这种设计反映了 PAE 网络的作用，即编码成对误差关系，这些关系已在迭代模拟过程中通过注意力机制和三角形乘法操作隐式地捕获在成对表征中。
+
+**网络结构：**
+- **输入：** 成对张量 (B, L, L, d_pair)，其中 d_pair = 128
+- **输出：** Linear(d_pair, 64)，使用零初始化的权重/偏置
+
+PAE 预测的成对性质要求网络生成 (B, L, L, 64) 的 logits，其中每个位置 (i, j) 编码了当残基 i 与残基 j 对齐时的预测对齐误差。这种对称性内在于成对表征的结构中，因此无需在网络架构中显式强制执行对称性。
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L100-L110), [network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L43)
+
+## LDDT 计算与损失函数
+
+训练框架实现了两种互补的 LDDT 计算：用于监测骨架准确性的基于 CA 的变体，以及用于全面结构评估的全原子变体。基于 CA 的 LDDT 作为训练期间的跟踪指标，而全原子 LDDT 通过分箱预测的交叉熵分类直接贡献于损失函数。
+
+**基于 CA 的 LDDT：**
+基于 CA 的计算评估预测坐标与真实 CA 坐标之间的距离一致性，跨越四个距离阈值：0.5Å、1.0Å、2.0Å 和 4.0Å。对于 15Å 内的每个残基对，算法计算低于每个阈值的距离差比例，然后对所有有效对的这些比例取平均值。逐残基 LDDT 分数表示其所有有效相互作用伙伴的平均值。
+
+**全原子 LDDT：**
+全原子计算将此框架扩展到所有 14 个标准蛋白质原子（N, CA, C, O 和侧链原子）。该实现为预测结构和真实结构计算成对距离矩阵，然后评估跨越相同四个距离阈值的一致性。计算包含多种掩码策略：
+- 距离掩码：仅考虑 15Å 内的原子对
+- 原子掩码：排除缺失或无效的原子
+- 残基掩码：排除残基内原子对
+- 链掩码（用于负样本）：排除非相互作用链之间的链间对
+
+<CgxTip>全原子 LDDT 损失使用交叉熵分类而非回归，通过将置信度预测视为 50 路分类问题而非连续回归任务，提高了训练稳定性。</CgxTip>
+
+来源：[network/loss.py](network/loss.py#L569-L641), [network/train_multi_deep.py](network/train_multi_deep.py#L275-L282)
+
+## PAE 计算与损失函数
+
+PAE 损失计算发生在结构损失框架（`calc_str_loss`）内，尽管具体的 PAE 分箱和交叉熵实现遵循类似于距离图预测损失的模式。在推理期间，预测的 PAE logits 经历 softmax 变换，随后进行分箱加权平均，将 64 分箱分类输出转换为连续误差值。
+
+**PAE 解分箱：**
+推理过程对每个残基对的 64 个分箱应用 softmax，然后使用从 0.5Å 到 32Å、间隔为 0.5Å 的分箱中心计算期望值。此操作将分类概率分布转换为适用于可视化和分析的连续误差估计。
+
+```
+PAE_bins = [0.5, 1.0, 1.5, ..., 32.0]  # 64 个分箱
+PAE_continuous = Σ(PAE_bins × softmax(logits))
+```
+
+PAE 预测提供了关于相对结构域方向置信度的有价值信息，并识别出对齐不确定性较高的区域——这对于多结构域蛋白质和蛋白质复合物特别有用，因为不同的结构元件可能表现出不同的预测可靠性。
+
+来源：[network/predict.py](network/predict.py#L138-L146), [network/loss.py](network/loss.py#L62-L70)
+
+## 训练集成
+
+置信度评估模块与结构预测损失（FAPE、扭转角）、距离图预测和掩码标记预测一起集成到多组件损失框架中。每个损失组件接收独立的权重参数，允许对训练动态进行细粒度控制。
+
+**损失组件权重：**
+- `w_lddt`：全原子 LDDT 损失权重（默认 1.0）
+- `w_pae`：PAE 损失权重（默认 1.0）
+- `w_str`：结构损失权重（默认 1.0）
+- `w_dist`：距离图损失权重（默认 1.0）
+
+训练流水线在每次回收迭代中计算 LDDT 和 PAE 损失，并在预测寡聚复合物时应用对称性感知处理。对于对称操作，置信度预测被重新映射以匹配通过对称性感知结构确定的亚基对应关系，确保预测结构与其置信度估计之间的一致性。
+
+全原子 LDDT 计算需要使用预测的扭转角和骨架框架进行全原子坐标重建。此重建过程发生在 LDDT 损失计算之前，允许网络学习反映骨架和侧链预测准确性的置信度估计。
+
+来源：[network/train_multi_deep.py](network/train_multi_deep.py#L150-L310), [network/train_multi_deep.py](network/train_multi_deep.py#L673-L752)
+
+## 推理与输出格式
+
+在推理期间，置信度预测器在完成所有回收迭代后与最终结构预测一起生成其输出。`RoseTTAFoldModule` 返回 LDDT logits 作为其输出元组的一部分，预测流水线随后处理这些 logits 以进行可视化和模型排序。
+
+**输出维度：**
+- LDDT：(B, L, 50) logits → 转换为 (B, L) 概率
+- PAE：(B, L, L, 64) logits → 转换为 (B, L, L) 连续误差
+
+置信度估计实现了多种实际应用：对来自多个模型的替代结构预测进行排序（选择具有最高平均 LDDT 的模型）、识别不可靠区域以进行实验验证（低 LDDT 分数）以及评估结构域方向置信度（显示结构域间对齐不确定性的 PAE 热图）。
+
+来源：[network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L126-L149), [network/RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L130-L135)
+
+## 置信度评估组件摘要
+
+| 组件 | 输入 | 输出 | 分箱/范围 | 损失函数 |
+|-----------|-------|--------|-------------|---------------|
+| LDDT 网络 | 状态 (B, L, 16) | Logits (B, L, 50) | 50 个分箱 [0, 1] | 交叉熵 |
+| PAE 网络 | 成对 (B, L, L, 128) | Logits (B, L, L, 64) | 64 个分箱 [0.5, 32Å] | 交叉熵 |
+| 基于 CA 的 LDDT | CA 坐标 | 逐残基分数 | 连续 (0-1) | 仅监测 |
+| 全原子 LDDT | 全原子坐标 | 逐残基分数 | 连续 (0-1) | 分类损失 |
+
+<CgxTip>置信度评估模块需要全原子重建以准确计算 LDDT，确保侧链预测质量对置信度估计做出贡献，而不仅仅依赖于骨架准确性。</CgxTip>
+
+来源：[network/AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L54-L137), [network/loss.py](network/loss.py#L569-L650)
+
+## 后续步骤
+
+要加深对 RoseTTAFold2 完整训练流水线和损失函数的理解，请探索以下相关页面：
+
+- **[FAPE (帧对齐点误差) 损失](16-fape-frame-aligned-point-error-loss)** — 了解与 PAE 协同训练坐标预测的主要结构损失函数
+- **[多组件损失（距离、角度、LDDT、PAE）](17-multi-component-loss-distance-angle-lddt-pae)** — 全面概述所有损失组件如何在训练期间集成
+- **[三轨设计：MSA、成对和 3D 结构轨道](6-three-track-design-msa-pair-and-3d-structure-tracks)** — 了解为置信度评估模块提供输入的架构基础
+- **[使用 SE3 层生成坐标](14-coordinate-generation-with-se3-layers)** — 了解如何生成 LDDT 预测所使用的 3D 状态表征
+
+---
+
+- [深入解析/辅助预测器/用于复合物形成的 Binder 网络](https://zread.ai/uw-ipd/RoseTTAFold2/22-binder-network-for-complex-formation)
+
+---
+slug:22-binder-network-for-complex-formation
+blog_type:normal
+---
+
+
+Binder Network 是 RoseTTAFold2 中一个专门的神经网络组件，用于预测两个或多个蛋白质链是否形成稳定的复合结构。该模块利用模型注意力输出中的预测对齐误差（PAE）信息来进行二元结合预测，从而实现单体验证和复合结构形成评估。
+
+## 架构设计
+
+Binder Network 作为一个轻量级分类器运行，专门处理不同蛋白质链之间的 PAE 分布。与 RoseTTAFold2 中处理单链特征或全对相互作用的其他辅助预测器不同，Binder Network 仅专注于**链间**误差模式。
+
+**核心架构**：该网络采用流线型设计，包含单个线性投影层，后接 sigmoid 激活函数。这种设计是刻意的——通过学习识别链间残基对中的特征误差模式，网络能够有效区分真实的蛋白质-蛋白质界面与非相互作用链构型。PAE logits（每个残基对 64 个 bin）通过线性层处理，输出单个 logit，然后通过 sigmoid 生成 0 到 1 之间的结合概率。
+
+来源：[AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L114-L135)，[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L48-L49)
+
+## 网络实现
+
+### BinderNetwork 类结构
+
+`BinderNetwork` 模块继承自 PyTorch 的 `nn.Module`，实现了前馈分类架构。初始化接受两个参数：`n_hidden`（默认 64，当前未使用）和 `n_bin_pae`（默认 64，匹配 PAE bin 计数）。核心组件是一个线性层 `self.classify`，输入维度为 `n_bin_pae`，输出维度为 1。
+
+**前向传播**：在推理过程中，网络接收形状为 `(B, 64, L, L)` 的 PAE logits 和形状为 `(B, L, L)` 的二元 `same_chain` 掩码。PAE 张量被置换为 `(B, L, L, 64)` 以进行逐对处理。关键操作通过索引 `same_chain == 0` 仅提取链间 PAE 信息，然后对所有链间残基对求平均，生成单个 64 维向量。这种聚合捕获了整体链间误差特征，同时对链长度和残基顺序保持不变。`nan_to_num()` 函数处理单链输入可能产生 NaN 值的边缘情况。
+
+**分类层**：聚合的链间 PAE 向量通过线性分类器生成单个 logit，经 sigmoid 变换得到最终结合概率。权重和偏置初始化为零，遵循 RoseTTAFold2 在中性状态下启动辅助预测器的模式，以便在训练期间从数据中学习。
+
+来源：[AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L114-L135)
+
+## 与 RoseTTAFold2 流水线的集成
+
+### PAE 预测依赖关系
+
+Binder Network 位于计算流水线中 PAE 预测网络的下游。`PAENetwork` 类首先从配对表示特征（处理后形状为 `(B, d_pair, L, L)`）生成 64 bin PAE 分布。这发生在 RoseTTAFoldModel 前向传播的第 134 行，产生 `logits_pae`，作为 Binder Network 的主要输入。
+
+**配对表示**：配对特征通过迭代追踪模块包含关于残基间关系的演化信息。这些编码了空间约束、进化耦合和结构先验，使能够进行准确的 PAE 预测。PAENetwork 将这些丰富的配对特征投影到 64 个距离 bin 的误差概率分布中。
+
+来源：[AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L100-L112)，[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L134-L137)
+
+### same_chain 掩码生成
+
+`same_chain` 掩码是一个关键的二元矩阵，用于区分链内和链间残基对。该掩码在数据准备期间构建，并根据预测场景而变化。对于单链输入，它是全 1 的方阵；对于多链复合物，它具有块状结构，其中对应于同链残基的块标记为 1，链间块标记为 0。
+
+**构建逻辑**：在预测流水线（predict.py 第 403-410 行）中，通过遍历链来构建掩码。对于每个链段，对角块设置为 1。这创建了保留链内关系的块对角模式。掩码随后通过模型前向传播，以通知辅助预测有关链边界的信息。
+
+**训练数据加载**：data_loader.py 中的 `loader_complex` 函数演示了如何准备复合训练样本。对于异源寡聚体，读取并合并来自两条链的 MSA（`merge_a3m_hetero`），同时跟踪链边界。`chain_idx` 矩阵（第 935-937 行）显式编码链成员身份：如果残基 i 和 j 属于同一条链，则 `chain_idx[i,j] = 1`，否则为 0。该矩阵在训练期间直接成为 `same_chain` 输入。
+
+来源：[predict.py](network/predict.py#L403-L410)，[data_loader.py](network/data_loader.py#L935-L937)，[data_loader.py](network/data_loader.py#L857-L968)
+
+## 推理与输出
+
+### 模型前向传播集成
+
+在模型执行期间，Binder Network 在迭代模拟完成后被调用。RoseTTAFoldModel.py 第 137 行的前向传播序列显示了顺序：首先是 PAE 预测，然后使用 PAE 输出和 same_chain 掩码进行 Binder 预测。结果 `p_bind` 是形状为 `(B,)` 的张量，包含每个批次元素的结合概率。
+
+**循环机制**：Binder 预测受益于 RoseTTAFold2 的循环机制。在多个循环迭代中，配对表示和 PAE 预测变得越来越准确，从而产生更精细的结合概率估计。最终结合分数取自最后一个循环迭代，该迭代具有最收敛的结构信息。
+
+**输出处理**：在预测流水线（predict.py 第 510 行）中，模型返回 `p_bind` 以及其他辅助预测。虽然当前代码中未显式写入输出文件（第 595-601 行显示仅保存 dist、lddt 和 pae），但结合概率可编程获取，用于蛋白质复合预测任务中的决策制定。
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L134-L148)，[predict.py](network/predict.py#L510-L601)
+
+## 复合预测的数据处理
+
+### 复合数据加载流水线
+
+训练 Binder Network 需要成对的蛋白质相互作用正负样本。`loader_complex` 函数为异源寡聚复合物实现了专门的加载逻辑。它接受参数，包括链长度 `L_s`、分类学 ID、组装信息和指示加载真实相互作用对还是非相互作用的诱饵的 `negative` 标志。
+
+**MSA 合并策略**：对于具有匹配分类学 ID 的真实复合物，函数尝试加载保留链间共进化信息的成对 MSA。否则，加载单条链的 MSA 并使用 `merge_a3m_hetero` 合并，该方法在跟踪链边界的同时连接序列。此合并过程对于向模型提供捕获链间约束的进化信息至关重要。
+
+**模板处理**：每条链的模板独立加载（第 888-896 行），然后合并。值得注意的是，第二条链的模板在连接之前经过随机旋转和平移（`random_rot_trans`），以防止模型依赖模板定位信息进行界面预测。这强制从 MSA 共进化和内部表示动态中学习界面模式。
+
+**负样本**：`negative` 标志触发加载非相互作用的蛋白质对。这些是从不同生物体（不同 taxID）且无已知相互作用的蛋白质中随机采样的。对于负样本，插入信息被清零（第 880 行）以避免偏差，空间裁剪使用 `get_complex_crop` 而非专注于界面的 `get_spatial_crop`（第 941-944 行）。这确保网络学习区分真实相互作用与随机蛋白质共现。
+
+来源：[data_loader.py](network/data_loader.py#L857-L968)，[data_loader.py](network/data_loader.py#L510-L560)
+
+### 链索引掩码使用
+
+由 `loader_complex` 生成的 `chain_idx` 矩阵（在第 968 行返回）在训练期间成为 `same_chain` 输入。该二元掩码使模型能够在整个架构中区分链内和链间残基对。在 FAPE 损失计算中（loss.py 第 62-100 行），same_chain 掩码用于应用不同的距离钳位阈值：链内对使用 `d_clamp`，链间对使用 `d_clamp_inter`（通常较大，30Å），以适应蛋白质界面的预期几何结构。
+
+来源：[loss.py](network/loss.py#L62-L100)，[data_loader.py](network/data_loader.py#L935-L968)
+
+## 架构图
+
+```mermaid
+graph TB
+    subgraph "输入准备"
+        A["MSA 特征<br/>(B, N, L, d_msa)"]
+        B["配对特征<br/>(B, L, L, d_pair)"]
+        C["same_chain 掩码<br/>(B, L, L)"]
+    end
+    
+    subgraph "追踪模块处理"
+        D["迭代模拟器<br/>(n_extra + n_main blocks)"]
+        E["演化的配对表示<br/>(B, L, L, d_pair)"]
+    end
+    
+    subgraph "PAE 预测"
+        F["PAENetwork<br/>(线性: d_pair → 64 bins)"]
+        G["PAE Logits<br/>(B, 64, L, L)"]
+    end
+    
+    subgraph "Binder 预测"
+        H["置换为 (B, L, L, 64)"]
+        I["提取链间 PAE<br/>(same_chain == 0)"]
+        J["平均聚合<br/>(B, 64)"]
+        K["分类器<br/>(线性: 64 → 1)"]
+        L["Sigmoid 激活"]
+        M["结合概率<br/>(B,)"]
+    end
+    
+    A --> D
+    B --> D
+    C --> C_keep["same_chain 掩码<br/>(传递通过)"]
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    C_keep --> I
+    H --> I
+    I --> J
+    J --> K
+    K --> L
+    L --> M
+    
+    style G fill:#e1f5fe
+    style M fill:#c8e6c9
+    style I fill:#fff3e0
+    style J fill:#fff3e0
+```
+
+## 操作流程
+
+```mermaid
+flowchart TD
+    Start([复合预测输入]) --> LoadMSA[加载成对/独立 MSA]
+    LoadMSA --> MergeMSA[合并 MSA 并跟踪链]
+    MergeMSA --> LoadTempl[为每条链加载模板]
+    LoadTempl --> ApplyTransform[对链 2 应用随机变换]
+    ApplyTransform --> GenMask[生成 same_chain 掩码<br/>块对角矩阵]
+    GenMask --> Iter[迭代循环<br/>追踪模块更新]
+    Iter --> PAE[PAENetwork 预测误差分布]
+    PAE --> Binder[BinderNetwork 分类]
+    Binder --> Extract[提取链间 PAE]
+    Extract --> Aggregate[平均聚合为 (64,) 向量]
+    Aggregate --> Linear[线性分类层]
+    Linear --> Sigmoid[Sigmoid → 概率]
+    Sigmoid --> Output([结合概率 p_bind])
+    
+    style Extract fill:#fff3e0
+    style Aggregate fill:#fff3e0
+    style Output fill:#c8e6c9
+```
+
+## 训练考虑
+
+### 正负样本平衡
+
+有效的 Binder Network 训练需要平衡接触相互作用和非相互作用的蛋白质对。data_loader.py 中的 `DatasetComplex` 类和 `DistilledDataset` 包含复合加载器，采用混合正复合物、负样本和其他数据类型的采样策略。`loader_complex` 中的 `negative` 标志（第 857 行）控制加载的类型，能够构建具有受控类别平衡的训练批次。
+
+**负样本生成**：非相互作用对从具有不同分类学 ID 的蛋白质中采样，降低了自然相互作用的可能性。这些样本接受与正样本相同的处理流水线（MSA 合并、模板处理），但进行修改（如清零插入信息）以防止模型利用伪影。网络必须学会识别共进化信号和界面兼容几何模式的缺失。
+
+来源：[data_loader.py](network/data_loader.py#L999-L1167)
+
+### 损失函数与优化
+
+虽然代码库在检查的文件中未显式显示专用的 Binder Network 损失，但网络通过标准二元交叉熵损失（由 sigmoid 输出暗示）与其他组件一起训练。权重和偏置的零初始化（第 125-126 行）确保网络以中性预测开始（平衡 sigmoid 的 p=0.5），需要训练信号将预测推向正确的标签。
+
+**训练流水线集成**：Binder Network 参与训练流水线中描述的多任务训练。在每次迭代期间，模型生成包括 `p_bind` 在内的预测，与真实标签（相互作用对为 1，非相互作用为 0）进行比较。梯度更新调整分类器权重以提高判别准确性，而上游 PAENetwork 和追踪模块学习生成更具信息性的链间 PAE 模式以进行结合预测。
+
+来源：[AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L122-L126)，[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L134-L148)
+
+## 应用场景
+
+### 蛋白质复合预测
+
+Binder Network 的主要应用是评估预测的多链结构是否代表生物学相关的复合物。在复合预测任务中，用户输入多条链的 MSA，RoseTTAFold2 生成 3D 坐标和包括结合概率在内的辅助预测。高 p_bind 分数表明预测的界面是真实的，而低分数可能表明非相互作用链或建模错误。
+
+**界面验证**：结合概率作为预测界面的验证指标。在蛋白质对接或同源建模场景中，研究人员可以使用 p_bind 对替代模型进行排序，选择合理的复合结构，或识别潜在的假阳性相互作用。当实验验证数据不可用时，这特别有价值。
+
+### 单体质量评估
+
+对于单链预测（同源二聚体除外），Binder Network 自然产生中性或低结合概率，因为不存在链间对。这种行为可用于检测输入数据中意外的链融合，或验证单体预测未意外建模虚假的链间接触。
+
+来源：[predict.py](network/predict.py#L510-L601)
+
+Binder Network 对链间 PAE 聚合的专注（对所有 same_chain=0 位置进行平均池化）使其对链长度和界面大小的变化具有鲁棒性。通过对所有链间对进行平均，而不是专注于局部界面特征，网络捕获了链间误差模式的全局一致性，从而表征真实相互作用与随机链构型。
+
+## 参数配置
+
+### 网络超参数
+
+Binder Network 配置极简但有效：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------------|-------------|
+| `n_bin_pae` | 64 | PAE bin 数量，必须与 PAENetwork 输出匹配 |
+| `n_hidden` | 64 | 当前未使用，为未来扩展保留 |
+| 权重初始化 | 零 | 收敛的中性起点 |
+| 偏置初始化 | 零 | 收敛的中性起点 |
+
+这种配置的简洁性反映了网络作为专门分类器处理已处理的 PAE 特征的角色，而非特征提取模块本身。所有复杂性和表示能力都位于上游 PAENetwork 和追踪模块中。
+
+来源：[AuxiliaryPredictor.py](network/AuxiliaryPredictor.py#L115-L120)
+
+## 后续步骤
+
+为了全面理解 RoseTTAFold2 中的复合形成预测，建议探索以下相关主题：
+
+- [PAE 和 LDDT 置信度估计](21-lddt-and-pae-confidence-estimation) 以了解为 Binder Network 提供数据的 PAE 预测机制
+- [距离和角度预测](20-distance-and-angle-prediction) 以了解其他辅助预测器及其集成
+- [输入处理](10-msa-generation-and-featurization) 以了解如何准备和合并多条链的 MSA
+- [追踪模块设计与交互](13-track-module-design-and-interaction) 以了解配对表示如何通过迭代处理演化
+- [训练流水线](19-training-pipeline-with-distributed-data-parallel) 以了解如何采样复合训练样本以及如何优化多任务损失
+
+---
+
+## 高级特性
+
+- [深入解析/高级特性/内存优化策略](https://zread.ai/uw-ipd/RoseTTAFold2/23-memory-optimization-strategies)
+
+---
+slug:23-memory-optimization-strategies
+blog_type:normal
+---
+
+
+RoseTTAFold2 实施了一套全面的内存优化技术，以实现在不同显存容量的 GPU 上进行蛋白质结构预测。这些策略对于在处理大型蛋白质序列时应对三轨架构（MSA、pair 和 3D 结构轨）的计算需求至关重要。该优化框架通过响应可用硬件资源的自适应算法，在内存效率与模型性能之间取得平衡。
+
+## 内存分析与监控
+
+RoseTTAFold2 内存管理的基础是一个复杂的分析系统，可实时监控 GPU 和 CPU 张量存储的使用情况。`network/memory.py` 中的 `mem_report()` 函数对内存中分配的所有 PyTorch 张量进行全面分析，并根据设备类型和大小阈值进行筛选 [network/memory.py#L6-L59](network/memory.py#L6-L59)。
+
+```python
+def mem_report():
+    '''Report the memory usage of the tensor.storage in pytorch
+    Both on CPUs and GPUs are reported'''
+```
+
+该分析系统通过 `data_ptr()` 方法跟踪唯一的数据指针，防止重复计算共享内存。对于 CUDA 张量，报告器会筛选并仅显示超过 128 MB 的重要分配，从而为最消耗内存的组件提供集中诊断。这使开发人员能够在模型开发和优化过程中识别内存瓶颈。
+
+## 梯度检查点
+
+RoseTTAFold2 采用 PyTorch 梯度检查点作为核心策略，以减少在昂贵的迭代细化阶段的内存消耗。`IterBlock.forward()` 方法支持 `use_checkpoint` 参数，该参数将每个主要操作封装在检查点上下文中 [network/Track_module.py#L671-L678](network/Track_module.py#L671-L678)。
+
+<CgxTip>Checkpointing 通过在前向传播期间不存储中间激活值，而是在反向传播期间重新计算它们，以额外的计算时间换取内存节省。对于默认配置中的 48 个主迭代块，这将激活存储的峰值内存从 O(depth) 降低到 O(1)。</CgxTip>
+
+检查点封装了四个关键操作：
+- **MSA-to-MSA 更新**：带有 pair 偏置的 MSA 行/列注意力
+- **MSA-to-Pair 更新**：从 MSA 到 pair 表示的外积注意力
+- **Pair-to-Pair 更新**：三角形乘法和轴向注意力操作
+- **Structure-to-Structure 更新**：SE(3) 等变 Transformer 计算
+
+该技术在训练阶段特别有价值，因为训练期间必须保留完整的计算图以进行反向传播，但它同样也能使在内存受限设备上进行推理受益。
+
+## 分条和分块计算
+
+为了处理 pair 表示的二次方内存需求（L×L 张量，其中 L 是序列长度），RoseTTAFold2 实施了分条处理，将计算划分为可管理的块。`get_striping_parameters()` 函数定义了每种操作类型的步幅值，在低显存模式下可进行大幅度的缩减 [network/predict.py#L96-L136](network/predict.py#L96-L136)。
+
+| Operation | Default Stride | Low VRAM Stride | Memory Reduction |
+|-----------|----------------|-----------------|------------------|
+| MSA2MSA | 1024 | 256 | 4× |
+| MSA2Pair | 1024 | 256 | 4× |
+| Pair2Pair | 1024 | 256 | 4× |
+| Str2Str | 1024 | 256 | 4× |
+| BiasedAxial | 512 | 128 | 4× |
+| TriMult | 512 | 128 | 4× |
+
+该实现通过按步幅大小的块迭代序列索引，在子集上计算操作并组装结果来处理张量。例如，当指定步幅时，`FeedForwardLayer.forward()` 方法会分块应用转换 [network/Attention_module.py#L33-L45](network/Attention_module.py#L33-L45)：
+
+```python
+if STRIDE>0 and STRIDE<L:
+    out = torch.zeros_like(src)
+    for i in range((L-1)//STRIDE+1):
+        cols = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=src.device)
+        out_i = self.norm(src[...,cols,:])
+        out_i = self.linear2(self.dropout(F.relu(self.linear1(out_i))))
+        out[...,cols,:] = out_i.to(dtype=dtype)
+    src = out
+```
+
+对于原本会具体化完整 pair 矩阵的操作，此方法将内存复杂度从 O(L²) 转变为 O(L×stride)。
+
+## 低显存模式
+
+`low_vram` 参数激活了一组协调的内存节省策略，协同工作以最小化峰值 GPU 内存使用量。在 `IterBlock.forward()` 中，当启用低显存模式且模型处于评估模式时，MSA 张量会在昂贵的 pair-to-pair 操作之前临时转移到 CPU 内存，随后再恢复 [network/Track_module.py#L683-L688](network/Track_module.py#L683-L688)。
+
+```python
+if (low_vram and not self.training):
+    msa = msa.cpu()  # temporarily move msa to CPU to free more memory for p2p
+pair = self.pair2pair(pair, rbf_feat, state, strides, crop)
+rbf_feat = None  # free memory
+if (low_vram and not self.training):
+    msa = msa.to(pair.device)
+```
+
+`predict.py` 中的推理管道还会根据低显存标志调整张量加载，将某些源自模板的特征保留在 GPU 之外，直到需要时才加载 [network/predict.py#L466-L467](network/predict.py#L466-L467)。这种分阶段加载策略防止了那些可能仅在后续回收迭代中才需要的特征产生不必要的内存消耗。
+
+## Pair-to-Pair 裁剪
+
+对于即使采用分条处理也不足以应对的超大序列，RoseTTAFold2 通过 `PairStr2Pair.subblock()` 方法为 pair 操作实施裁剪策略 [network/Track_module.py#L172-L215](network/Track_module.py#L172-L215)。该方法将 L×L pair 矩阵划分为固定大小的重叠子块，独立处理每个子块，并通过平均合并结果。
+
+```mermaid
+flowchart TD
+    A[Pair Matrix L×L] --> B[Divide into Crop×Crop blocks]
+    B --> C[Process each block with offset handling]
+    C --> D[Index-add results to output matrix]
+    D --> E[Track visitation counts]
+    E --> F[Divide by counts for averaging]
+    F --> G[Final updated pair matrix]
+```
+
+子块算法仔细处理块超出序列边界时的边缘情况，使用 `torch.clamp()` 计算有效偏移量。每个块的贡献通过 `index_add_()` 操作累加，并使用并行计数矩阵跟踪每个位置更新的次数。最终结果通过将累加值除以访问计数进行归一化，确保对不同重叠级别的区域进行一致处理。
+
+## 输入序列裁剪
+
+在训练和推理期间，RoseTTAFold2 应用序列裁剪以限制内存需求。`data_loader.py` 中的 `get_crop()` 函数随机选择最多达到指定裁剪大小的连续子序列，并可选择偏向 N 端区域 [network/data_loader.py#L440-L459](network/data_loader.py#L440-L459)。
+
+默认的 256 个残基的裁剪大小可以通过命令行参数调整 [network/arguments.py#L43-L44](network/arguments.py#L43-L44)。对于蛋白质复合物，`get_complex_crop()` 在确保每条链保持最小表示的同时，将裁剪预算分配给多条链 [network/data_loader.py#L461-L487](network/data_loader.py#L461-L487)。该策略能够在保持计算资源在可行范围内的同时，处理大型多蛋白质组装体。
+
+## 混合精度和张量管理
+
+RoseTTAFold2 在推理期间利用 PyTorch 的自动混合精度 (AMP) 功能，将主前向传播封装在 `torch.cuda.amp.autocast(True)` 中 [network/predict.py#L509-L530](network/predict.py#L509-L530)。该模型还显式地将 MSA 张量转换为半精度格式以进一步节省内存 [network/predict.py#L504-L505](network/predict.py#L504-L505)。
+
+```python
+with torch.cuda.amp.autocast(True):
+    logit_s, _, _, logits_pae, p_bind, xyz_prev, alpha, symmsub, pred_lddt, msa_prev, pair_prev, state_prev = self.model(...)
+```
+
+推理管道包括通过张量卸载和缓存清理进行的显式内存管理。在回收迭代之间，MSA 和 pair 表示使用 `.cpu()` 调用转移到 CPU 内存 [network/predict.py#L534-L535](network/predict.py#L534-L535)，同时调用 `torch.cuda.empty_cache()` 释放未使用的 GPU 内存 [network/predict.py#L545](network/predict.py#L545)。这可以防止在通常的 3-4 次回收迭代中内存累积。
+
+<CgxTip>半精度张量（16 位而非 32 位）的结合为数值特征提供了大约 2 倍的内存减少，而 CPU 卸载策略确保了仅当前操作主动需要的张量保留在 GPU 内存中。</CgxTip>
+
+## 内存优化配置
+
+下表总结了控制 RoseTTAFold2 中内存优化行为的关键参数和标志：
+
+| Parameter | Type | Default | Purpose |
+|-----------|------|---------|---------|
+| `--crop` | Integer | 256 | 训练/推理期间的最大序列长度 |
+| `--low_vram` | Boolean | False | 激活全面的内存节省模式 |
+| `--subcrop` | Integer | -1 | Pair-to-pair 块大小（如果为 -1 则禁用） |
+| `--topk` | Integer | -1 | 结构模块的 Top-k 图大小（如果为 -1 则禁用） |
+| `use_checkpoint` | Boolean | False | 启用梯度检查点 |
+| `nseqs` | Integer | 256 | 种子 MSA 序列的数量 |
+| `nseqs_full` | Integer | 2048 | 额外 MSA 序列的数量 |
+
+这些参数可以组合使用，将模型性能从高端 GPU（24GB+）扩展到消费级显卡（8-12GB），而对预测精度的影响最小。
+
+## 自适应内存管理
+
+RoseTTAFold2 的内存优化框架展示了复杂的自适应行为，根据序列长度、可用内存和训练/推理模式自动调整计算模式。分条处理、检查点和低显存策略的集成提供了一种多层方法，可以根据资源约束进行选择性应用。
+
+该架构能够从单链蛋白质扩展到大型复合物，同时保持合理的内存占用。对于生产部署，推荐的方法是从默认参数开始，如果发生内存不足错误则启用 `--low_vram`，然后根据需要调整裁剪大小和步幅参数以适应目标硬件。
+
+## 后续步骤
+
+要全面了解实现这些优化的计算架构，请参阅 [三轨设计：MSA、Pair 和 3D 结构轨](6-three-track-design-msa-pair-and-3d-structure-tracks) 文档。要探索内存管理最关键的迭代细化周期，请参阅 [迭代细化的回收机制](8-recycling-mechanism-for-iterative-refinement) 部分。
+
+---
+
+- [深入解析/高级特性/环肽预测](https://zread.ai/uw-ipd/RoseTTAFold2/24-cyclic-peptide-prediction)
+
+---
+slug:24-cyclic-peptide-prediction
+blog_type:normal
+---
+
+
+RoseTTAFold2 中的环肽预测解决了肽链的结构建模难题，这类肽链的 N 端和 C 端共价连接，形成闭环拓扑结构，这从根本上改变了对残基之间空间关系的计算和解释方式。该实现在序列间隔编码和坐标生成机制中引入了专门的修改，以便在整个迭代结构预测流程中强制执行环肽约束。
+
+## 核心架构与设计
+
+环肽预测功能通过 `nc_cycle`（非环循环）参数实现，该参数贯穿三轨架构，修改序列间隔计算以解决线性肽链中首尾残基之间的拓扑不连续性。当 `cyclize=True` 时，系统将肽链视为一个闭环，其中残基 0 与残基 L-1 相邻，这从根本上改变了距离和角度关系的编码与处理方式。
+
+```mermaid
+flowchart TB
+    A[输入: 环肽序列] --> B{cyclize 标志?}
+    B -->|True| C[启用环肽模式]
+    B -->|False| D[标准线性模式]
+    C --> E[MSA 生成与特征化]
+    D --> E
+    E --> F[序列间隔编码<br/>包含环肽拓扑]
+    F --> G[三轨处理<br/>MSA | Pair | 3D 结构]
+    G --> H[环肽感知坐标更新]
+    H --> I[迭代循环<br/>包含环肽约束]
+    I --> J[最终环肽结构<br/>包含 N-C 键闭合]
+    
+    style C fill:#e1f5ff
+    style F fill:#fff4e1
+    style H fill:#fff4e1
+```
+
+### 环肽拓扑的序列间隔编码
+
+基础修改发生在 `Track_module.py` 中的 `SeqSep` 类中，该类计算成对表示的相对位置编码。对于环肽，序列间隔计算会环绕序列边界，将肽链视为环面拓扑而非线性链。
+
+来源：[Track_module.py](network/Track_module.py#L28-L48)
+
+该实现应用模运算来计算序列间隔：`(seqsep + L//2) % L - L//2`，这确保了残基 0 和残基 L-1 之间的间隔被计算为 -1 而不是 L-1，正确反映了它们在环肽结构中的空间邻近性。这种环绕处理在保持间隔有界范围的同时，在特征编码中维持了正确的空间关系。
+
+### 与三轨架构的集成
+
+环肽拓扑参数在三轨架构中传递，在多个处理阶段修改行为：
+
+1. **MSA 轨**：序列间隔编码影响注意力机制和协同进化信号提取
+2. **Pair 轨**：修改后的相对定位影响成对距离和方向预测
+3. **结构轨**：SE(3) Transformer 操作融合环肽感知的空间关系
+
+参数流展示了环肽约束的系统性集成：
+
+```mermaid
+graph LR
+    A[predict.py<br/>cyclize 标志] --> B[RoseTTAFoldModel.forward<br/>nc_cycle 参数]
+    B --> C[SeqSep.forward<br/>环肽 seqsep]
+    B --> D[Str2Str.forward<br/>nc_cycle 传递]
+    D --> E[get_seqsep 函数<br/>环肽距离计算]
+    E --> F[SE3 Transformer<br/>环肽空间更新]
+    
+    style A fill:#ffe1e1
+    style B fill:#e1ffe1
+    style E fill:#ffe1e1
+```
+
+来源：[RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L52-L58), [Track_module.py](network/Track_module.py#L533-L587)
+
+## 用法与配置
+
+### 命令行界面
+
+环肽预测通过预测管道中的 `-cyclize` 标志激活，可以通过直接 Python 接口或通过包装脚本调用。
+
+**直接 Python 调用：**
+
+```bash
+python network/predict.py \
+    -inputs input.a3m \
+    -prefix output_prefix \
+    -cyclize \
+    -n_recycles 4 \
+    -n_models 1
+```
+
+**predict.py 中的参数指定：**
+`cyclize` 参数在参数解析器中定义为布尔标志，默认为 `False`，进行环肽建模时需要显式激活。
+
+来源：[predict.py](network/predict.py#L49-L50), [predict.py](network/predict.py#L251-L255)
+
+### 模型前向传播集成
+
+`nc_cycle` 参数贯穿整个模型前向传播，从 `Predictor.predict()` 方法开始，该方法将 `cyclize` 传递给 `run_prediction()`，随后传递给模型的前向方法。这种参数流确保所有下游组件在一致的环肽拓扑感知下运行。
+
+来源：[predict.py](network/predict.py#L528), [predict.py](network/predict.py#L444)
+
+## 技术实现细节
+
+### 序列间隔计算
+
+环肽的核心算法修改发生在 `Str2Str` 类中的序列间隔计算中：
+
+**线性肽链：** `seqsep = idx2[:,None,:] - idx[:,:,None]`  
+**环肽：** `seqsep = ((idx2[:,None,:] - idx[:,:,None]) + L//2) % L - L//2`
+
+环肽版本将间隔范围以零为中心，最大幅度为 L/2，确保首尾残基之间的间隔被正确识别为最小（在环肽拓扑中相邻）而不是最大（在线性拓扑中远离）。
+
+来源：[Track_module.py](network/Track_module.py#L37-L41)
+
+### SE(3) Transformer 修改
+
+在 `Str2Str.forward()` 方法中，`nc_cycle` 参数被传递给 `get_seqsep()`，该函数计算用于边特征构建的序列间隔嵌入。这些边特征为驱动 SE(3) Transformer 更新坐标和方向的 top-k 图构建提供信息。
+
+环肽感知的边特征确保：
+1. 空间注意力模式考虑 N 端到 C 端的邻近性
+2. 图构建正确识别跨越环肽边界的邻居
+3. 坐标更新在迭代优化期间遵守闭环拓扑
+
+来源：[Track_module.py](network/Track_module.py#L565-L592)
+
+### 环肽约束下的循环
+
+在迭代循环期间，环肽参数在所有循环迭代中保持一致性。模型在改进的同时保持环肽拓扑感知，允许 N-C 端闭合从学习的结构模式中自然产生，而不是被人为强制执行。
+
+来源：[predict.py](network/predict.py#L495-L543), [RoseTTAFoldModel.py](network/RoseTTAFoldModel.py#L96-L98)
+
+## 架构考虑与限制
+
+### 与对称感知预测的交互
+
+环肽预测独立于对称感知预测功能运行。`cyclize` 标志强制单条链内的 N-C 端连接性，而 `symm` 参数对非对称单元的多个副本应用旋转对称操作。这些功能解决不同的拓扑约束，可以独立使用或组合使用于复杂的环状寡聚体。
+
+来源：[predict.py](network/predict.py#L40-L41), [predict.py](network/predict.py#L252-L253)
+
+### 坐标生成与闭合
+
+环肽拓扑通过 SE(3) Transformer 层影响坐标生成，这些层预测每个残基的旋转和平移。序列间隔编码确保靠近 N 端和 C 端的残基的坐标更新考虑它们的空间邻近性，促进环肽结构的自然闭合，而不需要在损失函数中显式的键长约束或闭合惩罚。
+
+来源：[Track_module.py](network/Track_module.py#L599-L617)
+
+### MSA 处理考虑
+
+环肽由于非规范连接性和可能的环排列，通常给 MSA 生成带来独特的挑战。当前实现假设输入 MSA 以线性形式正确对齐，环肽拓扑强制执行发生在结构预测期间而不是 MSA 特征化期间。
+
+来源：[predict.py](network/predict.py#L276-L306)
+
+## 性能与最佳实践
+
+### 预测质量指标
+
+预测环肽时，监控标准置信度指标：
+- **预测 LDDT (pLDDT)**：每残基置信度分数，在输出 PDB 文件中显示为 B 因子
+- **预测对齐误差 (PAE)**：残基间距离精度估计
+- **RMSD 收敛**：循环迭代之间的变化表明稳定化
+
+N-C 端闭合质量可以通过检查 N 端（残基 0，N 原子）和 C 端（残基 L-1，C 原子）之间的距离来评估，在高质量的环肽预测中，该距离应接近典型的肽键长度（~1.33 Å）。
+
+### 推荐配置
+
+**对于小型环肽（≤ 20 个残基）：**
+```bash
+python network/predict.py \
+    -inputs peptide.a3m \
+    -prefix cyclic_peptide \
+    -cyclize \
+    -n_recycles 6 \
+    -nseqs 256 \
+    -nseqs_full 2048
+```
+
+**对于大型环肽（> 20 个残基）：**
+```bash
+python network/predict.py \
+    -inputs large_peptide.a3m \
+    -prefix large_cyclic \
+    -cyclize \
+    -n_recycles 8 \
+    -nseqs 512 \
+    -nseqs_full 4096 \
+    -low_vram
+```
+
+增加循环迭代通常可以改善具有挑战性的环肽拓扑的收敛性，而 `low_vram` 标志允许在内存受限的硬件上预测更大的环肽。
+
+来源：[predict.py](network/predict.py#L42-L48), [predict.py](network/predict.py#L96-L137)
+
+<CgxTip>
+环肽预测功能于 2024 年 5 月引入，代表了 RoseTTAFold2 灵活架构的专门应用。为了对含有非标准氨基酸或翻译后修饰的环肽获得最佳结果，请确保正确的化学参数化，并考虑在结构数据库中存在同源环肽时提供模板结构。
+</CgxTip>
+
+## 未来开发考虑
+
+当前实现为环肽结构预测奠定了基础。潜在的增强可能包括：
+- N-C 端闭合的显式键几何约束
+- MSA 生成中的环排列检测
+- 环肽拓扑验证的专门损失组件
+- 与环肽和约束肽的小分子配体预测集成
+
+## 后续步骤
+
+要了解更广泛的架构背景：
+- **三轨设计**：在 [三轨设计：MSA、Pair 和 3D 结构轨道](6-three-track-design-msa-pair-and-3d-structure-tracks) 中了解 MSA、Pair 和 3D 结构轨道
+- **坐标生成**：在 [使用 SE3 层生成坐标](14-coordinate-generation-with-se3-layers) 中探索基于 SE(3) Transformer 的坐标更新
+- **循环机制**：在 [迭代优化的循环机制](8-recycling-mechanism-for-iterative-refinement) 中理解迭代优化
+- **对称功能**：在 [对称感知预测](15-symmetry-aware-prediction) 中与对称感知预测进行比较
+
+---
+
+- [深入解析/高级特性/多 GPU 训练配置](https://zread.ai/uw-ipd/RoseTTAFold2/25-multi-gpu-training-configuration)
+
+---
+slug:25-multi-gpu-training-configuration
+blog_type:normal
+---
+
+
+本页面详细介绍了 RoseTTAFold2 的分布式训练架构，该架构能够实现高效的多 GPU 和多节点训练，适用于大规模蛋白质结构预测。该系统利用 PyTorch 的分布式数据并行（DDP）框架，并针对异构硬件配置下的内存效率和计算性能进行了优化。
+
+## 分布式训练架构
+
+训练基础设施支持两种主要的执行模式：**SLURM 集群环境**和**交互式单节点会话**。该架构会自动检测执行环境并相应地配置分布式进程组 [train_multi_deep.py#L393-L412](network/train_multi_deep.py#L393-L412)。
+
+```mermaid
+flowchart TB
+    Start[Training Initiated] --> ModeCheck{Check Execution Mode}
+    
+    ModeCheck -->|SLURM Environment| SlurmPath[SLURM Mode]
+    ModeCheck -->|Interactive Session| InteractivePath[Interactive Mode]
+    
+    SlurmPath --> SlurmConfig[Read SLURM_NTASKS & SLURM_PROCID]
+    SlurmConfig --> SlurmLaunch[Launch One Process Per GPU]
+    SlurmLaunch --> InitProcess[Initialize NCCL Process Group]
+    
+    InteractivePath --> AutoDetect[Detect GPU Count]
+    AutoDetect --> Spawn[Spawn Processes via mp.spawn]
+    Spawn --> InitProcess
+    
+    InitProcess --> SetupDevice[Set CUDA Device for Each Rank]
+    SetupDevice --> LoadData[Create Distributed Samplers]
+    LoadData --> WrapModel[Apply DDP Wrapper]
+    WrapModel --> Training[Begin Distributed Training Loop]
+    
+    subgraph ProcessGroup [Distributed Process Group]
+        rank0[Rank 0: Master]
+        rank1[Rank 1]
+        rank2[Rank 2]
+        rankN[Rank N]
+    end
+    
+    Training --> ProcessGroup
+```
+
+在 SLURM 模式下，系统期望由调度器管理每个 GPU 运行一个进程，并读取环境变量 `SLURM_NTASKS` 和 `SLURM_PROCID` 来确定全局大小和秩。在交互模式下，脚本通过 `torch.cuda.device_count()` 自动检测可用的 GPU，并使用 Python 的多处理模块生成进程 [train_multi_deep.py#L393-L412](network/train_multi_deep.py#L393-L412)。
+
+## 核心训练组件
+
+### Trainer 类架构
+
+`Trainer` 类编排整个训练生命周期，包含以下关键初始化参数 [train_multi_deep.py#L104-L150](network/train_multi_deep.py#L104-L150)：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `model_name` | str | 'BFF' | 检查点文件的标识符 |
+| `n_epoch` | int | 100 | 总训练轮数 |
+| `lr` | float | 1.0e-4 | 初始学习率 |
+| `l2_coeff` | float | 1.0e-2 | L2 正则化系数 |
+| `port` | int | 用户自定义 | DDP 通信端口 |
+| `interactive` | bool | False | 启用交互式执行模式 |
+| `batch_size` | int | 1 | 每个 GPU 的批次大小 |
+| `accum_step` | int | 1 | 梯度累积步数 |
+| `maxcycle` | int | 4 | 最大循环迭代次数 |
+
+训练器集成了几个关键组件以实现稳定的多 GPU 训练，包括用于模型权重的指数移动平均（EMA）和多组件损失函数 [train_multi_deep.py#L60-L102](network/train_multi_deep.py#L60-L102)。
+
+### 分布式数据加载
+
+训练流水线采用**分布式采样器**，以确保每个 GPU 在训练和验证期间处理唯一的数据样本。验证数据集的大小会自动调整为可被全局大小整除，以保持平衡的工作负载分布 [train_multi_deep.py#L434-L450](network/train_multi_deep.py#L434-L450)。
+
+```python
+# 验证集大小调整以实现平衡分布
+self.n_valid_pdb = (self.n_valid_pdb // world_size) * world_size
+self.n_valid_homo = (self.n_valid_homo // world_size) * world_size
+self.n_valid_compl = (self.n_valid_compl // world_size) * world_size
+self.n_valid_neg = (self.n_valid_neg // world_size) * world_size
+```
+
+`DistributedWeightedSampler` 处理跨多个数据源（PDB 结构、蛋白质复合物和同源序列）的复杂采样策略，并具有可配置的混合比例 [train_multi_deep.py#L452-L456](network/train_multi_deep.py#L452-L456)。
+
+## 多 GPU 配置参数
+
+### 训练超参数
+
+关键的分布式训练参数通过 `arguments.py` 中的参数解析器配置 [arguments.py#L15-L55](network/arguments.py#L15-L55)：
+
+| 参数 | 标志 | 类型 | 默认值 | 分布式影响 |
+|-----------|------|------|---------|-------------------|
+| Batch Size | `-batch_size` | int | 1 | 乘以全局大小得到有效批次 |
+| Learning Rate | `-lr` | float | 1.0e-3 | 随梯度累积进行缩放 |
+| Port | `-port` | int | 12319 | 每个并发训练作业必须唯一 |
+| Accumulation | `-accum` | int | 1 | 模拟更大的批次大小 |
+| Max Recycling | `-maxcycle` | int | 4 | 影响每次迭代的计算成本 |
+
+### 性能优化常量
+
+训练流水线定义了几个影响多 GPU 性能的常量 [train_multi_deep.py#L28-L44](network/train_multi_deep.py#L28-L44)：
+
+```python
+USE_AMP = True                    # 启用自动混合精度
+N_PRINT_TRAIN = 4                 # 记录频率（批次）
+N_EXAMPLE_PER_EPOCH = 4*3200     # 每轮结构数（必须能被 GPU 整除）
+
+LOAD_PARAM = {
+    'shuffle': False,
+    'num_workers': 4,
+    'pin_memory': True
+}
+```
+
+<CgxTip>**关键配置**：`N_EXAMPLE_PER_EPOCH`（12,800 个结构）必须能被 GPU 数量整除，以确保各秩之间的训练负载均衡。不匹配的值会导致工作负载分布不均和吞吐量次优。</CgxTip>
+
+## 模型并行化策略
+
+### DDP 包装器配置
+
+RoseTTAFoldModule 使用 NCCL 后端包装了 DistributedDataParallel，以实现高效的 GPU 通信 [train_multi_deep.py#L473-L476](network/train_multi_deep.py#L473-L476)：
+
+```python
+model = EMA(RoseTTAFoldModule(**self.model_param).to(gpu), 0.99)
+ddp_model = DDP(model, device_ids=[gpu], find_unused_parameters=False)
+```
+
+`find_unused_parameters=False` 设置通过跳过未使用参数的梯度同步来优化性能，前提是假设所有模型参数都参与前向传播。EMA 包装器维护模型权重的指数移动平均值（decay=0.99）以实现更稳定的推理。
+
+### 梯度同步优化
+
+在**循环机制**（多迭代细化）期间，使用 `no_sync()` 上下文管理器对中间迭代有选择地禁用梯度同步 [train_multi_deep.py#L773-L783](network/train_multi_deep.py#L773-L783)：
+
+```python
+N_cycle = np.random.randint(1, self.maxcycle+1)
+output_i = (None, None, None, xyz_prev, None, mask_recycle)
+
+for i_cycle in range(N_cycle):
+    with ExitStack() as stack:
+        if i_cycle < N_cycle - 1:
+            stack.enter_context(torch.no_grad())
+            stack.enter_context(ddp_model.no_sync())
+            stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
+            # 中间循环步骤：无梯度同步
+        else:
+            stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
+            # 最后一次迭代：计算梯度
+```
+
+这种优化显著减少了循环过程中的通信开销，该过程通常每个样本涉及 2-4 次前向传播。
+
+## 自动混合精度训练
+
+### AMP 配置
+
+训练流水线利用 **bfloat16** 精度来提高计算吞吐量，同时将精度损失降至最低 [train_multi_deep.py#L28](network/train_multi_deep.py#L28)。AMP 缩放器处理梯度缩放以防止反向传播期间的下溢：
+
+```python
+scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
+
+# 训练循环期间
+with torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16):
+    output_i = ddp_model(**input_i)
+
+# 梯度缩放和优化器步进
+scaler.scale(loss).backward()
+scaler.unscale_(optimizer)
+torch.nn.utils.clip_grad_norm_(ddp_model.parameters(), 0.2)
+scaler.step(optimizer)
+scaler.update()
+```
+
+调度器包含在梯度缩放触发（NaN 检测）时跳过学习率更新的逻辑 [train_multi_deep.py#L797-L801](network/train_multi_deep.py#L797-L801)。
+
+<CgxTip>**内存优化**：梯度累积结合 AMP 减少了内存需求，允许每个 GPU 使用更大的有效批次大小或更长的蛋白质序列。通过训练日志监控 `torch.cuda.max_memory_allocated()` 以识别内存瓶颈。</CgxTip>
+
+## 学习率调度
+
+训练系统采用**带预热的阶梯式衰减调度**，专为分布式训练优化 [scheduler.py#L156-L181](network/scheduler.py#L156-L181)：
+
+```python
+scheduler = get_stepwise_decay_schedule_with_warmup(
+    optimizer, 
+    num_warmup_steps=1000,      # 预热阶段
+    num_steps_decay=15000,       # 衰减间隔
+    decay_rate=0.95              # 衰减因子
+)
+```
+
+| 阶段 | 步数 | 学习率行为 |
+|-------|-------|----------------------|
+| Warmup | 0-1000 | 从 0 线性增加到初始 LR |
+| Decay | 1000+ | 每 15,000 步乘以 0.95 |
+
+预热阶段对于分布式训练的稳定性至关重要，它允许模型适应由于并行处理带来的有效批次大小的增加。
+
+## 执行模式和启动脚本
+
+### 交互式模式启动
+
+对于没有作业调度器的单节点多 GPU 训练，请使用交互式标志：
+
+```bash
+python network/train_multi_deep.py \
+  -model_name BFF \
+  -batch_size 1 \
+  -lr 1.0e-4 \
+  -num_epochs 100 \
+  -port 12319 \
+  -interactive \
+  -accum 1 \
+  -maxcycle 4
+```
+
+系统通过 `torch.cuda.device_count()` 自动检测可用的 GPU，并为每个 GPU 生成一个进程 [train_multi_deep.py#L408-L411](network/train_multi_deep.py#L408-L411)。
+
+### SLURM 集群启动
+
+对于 HPC 集群上的生产训练，请使用每个 GPU 一个秩的 SLURM 作业脚本：
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=rosettafold2_training
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=8
+#SBATCH --gres=gpu:8
+#SBATCH --time=72:00:00
+
+srun python network/train_multi_deep.py \
+  -model_name BFF_cluster \
+  -batch_size 1 \
+  -lr 1.0e-4 \
+  -num_epochs 200 \
+  -port 12319
+```
+
+该脚本从环境中读取 `SLURM_NTASKS` 和 `SLURM_PROCID` 来配置秩和全局大小 [train_multi_deep.py#L402-L406](network/train_multi_deep.py#L402-L406)。
+
+### SE3-Transformer 多 GPU 参考
+
+SE3Transformer 组件包含一个参考多 GPU 启动脚本，演示了标准的 PyTorch 分布式模式 [train_multi_gpu.sh](SE3Transformer/scripts/train_multi_gpu.sh)：
+
+```bash
+python -m torch.distributed.run \
+  --nnodes=1 \
+  --nproc_per_node=gpu \
+  --max_restarts 0 \
+  --module se3_transformer.runtime.training \
+  --amp true \
+  --batch_size 240 \
+  --epochs 130 \
+  --lr 0.01 \
+  --weight_decay 0.1
+```
+
+## 监控和诊断
+
+### 训练指标聚合
+
+训练器使用 PyTorch 分布式集合操作在记录之前聚合所有 GPU 的指标 [train_multi_deep.py#L859-L869](network/train_multi_deep.py#L859-L869)：
+
+```python
+dist.all_reduce(train_tot, op=dist.ReduceOp.SUM)
+dist.all_reduce(train_loss, op=dist.ReduceOp.SUM)
+dist.all_reduce(train_acc, op=dist.ReduceOp.SUM)
+
+# 按全局大小归一化以获得每 GPU 平均值
+train_tot /= float(counter * world_size)
+train_loss /= float(counter * world_size)
+```
+
+只有秩 0 写入检查点文件和日志，以防止多个进程之间的 I/O 争用 [train_multi_deep.py#L871-L907](network/train_multi_deep.py#L871-L907)。
+
+### 内存和性能跟踪
+
+训练日志包括最大 GPU 内存分配和吞吐量指标 [train_multi_deep.py#L834-L848](network/train_multi_deep.py#L834-L848)：
+
+```
+Local: [0001/0200] Batch: [01024/12800] Time:         1234.5 | total_loss:   1.2345 | 0.1234 0.2345 0.3456 | 0.7890 0.8901 0.9012 | Max mem 45.6789
+```
+
+监控这些指标以识别：
+- 内存瓶颈：增加 `accum` 或减小批次大小
+- 通信开销：检查 NCCL 带宽和互连
+- 负载不平衡：验证数据集能否被全局大小整除
+
+## 检查点和恢复
+
+### 状态保存策略
+
+检查点包括 **EMA 影子模型**和最终模型状态，以便灵活恢复 [train_multi_deep.py#L876-L907](network/train_multi_deep.py#L876-L907)：
+
+```python
+torch.save({
+    'epoch': epoch,
+    'model_state_dict': ddp_model.module.shadow.state_dict(),  # EMA 权重
+    'final_state_dict': ddp_model.module.model.state_dict(),   # 训练权重
+    'optimizer_state_dict': optimizer.state_dict(),
+    'scheduler_state_dict': scheduler.state_dict(),
+    'scaler_state_dict': scaler.state_dict(),  # AMP 缩放器状态
+    'best_loss': best_valid_loss,
+    'train_loss': train_loss,
+    'train_acc': train_acc,
+    'valid_loss': valid_loss,
+    'valid_acc': valid_acc
+}, checkpoint_path)
+```
+
+缩放器状态对于 AMP 恢复至关重要，因为它包含动态损失缩放因子。
+
+## 后续步骤
+
+要完全了解训练工作流，请参阅[使用分布式数据并行的训练流水线](19-training-pipeline-with-distributed-data-parallel)。有关硬件级别的优化策略，请咨询[内存优化策略](23-memory-optimization-strategies)。要了解正在并行化的模型架构，请查看[三轨道设计：MSA、Pair 和 3D 结构轨道](6-three-track-design-msa-pair-and-3d-structure-tracks)。
+
+---

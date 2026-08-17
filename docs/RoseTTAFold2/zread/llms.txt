@@ -1,0 +1,55 @@
+# uw-ipd/RoseTTAFold2
+
+Source: https://zread.ai/uw-ipd/RoseTTAFold2
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+### 安装与配置
+
+- [入门指南/安装与配置/环境配置](3-environment-setup.md)
+- [入门指南/安装与配置/数据库下载](4-database-downloads.md)
+- [入门指南/安装与配置/模型权重安装](5-model-weights-installation.md)
+
+
+## 深入解析
+
+### 模型架构
+
+- [深入解析/模型架构/三轨设计：MSA、Pair 和 3D 结构轨](6-three-track-design-msa-pair-and-3d-structure-tracks.md)
+- [深入解析/模型架构/SE(3)-等变 Transformer 网络](7-se-3-equivariant-transformer-network.md)
+- [深入解析/模型架构/用于迭代优化的循环机制](8-recycling-mechanism-for-iterative-refinement.md)
+- [深入解析/模型架构/注意力机制（MSA 行/列、三角形乘法）](9-attention-mechanisms-msa-row-column-triangle-multiplication.md)
+
+### 输入处理
+
+- [深入解析/输入处理/MSA 生成与特征化](10-msa-generation-and-featurization.md)
+- [深入解析/输入处理/基于模板的结构特征](11-template-based-structure-features.md)
+- [深入解析/输入处理/嵌入模块（MSA、模板、Pair 表示）](12-embedding-modules-msa-template-pair-representations.md)
+
+### 迭代模拟
+
+- [深入解析/迭代模拟/轨道模块设计与交互](13-track-module-design-and-interaction.md)
+- [深入解析/迭代模拟/使用 SE3 层生成坐标](14-coordinate-generation-with-se3-layers.md)
+- [深入解析/迭代模拟/对称性感知预测](15-symmetry-aware-prediction.md)
+
+### 损失函数与训练
+
+- [深入解析/损失函数与训练/FAPE（帧对齐点误差）损失](16-fape-frame-aligned-point-error-loss.md)
+- [深入解析/损失函数与训练/多分量损失（距离、角度、LDDT、PAE）](17-multi-component-loss-distance-angle-lddt-pae.md)
+- [深入解析/损失函数与训练/基于物理的损失（Lennard-Jones、氢键）](18-physics-based-losses-lennard-jones-hydrogen-bonds.md)
+- [深入解析/损失函数与训练/基于分布式数据并行的训练流程](19-training-pipeline-with-distributed-data-parallel.md)
+
+### 辅助预测器
+
+- [深入解析/辅助预测器/距离与角度预测](20-distance-and-angle-prediction.md)
+- [深入解析/辅助预测器/LDDT 和 PAE 置信度估计](21-lddt-and-pae-confidence-estimation.md)
+- [深入解析/辅助预测器/用于复合物形成的 Binder 网络](22-binder-network-for-complex-formation.md)
+
+### 高级特性
+
+- [深入解析/高级特性/内存优化策略](23-memory-optimization-strategies.md)
+- [深入解析/高级特性/环肽预测](24-cyclic-peptide-prediction.md)
+- [深入解析/高级特性/多 GPU 训练配置](25-multi-gpu-training-configuration.md)
+
