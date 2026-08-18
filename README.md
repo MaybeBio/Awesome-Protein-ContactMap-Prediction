@@ -274,6 +274,46 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 --- 
 
+<details>
+<summary>Protenix-Mini</summary>
+
+- **Paper:** [Protenix-Mini: Efficient Structure Predictor via Compact Architecture, Few-Step Diffusion and Switchable pLM](https://arxiv.org/abs/2507.11839) (arxiv, 2025)
+- **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
+- **Code:** https://github.com/bytedance/Protenix
+</details>
+
+--- 
+
+<details>
+<summary>Protenix</summary>
+
+- **Paper:** [Protenix - Advancing Structure Prediction Through a Comprehensive AlphaFold3 Reproduction](https://www.biorxiv.org/content/10.1101/2025.01.08.631967v1) (bioRxiv, 2025)
+- **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
+- **Code:** https://github.com/bytedance/Protenix
+</details>
+
+--- 
+
+<details>
+<summary>Protenix-v1</summary>
+
+- **Paper:** [Protenix-v1: Toward High-Accuracy Open-Source Biomolecular Structure Prediction](https://www.biorxiv.org/content/10.64898/2026.02.05.703733v1) (bioRxiv, 2026)
+- **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
+- **Code:** https://github.com/bytedance/Protenix
+</details>
+
+--- 
+
+<details>
+<summary>Protenix-v2</summary>
+
+- **Paper:** [Protenix-v2: Broadening the Reach of Structure Prediction and Biomolecular Design](https://www.biorxiv.org/content/10.64898/2026.04.10.717613v1) (bioRxiv, 2026)
+- **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
+- **Code:** https://github.com/bytedance/Protenix
+</details>
+
+--- 
+
 <!-- More single_structure placeholders can be added here -->
 <!-- PLACEHOLDER: <another single-structure predictor> -->
 
