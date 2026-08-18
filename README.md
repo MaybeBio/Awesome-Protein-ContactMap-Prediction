@@ -136,6 +136,15 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Code:** https://github.com/uw-ipd/RoseTTAFold2NA
 </details>
 
+---
+
+<details>
+<summary>RoseTTAFold3</summary>
+
+- **Paper:** [Accelerating Biomolecular Modeling with AtomWorks and RF3](https://www.biorxiv.org/content/10.1101/2025.08.14.670328v2) (bioRxiv, 2025)
+- **Docs:** [Read more →](docs/RoseTTAFold3/) *to be written*
+- **Code:** https://github.com/RosettaCommons/foundry/tree/production/models/rf3
+</details>
 
 ---
 
