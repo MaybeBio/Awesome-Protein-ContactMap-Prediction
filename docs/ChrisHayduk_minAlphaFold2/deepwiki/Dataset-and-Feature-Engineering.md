@@ -93,8 +93,50 @@ The following diagram illustrates the transformation from raw disk files to the 
 
 **Data Pipeline Flow**
 
-```
+```mermaid
+flowchart TD
 
+F[".npz Features"]
+L[".npz Labels"]
+DS["getitem"]
+CRP["crop_example"]
+BD["block_delete_msa"]
+SMP["sample_msa"]
+MSK["mask_msa"]
+TF["build_template_features"]
+CB["collate_batch"]
+OUT["Model Input Tensors"]
+
+F --> DS
+L --> DS
+DS --> CRP
+TF --> CB
+CB --> OUT
+
+subgraph Batching ["Batching"]
+    CB
+end
+
+subgraph subGraph2 ["Preprocessing Logic"]
+    CRP
+    BD
+    SMP
+    MSK
+    TF
+    CRP --> BD
+    BD --> SMP
+    SMP --> MSK
+    MSK --> TF
+end
+
+subgraph ProcessedOpenProteinSetDataset ["ProcessedOpenProteinSetDataset"]
+    DS
+end
+
+subgraph subGraph0 ["Disk Storage"]
+    F
+    L
+end
 ```
 
 Sources: [minalphafold/data.py L84-L128](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/data.py#L84-L128)
@@ -109,8 +151,58 @@ The following diagram maps the logical data stages to the specific functions and
 
 **Logic to Code Entity Mapping**
 
-```
+```mermaid
+flowchart TD
 
+K["MSA Processing"]
+L["build_processed_example"]
+M["Template Logic"]
+N["build_template_features"]
+O["Normalization"]
+P["transformed_deletions"]
+E["Frame Generation"]
+F["backbone_frames"]
+G["Torsion Computation"]
+H["torsion_angles"]
+I["Beta Position"]
+J["pseudo_beta_positions"]
+A["Dataset Class"]
+B["ProcessedOpenProteinSetDataset"]
+C["ID Discovery"]
+D["discover_chain_ids"]
+
+subgraph subGraph2 ["Feature Engineering"]
+    K
+    L
+    M
+    N
+    O
+    P
+    K --> L
+    M --> N
+    O --> P
+end
+
+subgraph subGraph1 ["Geometry Engine"]
+    E
+    F
+    G
+    H
+    I
+    J
+    E --> F
+    G --> H
+    I --> J
+end
+
+subgraph subGraph0 ["Data Loading"]
+    A
+    B
+    C
+    D
+    A --> B
+    C --> D
+end
 ```
 
 Sources: [minalphafold/data.py L56-L128](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/data.py#L56-L128)

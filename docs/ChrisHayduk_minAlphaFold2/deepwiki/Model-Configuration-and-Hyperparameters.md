@@ -15,8 +15,49 @@ The following diagram maps the high-level configuration concepts to their respec
 
 **Configuration Entity Map**
 
-```
+```mermaid
+flowchart TD
 
+A["Model Hyperparameters"]
+B["_make_model_config"]
+C["Data Pipeline Settings"]
+D["DataConfig"]
+E["Training & Optimization"]
+F["TrainingConfig"]
+G["default_model_config()"]
+H["medium_model_config()"]
+I["alphafold2_model_config()"]
+SN["SimpleNamespace"]
+DC["DataConfig"]
+TC["TrainingConfig"]
+
+B --> G
+B --> H
+B --> I
+D --> DC
+F --> TC
+
+subgraph subGraph1 ["Code Entity Space (minalphafold/trainer.py)"]
+    G
+    H
+    I
+    SN
+    DC
+    TC
+    G --> SN
+end
+
+subgraph subGraph0 ["Configuration Space"]
+    A
+    B
+    C
+    D
+    E
+    F
+    A --> B
+    C --> D
+    E --> F
+end
 ```
 
 Sources: [minalphafold/trainer.py L25-L68](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/trainer.py#L25-L68)
@@ -62,8 +103,40 @@ The `DataConfig` dataclass defines how protein features are sampled, cropped, an
 
 **Data Flow and Hyperparameters**
 
-```
+```mermaid
+flowchart TD
 
+Raw["Raw Features"]
+Crop["Crop (crop_size)"]
+MSASample["MSA Sampling (msa_depth)"]
+Mask["MSA Masking (masked_msa_probability)"]
+DC1["crop_size: 128"]
+DC2["msa_depth: 64"]
+DC3["extra_msa_depth: 128"]
+DC4["max_templates: 1"]
+DC["Final Tensors"]
+
+DC1 --> Crop
+DC2 --> MSASample
+DC3 --> MSASample
+Mask --> DC
+
+subgraph subGraph1 ["DataConfig Fields"]
+    DC1
+    DC2
+    DC3
+    DC4
+end
+
+subgraph subGraph0 ["Input Processing"]
+    Raw
+    Crop
+    MSASample
+    Mask
+    Raw --> Crop
+    Crop --> MSASample
+    MSASample --> Mask
+end
 ```
 
 | Field | Type | Default | Description |

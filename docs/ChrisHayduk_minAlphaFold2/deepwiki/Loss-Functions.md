@@ -52,8 +52,42 @@ Before any loss is computed, `AlphaFoldLoss.forward` ([minalphafold/losses.py L4
 
 **Diagram: Derived Quantity Pipeline**
 
-```
+```mermaid
+flowchart TD
 
+A["true_rotations (b,N,3,3)"]
+B["true_translations (b,N,3)"]
+C["true_torsion_angles (b,N,7,2)"]
+D["res_types (b,N)"]
+E["true_atom_positions (b,N,14,3)"]
+F["structure_model_prediction dict"]
+G["compute_all_atom_coordinates()<br>true_all_frames_R, true_all_frames_t"]
+H["true_torsion_angles_alt<br>negate chi2 for ASP/PHE/TYR<br>negate chi3 for GLU"]
+I["CB selection<br>CA idx=1 for GLY, CB idx=4 otherwise<br>cb_pos (b,N,3)"]
+J["distance_bin(cb_pos)<br>distogram_true (b,N,N,n_bins)"]
+K["pred_ca atom_coords[:,;,1,:]<br>true_ca true_atom_positions[:,;,1,:]"]
+L["lDDT over thresholds 0.5,1.0,2.0,4.0 A<br>plddt_bin_idx -> one_hot plddt_true"]
+
+A --> G
+B --> G
+C --> G
+D --> G
+C --> H
+D --> H
+D --> I
+E --> I
+I --> J
+F --> K
+K --> L
+
+subgraph subGraph0 ["Inputs to AlphaFoldLoss.forward"]
+    A
+    B
+    C
+    D
+    E
+    F
+end
 ```
 
 Sources: [minalphafold/losses.py L59-L140](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L59-L140)
@@ -128,8 +162,35 @@ Sources: [minalphafold/losses.py L144-L149](https://github.com/ChrisHayduk/minAl
 
 **Diagram: Class Hierarchy and Data Flow**
 
-```
+```mermaid
+flowchart TD
 
+AFL["AlphaFoldLoss"]
+AAF["AllAtomFAPE<br>fape_loss"]
+AUX["AuxiliaryLoss<br>aux_loss"]
+DGL["DistogramLoss<br>dist_loss"]
+MSAL["MSALoss<br>msa_loss"]
+PLL["PLDDTLoss<br>plddt_loss"]
+ERL["ExperimentallyResolvedLoss<br>exp_resolved_loss (finetune)"]
+SVL["StructuralViolationLoss<br>struct_violation_loss (finetune)"]
+BBF["BackboneFAPE<br>fape_loss"]
+TAL["TorsionAngleLoss<br>torsion_angle_loss"]
+BLL["bond_length_loss()"]
+BAL["bond_angle_loss()"]
+CLL["clash_loss()"]
+
+AFL --> AAF
+AFL --> AUX
+AFL --> DGL
+AFL --> MSAL
+AFL --> PLL
+AFL --> ERL
+AFL --> SVL
+AUX --> BBF
+AUX --> TAL
+SVL --> BLL
+SVL --> BAL
+SVL --> CLL
 ```
 
 Sources: [minalphafold/losses.py L17-L566](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L17-L566)
@@ -236,8 +297,87 @@ For details, see [FAPE Losses](/ChrisHayduk/minAlphaFold2/3.1-fape-losses).
 
 **Diagram: AlphaFoldLoss.forward — Inputs, Derived Quantities, and Loss Terms**
 
-```
+```mermaid
+flowchart TD
 
+P1["all_frames_R (b,N,8,3,3)"]
+P2["all_frames_t (b,N,8,3)"]
+P3["atom14_coords (b,N,14,3)"]
+P4["atom14_mask (b,N,14)"]
+P5["traj_rotations (L,b,N,3,3)"]
+P6["traj_translations (L,b,N,3)"]
+P7["traj_torsion_angles (L,b,N,7,2)"]
+G1["true_rotations"]
+G2["true_translations"]
+G3["true_torsion_angles"]
+G4["true_atom_positions"]
+G5["res_types"]
+CAC["compute_all_atom_coordinates()<br>true_all_frames_R, true_all_frames_t"]
+ALT["true_torsion_angles_alt"]
+FAPE["AllAtomFAPE<br>x 0.5"]
+AUX["AuxiliaryLoss<br>x 0.5"]
+DBIN["distance_bin() -> distogram_true"]
+DIST["DistogramLoss<br>x 0.3"]
+LDDT["lDDT computation -> plddt_true"]
+PLDT["PLDDTLoss<br>x 0.01"]
+MSA["MSALoss<br>x 2.0"]
+SUM["loss (scalar per batch)"]
+FT["finetune=True"]
+ERL["ExperimentallyResolvedLoss<br>x 0.01"]
+SVL2["StructuralViolationLoss<br>x 1.0"]
+
+G1 --> CAC
+G2 --> CAC
+G3 --> CAC
+G5 --> CAC
+G3 --> ALT
+G5 --> ALT
+P1 --> FAPE
+P2 --> FAPE
+P3 --> FAPE
+P4 --> FAPE
+CAC --> FAPE
+G4 --> FAPE
+P5 --> AUX
+P6 --> AUX
+P7 --> AUX
+ALT --> AUX
+G1 --> AUX
+G2 --> AUX
+G3 --> AUX
+G4 --> DBIN
+G5 --> DBIN
+DBIN --> DIST
+P3 --> LDDT
+G4 --> LDDT
+LDDT --> PLDT
+FAPE --> SUM
+AUX --> SUM
+DIST --> SUM
+MSA --> SUM
+PLDT --> SUM
+FT --> ERL
+FT --> SVL2
+ERL --> SUM
+SVL2 --> SUM
+
+subgraph subGraph1 ["Ground Truth Inputs"]
+    G1
+    G2
+    G3
+    G4
+    G5
+end
+
+subgraph subGraph0 ["Model Outputs"]
+    P1
+    P2
+    P3
+    P4
+    P5
+    P6
+    P7
+end
 ```
 
 Sources: [minalphafold/losses.py L42-L151](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L42-L151)

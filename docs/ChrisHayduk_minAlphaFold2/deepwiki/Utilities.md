@@ -72,8 +72,36 @@ The following diagram shows which sub-modules call each dropout variant and for 
 
 **Dropout call sites across modules**
 
-```
+```mermaid
+flowchart TD
 
+DR["dropout_rowwise"]
+DC["dropout_columnwise"]
+TP_DR["TemplatePair<br>triangle_att_start, triangle_mult_out/in"]
+TP_DC["TemplatePair<br>triangle_att_end"]
+EMS_DR["ExtraMsaStack<br>msa row update, triangle_mult, triangle_att_start"]
+EMS_DC["ExtraMsaStack<br>triangle_att_end"]
+EVO_DR["Evoformer<br>msa_row_att, triangle_mult_out/in, triangle_att_start"]
+EVO_DC["Evoformer<br>triangle_att_end"]
+
+DR --> TP_DR
+DC --> TP_DC
+DR --> EMS_DR
+DC --> EMS_DC
+DR --> EVO_DR
+DC --> EVO_DC
+
+subgraph evoformer.py ["evoformer.py"]
+    EVO_DR
+    EVO_DC
+end
+
+subgraph embedders.py ["embedders.py"]
+    TP_DR
+    TP_DC
+    EMS_DR
+    EMS_DC
+end
 ```
 
 Sources: [minalphafold/utils.py L5-L32](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/utils.py#L5-L32)
@@ -171,8 +199,28 @@ The bin centers are generated as `d_min + bin_width * torch.arange(n_bins)` [min
 
 **How utils.py functions integrate into the forward pass**
 
-```
+```mermaid
+flowchart TD
 
+CB["Cbeta positions<br>(B, N, 3)"]
+AT["atom14 positions<br>(B, N, 3)"]
+RDB["recycling_distance_bin<br>15-bin, nearest-center<br>Algorithm 32"]
+DB["distance_bin<br>64-bin, bucketize<br>d_min=2.0, d_max=22.0"]
+RECYC["Recycling pair features<br>(B, N, N, 15)"]
+DISTO["Distogram logits input<br>(B, N, N, 64)"]
+MSA4D["msa_repr / pair_repr<br>(B, R, C, D) 4D tensors"]
+DRW["dropout_rowwise<br>mask shape (B,1,C,D)"]
+DCW["dropout_columnwise<br>mask shape (B,R,1,D)"]
+UPDATED["Updated representations"]
+
+CB --> RDB
+RDB --> RECYC
+AT --> DB
+DB --> DISTO
+MSA4D --> DRW
+DRW --> UPDATED
+MSA4D --> DCW
+DCW --> UPDATED
 ```
 
 Sources: [minalphafold/utils.py L5-L60](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/utils.py#L5-L60)

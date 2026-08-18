@@ -28,8 +28,44 @@ The Structure Module takes the final single and pair representations from the Ev
 
 **Data flow diagram — Structure Module pipeline**
 
-```
+```mermaid
+flowchart TD
 
+SR["single_representation<br>(B, N_res, c_s)"]
+PR["pair_representation<br>(B, N_res, N_res, c_z)"]
+AT["aatype<br>(B, N_res)"]
+LN1["layer_norm_single_rep_1<br>LayerNorm(c_s)"]
+LN2["layer_norm_pair_rep<br>LayerNorm(c_z)"]
+PROJ["single_rep_proj<br>Linear(c_s, c_s)"]
+INIT["Initial frames<br>rotations = I(3x3)<br>translations = 0"]
+IPA["InvariantPointAttention<br>(IPA)"]
+LN3["layer_norm_single_rep_3 + Dropout"]
+TRANS["Transition MLP<br>3x Linear(c_s, c_s)"]
+LN4["layer_norm_single_rep_2 + Dropout"]
+BU["BackboneUpdate<br>Linear(c_s, 6)"]
+FR["Frame update<br>R = R_prev @ R_new<br>t = R_prev @ t_new + t_prev"]
+TA["Torsion angle MLP<br>alpha: (B, N_res, 7, 2)"]
+CAAC["compute_all_atom_coordinates"]
+OUT["Output dict<br>atom14_coords, all_frames_R/t<br>traj_rotations/translations<br>traj_torsion_angles"]
+
+SR --> LN1
+LN1 --> PROJ
+PROJ --> IPA
+PR --> LN2
+LN2 --> IPA
+LN1 --> TA
+INIT --> IPA
+IPA --> LN3
+LN3 --> TRANS
+TRANS --> LN4
+LN4 --> BU
+BU --> FR
+FR --> IPA
+FR --> TA
+FR --> CAAC
+TA --> CAAC
+AT --> CAAC
+CAAC --> OUT
 ```
 
 Sources: [minalphafold/structure_module.py L70-L171](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L70-L171)
@@ -62,15 +98,30 @@ Sources: [minalphafold/structure_module.py L17-L68](https://github.com/ChrisHayd
 The `StructureModule.forward` signature is:
 
 ```
-
+forward(single_representation, pair_representation, aatype, seq_mask=None)
 ```
 
 Before entering the layer loop, the module applies `layer_norm_single_rep_1` to `single_representation` and `layer_norm_pair_rep` to `pair_representation`, then projects `single_representation` with `single_rep_proj` to produce the working single state `s`. Backbone frames are initialized to identity rotations and zero translations [minalphafold/structure_module.py L82-L90](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L82-L90)
 
 **Per-layer update sequence (Algorithm 20)**
 
-```
+```mermaid
+sequenceDiagram
+  participant s (single state)
+  participant rotations
+  participant translations
+  participant torsion_angles alpha
 
+  note over rotations: "detach() on all but last layer"
+  s (single state)->>s (single state): "s = s + IPA(s, pair, R, t, mask)"
+  s (single state)->>s (single state): "s = LN3(Dropout(s))"
+  s (single state)->>s (single state): "s = s + Transition(s)"
+  s (single state)->>s (single state): "s = LN2(Dropout(s))"
+  s (single state)->>rotations: "R_new, t_new = BackboneUpdate(s)"
+  rotations->>rotations: "R = R @ R_new"
+  translations->>translations: "t = R_prev @ t_new + t"
+  s (single state)->>torsion_angles alpha: "alpha = TorsionAngleMLP(s)"
+  note over rotations,torsion_angles alpha: "append R, t, alpha to trajectory lists"
 ```
 
 The gradient stop on rotations (`rotations.detach()`) applies to all layers except the last [minalphafold/structure_module.py L101](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L101-L101)
@@ -80,7 +131,7 @@ The gradient stop on rotations (`rotations.detach()`) applies to all layers exce
 The frame composition rule applied after `BackboneUpdate` is:
 
 ```
-
+translations = torch.einsum('bsij, bsj -> bsi', rotations, new_translations) + translationsrotations = torch.einsum('bsij, bsjk -> bsik', rotations, new_rotations)
 ```
 
 Sources: [minalphafold/structure_module.py L98-L133](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L98-L133)
@@ -111,7 +162,7 @@ The scalar `γ` per head is `softplus(head_weights)`, where `head_weights` is a 
 Query and key points are produced by linear projections of shape `(B, N_res, 3 * num_heads * n_query_points)`. After reshaping, each point is transformed into global frame coordinates:
 
 ```
-
+global_frame_q = torch.einsum('biop, bihqp -> bihqo', rotations, q_pts) + translations[:, :, None, None, :]
 ```
 
 Value points undergo the same global transformation [minalphafold/structure_module.py L284](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L284-L284)
@@ -124,8 +175,23 @@ The final output of IPA concatenates four components along the last dimension be
 
 **IPA output diagram — `linear_output` input construction**
 
-```
+```mermaid
+flowchart TD
 
+OR["output_rep<br>(B, N_res, h*head_dim)"]
+OV["output_values<br>(B, N_res, hn_value_pts3)"]
+ON["output_norms<br>(B, N_res, h*n_value_pts)"]
+OP["output_pair<br>(B, N_res, h*c_z)"]
+CAT["torch.cat"]
+LO["linear_output<br>Linear(total_in, c_s)"]
+OUT["(B, N_res, c_s)"]
+
+OR --> CAT
+OV --> CAT
+ON --> CAT
+OP --> CAT
+CAT --> LO
+LO --> OUT
 ```
 
 The `total_in` dimension of `linear_output` equals `h*head_dim + h*n_value_pts*3 + h*n_value_pts + h*c_z` [minalphafold/structure_module.py L218-L223](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L218-L223)
@@ -143,7 +209,7 @@ A single `Linear(c_s, 6)` layer produces 6 scalars per residue [minalphafold/str
  The first 3 scalars are quaternion components `(b, c, d)`. The real component `a` is implicitly fixed to 1, and the quaternion is normalized:
 
 ```
-
+norm = torch.sqrt(1 + b**2 + c**2 + d**2)quaternion = torch.stack([torch.ones_like(b), b, c, d], dim=-1) / norm.unsqueeze(-1)
 ```
 
 This parameterization guarantees a valid unit quaternion without any trigonometric operations. The rotation matrix `R_new` is then constructed from the quaternion products analytically [minalphafold/structure_module.py L354-L372](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L354-L372)
@@ -161,7 +227,7 @@ Seven torsion angles `[ω, φ, ψ, χ1, χ2, χ3, χ4]` are predicted per residu
 The prediction network uses the current single state `s` and the **initial** (pre-loop) single representation (before the projection step) as inputs:
 
 ```
-
+a = self.angle_linear_1(s) + self.angle_linear_2(single_representation)a += self.angle_linear_4(self.relu(self.angle_linear_3(self.relu(a))))a += self.angle_linear_6(self.relu(self.angle_linear_5(self.relu(a))))alpha = self.angle_linear_7(self.relu(a)).reshape(*alpha.shape[:-1], 7, 2)
 ```
 
 The two residual blocks use `Linear(c, c)` layers where `c = config.structure_module_c` [minalphafold/structure_module.py L49-L57](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L49-L57)
@@ -178,8 +244,25 @@ This standalone function takes the final backbone frames and torsion angles and 
 
 **Rigid group frame hierarchy**
 
-```
+```mermaid
+flowchart TD
 
+BF["Frame 0: Backbone<br>(R, t from BackboneUpdate)"]
+F1["Frame 1: pre-omega (dummy identity)"]
+F2["Frame 2: phi-frame"]
+F3["Frame 3: psi-frame"]
+F4["Frame 4: chi1-frame"]
+F5["Frame 5: chi2-frame"]
+F6["Frame 6: chi3-frame"]
+F7["Frame 7: chi4-frame"]
+
+BF --> F1
+BF --> F2
+BF --> F3
+BF --> F4
+F4 --> F5
+F5 --> F6
+F6 --> F7
 ```
 
 Frames 1–4 each compose independently from the backbone frame. Frames 5–7 chain sequentially from their predecessor sidechain frame [minalphafold/structure_module.py L440-L449](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L440-L449)
@@ -202,7 +285,7 @@ Frames 1–4 each compose independently from the backbone frame. Frames 5–7 ch
  converts a normalized `(sin θ, cos θ)` pair into a rotation about the x-axis:
 
 ```
-
+R = [[1,    0,    0  ],     [0,    cosθ, -sinθ],     [0,    sinθ,  cosθ]]
 ```
 
 ### compose_transforms
@@ -212,7 +295,7 @@ Frames 1–4 each compose independently from the backbone frame. Frames 5–7 ch
  implements the standard rigid body composition:
 
 ```
-
+R_out = torch.matmul(R1, R2)t_out = torch.matmul(R1, t2.unsqueeze(-1)).squeeze(-1) + t1
 ```
 
 Sources: [minalphafold/structure_module.py L403-L474](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L403-L474)
@@ -225,8 +308,8 @@ The Structure Module operates **internally in nanometers (nm)** to match the Alp
 
 **Å → nm (on initialization):**
 
-```
-
+```markdown
+self.default_frames[..., :3, 3] *= 0.1   # translation column: Å → nmself.lit_positions *= 0.1                  # atom positions:     Å → nm
 ```
 
 [minalphafold/structure_module.py L67-L68](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L67-L68)
@@ -236,7 +319,7 @@ The Structure Module operates **internally in nanometers (nm)** to match the Alp
 All translation-containing tensors in the output dict are multiplied by `10.0` before being returned:
 
 ```
-
+predictions = {    "traj_translations": all_translations * 10.0,    "final_translations": translations * 10.0,    "all_frames_t": all_frames_t * 10.0,    "atom14_coords": atom_coords * 10.0,    ...}
 ```
 
 Rotation matrices are dimensionless and require no conversion.

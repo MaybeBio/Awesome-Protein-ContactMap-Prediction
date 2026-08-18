@@ -90,8 +90,57 @@ The following diagram maps high-level AlphaFold2 concepts to their specific clas
 
 **System Entity Map**
 
-```
+```mermaid
+flowchart TD
 
+A["Raw Sequence/MSA"]
+B["InputEmbedder (embedders.py)"]
+C["Templates"]
+D["TemplatePair (embedders.py)"]
+E["Extra MSA"]
+F["ExtraMsaStack (embedders.py)"]
+G["Evoformer (evoformer.py)"]
+H["StructureModule (structure_module.py)"]
+I["IPA (structure_module.py)"]
+J["BackboneUpdate (structure_module.py)"]
+K["AlphaFoldLoss (losses.py)"]
+L["AllAtomFAPE (losses.py)"]
+M["TorsionAngleLoss (losses.py)"]
+
+B --> G
+D --> G
+F --> G
+H --> K
+
+subgraph subGraph2 ["Output & Loss"]
+    K
+    L
+    M
+    K --> L
+    K --> M
+end
+
+subgraph subGraph1 ["Folding Core"]
+    G
+    H
+    I
+    J
+    G --> H
+    H --> I
+    I --> J
+end
+
+subgraph subGraph0 ["Input Processing"]
+    A
+    B
+    C
+    D
+    E
+    F
+    A --> B
+    C --> D
+    E --> F
+end
 ```
 
 **Sources:** [minalphafold/model.py L10-L45](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/model.py#L10-L45)
@@ -134,8 +183,42 @@ This diagram illustrates how raw coordinates are transformed into the internal r
 
 **Geometry to Loss Flow**
 
-```
+```mermaid
+flowchart TD
 
+P["atom14_coords"]
+BF["backbone_frames (geometry.py)"]
+PB["pseudo_beta_positions (geometry.py)"]
+TA["torsion_angles (geometry.py)"]
+FAPE["AllAtomFAPE (losses.py)"]
+DIST["DistogramLoss (losses.py)"]
+TORS["TorsionAngleLoss (losses.py)"]
+RC["residue_constants.py"]
+
+BF --> FAPE
+PB --> DIST
+TA --> TORS
+RC --> P
+
+subgraph Constants ["Constants"]
+    RC
+end
+
+subgraph subGraph1 ["Loss Components"]
+    FAPE
+    DIST
+    TORS
+end
+
+subgraph subGraph0 ["Geometry Logic"]
+    P
+    BF
+    PB
+    TA
+    P --> BF
+    P --> PB
+    P --> TA
+end
 ```
 
 **Sources:** [minalphafold/geometry.py L67-L166](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/geometry.py#L67-L166)

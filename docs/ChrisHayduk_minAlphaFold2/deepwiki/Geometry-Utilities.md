@@ -21,8 +21,49 @@ The `backbone_frames` function implements a Gram-Schmidt-style orthonormalizatio
 
 The following diagram maps the geometric concepts to the code entities in `geometry.py`.
 
-```
+```mermaid
+flowchart TD
 
+N_Atom["Nitrogen (N)"]
+CA_Atom["Carbon-Alpha (CA)"]
+C_Atom["Carbon (C)"]
+Basis["Orthonormal Basis"]
+pos["atom14_positions"]
+func_bf["backbone_frames()"]
+ex["ex = safe_normalize(c_pos - ca_pos)"]
+ez["ez = safe_normalize(cross(ex, ey_seed))"]
+ey["ey = safe_normalize(cross(ez, ex))"]
+rot["rotations (3x3)"]
+trans["translations (CA_pos)"]
+
+N_Atom --> pos
+CA_Atom --> pos
+C_Atom --> pos
+CA_Atom --> trans
+rot --> Basis
+trans --> Basis
+
+subgraph subGraph1 ["Code Entity Space (minalphafold/geometry.py)"]
+    pos
+    func_bf
+    ex
+    ez
+    ey
+    rot
+    trans
+    pos --> func_bf
+    func_bf --> ex
+    ex --> ez
+    ez --> ey
+    ey --> rot
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    N_Atom
+    CA_Atom
+    C_Atom
+    Basis
+end
 ```
 
 **Sources:** [minalphafold/geometry.py L67-L87](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/geometry.py#L67-L87)
@@ -90,8 +131,49 @@ The function utilizes `gather_atom14` to efficiently index into the `atom14_posi
 
 This diagram illustrates how raw atomic data is transformed into geometric features for the model.
 
-```
+```mermaid
+flowchart TD
 
+raw_pos["atom14_positions"]
+raw_mask["atom14_mask"]
+aa["aatype"]
+bf["backbone_frames()"]
+ta["torsion_angles()"]
+pb["pseudo_beta_positions()"]
+dsc["dihedral_sin_cos()"]
+frames["Backbone Frames (R, t)"]
+torsions["Sin/Cos Torsions (7x2)"]
+betas["CB/CA Coordinates"]
+
+raw_pos --> bf
+raw_mask --> bf
+raw_pos --> ta
+aa --> ta
+raw_pos --> pb
+aa --> pb
+bf --> frames
+ta --> torsions
+pb --> betas
+
+subgraph subGraph2 ["Output Features"]
+    frames
+    torsions
+    betas
+end
+
+subgraph subGraph1 ["Geometry Functions (minalphafold/geometry.py)"]
+    bf
+    ta
+    pb
+    dsc
+    ta --> dsc
+end
+
+subgraph subGraph0 ["Input Data (minalphafold/data.py)"]
+    raw_pos
+    raw_mask
+    aa
+end
 ```
 
 **Sources:** [minalphafold/geometry.py L67-L166](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/geometry.py#L67-L166)

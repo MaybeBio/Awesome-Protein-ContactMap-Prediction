@@ -16,8 +16,51 @@ The `Evoformer` block executes nine sequential update steps split across two cou
 
 **Evoformer Block — Code Entity Flow**
 
-```
+```mermaid
+flowchart TD
 
+inputs["Inputs<br>msa_representation: B,N_seq,N_res,c_m<br>pair_representation: B,N_res,N_res,c_z"]
+R1["MSARowAttentionWithPairBias<br>+ dropout_rowwise"]
+R2["MSAColumnAttention<br>(no dropout)"]
+R3["MSATransition<br>(no dropout)"]
+R4["OuterProductMean<br>(no dropout)"]
+R5["TriangleMultiplicationOutgoing<br>+ dropout_rowwise"]
+R6["TriangleMultiplicationIncoming<br>+ dropout_rowwise"]
+R7["TriangleAttentionStartingNode<br>+ dropout_rowwise"]
+R8["TriangleAttentionEndingNode<br>+ dropout_columnwise"]
+R9["PairTransition<br>(no dropout)"]
+outputs["Outputs<br>msa_representation: B,N_seq,N_res,c_m<br>pair_representation: B,N_res,N_res,c_z"]
+
+inputs --> R1
+R3 --> R4
+inputs --> R1
+R4 --> R5
+R3 --> outputs
+R9 --> outputs
+
+subgraph Pair_Track ["Pair Track (minalphafold/embedders.py)"]
+    R5
+    R6
+    R7
+    R8
+    R9
+    R5 --> R6
+    R6 --> R7
+    R7 --> R8
+    R8 --> R9
+end
+
+subgraph Bridge ["MSA to Pair Bridge (minalphafold/embedders.py)"]
+    R4
+end
+
+subgraph MSA_Track ["MSA Track (minalphafold/evoformer.py)"]
+    R1
+    R2
+    R3
+    R1 --> R2
+    R2 --> R3
+end
 ```
 
 Sources: [minalphafold/evoformer.py L7-L51](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/evoformer.py#L7-L51)
@@ -234,8 +277,36 @@ No dropout is applied [minalphafold/evoformer.py L48-L49](https://github.com/Chr
 
 **Dropout assignment in one Evoformer block:**
 
-```
+```mermaid
+flowchart TD
 
+F["MSAColumnAttention"]
+G["MSATransition"]
+H["OuterProductMean"]
+I["PairTransition"]
+B["TriangleMultiplicationOutgoing<br>dropout_rowwise"]
+C["TriangleMultiplicationIncoming<br>dropout_rowwise"]
+D["TriangleAttentionStartingNode<br>dropout_rowwise"]
+E["TriangleAttentionEndingNode<br>dropout_columnwise"]
+A["MSARowAttentionWithPairBias<br>dropout_rowwise"]
+
+subgraph no_dropout ["No dropout"]
+    F
+    G
+    H
+    I
+end
+
+subgraph pair_dropout ["pair_dropout rate (evoformer_pair_dropout)"]
+    B
+    C
+    D
+    E
+end
+
+subgraph msa_dropout ["msa_dropout rate (evoformer_msa_dropout)"]
+    A
+end
 ```
 
 Dropout rates are stored as `self.msa_dropout` and `self.pair_dropout` on the `Evoformer` instance [minalphafold/evoformer.py L23-L24](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/evoformer.py#L23-L24)
@@ -252,8 +323,8 @@ Sources: [minalphafold/evoformer.py L22-L49](https://github.com/ChrisHayduk/minA
 
 After the full 48-block Evoformer stack runs in `model.py`, the single representation used by the `StructureModule` is extracted as the first row of `msa_representation`:
 
-```
-
+```markdown
+single_repr = msa_representation[:, 0, :, :]  # shape: (B, N_res, c_s)
 ```
 
 This corresponds to the "target sequence" row of the MSA (the query sequence). `c_s` equals `c_m` at this point.

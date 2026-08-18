@@ -33,8 +33,36 @@ Sources: [minalphafold/losses.py L23-L32](https://github.com/ChrisHayduk/minAlph
 
 **Data Flow: Ground Truth Derivation**
 
-```
+```mermaid
+flowchart TD
 
+TP["true_atom_positions<br>(b, N_res, 14, 3)"]
+CB["CB/CA selection<br>(GLY uses CA at index 1,<br>others use CB at index 4)"]
+DF["distance_bin(cb_pos, n_bins)<br>→ distogram_true<br>(b, N_res, N_res, n_dist_bins) one-hot"]
+DL["DistogramLoss.forward"]
+LDDT["cdist on pred_ca vs true_ca<br>→ lddt (b, N_res) in 0,1"]
+BIN["torch.bucketize → plddt_bin_idx<br>torch.nn.functional.one_hot<br>→ plddt_true (b, N_res, n_plddt_bins)"]
+PL["PLDDTLoss.forward"]
+TT["true_torsion_angles<br>(b, N_res, 7, 2)"]
+ALT["symmetry-aware alt<br>→ true_torsion_angles_alt"]
+TAL["TorsionAngleLoss.forward<br>(via AuxiliaryLoss)"]
+MSA["msa_true<br>(b, N_seq, N_res, n_classes)"]
+ML["MSALoss.forward"]
+MASK["msa_mask<br>(N_seq, N_res)"]
+ER["experimentally_resolved_true<br>(b, N_res, 14)"]
+ERL["ExperimentallyResolvedLoss.forward<br>(finetune only)"]
+
+TP --> CB
+CB --> DF
+DF --> DL
+TP --> LDDT
+LDDT --> BIN
+BIN --> PL
+TT --> ALT
+ALT --> TAL
+MSA --> ML
+MASK --> ML
+ER --> ERL
 ```
 
 Sources: [minalphafold/losses.py L86-L160](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L86-L160)
@@ -106,8 +134,35 @@ Sources: [minalphafold/losses.py L270-L322](https://github.com/ChrisHayduk/minAl
 
 **TorsionAngleLoss Computation**
 
-```
+```mermaid
+flowchart TD
 
+TA["torsion_angles<br>(b, N_res, 7, 2)"]
+NORM["normalize → pred_unit"]
+D1["‖pred_unit - true‖²"]
+D2["‖pred_unit - true_alt‖²"]
+MIN["torch.minimum → torsion_dist_sq"]
+MAG["‖torsion_angles‖ → norm"]
+NL["‖norm - 1‖ → angle_norm_loss"]
+MASK["× torsion_mask<br>(chi_mask_table + backbone + seq_mask)"]
+MASK2["× torsion_mask"]
+SUM["Σ / Σ mask"]
+SUM2["0.02 × Σ / Σ mask"]
+OUT["torsion_loss + angle_norm_loss"]
+
+TA --> NORM
+NORM --> D1
+NORM --> D2
+D1 --> MIN
+D2 --> MIN
+TA --> MAG
+MAG --> NL
+MIN --> MASK
+NL --> MASK2
+MASK --> SUM
+MASK2 --> SUM2
+SUM --> OUT
+SUM2 --> OUT
 ```
 
 Sources: [minalphafold/losses.py L270-L322](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L270-L322)
@@ -204,8 +259,32 @@ Sources: [minalphafold/losses.py L134-L162](https://github.com/ChrisHayduk/minAl
 
 **PLDDTLoss: True Label Pipeline**
 
-```
+```mermaid
+flowchart TD
 
+AC["atom14_coords<br>(b, N_res, 14, 3)"]
+PCA["pred_ca = atom_coords[:,  :, 1, :]<br>(b, N_res, 3)"]
+TAP["true_atom_positions<br>(b, N_res, 14, 3)"]
+TCA["true_ca = true_atom_positions[:,  :, 1, :]<br>(b, N_res, 3)"]
+CDIST["torch.cdist → pred_ca_dists, true_ca_dists<br>(b, N_res, N_res)"]
+INC["inclusion mask:<br>true_ca_dists < 15Å AND not self AND seq_mask pair"]
+ERR["dist_error = |pred_ca_dists - true_ca_dists|"]
+LDDT["lddt = avg fraction preserved<br>across thresholds 0.5, 1.0, 2.0, 4.0 Å"]
+BUCK["torch.bucketize(lddt, plddt_edges)<br>→ plddt_bin_idx (b, N_res)"]
+OH["F.one_hot(plddt_bin_idx, n_plddt_bins)<br>→ plddt_true (b, N_res, n_plddt_bins)"]
+PLL["PLDDTLoss.forward(plddt_pred, plddt_true, seq_mask)"]
+
+AC --> PCA
+TAP --> TCA
+PCA --> CDIST
+TCA --> CDIST
+CDIST --> INC
+CDIST --> ERR
+INC --> LDDT
+ERR --> LDDT
+LDDT --> BUCK
+BUCK --> OH
+OH --> PLL
 ```
 
 Sources: [minalphafold/losses.py L136-L162](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L136-L162)
@@ -257,8 +336,38 @@ Sources: [minalphafold/losses.py L518-L528](https://github.com/ChrisHayduk/minAl
 
 **Class and Tensor Relationships**
 
-```
+```mermaid
+flowchart TD
 
+AFL["AlphaFoldLoss"]
+TAL["TorsionAngleLoss<br>chi_mask_table buffer (21,4)<br>from chi_angles_mask"]
+PLL["PLDDTLoss"]
+DL["DistogramLoss"]
+ML["MSALoss"]
+ERL["ExperimentallyResolvedLoss<br>(finetune only)"]
+AUXL["AuxiliaryLoss<br>→ TorsionAngleLoss<br>→ BackboneFAPE"]
+DB["distance_bin()<br>utils.py"]
+OHT["plddt_true<br>one-hot (b, N_res, n_plddt_bins)<br>derived via torch.bucketize + F.one_hot"]
+ALTA["true_torsion_angles_alt<br>derived inline in AlphaFoldLoss.forward"]
+MH["MaskedMSAHead<br>heads.py"]
+PH["PLDDTHead<br>heads.py"]
+DH["DistogramHead<br>heads.py"]
+ERH["ExperimentallyResolvedHead<br>heads.py"]
+
+AFL --> TAL
+AFL --> PLL
+AFL --> DL
+AFL --> ML
+AFL --> ERL
+AFL --> AUXL
+DL --> DB
+AFL --> DB
+PLL --> OHT
+TAL --> ALTA
+MH --> ML
+PH --> PLL
+DH --> DL
+ERH --> ERL
 ```
 
 Sources: [minalphafold/losses.py L17-L171](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L17-L171)

@@ -25,7 +25,7 @@ The loss decomposes into three independent sub-losses: `bond_length_loss`, `bond
 [minalphafold/losses.py L175-L178](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L175-L178)
 
 ```
-
+if self.finetune:    struct_violation_loss = self.structural_violation_loss(atom_coords, atom_mask, res_types)    loss += 1.0 * struct_violation_loss
 ```
 
 | Argument to `forward` | Shape | Description |
@@ -49,8 +49,23 @@ The scalar loss returned is the sum of the three components:
 
 **Figure 1: `StructuralViolationLoss` — Class and Sub-Loss Decomposition**
 
-```
+```mermaid
+flowchart TD
 
+AlphaFoldLoss["AlphaFoldLoss<br>(finetune=True only)"]
+SVL["StructuralViolationLoss<br>.forward()"]
+BLL["bond_length_loss()<br>C-N peptide bond deviation"]
+BAL["bond_angle_loss()<br>CA-C-N and C-N-CA angle deviation"]
+CL["clash_loss()<br>VDW overlap between non-bonded atoms"]
+RC["residue_constants.py<br>between_res_bond_length_c_n<br>between_res_bond_length_stddev_c_n<br>between_res_cos_angles_ca_c_n<br>between_res_cos_angles_c_n_ca<br>restype_atom14_vdw_radius"]
+
+AlphaFoldLoss --> SVL
+SVL --> BLL
+SVL --> BAL
+SVL --> CL
+BLL --> RC
+BAL --> RC
+CL --> RC
 ```
 
 **Sources:** [minalphafold/losses.py L23-L32](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L23-L32)
@@ -127,7 +142,7 @@ Constants are sourced from `between_res_cos_angles_ca_c_n` and `between_res_cos_
 All four backbone atoms must exist: CA(i), C(i), N(i+1), CA(i+1).
 
 ```
-
+mask = atom_mask[:, :-1, 1] * atom_mask[:, :-1, 2] * \       atom_mask[:, 1:, 0]  * atom_mask[:, 1:, 1]
 ```
 
 [minalphafold/losses.py L516-L517](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L516-L517)
@@ -157,7 +172,7 @@ Radii are assigned by residue type and atom index using the `restype_atom14_vdw_
 Pairs within the same residue or in adjacent residues (sequence separation < 2) are excluded:
 
 ```
-
+seq_sep = torch.abs(res_idx[:, :, None] - res_idx[:, None, :])sep_mask = (seq_sep >= 2)
 ```
 
 [minalphafold/losses.py L549-L550](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L549-L550)
@@ -166,8 +181,8 @@ Pairs within the same residue or in adjacent residues (sequence separation < 2) 
 
 The implementation uses a fixed overlap tolerance of 1.5 Å [minalphafold/losses.py L557](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L557-L557)
 
-```
-
+```markdown
+overlap_tolerance = 1.5  # Åoverlap = (vdw_i + vdw_j) - overlap_tolerance - dist(i, j)clash   = torch.clamp(overlap, min=0) * pair_maskloss    = torch.sum(clash) / (torch.sum(pair_mask) + 1e-6)
 ```
 
 A positive `overlap` value indicates the atoms are closer than `vdw_i + vdw_j - 1.5` Å. The `clamp(min=0)` makes this a one-sided hinge loss.
@@ -182,8 +197,83 @@ A positive `overlap` value indicates the atoms are closer than `vdw_i + vdw_j - 
 
 **Figure 2: `StructuralViolationLoss` — Inputs, Buffers, and Computation Graph**
 
-```
+```mermaid
+flowchart TD
 
+PredPos["predicted_positions<br>(batch, N_res, 14, 3)"]
+AtomMask["atom_mask<br>(batch, N_res, 14)"]
+ResTypes["residue_types<br>(batch, N_res)"]
+BLL_CN["C_i = positions[:,:-1,2,:]<br>N_next = positions[:,1:,0,:]"]
+BLL_D["d = euclidean(C_i, N_next)"]
+BLL_PRO["is_proline = residue_types[:,1:] == 14"]
+BLL_IDEAL["d_ideal from between_res_bond_length_c_n<br>d_stddev from between_res_bond_length_stddev_c_n"]
+BLL_LOSS["loss = mean( ((d - d_ideal)/stddev)^2 * mask )"]
+BAL_ATOMS["CA_i, C_i, N_next, CA_next"]
+BAL_COS["cos via law of cosines"]
+BAL_IDEAL["ideal from between_res_cos_angles_ca_c_n<br>between_res_cos_angles_c_n_ca"]
+BAL_LOSS["loss = mean( ((cos - mean)/stddev)^2 * mask )"]
+CL_FLAT["pos_flat (batch, N_res*14, 3)"]
+CL_VDW["vdw = vdw_table[residue_types]<br>(batch, N_res, 14)"]
+CL_DIST["pairwise dist (batch, M, M)"]
+CL_SEP["seq_sep mask: exclude sep < 2"]
+CL_OVL["overlap = vdw_i + vdw_j - 1.5 - dist"]
+CL_LOSS["loss = mean( clamp(overlap, min=0) * pair_mask )"]
+RC_BL["between_res_bond_length_c_n<br>between_res_bond_length_stddev_c_n"]
+RC_ANG["between_res_cos_angles_ca_c_n<br>between_res_cos_angles_c_n_ca"]
+RC_VDW["restype_atom14_vdw_radius<br>(21, 14)"]
+SUM["sum → scalar loss per batch"]
+
+PredPos --> BLL_CN
+AtomMask --> BLL_LOSS
+ResTypes --> BLL_PRO
+RC_BL --> BLL_IDEAL
+PredPos --> BAL_ATOMS
+AtomMask --> BAL_LOSS
+RC_ANG --> BAL_IDEAL
+PredPos --> CL_FLAT
+ResTypes --> CL_VDW
+RC_VDW --> CL_VDW
+AtomMask --> CL_SEP
+BLL_LOSS --> SUM
+BAL_LOSS --> SUM
+CL_LOSS --> SUM
+
+subgraph clash_loss() ["clash_loss()"]
+    CL_FLAT
+    CL_VDW
+    CL_DIST
+    CL_SEP
+    CL_OVL
+    CL_LOSS
+    CL_FLAT --> CL_DIST
+    CL_VDW --> CL_OVL
+    CL_DIST --> CL_OVL
+    CL_DIST --> CL_SEP
+    CL_SEP --> CL_LOSS
+    CL_OVL --> CL_LOSS
+end
+
+subgraph bond_angle_loss() ["bond_angle_loss()"]
+    BAL_ATOMS
+    BAL_COS
+    BAL_IDEAL
+    BAL_LOSS
+    BAL_ATOMS --> BAL_COS
+    BAL_COS --> BAL_LOSS
+    BAL_IDEAL --> BAL_LOSS
+end
+
+subgraph bond_length_loss() ["bond_length_loss()"]
+    BLL_CN
+    BLL_D
+    BLL_PRO
+    BLL_IDEAL
+    BLL_LOSS
+    BLL_CN --> BLL_D
+    BLL_D --> BLL_LOSS
+    BLL_PRO --> BLL_IDEAL
+    BLL_IDEAL --> BLL_LOSS
+end
 ```
 
 **Sources:** [minalphafold/losses.py L440-L566](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L440-L566)

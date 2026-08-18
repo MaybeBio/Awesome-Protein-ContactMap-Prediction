@@ -135,7 +135,7 @@ The implementation flattens the `(N_res, 8)` frame grid and `(N_res, 14)` atom g
 :
 
 ```
-
+pred_R  = predicted_frames_R.reshape(b, N_res*8,  3, 3)pred_t  = predicted_frames_t.reshape(b, N_res*8,  3)pred_pos = predicted_atom_positions.reshape(b, N_res*14, 3)
 ```
 
 ### Masking
@@ -156,8 +156,8 @@ The average is two-stage:
 1. For each frame, average the clamped distances over all valid atoms → `frame_means` of shape `(b, N_frames)`.
 2. Average `frame_means` over valid frames, divided by `Z`.
 
-```
-
+```markdown
+# Step 1: average over atoms (shared denominator)atom_count = flat_atom_mask.sum(dim=-1, keepdim=True).clamp(min=1)frame_means = (dist_clamped * flat_atom_mask[:, None, :]).sum(dim=-1) / atom_count # Step 2: average over framesframe_count = frame_mask.sum(dim=-1).clamp(min=1)fape_loss   = (frame_means * frame_mask).sum(dim=-1) / (frame_count * Z)
 ```
 
 **Sources:** [minalphafold/losses.py L306-L365](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L306-L365)
@@ -190,8 +190,8 @@ A key implementation detail: translations are passed **both** as `predicted_tran
 
  This means the backbone FAPE in `AuxiliaryLoss` effectively evaluates Cα positions only, without needing full atom14 coordinates at each intermediate layer.
 
-```
-
+```markdown
+fape = self.fape_loss(    traj_R[l], traj_t[l], traj_t[l],   # translations used twice    true_rotations, true_translations, true_translations,    seq_mask=seq_mask,)
 ```
 
 **Sources:** [minalphafold/losses.py L176-L189](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L176-L189)
@@ -202,8 +202,65 @@ A key implementation detail: translations are passed **both** as `predicted_tran
 
 **FAPE Loss Data Flow — from StructureModule to Loss**
 
-```
+```mermaid
+flowchart TD
 
+SM["StructureModule.forward()"]
+trajR["traj_rotations<br>(L, b, N_res, 3, 3)"]
+trajT["traj_translations<br>(L, b, N_res, 3)"]
+trajTors["traj_torsion_angles<br>(L, b, N_res, 7, 2)"]
+allR["all_frames_R<br>(b, N_res, 8, 3, 3)"]
+allT["all_frames_t<br>(b, N_res, 8, 3)"]
+atom14["atom14_coords<br>(b, N_res, 14, 3)"]
+atom14mask["atom14_mask<br>(b, N_res, 14)"]
+true_allR["true_all_frames_R<br>(b, N_res, 8, 3, 3)"]
+true_allT["true_all_frames_t<br>(b, N_res, 8, 3)"]
+true_inputs["true_rotations, true_translations,<br>true_torsion_angles, res_types"]
+AllatomFAPE["AllAtomFAPE.forward()"]
+fape_loss["fape_loss (scalar per batch)"]
+AuxLoss["AuxiliaryLoss.forward()"]
+true_rotations2["true_rotations<br>true_translations<br>true_torsion_angles"]
+BackboneFAPE_L["BackboneFAPE × L layers"]
+TorsionLoss_L["TorsionAngleLoss × L layers"]
+aux_loss["aux_loss = mean over L (scalar per batch)"]
+
+SM --> trajR
+SM --> trajT
+SM --> trajTors
+SM --> allR
+SM --> allT
+SM --> atom14
+SM --> atom14mask
+allR --> AllatomFAPE
+allT --> AllatomFAPE
+atom14 --> AllatomFAPE
+atom14mask --> AllatomFAPE
+true_allR --> AllatomFAPE
+true_allT --> AllatomFAPE
+AllatomFAPE --> fape_loss
+trajR --> AuxLoss
+trajT --> AuxLoss
+trajTors --> AuxLoss
+true_rotations2 --> AuxLoss
+AuxLoss --> BackboneFAPE_L
+AuxLoss --> TorsionLoss_L
+BackboneFAPE_L --> aux_loss
+TorsionLoss_L --> aux_loss
+
+subgraph compute_true ["compute_all_atom_coordinates (AlphaFoldLoss)"]
+    true_allR
+    true_allT
+end
+
+subgraph SM_outputs ["StructureModule Outputs"]
+    trajR
+    trajT
+    trajTors
+    allR
+    allT
+    atom14
+    atom14mask
+end
 ```
 
 **Sources:** [minalphafold/losses.py L59-L98](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L59-L98)
@@ -218,8 +275,33 @@ A key implementation detail: translations are passed **both** as `predicted_tran
 
 **Class hierarchy and shared parameters**
 
-```
-
+```mermaid
+classDiagram
+    class BackboneFAPE {
+        +d_clamp_val: float = 10.0
+        +eps: float = 1e-4
+        +Z: float = 10.0
+        +forward(pred_R, pred_t, pred_pos, true_R, true_t, true_pos, seq_mask)
+    }
+    class AllAtomFAPE {
+        +d_clamp_val: float = 10.0
+        +eps: float = 1e-4
+        +Z: float = 10.0
+        +forward(pred_frames_R, pred_frames_t, pred_pos, atom_mask, true_frames_R, true_frames_t, true_pos, seq_mask, rigid_group_mask, aatype)
+    }
+    class AuxiliaryLoss {
+        +fape_loss: BackboneFAPE
+        +torsion_angle_loss: TorsionAngleLoss
+        +forward(structure_model_prediction, true_R, true_t, true_torsions, true_torsions_alt, res_types, seq_mask)
+    }
+    class AlphaFoldLoss {
+        +fape_loss: AllAtomFAPE
+        +aux_loss: AuxiliaryLoss
+        +forward(...)
+    }
+    AlphaFoldLoss --> AllAtomFAPE : "weight 0.5"
+    AlphaFoldLoss --> AuxiliaryLoss : "weight 0.5"
+    AuxiliaryLoss --> BackboneFAPE
 ```
 
 **Sources:** [minalphafold/losses.py L17-L41](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L17-L41)
@@ -267,7 +349,7 @@ The two FAPE contributions enter `AlphaFoldLoss.forward()` with equal weight [mi
 :
 
 ```
-
+loss = 0.5 * fape_loss + 0.5 * aux_loss + 0.3 * dist_loss + 2.0 * msa_loss + 0.01 * plddt_loss
 ```
 
 `AllAtomFAPE` receives the final-layer all-atom coordinates and all 8 rigid-group frames. `AuxiliaryLoss` receives the per-layer trajectory from the structure module. Both consume true frames derived from `compute_all_atom_coordinates` applied to the ground-truth rotations, translations, and torsion angles [minalphafold/losses.py L66-L75](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/losses.py#L66-L75)

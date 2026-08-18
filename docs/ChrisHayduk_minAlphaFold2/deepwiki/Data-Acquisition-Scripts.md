@@ -65,8 +65,47 @@ The following diagram illustrates how the preprocessing script bridges raw file 
 
 **Preprocessing Entity Mapping**
 
-```
+```mermaid
+flowchart TD
 
+A3M[".a3m File"]
+HHR[".hhr File"]
+CIF[".cif File"]
+RA3M["read_a3m()"]
+PHHR["parse_hhr_hits()"]
+ECA["extract_chain_atoms()"]
+PTQ["project_to_query()"]
+HH["HHRHit Class"]
+FEAT["msa, deletion_matrix"]
+LAB["all_atom_positions, all_atom_mask"]
+
+A3M --> RA3M
+HHR --> PHHR
+CIF --> ECA
+RA3M --> FEAT
+HH --> FEAT
+PTQ --> LAB
+
+subgraph subGraph2 ["Processed Cache (.npz)"]
+    FEAT
+    LAB
+end
+
+subgraph preprocess_openproteinset.py ["preprocess_openproteinset.py"]
+    RA3M
+    PHHR
+    ECA
+    PTQ
+    HH
+    PHHR --> HH
+    ECA --> PTQ
+end
+
+subgraph subGraph0 ["Raw Data Space"]
+    A3M
+    HHR
+    CIF
+end
 ```
 
 **Sources:** [scripts/preprocess_openproteinset.py L37-L41](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/scripts/preprocess_openproteinset.py#L37-L41)
@@ -85,8 +124,43 @@ The scripts expect and maintain a specific directory hierarchy to ensure the `Pr
 
 **Data Flow Diagram**
 
-```
+```mermaid
+flowchart TD
 
+S3["S3: openfold/pdb/"]
+RODA["data/openproteinset/roda_pdb/"]
+RCSB["RCSB: mmcif/"]
+MMCIF["data/openproteinset/pdb_data/mmcif_files/"]
+PRE["preprocess_openproteinset.py"]
+P_FEAT["data/processed_features/"]
+P_LAB["data/processed_labels/"]
+DS["ProcessedOpenProteinSetDataset"]
+
+RODA --> PRE
+MMCIF --> PRE
+P_FEAT --> DS
+P_LAB --> DS
+
+subgraph subGraph2 ["Training Phase"]
+    DS
+end
+
+subgraph subGraph1 ["Preprocessing Phase"]
+    PRE
+    P_FEAT
+    P_LAB
+    PRE --> P_FEAT
+    PRE --> P_LAB
+end
+
+subgraph subGraph0 ["Download Phase"]
+    S3
+    RODA
+    RCSB
+    MMCIF
+    S3 --> RODA
+    RCSB --> MMCIF
+end
 ```
 
 ### Expected Layout

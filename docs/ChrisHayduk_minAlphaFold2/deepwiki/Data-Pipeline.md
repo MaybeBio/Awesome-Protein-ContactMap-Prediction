@@ -15,8 +15,54 @@ The following diagram illustrates how data flows from raw files through the prep
 
 ### System Data Flow: Disk to Tensor
 
-```
+```mermaid
+flowchart TD
 
+A3M[".a3m (MSA Files)"]
+CIF[".mmcif (Structures)"]
+PP["preprocess_openproteinset.py"]
+A3MP["a3m.py Parser"]
+CIFP["mmcif.py Parser"]
+FNPZ["features/*.npz"]
+LNPZ["labels/*.npz"]
+DS["ProcessedOpenProteinSetDataset"]
+CB["collate_batch"]
+BPE["build_processed_example"]
+Model["AlphaFold2 Model"]
+
+A3M --> A3MP
+CIF --> CIFP
+PP --> FNPZ
+PP --> LNPZ
+FNPZ --> DS
+LNPZ --> DS
+BPE --> Model
+
+subgraph subGraph3 ["Training Pipeline (Code Entities)"]
+    DS
+    CB
+    BPE
+    DS --> CB
+    CB --> BPE
+end
+
+subgraph subGraph2 ["Cached Features (Disk)"]
+    FNPZ
+    LNPZ
+end
+
+subgraph subGraph1 ["Preprocessing (scripts/)"]
+    PP
+    A3MP
+    CIFP
+    A3MP --> PP
+    CIFP --> PP
+end
+
+subgraph subGraph0 ["Raw Data Space (Disk)"]
+    A3M
+    CIF
+end
 ```
 
 **Sources:** [minalphafold/data.py L84-L128](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/data.py#L84-L128)
@@ -68,8 +114,28 @@ To ensure model robustness, the pipeline employs several stochastic strategies d
 
 ### Code Entity Mapping: Feature Construction
 
-```
-
+```mermaid
+classDiagram
+    class ProcessedOpenProteinSetDataset {
+        -chain_ids: List[str]
+        +getitem(index)
+    }
+    class CollateBatch {
+        +collate_batch(examples)
+        +build_processed_example(example)
+    }
+    class MSAMasking {
+        +block_delete_msa()
+        +sample_msa()
+        +make_masked_msa()
+    }
+    class Geometry {
+        +backbone_frames()
+        +torsion_angles()
+    }
+    ProcessedOpenProteinSetDataset ..> CollateBatch : produces raw dict
+    CollateBatch --> MSAMasking : augments MSA
+    CollateBatch --> Geometry : computes labels
 ```
 
 **Sources:** [minalphafold/data.py L84-L128](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/data.py#L84-L128)

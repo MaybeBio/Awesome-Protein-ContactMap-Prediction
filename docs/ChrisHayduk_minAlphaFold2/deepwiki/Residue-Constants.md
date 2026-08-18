@@ -102,8 +102,25 @@ The atom positions in `rigid_group_atom_positions` [minalphafold/residue_constan
 
 **Diagram: Frame dependency chain for a sidechain (e.g. ARG)**
 
-```
+```mermaid
+flowchart TD
 
+backbone["Frame 0<br>(Backbone T_i)"]
+f1["Frame 1<br>(Pre-omega, dummy)"]
+f2["Frame 2<br>(Phi)"]
+f3["Frame 3<br>(Psi)"]
+chi1["Frame 4<br>(Chi1)<br>lit[4] ∘ rotX(χ1)"]
+chi2["Frame 5<br>(Chi2)<br>lit[5] ∘ rotX(χ2)"]
+chi3["Frame 6<br>(Chi3)<br>lit[6] ∘ rotX(χ3)"]
+chi4["Frame 7<br>(Chi4)<br>lit[7] ∘ rotX(χ4)"]
+
+backbone --> f1
+backbone --> f2
+backbone --> f3
+backbone --> chi1
+chi1 --> chi2
+chi2 --> chi3
+chi3 --> chi4
 ```
 
 Frames 4–7 chain sequentially: frame 5 is built relative to frame 4, frame 6 relative to frame 5, and so on. Frames 0–4 all branch directly from the backbone. This chain is implemented in `compute_all_atom_coordinates` in `structure_module.py` [minalphafold/structure_module.py L427-L457](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L427-L457)
@@ -120,8 +137,23 @@ All primary arrays are populated at module import time and exported as plain Num
 
 **Diagram: Exported array names and their shapes**
 
-```
+```mermaid
+flowchart TD
 
+rc["residue_constants.py<br>(module-level init)"]
+df["restype_rigid_group_default_frame<br>(21, 8, 4, 4) float32<br>4×4 homogeneous transform per frame"]
+lp["restype_atom14_rigid_group_positions<br>(21, 14, 3) float32<br>Atom positions in local frame coords (Å)"]
+afg["restype_atom14_to_rigid_group<br>(21, 14) int64<br>Frame index for each atom14 slot"]
+am["restype_atom14_mask<br>(21, 14) float32<br>1.0 if atom exists, 0.0 otherwise"]
+rgm["restype_rigid_group_mask<br>(21, 8) float32<br>1.0 if frame exists for this restype"]
+vdw["restype_atom14_vdw_radius<br>(21, 14) float32<br>VDW radius per atom14 slot (Å)"]
+
+rc --> df
+rc --> lp
+rc --> afg
+rc --> am
+rc --> rgm
+rc --> vdw
 ```
 
 | Array | Shape | dtype | Description |
@@ -149,8 +181,33 @@ All arrays are initialized to zero at module top level, then populated by two fu
 
 **Diagram: Initialization call graph**
 
-```
+```mermaid
+flowchart TD
 
+import["Module import"]
+zeros1["restype_rigid_group_default_frame = np.zeros(21,8,4,4)"]
+zeros2["restype_atom14_to_rigid_group = np.zeros(21,14)"]
+zeros3["restype_atom14_mask = np.zeros(21,14)"]
+zeros4["restype_atom14_rigid_group_positions = np.zeros(21,14,3)"]
+zeros5["restype_rigid_group_mask = np.zeros(21,8)"]
+zeros6["restype_atom14_vdw_radius = np.zeros(21,14)"]
+fn1["_make_atom14_vdw_radius()"]
+fn2["_make_rigid_group_constants()"]
+helper["_make_rigid_transformation_4x4(ex, ey, translation)<br>→ 4×4 homogeneous matrix"]
+
+import --> zeros1
+import --> zeros2
+import --> zeros3
+import --> zeros4
+import --> zeros5
+import --> zeros6
+zeros6 --> fn1
+zeros1 --> fn2
+zeros2 --> fn2
+zeros3 --> fn2
+zeros4 --> fn2
+zeros5 --> fn2
+fn2 --> helper
 ```
 
 ### _make_atom14_vdw_radius
@@ -159,8 +216,8 @@ All arrays are initialized to zero at module top level, then populated by two fu
 
 Iterates over all 20 standard residue types. For each atom14 slot, looks up the element from the atom name's first character (e.g., `'CG'[0] == 'C'`) and writes the corresponding radius from `van_der_waals_radius` into `restype_atom14_vdw_radius`. UNK (index 20) is left as zero.
 
-```
-
+```css
+van_der_waals_radius = {'C': 1.7, 'N': 1.55, 'O': 1.52, 'S': 1.8}  # Å
 ```
 
 ### _make_rigid_group_constants
@@ -258,14 +315,47 @@ Sources: [minalphafold/residue_constants.py L364-L370](https://github.com/ChrisH
 
 Both `StructureModule` and `AlphaFoldLoss` register the arrays as PyTorch buffers so they move to the correct device automatically:
 
-```
-
+```markdown
+# In StructureModule.__init__ [minalphafold/structure_module.py:34-41]self.register_buffer('default_frames',    torch.tensor(restype_rigid_group_default_frame))   # (21, 8, 4, 4)self.register_buffer('lit_positions',    torch.tensor(restype_atom14_rigid_group_positions)) # (21, 14, 3)self.register_buffer('atom_frame_idx_table',    torch.tensor(restype_atom14_to_rigid_group))        # (21, 14)self.register_buffer('atom_mask_table',    torch.tensor(restype_atom14_mask))                  # (21, 14)
 ```
 
 **Diagram: Which modules import which constants**
 
-```
+```mermaid
+flowchart TD
 
+rc["residue_constants.py"]
+sm["structure_module.py<br>StructureModule<br>compute_all_atom_coordinates"]
+loss["losses.py<br>AlphaFoldLoss<br>StructuralViolationLoss<br>TorsionAngleLoss"]
+df["restype_rigid_group_default_frame"]
+lp["restype_atom14_rigid_group_positions"]
+afg["restype_atom14_to_rigid_group"]
+am["restype_atom14_mask"]
+rgm["restype_rigid_group_mask"]
+vdw["restype_atom14_vdw_radius"]
+cam["chi_angles_mask"]
+bond["between_res_bond_length_c_n<br>between_res_bond_length_stddev_c_n<br>between_res_cos_angles_c_n_ca<br>between_res_cos_angles_ca_c_n"]
+
+rc --> df
+rc --> lp
+rc --> afg
+rc --> am
+rc --> rgm
+rc --> vdw
+rc --> cam
+rc --> bond
+df --> sm
+lp --> sm
+afg --> sm
+am --> sm
+df --> loss
+lp --> loss
+afg --> loss
+am --> loss
+rgm --> loss
+vdw --> loss
+cam --> loss
+bond --> loss
 ```
 
 Sources: [minalphafold/structure_module.py L4-L9](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/structure_module.py#L4-L9)

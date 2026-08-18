@@ -52,8 +52,55 @@ The test suite is organized into specialized files targeting different layers of
 
 **Test Class to Code Entity Mapping**
 
-```
+```mermaid
+flowchart TD
 
+TIE["TestInputEmbedder"]
+TEvo["TestEvoformer"]
+TSM["TestStructureModule"]
+TIPA["TestInvariantPointAttention"]
+TAF2["TestAlphaFold2"]
+TDP["test_preprocess_chain"]
+TDS["TestDataset"]
+TTS["test_train_step_updates"]
+TEV["test_evaluate_returns_finite"]
+IE["InputEmbedder (embedders.py)"]
+EV["Evoformer (evoformer.py)"]
+SM["StructureModule (structure_module.py)"]
+IPA["InvariantPointAttention (structure_module.py)"]
+AF2["AlphaFold2 (model.py)"]
+PC["preprocess_chain (preprocess_openproteinset.py)"]
+POD["ProcessedOpenProteinSetDataset (data.py)"]
+TS["train_step (trainer.py)"]
+EVF["evaluate (trainer.py)"]
+
+TIE --> IE
+TEvo --> EV
+TSM --> SM
+TIPA --> IPA
+TAF2 --> AF2
+TDP --> PC
+TDS --> POD
+TTS --> TS
+TEV --> EVF
+
+subgraph tests/test_trainer.py ["tests/test_trainer.py"]
+    TTS
+    TEV
+end
+
+subgraph tests/test_data_pipeline.py ["tests/test_data_pipeline.py"]
+    TDP
+    TDS
+end
+
+subgraph tests/test_shapes.py ["tests/test_shapes.py"]
+    TIE
+    TEvo
+    TSM
+    TIPA
+    TAF2
+end
 ```
 
 Sources: [tests/test_shapes.py L87-L477](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/tests/test_shapes.py#L87-L477)
@@ -157,8 +204,33 @@ Sources: [tests/test_data_pipeline.py L205-L305](https://github.com/ChrisHayduk/
 
 **Data Flow for Structural Validation**
 
-```
+```mermaid
+flowchart TD
 
+A3M["a3m.py"]
+CIF["mmcif.py"]
+GEO["geometry.py"]
+PDB["pdbio.py"]
+SM["StructureModule"]
+IE["InputEmbedder"]
+
+CIF --> GEO
+GEO --> SM
+SM --> PDB
+A3M --> IE
+
+subgraph subGraph2 ["Output Serialization"]
+    PDB
+end
+
+subgraph subGraph1 ["Geometry Logic"]
+    GEO
+end
+
+subgraph subGraph0 ["Input Parsing"]
+    A3M
+    CIF
+end
 ```
 
 Sources: [tests/test_geometry.py L11-L65](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/tests/test_geometry.py#L11-L65)

@@ -51,8 +51,37 @@ The parser identifies the target chain, resolves ambiguities in alternative loca
 **Structure Parsing Flow**
 "Natural Language Space" to "Code Entity Space"
 
-```
+```mermaid
+flowchart TD
 
+A["mmCIF File"]
+B["Chain Selection"]
+C["Coordinate Extraction"]
+D["_parse_mmcif()"]
+E["_tokenize_mmcif()"]
+F["_select_atom_rows()"]
+G["_best_atom_rows()"]
+H["ChainAtoms"]
+
+A --> D
+B --> F
+C --> G
+
+subgraph subGraph1 ["Code Entity Space"]
+    D
+    E
+    F
+    G
+    H
+    D --> E
+    G --> H
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    A
+    B
+    C
+end
 ```
 
 **Sources:** [minalphafold/mmcif.py L1-L241](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/mmcif.py#L1-L241)
@@ -81,8 +110,35 @@ The `pdbio.py` module provides utilities for converting model output tensors bac
 **Model Output Serialization**
 "Natural Language Space" to "Code Entity Space"
 
-```
+```mermaid
+flowchart TD
 
+M["Model Tensors"]
+C["Confidence Score"]
+P["PDB File"]
+W["write_model_output_pdb()"]
+S["plddt_logits"]
+B["b_factors"]
+A["atom14_to_pdb_string()"]
+
+M --> W
+C --> S
+A --> P
+
+subgraph subGraph1 ["Code Entity Space"]
+    W
+    S
+    B
+    A
+    S --> B
+    W --> A
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    M
+    C
+    P
+end
 ```
 
 **Sources:** [minalphafold/pdbio.py L1-L187](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/pdbio.py#L1-L187)

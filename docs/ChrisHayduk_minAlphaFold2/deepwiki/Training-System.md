@@ -15,8 +15,45 @@ The training orchestration follows a standard PyTorch pattern but adds domain-sp
 
 The following diagram illustrates how the `fit` function orchestrates the training process, interacting with the configuration profiles and the model.
 
-```
+```mermaid
+flowchart TD
 
+FIT["trainer.py: fit()"]
+TRAIN_STEP["trainer.py: train_step()"]
+EVAL["trainer.py: evaluate()"]
+M_CFG["ModelConfig (SimpleNamespace)"]
+D_CFG["DataConfig (dataclass)"]
+T_CFG["TrainingConfig (dataclass)"]
+MDL["model.py: AlphaFold2"]
+LOSS["losses.py: AlphaFoldLoss"]
+DL["DataLoader (via build_dataloader)"]
+
+FIT --> M_CFG
+FIT --> D_CFG
+FIT --> T_CFG
+FIT --> DL
+DL --> TRAIN_STEP
+TRAIN_STEP --> MDL
+TRAIN_STEP --> LOSS
+
+subgraph Execution ["Execution"]
+    MDL
+    LOSS
+    DL
+end
+
+subgraph subGraph1 ["Configuration Space"]
+    M_CFG
+    D_CFG
+    T_CFG
+end
+
+subgraph subGraph0 ["Training Orchestration"]
+    FIT
+    TRAIN_STEP
+    EVAL
+    FIT --> EVAL
+end
 ```
 
 **Sources:** [minalphafold/trainer.py L243-L346](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/trainer.py#L243-L346)
@@ -68,8 +105,33 @@ The `fit()` function implements a robust checkpointing strategy to ensure progre
 
 This diagram maps the high-level training concepts to the specific functions and classes in the codebase.
 
-```
+```mermaid
+flowchart TD
 
+S1["fit()"]
+S2["train_step()"]
+S3["save_checkpoint()"]
+S4["learning_rate_for_step()"]
+D1["ProcessedOpenProteinSetDataset"]
+L1["AlphaFoldLoss"]
+
+S2 --> D1
+S2 --> L1
+
+subgraph subGraph1 ["Data & Loss Entities"]
+    D1
+    L1
+end
+
+subgraph trainer.py ["trainer.py"]
+    S1
+    S2
+    S3
+    S4
+    S1 --> S2
+    S2 --> S4
+    S1 --> S3
+end
 ```
 
 **Sources:** [minalphafold/trainer.py L349-L436](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/trainer.py#L349-L436)

@@ -30,8 +30,44 @@ The `collate_batch` function is the primary entry point for transforming a list 
 
 **Data Flow: Disk to Batch**
 
-```
+```mermaid
+flowchart TD
 
+F[".npz Features"]
+L[".npz Labels"]
+DS["getitem"]
+C["crop_example"]
+BD["block_delete_msa"]
+MS["sample_msa"]
+MK["mask_msa"]
+G["Geometry Utils"]
+B["Final Batch Tensor"]
+
+F --> DS
+L --> DS
+DS --> C
+G --> B
+
+subgraph subGraph2 ["collate_batch Pipeline"]
+    C
+    BD
+    MS
+    MK
+    G
+    C --> BD
+    BD --> MS
+    MS --> MK
+    MK --> G
+end
+
+subgraph ProcessedOpenProteinSetDataset ["ProcessedOpenProteinSetDataset"]
+    DS
+end
+
+subgraph subGraph0 ["Disk Storage"]
+    F
+    L
+end
 ```
 
 Sources: [minalphafold/data.py L84-L356](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/data.py#L84-L356)
@@ -64,8 +100,32 @@ The `train_step` function performs a single optimization iteration [minalphafold
 
 **Training Step Execution**
 
-```
+```mermaid
+flowchart TD
 
+LR["learning_rate_for_step"]
+STEP["optimizer.step"]
+MIFB["model_inputs_from_batch"]
+FWD["AlphaFold2.forward"]
+LOSS["AlphaFoldLoss.forward"]
+LIFB["loss_inputs_from_batch"]
+BACK["loss.backward"]
+
+subgraph train_step ["train_step"]
+    LR
+    STEP
+    MIFB
+    FWD
+    LOSS
+    LIFB
+    BACK
+    LR --> STEP
+    MIFB --> FWD
+    FWD --> LOSS
+    LIFB --> LOSS
+    LOSS --> BACK
+    BACK --> STEP
+end
 ```
 
 Sources: [minalphafold/trainer.py L313-L417](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/trainer.py#L313-L417)
@@ -91,8 +151,44 @@ The following diagram maps the natural language concepts of the training loop to
 
 **Training Loop Code Mapping**
 
-```
+```mermaid
+flowchart TD
 
+DataLoad["Data Loading"]
+FeatEng["Feature Engineering"]
+TrainLoop["Main Training Loop"]
+Sched["LR Scheduling"]
+Adapt["Batch Adapters"]
+BDL["build_dataloader"]
+CB["collate_batch"]
+FIT["fit"]
+TS["train_step"]
+LRFS["learning_rate_for_step"]
+MIFB["model_inputs_from_batch"]
+
+DataLoad --> BDL
+FeatEng --> CB
+TrainLoop --> FIT
+TrainLoop --> TS
+Sched --> LRFS
+Adapt --> MIFB
+
+subgraph subGraph1 ["Code Entities"]
+    BDL
+    CB
+    FIT
+    TS
+    LRFS
+    MIFB
+end
+
+subgraph subGraph0 ["Natural Language"]
+    DataLoad
+    FeatEng
+    TrainLoop
+    Sched
+    Adapt
+end
 ```
 
 Sources: [minalphafold/trainer.py L236-L550](https://github.com/ChrisHayduk/minAlphaFold2/blob/d0d066ad/minalphafold/trainer.py#L236-L550)
