@@ -10,138 +10,179 @@ url: https://deepwiki.com/jwohlwend/boltz/6-developer-guide
 # Developer Guide
 
 > **Relevant source files**
-> - [README\.md](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1)
-> - [examples/prot\_no\_msa\.yaml](https://github.com/jwohlwend/boltz/blob/cb04aecc/examples/prot_no_msa.yaml)
-> - [pyproject\.toml](https://github.com/jwohlwend/boltz/blob/cb04aecc/pyproject.toml)
-> - [src/boltz/model/layers/triangular\_mult\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py)
+> - [\.gitignore](https://github.com/jwohlwend/boltz/blob/b1ebfc46/.gitignore)
+> - [docs/evaluation\.md](https://github.com/jwohlwend/boltz/blob/b1ebfc46/docs/evaluation.md?plain=1)
+> - [scripts/eval/aggregate\_evals\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/aggregate_evals.py)
+> - [scripts/eval/run\_evals\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/run_evals.py)
+> - [scripts/process/ccd\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/ccd.py)
+> - [scripts/process/cluster\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/cluster.py)
+> - [scripts/process/mmcif\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/mmcif.py)
+> - [scripts/process/rcsb\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/rcsb.py)
+> - [tests/model/layers/test\_outer\_product\_mean\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/model/layers/test_outer_product_mean.py)
+> - [tests/model/layers/test\_triangle\_attention\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/model/layers/test_triangle_attention.py)
+> - [tests/profiling\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/profiling.py)
+> - [tests/test\_kernels\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/test_kernels.py)
+> - [tests/test\_regression\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/test_regression.py)
+> - [tests/test\_utils\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/test_utils.py)
 
- This document provides a technical reference for developers working with the Boltz codebase, including project structure, key abstractions, and extension points\. It focuses on the architectural components and code organization needed to understand, modify, or extend the system\.
-
- For information about using Boltz for predictions, see [Prediction Pipeline](https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline)\. For training new models, see [Training System](https://deepwiki.com/jwohlwend/boltz/5-training-system)\. For details about input/output formats, see [Input Formats](https://deepwiki.com/jwohlwend/boltz/2.2-input-formats) and [Output Formats and Interpretation](https://deepwiki.com/jwohlwend/boltz/2.3-msa-generation)\.
+ This document provides a technical reference for developers working with the Boltz codebase, including project structure, data preprocessing scripts, testing protocols, and core architectural abstractions\.
 
 ## Project Structure Overview
 
- The Boltz codebase is organized into several key modules that handle different aspects of the biomolecular prediction pipeline:
+ The Boltz codebase is organized into modules handling data ingestion, neural architecture, training orchestration, and preprocessing utilities\.
 
-  **Sources:** [main\.py L1-L1080](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1-L1080) [pyproject\.toml L1-L95](https://github.com/jwohlwend/boltz/blob/cb04aecc/pyproject.toml#L1-L95) [mmseqs2\.py L1-L287](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py#L1-L287) [triangular\_mult\.py L1-L213](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L1-L213)
+```mermaid
+flowchart TD
 
-## Core Abstractions and Data Types
+CCD["scripts/process/ccd.py<br>Ligand conformers & symmetry"]
+RCSB["scripts/process/rcsb.py<br>PDB pipeline & filtering"]
+MMCIF["scripts/process/mmcif.py<br>Structure parsing"]
+Cluster["scripts/process/cluster.py<br>Sequence clustering"]
+MainCLI["src/boltz/main.py<br>CLI Commands & Orchestration"]
+PyProject["pyproject.toml<br>Dependencies & Configuration"]
+Models["src/boltz/model/model.py<br>Boltz1/Boltz2 classes"]
+Layers["src/boltz/model/layers/<br>Core NN primitives"]
+Diff["src/boltz/model/layers/diffusion/<br>AtomDiffusion"]
+Regress["tests/test_regression.py<br>Model parity tests"]
+Unit["tests/model/layers/<br>Layer-wise unit tests"]
 
- The system is built around several key abstractions that represent different stages of the prediction pipeline:
+MainCLI --> Models
+Regress --> Models
 
-### Primary Data Classes
+subgraph subGraph3 ["Testing Suite"]
+    Regress
+    Unit
+end
 
-  **Sources:** [main\.py L55-L65](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L55-L65) [main\.py L546-L655](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L546-L655)
+subgraph subGraph2 ["Model Architecture"]
+    Models
+    Layers
+    Diff
+    Models --> Layers
+end
 
-### Configuration Classes
+subgraph subGraph0 ["Core Entry Points"]
+    MainCLI
+    PyProject
+end
 
- The system uses dataclasses to manage configuration for different components:
+subgraph subGraph1 ["Data Preprocessing (Scripts)"]
+    CCD
+    RCSB
+    MMCIF
+    Cluster
+    RCSB --> MMCIF
+end
+```
 
-  **Sources:** [main\.py L68-L158](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L68-L158)
+ **Sources:** [main\.py L1-L1080](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1-L1080) [ccd\.py L1-L217](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/ccd.py#L1-L217) [rcsb\.py L1-L254](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/rcsb.py#L1-L254) [test\_regression\.py L1-L113](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/test_regression.py#L1-L113)
 
-## System Architecture and Components
+## Data Preprocessing Pipeline
 
-### Data Processing Pipeline
+ For developers working on the training data pipeline, Boltz provides scripts to process raw PDB/CCD data into optimized formats\.
 
- The data processing pipeline transforms raw inputs into model\-ready features through several stages:
+### Ligand Processing \(`ccd.py`\)
 
-  **Sources:** [main\.py L525-L662](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L525-L662) [main\.py L415-L523](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L415-L523) [mmseqs2\.py L21-L286](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py#L21-L286)
+ This script processes the Chemical Component Dictionary \(CCD\) to generate 3D conformers and compute molecular symmetries\.
 
-### Model Architecture Components
+ - **Conformer Generation:** Uses RDKit's `ETKDGv3` method to generate coordinates [ccd\.py L46-L90](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/ccd.py#L46-L90)
+- **Symmetry Computation:** Computes index permutations for symmetric atoms using `GetSubstructMatches`, filtering out leaving atoms [ccd\.py L127-L166](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/ccd.py#L127-L166)
+- **Parallelization:** Utilizes `p_uimap` for multi\-core processing of CCD components [ccd\.py L241-L256](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/ccd.py#L241-L256)
 
- Both Boltz\-1 and Boltz\-2 models share core components but differ in their specific implementations:
+### PDB Processing \(`rcsb.py` & `mmcif.py`\)
 
-  **Sources:** [triangular\_mult\.py L39-L124](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L39-L124) [triangular\_mult\.py L127-L212](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L127-L212) [triangular\_mult\.py L7-L36](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L7-L36)
+ Handles the ingestion of MMCIF files and applies biological filters\.
 
-## Key Extension Points
+ - **Structure Parsing:** `parse_mmcif` \(in `mmcif.py`\) extracts atom coordinates, resolutions, and experimental methods [mmcif\.py L133-L179](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/mmcif.py#L133-L179)
+- **Filtering:** `StaticFilter` subclasses \(e\.g\., `ClashingChainsFilter`, `MinimumLengthFilter`\) are applied to remove low\-quality structures [rcsb\.py L18-L25](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/rcsb.py#L18-L25) [rcsb\.py L206-L215](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/rcsb.py#L206-L215)
+- **Manifest Generation:** `finalize` groups processed records into a single `manifest.json` for the training `DataLoader` [rcsb\.py L80-L110](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/rcsb.py#L80-L110)
 
-### Custom Tokenizers
+### Sequence Clustering \(`cluster.py`\)
 
- Developers can extend the tokenization system by implementing new tokenizer classes\. The system supports model\-specific tokenizers:
+ Creates a mapping from structure IDs to MSA indices to prevent data leakage\.
 
-| Component | Purpose | Key Methods |
+ - **MMSeqs2 Integration:** Uses `mmseqs easy-cluster` on protein sequences with a 40% identity threshold [cluster\.py L43-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/cluster.py#L43-L52)
+- **Nucleotide/Ligand Handling:** Assigns unique IDs to RNA/DNA and CCD codes, ensuring they are represented in the clustering manifest [cluster\.py L62-L78](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/cluster.py#L62-L78)
+
+ **Sources:** [ccd\.py L46-L166](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/ccd.py#L46-L166) [mmcif\.py L1-L179](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/mmcif.py#L1-L179) [rcsb\.py L175-L239](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/rcsb.py#L175-L239) [cluster\.py L19-L82](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/cluster.py#L19-L82)
+
+## Testing and Quality Assurance
+
+ The `tests/` directory contains regression and unit tests to ensure model stability and numerical precision\.
+
+### Regression Testing
+
+ `tests/test_regression.py` ensures that changes to the codebase do not alter model outputs for known inputs\.
+
+| Test Case | Entity Validated | Logic |
 | --- | --- | --- |
-| BoltzTokenizer | Basic tokenization for Boltz\-1 | tokenize\(\), encode\(\) |
-| Boltz2Tokenizer | Enhanced tokenization for Boltz\-2 | tokenize\(\), encode\(\), additional features |
+| test\_input\_embedder | Boltz1\.input\_embedder | Compares s\_inputs against stored tensors tests/test\_regression\.py61\-65 |
+| test\_rel\_pos | Boltz1\.rel\_pos | Validates relative position encoding tests/test\_regression\.py67\-71 |
+| test\_structure\_output | Boltz1\.structure\_module | Checks noised\_atom\_coords with sigma\_data=0 for determinism tests/test\_regression\.py74\-109 |
 
- **Sources:** [main\.py L24](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L24-L24)
+### Layer Unit Tests
 
-### Custom Featurizers
+ Individual layers are tested for feature parity and chunking support\.
 
- The feature generation pipeline can be extended through custom featurizer implementations:
+ - **`OuterProductMeanTest`**: Validates that chunked execution matches the standard forward pass within `1e-8` tolerance [test\_outer\_product\_mean\.py L27-L38](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/model/layers/test_outer_product_mean.py#L27-L38)
+- **`TriangleAttention`**: Tests `TriangleAttention` layers with varying `chunk_size` to ensure memory\-efficient paths produce identical results [test\_triangle\_attention\.py L24-L35](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/model/layers/test_triangle_attention.py#L24-L35)
 
-| Component | Purpose | Extension Point |
-| --- | --- | --- |
-| BoltzFeaturizer | Basic feature generation | Inherit and override compute\_features\(\) |
-| Boltz2Featurizer | Advanced feature generation | Inherit and override compute\_features\(\) |
+ **Sources:** [test\_regression\.py L23-L110](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/test_regression.py#L23-L110) [test\_outer\_product\_mean\.py L10-L38](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/model/layers/test_outer_product_mean.py#L10-L38) [test\_triangle\_attention\.py L10-L35](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/model/layers/test_triangle_attention.py#L10-L35)
 
- **Sources:** [main\.py L24](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L24-L24)
+## Model Evaluation Scripts
 
-### Model Checkpoint Integration
+ Boltz includes utilities for comparing predicted structures against experimental ground truth using OpenStructure \(OST\)\.
 
- The system supports custom model checkpoints through configuration parameters:
+```mermaid
+flowchart TD
 
-  **Sources:** [main\.py L835-L847](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L835-L847) [main\.py L1010-L1013](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1010-L1013)
+RunEval["run_evals.py"]
+OST_Docker["OST Docker Image<br>(openstructure-0.2.8)"]
+AggEval["aggregate_evals.py"]
+LDDT["LDDT / bb-LDDT"]
+TM["TM-score"]
+DockQ["DockQ"]
+Ligand["LDDT-PLI / RMSD"]
 
-### MSA Server Integration
+AggEval --> LDDT
+AggEval --> TM
+AggEval --> DockQ
+AggEval --> Ligand
 
- The MSA generation system supports multiple authentication methods and custom servers:
+subgraph Metrics ["Metrics"]
+    LDDT
+    TM
+    DockQ
+    Ligand
+end
 
-  **Sources:** [mmseqs2\.py L21-L32](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py#L21-L32) [mmseqs2\.py L35-L42](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py#L35-L42) [main\.py L415-L462](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L415-L462)
+subgraph subGraph0 ["Evaluation Workflow"]
+    RunEval
+    OST_Docker
+    AggEval
+    RunEval --> OST_Docker
+    OST_Docker --> AggEval
+end
+```
 
-## CUDA Kernel Integration
+ - **`run_evals.py`**: Orchestrates Docker containers running `compare-structures` and `compare-ligand-structures` [run\_evals\.py L8-L43](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/run_evals.py#L8-L43)
+- **`aggregate_evals.py`**: Parses JSON outputs from OST to compute "Oracle" \(best of N\) and "Top\-1" \(ranked by confidence\) metrics [aggregate\_evals\.py L12-L105](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/aggregate_evals.py#L12-L105) It handles model\-specific confidence ranking for AF3 \(`ranking_score`\), Chai\-1 \(`aggregate_score`\), and Boltz [aggregate\_evals\.py L24-L27](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/aggregate_evals.py#L24-L27) [aggregate\_evals\.py L117-L120](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/aggregate_evals.py#L117-L120)
 
- The system integrates with cuEquivariance CUDA kernels for performance optimization:
+ **Sources:** [run\_evals\.py L46-L92](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/run_evals.py#L46-L92) [aggregate\_evals\.py L12-L105](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/aggregate_evals.py#L12-L105) [aggregate\_evals\.py L108-L180](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/eval/aggregate_evals.py#L108-L180)
 
-### Triangular Multiplication Kernels
+## Developer Guidelines
 
- The triangular multiplication layers can use optimized CUDA kernels when available:
+### Linting and Formatting
 
-  **Sources:** [triangular\_mult\.py L7-L36](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L7-L36) [triangular\_mult\.py L73-L105](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L73-L105) [triangular\_mult\.py L161-L193](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L161-L193)
+ The project uses standard Python byte\-code and cache exclusions in `.gitignore` [1\-5](https://github.com/jwohlwend/boltz/blob/b1ebfc46/1-5) Developers should ensure that all generated result folders \(pattern `boltz_results_*`\) are not committed to the repository [\.gitignore L164-L166](https://github.com/jwohlwend/boltz/blob/b1ebfc46/.gitignore#L164-L166)
 
-### Environment Configuration
+### Contributing New Features
 
- CUDA kernel behavior is controlled through environment variables:
+ 1. **Layers:** Implement new modules in `src/boltz/model/layers/`\. If the layer supports chunking, add a corresponding test in `tests/model/layers/`\.
+2. **Data:** If adding support for new molecular entities, update `scripts/process/mmcif.py` to handle the new `gemmi.PolymerType` [mmcif\.py L202-L226](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/mmcif.py#L202-L226)
+3. **Regression:** After significant architectural changes, update the regression tensors by running the model on the reference inputs and saving the outputs via `torch.save` [test\_regression\.py L35-L42](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/test_regression.py#L35-L42)
 
-| Environment Variable | Purpose | Default Value |
-| --- | --- | --- |
-| CUEQ\_DEFAULT\_CONFIG | Kernel configuration | "1" |
-| CUEQ\_DISABLE\_AOT\_TUNING | Disable tuning | "1" |
-| BOLTZ\_CACHE | Cache directory | ~/\.boltz |
-
- **Sources:** [main\.py L1105-L1108](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1105-L1108) [main\.py L261-L278](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L261-L278)
-
-## Development Workflows
-
-### Adding New Model Components
-
- To add new neural network components:
-
- 1. Implement the layer in `src/boltz/model/layers/`
-2. Add initialization logic following the pattern in existing layers
-3. Integrate with the model architecture in `src/boltz/model/models/`
-4. Update configuration dataclasses if needed
-
-### Extending Input Formats
-
- To support new input formats:
-
- 1. Add parsing logic in `src/boltz/data/parse/`
-2. Update the `process_input()` function to handle the new format
-3. Modify the CLI to accept the new file extension
-4. Update validation logic in `check_inputs()`
-
-### Custom Training Configurations
-
- The system supports custom training configurations through YAML files:
-
-| Configuration Type | File Pattern | Purpose |
-| --- | --- | --- |
-| Structure Training | structure\.yaml | Structure prediction only |
-| Confidence Training | confidence\.yaml | Confidence scoring |
-| Full Training | full\.yaml | Complete model training |
-
- **Sources:** [main\.py L281-L316](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L281-L316) [main\.py L525-L662](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L525-L662)
+ **Sources:** [\.gitignore L1-L166](https://github.com/jwohlwend/boltz/blob/b1ebfc46/.gitignore#L1-L166) [mmcif\.py L202-L226](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/mmcif.py#L202-L226) [test\_regression\.py L35-L59](https://github.com/jwohlwend/boltz/blob/b1ebfc46/tests/test_regression.py#L35-L59)
 
 ---
 *Source: [https://deepwiki.com/jwohlwend/boltz/6-developer-guide](https://deepwiki.com/jwohlwend/boltz/6-developer-guide) on DeepWiki*

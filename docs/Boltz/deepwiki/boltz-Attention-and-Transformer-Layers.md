@@ -10,24 +10,33 @@ url: https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers
 # Attention and Transformer Layers
 
 > **Relevant source files**
-> - [src/boltz/model/layers/attention\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/attention.py)
-> - [src/boltz/model/layers/attentionv2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/attentionv2.py)
-> - [src/boltz/model/models/boltz1\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py)
-> - [src/boltz/model/models/boltz2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py)
-> - [src/boltz/model/modules/transformers\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformers.py)
-> - [src/boltz/model/modules/transformersv2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py)
+> - [examples/prot\_no\_msa\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/examples/prot_no_msa.yaml)
+> - [pyproject\.toml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml)
+> - [src/boltz/model/layers/attention\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attention.py)
+> - [src/boltz/model/layers/attentionv2\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attentionv2.py)
+> - [src/boltz/model/layers/outer\_product\_mean\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/outer_product_mean.py)
+> - [src/boltz/model/layers/pair\_averaging\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pair_averaging.py)
+> - [src/boltz/model/layers/pairformer\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pairformer.py)
+> - [src/boltz/model/layers/transition\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/transition.py)
+> - [src/boltz/model/layers/triangular\_attention/attention\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_attention/attention.py)
+> - [src/boltz/model/layers/triangular\_attention/primitives\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_attention/primitives.py)
+> - [src/boltz/model/layers/triangular\_mult\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py)
+> - [src/boltz/model/modules/affinity\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/affinity.py)
+> - [src/boltz/model/modules/transformers\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py)
+> - [src/boltz/model/modules/transformersv2\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py)
+> - [src/boltz/model/modules/trunkv2\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/trunkv2.py)
 
- This document covers the attention and transformer layers used in Boltz's diffusion\-based structure generation\. These layers implement specialized attention mechanisms with pair bias, adaptive normalization, and windowing strategies that enable efficient processing of molecular structures at the atom level\.
+ This document covers the attention and transformer layers used in Boltz's structure generation and refinement tracks\. These layers implement specialized mechanisms including multi\-head attention with pair bias, adaptive normalization, and windowing strategies that enable efficient processing of molecular structures at the atom level\.
 
- For information about how these layers fit into the complete model architecture, see \[Model Architecture \(3\)\]\. For details about the diffusion process that uses these layers, see \[Diffusion Process \(3\.4\)\]\. For trunk layers like MSAModule and PairformerModule, see \[Boltz\-1 Model \(3\.1\)\] and \[Boltz\-2 Model \(3\.2\)\]\.
+ For information about how these layers fit into the complete model architecture, see [Model Architecture \(3\)](https://github.com/jwohlwend/boltz/blob/b1ebfc46/Model Architecture (3)) For details about the diffusion process that uses these layers, see [Diffusion Process \(3\.4\)](https://github.com/jwohlwend/boltz/blob/b1ebfc46/Diffusion Process (3.4)) For trunk layers like `MSAModule` and `PairformerModule`, see [Boltz\-1 Model \(3\.1\)](https://github.com/jwohlwend/boltz/blob/b1ebfc46/Boltz-1 Model (3.1)) and [Boltz\-2 Model \(3\.2\)](https://github.com/jwohlwend/boltz/blob/b1ebfc46/Boltz-2 Model (3.2))
 
 ## Attention and Transformer Layer Hierarchy
 
- Boltz uses specialized attention and transformer layers in its diffusion process\. These layers are distinct from the trunk's triangular attention layers and are designed for iterative refinement of atomic coordinates\.
+ Boltz uses specialized attention and transformer layers in its diffusion process\. These layers are distinct from the trunk's triangular attention layers and are designed for iterative refinement of atomic coordinates and cross\-track communication\.
 
  **Diffusion Transformer Stack Hierarchy**
 
-  Sources: [transformersv2\.py L1-L263](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L1-L263) [attentionv2\.py L1-L112](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/attentionv2.py#L1-L112) [diffusionv2\.py L1-L500](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/diffusionv2.py#L1-L500)
+  Sources: [transformersv2\.py L17-L211](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L17-L211) [attentionv2\.py L10-L111](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attentionv2.py#L10-L111) [transformers\.py L17-L180](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py#L17-L180)
 
 ## AttentionPairBias
 
@@ -39,9 +48,9 @@ url: https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers
 
 | Feature | Implementation | Location |
 | --- | --- | --- |
-| Multi\-head Attention | c\_s divided into num\_heads heads of dimension head\_dim = c\_s // num\_heads | src/boltz/model/layers/attentionv2\.py39\-41 |
-| Pair Bias | Optional projection from pairwise features z to per\-head biases | src/boltz/model/layers/attentionv2\.py49\-57 |
-| Gating | Sigmoid\-gated output projection | src/boltz/model/layers/attentionv2\.py47 |
+| Multi\-head Attention | c\_s divided into num\_heads heads of dimension head\_dim = c\_s // num\_heads | src/boltz/model/layers/attentionv2\.py37\-41 |
+| Pair Bias | Optional projection from pairwise features z to per\-head biases | src/boltz/model/layers/attentionv2\.py50\-57 |
+| Gating | Sigmoid\-gated output projection | src/boltz/model/layers/attentionv2\.py97\-109 |
 | Masking | Additive mask with large negative value \(inf=1e6\) | src/boltz/model/layers/attentionv2\.py42 |
 | Precision | Float32 for attention computation, even with bfloat16 inputs | src/boltz/model/layers/attentionv2\.py99\-107 |
 
@@ -49,10 +58,10 @@ url: https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers
 
  Boltz includes two versions of `AttentionPairBias`:
 
- 1. **Version 2** \(`attentionv2.py`\): Used in `DiffusionTransformer` and `AtomTransformer`  - Simpler interface with `k_in` parameter for key/value source - Optional `compute_pair_bias` flag to skip pair bias projection - Used in: [transformersv2\.py L155-L157](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L155-L157)
-2. **Version 1** \(`attention.py`\): Used in confidence and affinity modules  - Includes optional initial layer normalization - Supports caching of projected pair bias via `model_cache` - Supports `to_keys` function for cross\-attention patterns - Used in: [transformers\.py L210-L212](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformers.py#L210-L212)
+ 1. **Version 2** \(`attentionv2.py`\): Used in `DiffusionTransformer` and `AtomTransformer`\.  - Simpler interface with `k_in` parameter for key/value source [attentionv2\.py L91-L92](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attentionv2.py#L91-L92) - Optional `compute_pair_bias` flag to skip pair bias projection [attentionv2\.py L49](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attentionv2.py#L49-L49) - Used in: [transformersv2\.py L155-L157](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L155-L157)
+2. **Version 1** \(`attention.py`\): Used in confidence and affinity modules\.  - Includes optional initial layer normalization [attention\.py L45-L46](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attention.py#L45-L46) - Supports caching of projected pair bias via `model_cache` [attention\.py L108-L112](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attention.py#L108-L112) - Supports `to_keys` function for cross\-attention patterns [attention\.py L96-L98](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attention.py#L96-L98)
 
- Sources: [attentionv2\.py L10-L112](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/attentionv2.py#L10-L112) [attention\.py L8-L133](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/attention.py#L8-L133)
+ Sources: [attentionv2\.py L10-L111](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attentionv2.py#L10-L111) [attention\.py L8-L132](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attention.py#L8-L132)
 
 ## Adaptive Layer Normalization \(AdaLN\)
 
@@ -62,12 +71,12 @@ url: https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers
 
   **Key Characteristics:**
 
- - **Affine\-Free Normalization**: The primary input `a` is normalized without learnable scale/bias parameters
-- **Conditioned Parameters**: Scale and bias are computed from the conditioning input `s`
-- **Sigmoid Gating**: Scale is passed through sigmoid to ensure positive values
-- **Formula**: `output = sigmoid(s_scale(s)) * LayerNorm(a) + s_bias(s)`
+ - **Affine\-Free Normalization**: The primary input `a` is normalized without learnable scale/bias parameters [transformersv2\.py L22](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L22-L22)
+- **Conditioned Parameters**: Scale and bias are computed from the conditioning input `s` [transformersv2\.py L24-L25](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L24-L25)
+- **Sigmoid Gating**: Scale is passed through sigmoid to ensure positive values [transformersv2\.py L30](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L30-L30)
+- **Formula**: `output = sigmoid(s_scale(s)) * LayerNorm(a) + s_bias(s)` [transformersv2\.py L30](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L30-L30)
 
- Sources: [transformersv2\.py L17-L31](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L17-L31) [transformers\.py L17-L41](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformers.py#L17-L41)
+ Sources: [transformersv2\.py L17-L31](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L17-L31) [transformers\.py L17-L41](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py#L17-L41)
 
 ## ConditionedTransitionBlock
 
@@ -77,12 +86,12 @@ url: https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers
 
   **Key Features:**
 
- - **SwiGLU Activation**: Uses Swish\-Gated Linear Units for non\-linearity
-- **Expansion Factor**: Default factor of 2 expands hidden dimension
-- **Output Gating**: Final output is gated by sigmoid\-transformed conditioning
-- **Zero Initialization**: Output projection initialized with weights=0, bias=\-2\.0
+ - **SwiGLU Activation**: Uses Swish\-Gated Linear Units for non\-linearity [transformersv2\.py L43-L46](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L43-L46)
+- **Expansion Factor**: Default factor of 2 expands hidden dimension [transformersv2\.py L37](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L37-L37)
+- **Output Gating**: Final output is gated by sigmoid\-transformed conditioning [transformersv2\.py L54-L63](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L54-L63)
+- **Zero Initialization**: Output projection initialized with weights=0, bias=\-2\.0 [transformersv2\.py L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L51-L52)
 
- Sources: [transformersv2\.py L34-L66](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L34-L66) [transformers\.py L44-L87](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformers.py#L44-L87)
+ Sources: [transformersv2\.py L34-L66](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L34-L66) [transformers\.py L44-L87](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py#L44-L87)
 
 ## DiffusionTransformer
 
@@ -94,21 +103,18 @@ url: https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers
 
 | Parameter | Description | Typical Values |
 | --- | --- | --- |
-| depth | Number of transformer layers | 3\-12 |
-| heads | Number of attention heads | 4\-16 |
-| dim | Main representation dimension | 128\-384 |
-| dim\_single\_cond | Conditioning dimension | Same as dim or separate |
-| pair\_bias\_attn | Use pair bias in attention | True \(v2\), False with explicit z \(v1\) |
-| activation\_checkpointing | Use gradient checkpointing | True for training large models |
-| post\_layer\_norm | Apply LayerNorm after each layer | Optional |
+| depth | Number of transformer layers | src/boltz/model/modules/transformersv2\.py73 |
+| heads | Number of attention heads | src/boltz/model/modules/transformersv2\.py74 |
+| dim | Main representation dimension | 384 src/boltz/model/modules/transformersv2\.py75 |
+| pair\_bias\_attn | Use pair bias in attention | True src/boltz/model/modules/transformersv2\.py77 |
+| activation\_checkpointing | Use gradient checkpointing | src/boltz/model/modules/transformersv2\.py78 |
+| post\_layer\_norm | Apply LayerNorm after each layer | src/boltz/model/modules/transformersv2\.py79 |
 
 ### Pair Bias Handling
 
- The version 2 transformer \(`transformersv2.py`\) uses a single bias tensor split across layers:
+ The version 2 transformer \(`transformersv2.py`\) splits a combined bias tensor across layers:
 
-  This allows efficient caching of bias projections across all layers\.
-
- Sources: [transformersv2\.py L68-L138](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L68-L138) [transformersv2\.py L140-L209](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L140-L209) [transformers\.py L90-L178](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformers.py#L90-L178) [transformers\.py L180-L249](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformers.py#L180-L249)
+  Sources: [transformersv2\.py L106-L115](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L106-L115) [transformersv2\.py L140-L209](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L140-L209) [transformers\.py L90-L178](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py#L90-L178)
 
 ## AtomTransformer
 
@@ -118,88 +124,53 @@ url: https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers
 
 ### Window Parameters
 
-| Parameter | Description | Typical Values | Usage |
-| --- | --- | --- | --- |
-| attn\_window\_queries | Query window size \(W\) | 32 | Number of atoms in each query window |
-| attn\_window\_keys | Key/value window size \(H\) | 128 | Number of atoms each query attends to |
-| to\_keys | Key/value extraction function | Provided by caller | Maps queries to larger key/value context |
+| Parameter | Description | Typical Values |
+| --- | --- | --- |
+| attn\_window\_queries | Query window size \(W\) | src/boltz/model/modules/transformersv2\.py221 |
+| attn\_window\_keys | Key/value window size \(H\) | src/boltz/model/modules/transformersv2\.py222 |
 
-### Key/Value Context Window
+ The `to_keys` function is modified within `AtomTransformer` to map query windows to their corresponding key/value context windows, maintaining consistency across the local attention scope [transformersv2\.py L252-L257](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L252-L257)
 
- The `to_keys` function enables queries in a small window to attend to a larger context:
+ Sources: [transformersv2\.py L211-L262](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L211-L262) [transformers\.py L252-L323](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py#L252-L323)
 
-  **Windowing Benefits:**
+## Trunk Transformer Layers
 
- - **Memory Efficiency**: Reduces memory from O\(N²\) to O\(N \* H\)
-- **Computational Efficiency**: Enables parallel processing of windows
-- **Scalability**: Supports structures with thousands of atoms
-- **Flexible Context**: Keys can span larger context than queries
+ Boltz\-1 and Boltz\-2 utilize `PairformerLayer` within the main trunk to refine sequence and pairwise representations\.
 
- Sources: [transformersv2\.py L211-L263](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L211-L263) [transformers\.py L252-L324](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformers.py#L252-L324)
+### PairformerLayer Components
 
-## Integration with Diffusion Process
+ `PairformerLayer` integrates multiple specialized layers to update the sequence track `s` and pairwise track `z` [pairformer\.py L21-L34](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pairformer.py#L21-L34):
 
- The attention and transformer layers integrate into Boltz's diffusion\-based structure generation pipeline\.
+ 1. **Triangle Multiplication**: `TriangleMultiplicationOutgoing` and `TriangleMultiplicationIncoming` update pairwise features based on triangular relationships [pairformer\.py L47-L48](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pairformer.py#L47-L48)
+2. **Triangle Attention**: `TriangleAttentionStartingNode` and `TriangleAttentionEndingNode` apply attention along the rows and columns of the pair matrix [pairformer\.py L50-L55](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pairformer.py#L50-L55)
+3. **AttentionPairBias**: Updates the sequence track using the pairwise track as a bias [pairformer\.py L43-L45](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pairformer.py#L43-L45)
+4. **Transition**: Feed\-forward blocks for both tracks [pairformer\.py L57-L58](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pairformer.py#L57-L58)
 
- **Diffusion Process Integration**
+### OuterProductMean
 
-### Typical Depth Configuration
+ The `OuterProductMean` layer bridges the sequence track back to the pairwise track by computing the mean of outer products of sequence features [outer\_product\_mean\.py L7-L10](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/outer_product_mean.py#L7-L10)
 
- From Boltz\-2 configuration:
+ - **Chunking**: Supports sequential computation in chunks to manage memory [outer\_product\_mean\.py L71-L88](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/outer_product_mean.py#L71-L88)
+- **Projection**: Projects input `m` to hidden dimension `c_hidden` before computing the outer product [outer\_product\_mean\.py L52-L54](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/outer_product_mean.py#L52-L54)
 
-| Module | Depth | Heads | Usage |
-| --- | --- | --- | --- |
-| Conditioning |  |  |  |
-| atom\_encoder | 3 | 16 | Initial atom feature encoding |
-| token\_transformer | 24 | 16 | Token\-level processing |
-| atom\_decoder | 3 | 16 | Conditioning for diffusion |
-| Score Model |  |  |  |
-| atom\_encoder | 3 | 16 | Encode noisy coordinates |
-| atom\_attention | 24 | 16 | Main score computation |
-| atom\_decoder | 3 | 16 | Decode to coordinate updates |
+ Sources: [pairformer\.py L21-L114](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/pairformer.py#L21-L114) [outer\_product\_mean\.py L7-L98](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/outer_product_mean.py#L7-L98) [triangular\_mult\.py L39-L212](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py#L39-L212)
 
- **Window Sizes:**
+## Performance and Numerical Stability
 
- - `atoms_per_window_queries`: 32 \(atoms in query window\)
-- `atoms_per_window_keys`: 128 \(atoms in key/value context\)
+### Precision Control
 
- This creates a 3\-layer encoder → 24\-layer transformer → 3\-layer decoder architecture at both the conditioning and score model stages\.
-
- Sources: [diffusion\_conditioning\.py L1-L200](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/diffusion_conditioning.py#L1-L200) [diffusionv2\.py L1-L500](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/diffusionv2.py#L1-L500) [boltz2\.py L252-L273](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L252-L273)
-
-## Performance Considerations
-
-### Activation Checkpointing
-
- `DiffusionTransformer` supports activation checkpointing to reduce memory usage during training:
-
-  This trades computation time for memory by recomputing activations during backward pass\.
-
-### Float32 Attention
-
- Critical attention computations are forced to float32 even when using mixed precision:
-
-  This prevents numerical instability in softmax operations with bfloat16\.
+ Critical attention computations are forced to float32 even when using mixed precision to prevent numerical instability in softmax operations [attentionv2\.py L99-L107](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attentionv2.py#L99-L107)
 
 ### Kernel Support
 
- The `use_kernels` flag enables optimized implementations when `cuequivariance_torch` is available and CUDA compute capability ≥ 8\.0 \(Ampere or newer\)\.
+ The `use_kernels` flag enables optimized implementations of triangular operations and attention when `cuequivariance_torch` is available [triangular\_mult\.py L91-L105](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py#L91-L105) [primitives\.py L199-L202](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_attention/primitives.py#L199-L202)
 
- Sources: [transformersv2\.py L117-L126](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/transformersv2.py#L117-L126) [attentionv2\.py L99-L107](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/attentionv2.py#L99-L107) [boltz2\.py L362-L367](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L362-L367)
+### Memory Optimization
 
-## Integration with Model Architecture
+ - **Activation Checkpointing**: Supports gradient checkpointing to reduce memory usage during training [transformersv2\.py L117-L126](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L117-L126)
+- **CPU Offloading**: `DiffusionTransformer` in Boltz\-1 supports offloading checkpointed layers to CPU [transformers\.py L101](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py#L101-L101)
 
- These layers form the core computational components of the Boltz model architecture:
-
- 1. **InputEmbedder**: Processes raw molecular features
-2. **MSAModule**: Incorporates evolutionary information
-3. **PairformerModule**: Refines pairwise representations
-4. **Triangular Operations**: Enable geometric reasoning about molecular structures
-5. **DistogramModule**: Produces final distance predictions
-
- The modular design allows for flexible configuration and easy extension of the architecture for different molecular modeling tasks\.
-
- Sources: [trunk\.py L1-L689](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/modules/trunk.py#L1-L689) [attention\.py L1-L190](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_attention/attention.py#L1-L190) [triangular\_mult\.py L1-L213](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py#L1-L213)
+ Sources: [attentionv2\.py L99-L107](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/attentionv2.py#L99-L107) [triangular\_mult\.py L8-L36](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py#L8-L36) [transformersv2\.py L117-L126](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformersv2.py#L117-L126) [transformers\.py L129-L140](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/transformers.py#L129-L140)
 
 ---
 *Source: [https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers](https://deepwiki.com/jwohlwend/boltz/3.3-attention-and-transformer-layers) on DeepWiki*

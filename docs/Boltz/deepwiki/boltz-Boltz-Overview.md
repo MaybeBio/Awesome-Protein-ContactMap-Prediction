@@ -10,47 +10,48 @@ url: https://deepwiki.com/jwohlwend/boltz/1-boltz-overview
 # Boltz Overview
 
 > **Relevant source files**
-> - [README\.md](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1)
-> - [examples/prot\_no\_msa\.yaml](https://github.com/jwohlwend/boltz/blob/cb04aecc/examples/prot_no_msa.yaml)
-> - [pyproject\.toml](https://github.com/jwohlwend/boltz/blob/cb04aecc/pyproject.toml)
-> - [src/boltz/data/msa/mmseqs2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py)
-> - [src/boltz/main\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py)
-> - [src/boltz/model/layers/triangular\_mult\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/layers/triangular_mult.py)
+> - [README\.md](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1)
+> - [examples/prot\_no\_msa\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/examples/prot_no_msa.yaml)
+> - [pyproject\.toml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml)
+> - [src/boltz/\_\_init\_\_\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/__init__.py)
+> - [src/boltz/model/layers/triangular\_mult\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py)
 
 ## Purpose and Scope
 
- This document provides an introduction to the Boltz system, a biomolecular interaction prediction framework that uses deep learning models to predict protein structures and binding affinities\. It covers the system's purpose, architecture overview, and key capabilities\. For detailed usage instructions, see [Command\-Line Interface](https://deepwiki.com/jwohlwend/boltz/2.1-command-line-interface)\. For technical details about model architectures, see [Model Architecture](https://deepwiki.com/jwohlwend/boltz/3-model-architecture)\. For training procedures, see [Training System](https://deepwiki.com/jwohlwend/boltz/5-training-system)\.
+ This document introduces the Boltz system, a biomolecular interaction prediction framework that utilizes deep learning models to predict protein structures and binding affinities\. It covers the system's purpose, architectural overview, and high\-level capabilities\.
+
+ For detailed setup, see [Installation and Setup](https://deepwiki.com/jwohlwend/boltz/1.1-installation-and-setup)\. For a comparison of model versions, see [Boltz\-1 vs Boltz\-2](https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2)\. Technical details regarding the prediction workflow are found in [Prediction Pipeline](https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline)\.
 
 ## System Introduction
 
  Boltz is a family of deep learning models designed for biomolecular interaction prediction\. The system provides two main model variants:
 
- - **Boltz\-1**: The first fully open\-source model to approach AlphaFold3 accuracy for structure prediction
-- **Boltz\-2**: An enhanced biomolecular foundation model that jointly predicts complex structures and binding affinities
+ - **Boltz\-1**: The first fully open\-source model to approach AlphaFold3 accuracy for structure prediction [README\.md?plain=1 L17-L19](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L17-L19)
+- **Boltz\-2**: A biomolecular foundation model that jointly models complex structures and binding affinities [README\.md?plain=1 L17-L19](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L17-L19)
 
- The system operates 1000x faster than traditional physics\-based free\-energy perturbation \(FEP\) methods while approaching their accuracy, making it suitable for large\-scale molecular screening applications\.
+ The system operates up to 1000x faster than traditional physics\-based free\-energy perturbation \(FEP\) methods while approaching their accuracy, making it suitable for large\-scale molecular screening in early\-stage drug discovery [README\.md?plain=1 L17-L18](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L17-L18)
 
 | Model | Primary Capabilities | Key Features |
 | --- | --- | --- |
-| Boltz\-1 | Structure prediction, confidence estimation | Basic structure folding, pLDDT confidence scores |
-| Boltz\-2 | Structure \+ affinity prediction | Enhanced features, binding affinity estimation, B\-factor prediction |
+| Boltz\-1 | Structure prediction, confidence estimation | Open source, diffusion\-based folding README\.md17\-19 |
+| Boltz\-2 | Structure \+ affinity prediction | FEP\-level accuracy, binder detection, $log\_\{10\}\(IC\_\{50\}\)$ estimation README\.md17\-19 README\.md51\-52 |
 
- Sources: [README\.md?plain=1 L15-L19](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L15-L19)
+ Sources: [README\.md?plain=1 L15-L19](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L15-L19) [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L51-L52)
 
 ## Model Variants and Capabilities
 
 ### Boltz\-1 Model
 
- Boltz\-1 focuses on accurate structure prediction using a diffusion\-based approach\. It processes input sequences and multiple sequence alignments \(MSAs\) to generate 3D molecular structures with confidence estimates\.
+ Boltz\-1 focuses on accurate structure prediction\. It processes input sequences and multiple sequence alignments \(MSAs\) to generate 3D molecular structures with confidence estimates like pLDDT and PAE\.
 
 ### Boltz\-2 Model
 
- Boltz\-2 extends Boltz\-1 with binding affinity prediction capabilities\. It provides two types of affinity predictions:
+ Boltz\-2 extends Boltz\-1 by incorporating an `AffinityModule` for binding affinity prediction [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L51-L52) It provides two types of affinity outputs:
 
- - `affinity_probability_binary`: Probability score \(0\-1\) for detecting binders from decoys
-- `affinity_pred_value`: Quantitative binding affinity as log\(IC50\) in μM units
+ - `affinity_probability_binary`: A value from 0 to 1 representing the probability that a ligand is a binder, used for hit\-discovery [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L51-L52)
+- `affinity_pred_value`: A quantitative value reported as $log\_\{10\}\(IC\_\{50\}\)$, derived from $IC\_\{50\}$ measured in $\\mu M$, used for lead optimization [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L51-L52)
 
- Sources: [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L51-L52)
+ Sources: [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L51-L52)
 
 ## High\-Level System Architecture
 
@@ -75,8 +76,7 @@ OutputGeneration["Output Processing"]
 PDBOutput["PDB/mmCIF Files"]
 ConfidenceOutput["Confidence Metrics"]
 AffinityOutput["Affinity JSON Results"]
-ModelCache["~/.boltz Model Cache"]
-GPUAcceleration["cuEquivariance<br>GPU Kernels"]
+GPUAcceleration["cuequivariance_torch<br>GPU Kernels"]
 
 PredictCmd --> InputProcessor
 ConfigFiles --> InputProcessor
@@ -86,11 +86,9 @@ Boltz2Model --> AffinityPrediction
 OutputGeneration --> PDBOutput
 OutputGeneration --> ConfidenceOutput
 OutputGeneration --> AffinityOutput
-ModelSelection --> ModelCache
 StructurePrediction --> GPUAcceleration
 
 subgraph Infrastructure ["Infrastructure"]
-    ModelCache
     GPUAcceleration
 end
 
@@ -121,8 +119,8 @@ subgraph subGraph1 ["Core Prediction Pipeline"]
     Boltz2Model
     InputProcessor --> MSAGeneration
     MSAGeneration -->|"--use_msa_server"| ColabFoldAPI
-    MSAGeneration --> LocalMSA
-    ColabFoldAPI --> DataPreprocessing
+    MSAGeneration -->|"Local files"| LocalMSA
+    ColabFoldAPI -->|"--use_msa_server"| DataPreprocessing
     LocalMSA --> DataPreprocessing
     DataPreprocessing --> ModelSelection
     ModelSelection --> Boltz1Model
@@ -137,32 +135,7 @@ subgraph subGraph0 ["User Interface Layer"]
 end
 ```
 
- Sources: [README\.md?plain=1 L42-L48](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L42-L48) [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L51-L52)
-
-## Key System Components
-
- The Boltz system consists of several interconnected components that handle the complete prediction pipeline:
-
-### Input Processing Layer
-
- - `parse_boltz_schema`: Parses YAML and FASTA input formats into structured representations
-- `BoltzTokenizer`/`Boltz2Tokenizer`: Converts parsed structures into model\-ready tokens
-- `BoltzFeaturizer`/`Boltz2Featurizer`: Generates feature tensors from tokenized data
-
-### Neural Network Core
-
- - `InputEmbedder`: Processes input features into embedding space
-- `MSAModule`: Handles multiple sequence alignment processing
-- `PairformerModule`: Computes pairwise representations
-- `AtomDiffusion`: Performs diffusion\-based structure generation
-
-### Output Processing
-
- - `ConfidenceModule`: Estimates prediction confidence \(pLDDT, PAE, PDE\)
-- `AffinityModule`: Predicts binding affinities \(Boltz\-2 only\)
-- Structure writers: Output PDB/mmCIF format files
-
- Sources: Based on system architecture diagrams provided
+ Sources: [README\.md?plain=1 L42-L48](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L42-L48) [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L51-L52) [pyproject\.toml L44-L46](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml#L44-L46) [triangular\_mult\.py L22-L36](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py#L22-L36)
 
 ## Core Data Flow
 
@@ -243,51 +216,42 @@ subgraph subGraph0 ["Input Processing"]
 end
 ```
 
- Sources: Based on data processing pipeline diagrams provided
+ Sources: [README\.md?plain=1 L42-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L42-L52) [prot\_no\_msa\.yaml L1-L6](https://github.com/jwohlwend/boltz/blob/b1ebfc46/examples/prot_no_msa.yaml#L1-L6)
 
 ## Installation and Dependencies
 
- Boltz can be installed via PyPI with CUDA support:
+ Boltz is primarily written in Python \(\>=3\.10\) [pyproject\.toml L8](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml#L8-L8) It can be installed via PyPI with optional CUDA support for accelerated kernels:
 
 ```
 pip install boltz[cuda] -U
 ```
 
- For CPU\-only installations:
+ The system leverages several key technical components:
 
-```
-pip install boltz -U
-```
+ - **NVIDIA cuEquivariance**: Provides accelerated kernels for equivariant operations [README\.md?plain=1 L79](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L79-L79) [triangular\_mult\.py L22-L23](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py#L22-L23)
+- **MMseqs2/ColabFold**: Used for automatic MSA generation [README\.md?plain=1 L108-L117](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L108-L117)
+- **PyTorch & Lightning**: The underlying deep learning framework [pyproject\.toml L12-L15](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml#L12-L15)
 
- The system leverages several key dependencies:
-
- - PyTorch Lightning for training infrastructure
-- cuEquivariance for GPU\-accelerated operations on NVIDIA hardware
-- ColabFold API for MSA generation
-- Standard scientific computing libraries \(NumPy, PyTorch\)
-
- Sources: [README\.md?plain=1 L25-L38](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L25-L38)
+ Sources: [README\.md?plain=1 L25-L38](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L25-L38) [pyproject\.toml L5-L47](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml#L5-L47) [triangular\_mult\.py L22-L36](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/layers/triangular_mult.py#L22-L36)
 
 ## Usage Workflow
 
  The typical Boltz prediction workflow follows this pattern:
 
- 1. **Input Preparation**: Create YAML configuration files or FASTA sequences
-2. **MSA Generation**: Optionally use `--use_msa_server` for automatic MSA generation
-3. **Model Execution**: Run `boltz predict input_path` to generate predictions
-4. **Output Analysis**: Examine structure files and confidence/affinity metrics
+ 1. **Input Preparation**: Create YAML configuration files \(specifying sequences, MSAs, and properties\) or FASTA sequences [README\.md?plain=1 L48](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L48-L48)
+2. **MSA Generation**: Use the `--use_msa_server` flag to fetch alignments automatically [README\.md?plain=1 L45](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L45-L45)
+3. **Model Execution**: Run the `boltz predict` command, which serves as the main entry point [pyproject\.toml L38](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml#L38-L38) [README\.md?plain=1 L42-L45](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L42-L45)
+4. **Output Analysis**: Review generated mmCIF/PDB structures and affinity JSON results [README\.md?plain=1 L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L52-L52)
 
  For detailed instructions on each step, see [Command\-Line Interface](https://deepwiki.com/jwohlwend/boltz/2.1-command-line-interface) and [Input Formats](https://deepwiki.com/jwohlwend/boltz/2.2-input-formats)\.
 
- The system automatically selects the appropriate model variant \(Boltz\-1 or Boltz\-2\) based on the input specifications and requested prediction types\.
-
- Sources: [README\.md?plain=1 L42-L48](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L42-L48)
+ Sources: [README\.md?plain=1 L40-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L40-L52) [pyproject\.toml L37-L38](https://github.com/jwohlwend/boltz/blob/b1ebfc46/pyproject.toml#L37-L38)
 
 ## License and Availability
 
- Boltz is released under the MIT License, making it freely available for both academic and commercial use\. All model weights and source code are provided without restrictions\.
+ Boltz is released under the **MIT License**, making it freely available for both academic and commercial purposes [README\.md?plain=1 L81-L83](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L81-L83)
 
- Sources: [README\.md?plain=1 L81-L83](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L81-L83)
+ Sources: [README\.md?plain=1 L81-L83](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L81-L83)
 
 ---
 *Source: [https://deepwiki.com/jwohlwend/boltz/1-boltz-overview](https://deepwiki.com/jwohlwend/boltz/1-boltz-overview) on DeepWiki*

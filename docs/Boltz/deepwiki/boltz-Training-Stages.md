@@ -7,231 +7,131 @@ url: https://deepwiki.com/jwohlwend/boltz/5.2-training-stages
 ---
 # Training Stages
 
-# Data Preparation
+# Training Stages
 
 > **Relevant source files**
-> - [scripts/train/configs/confidence\.yaml](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/train/configs/confidence.yaml)
-> - [scripts/train/configs/full\.yaml](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/train/configs/full.yaml)
-> - [scripts/train/configs/structure\.yaml](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/train/configs/structure.yaml)
-> - [src/boltz/model/models/boltz1\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py)
-> - [src/boltz/model/models/boltz2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py)
+> - [docs/training\.md](https://github.com/jwohlwend/boltz/blob/b1ebfc46/docs/training.md?plain=1)
+> - [scripts/train/configs/confidence\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/confidence.yaml)
+> - [scripts/train/configs/full\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml)
+> - [scripts/train/configs/structure\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/structure.yaml)
+> - [src/boltz/data/module/trainingv2\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/module/trainingv2.py)
 
- This document covers the training data preprocessing pipeline for Boltz models, including structure processing, MSA preparation, and Chemical Components Dictionary \(CCD\) handling\. The data preparation system transforms raw structural data from sources like the RCSB PDB into model\-ready formats for training\.
+ The Boltz training process is divided into three distinct stages: **Structure**, **Full**, and **Confidence**\. Each stage focuses on different aspects of the model's capabilities, ranging from learning basic atomic geometry to refining multi\-chain interactions and predicting the reliability of its own outputs\.
 
- For information about training configuration and execution, see [Training Configuration](https://deepwiki.com/jwohlwend/boltz/5.2-training-stages) and [Running Training](https://deepwiki.com/jwohlwend/boltz/5.3-loss-functions-and-optimization)\. For details on input parsing during prediction, see [Input Parsing](https://deepwiki.com/jwohlwend/boltz/4.1-input-parsing-and-schema)\.
+## Overview of Training Stages
 
-## Overview
+ The training stages are defined by specific configuration files located in `scripts/train/configs/`\. These configurations adjust loss weights, data filters, and model components to transition the model from a structural backbone to a complete prediction system\.
 
- The Boltz training system supports two approaches for data preparation:
+| Stage | Config File | Primary Objective | Key Difference |
+| --- | --- | --- | --- |
+| Structure | structure\.yaml | Learn atomic coordinates and local geometry\. | Confidence prediction is disabled; focus on diffusion loss\. |
+| Full | full\.yaml | Refine structure and start confidence training\. | Structure and confidence trained simultaneously\. |
+| Confidence | confidence\.yaml | Fine\-tune reliability metrics \(pLDDT, PAE\)\. | Structure weights are frozen or structure training is disabled\. |
 
- 1. **Pre\-processed Data**: Download ready\-to\-use datasets that have been preprocessed by the Boltz team
-2. **Raw Data Processing**: Process your own raw structural data through the complete preprocessing pipeline
+ Sources: [training\.md?plain=1 L42-L47](https://github.com/jwohlwend/boltz/blob/b1ebfc46/docs/training.md?plain=1#L42-L47) [training\.md?plain=1 L108-L111](https://github.com/jwohlwend/boltz/blob/b1ebfc46/docs/training.md?plain=1#L108-L111)
 
- The preprocessing pipeline converts structural data from formats like mmCIF into tokenized, featurized representations suitable for model training\. This includes parsing molecular structures, generating MSAs, computing symmetries, and creating training manifests\.
+## Stage 1: Structure Training
 
-## Pre\-processed Dataset Downloads
+ The structure stage is the initial phase where the model learns to generate 3D coordinates\. During this stage, the model is trained primarily on the diffusion loss to minimize the difference between predicted and ground\-truth atomic positions\.
 
- The Boltz team provides several pre\-processed datasets totaling approximately 250GB of storage:
+### Configuration Characteristics
 
-| Dataset | Description | Download Command |
-| --- | --- | --- |
-| RCSB Structures | Processed PDB structures | wget https://boltz1\.s3\.us\-east\-2\.amazonaws\.com/rcsb\_processed\_targets\.tar |
-| RCSB MSAs | Multiple sequence alignments for PDB | wget https://boltz1\.s3\.us\-east\-2\.amazonaws\.com/rcsb\_processed\_msa\.tar |
-| OpenFold Structures | Distillation dataset structures | wget https://boltz1\.s3\.us\-east\-2\.amazonaws\.com/openfold\_processed\_targets\.tar |
-| OpenFold MSAs | Distillation dataset MSAs | wget https://boltz1\.s3\.us\-east\-2\.amazonaws\.com/openfold\_processed\_msa\.tar |
-| Symmetry Files | Precomputed ligand symmetries | wget https://boltz1\.s3\.us\-east\-2\.amazonaws\.com/symmetry\.pkl |
+ - **Confidence Prediction**: Disabled \(`confidence_prediction: false`\)\. [structure\.yaml L127](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/structure.yaml#L127-L127)
+- **Data Filtering**: Uses a more permissive resolution filter \(e\.g\., 9\.0Å\) to maximize data volume\. [structure\.yaml L44](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/structure.yaml#L44-L44)
+- **Loss Weights**: High weight on `diffusion_loss_weight` \(4\.0\) and `distogram_loss_weight` \(3e\-2\)\. [structure\.yaml L147-L148](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/structure.yaml#L147-L148)
+- **Sampling**: Lower `sampling_steps` \(20\) are often used to speed up training iterations\. [structure\.yaml L143](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/structure.yaml#L143-L143)
 
- Sources: [training\.md?plain=1 L5-L41](https://github.com/jwohlwend/boltz/blob/cb04aecc/docs/training.md?plain=1#L5-L41)
+### Implementation Flow
 
-## Raw Data Processing Pipeline
+```mermaid
+flowchart TD
 
- The raw data processing pipeline consists of several sequential steps that transform molecular data from source formats into training\-ready representations\.
+INPUT["Input Features"]
+TRUNK["Model Trunk<br>(MSA + Pairformer)"]
+DIFF["AtomDiffusion<br>(Score Model)"]
+LOSS["Structure Loss<br>(Diffusion + Distogram)"]
 
-### Processing Pipeline Architecture
+subgraph subGraph0 ["Structure Training Flow (Boltz1)"]
+    INPUT
+    TRUNK
+    DIFF
+    LOSS
+    INPUT --> TRUNK
+    TRUNK --> DIFF
+    DIFF --> LOSS
+end
+```
 
-  Sources: [training\.md?plain=1 L113-L263](https://github.com/jwohlwend/boltz/blob/cb04aecc/docs/training.md?plain=1#L113-L263) [ccd\.py L1-L296](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/ccd.py#L1-L296) [msa\.py L1-L131](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/msa.py#L1-L131)
+ Sources: [structure\.yaml L78-L194](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/structure.yaml#L78-L194)
 
-### Chemical Components Dictionary \(CCD\) Processing
+## Stage 2: Full Training
 
- The CCD processing step converts the PDB Chemical Components Dictionary into RDKit molecule objects with computed 3D conformers and symmetries\.
+ In the Full stage, the model continues to refine its structural predictions while simultaneously learning to predict confidence scores\. This stage bridges the gap between raw coordinate generation and usable biological predictions\.
 
-  The `ccd.py` script processes each component through several steps:
+### Configuration Characteristics
 
- 1. **Molecule Loading**: Parse CCD components using `pdbeccdutils.core.ccd_reader.read_pdb_components_file()`
-2. **3D Conformer Generation**: Generate 3D coordinates using RDKit's ETKDG method with UFF optimization
-3. **Symmetry Computation**: Calculate molecular symmetries as atom index permutations using substructure matching
-4. **Serialization**: Save processed molecules as pickled RDKit `Mol` objects with metadata
+ - **Confidence Prediction**: Enabled \(`confidence_prediction: true`\)\. [full\.yaml L129](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml#L129-L129)
+- **Structure Training**: Remains active \(`structure_prediction_training: true`\)\. [full\.yaml L128](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml#L128-L128)
+- **Data Filtering**: Stricter resolution requirements \(e\.g\., 4\.0Å\) to ensure the confidence module learns from high\-quality data\. [full\.yaml L45](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml#L45-L45)
+- **Loss Integration**: Introduces `confidence_loss_weight` \(3e\-3\)\. [full\.yaml L150](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml#L150-L150)
+- **Symmetry**: `return_train_symmetries` is set to `true` to handle ligand permutations during loss calculation\. [full\.yaml L66](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml#L66-L66)
 
- Key functions and processing details:
+ Sources: [full\.yaml L1-L200](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml#L1-L200)
 
- - `load_molecules()`: Reads CCD components and creates RDKit `Mol` objects with PDB names
-- `compute_3d()`: Uses `AllChem.EmbedMolecule()` with ETKDGv3 options and `UFFOptimizeMolecule()` for refinement
-- `compute_symmetries()`: Computes molecular symmetries via `mol.GetSubstructMatches()` with leaving atom filtering
-- `process()`: Handles single atoms, computed conformers, and ideal coordinates fallback
+## Stage 3: Confidence Training
 
- Processing outcomes:
+ The final stage focuses exclusively on the `ConfidenceModule`\. The goal is to calibrate the model's self\-assessment metrics: pLDDT \(local quality\), PAE \(alignment error\), and PDE \(distance error\)\.
 
- - **Single atoms**: Processed as\-is without conformer generation
-- **Computed conformers**: Successfully generated 3D coordinates using ETKDG
-- **Ideal conformers**: Fall back to ideal coordinates from CCD when computation fails
-- **Failed cases**: Molecules that cannot be processed are excluded
+### Configuration Characteristics
 
- Sources: [ccd\.py L21-L44](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/ccd.py#L21-L44) [ccd\.py L46-L91](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/ccd.py#L46-L91) [ccd\.py L127-L167](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/ccd.py#L127-L167) [ccd\.py L169-L216](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/ccd.py#L169-L216)
+ - **Structure Training**: Disabled \(`structure_prediction_training: false`\)\. The trunk weights are typically frozen or the gradients are not backpropagated to the diffusion module\. [confidence\.yaml L129](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/confidence.yaml#L129-L129)
+- **Confidence Imitation**: `confidence_imitate_trunk` is set to `true` to ensure the confidence features align with the Pairformer's representations\. [confidence\.yaml L132](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/confidence.yaml#L132-L132)
+- **Pretrained Loading**: The model starts from a checkpoint that has already completed structure training\. [confidence\.yaml L17](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/confidence.yaml#L17-L17)
+- **Validation**: Uses `run_confidence_sequentially: true` to accurately measure validation metrics without memory overflow\. [confidence\.yaml L172](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/confidence.yaml#L172-L172)
 
-### Structure Processing and Data Filtering
+### Data Flow for Confidence Prediction
 
- The structure processing pipeline parses structural data and applies quality filters to ensure training data meets requirements\.
+```mermaid
+flowchart TD
 
-  The structure processing pipeline includes comprehensive data filtering:
+S_Z["Trunk Representations<br>(s and z tensors)"]
+CONF_MOD["ConfidenceModule"]
+DIFF_OUT["Diffusion Output<br>(Predicted Coords)"]
+PLDDT["pLDDT Output"]
+PAE["PAE Output"]
+PDE["PDE Output"]
 
- **Quality Filters \(`StaticFilter` implementations\):**
-
- - `MinimumLengthFilter`: Removes chains outside 4\-5000 residue range based on resolved residues
-- `UnknownFilter`: Filters chains with all unknown residues \(UNK tokens\)
-- `ConsecutiveCA`: Removes proteins with consecutive CA atoms \>10\.0Å apart
-- `ClashingChainsFilter`: Removes chains with \>30% atoms within 1\.7Å of other chains
-
- **Clash Resolution Logic:**
-
- 1. Identify chains with \>30% clashing atoms \(`freq=0.3`, `dist=1.7`\)
-2. Remove chain with higher clash percentage
-3. If equal clash rates, remove chain with fewer atoms
-4. If equal atom counts, remove chain with larger chain ID
-
- **Key Processing Functions:**
-
- - Structure parsing handles protein, DNA, RNA chains and ligands
-- CCD residue processing for non\-standard residues and ligands
-- Connection parsing for covalent bonds between residues
-- Interface computation for chain\-chain interactions
-
- Sources: [polymer\.py L12-L63](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/filter/static/polymer.py#L12-L63) [polymer\.py L65-L102](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/filter/static/polymer.py#L65-L102) [polymer\.py L104-L163](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/filter/static/polymer.py#L104-L163) [polymer\.py L175-L300](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/filter/static/polymer.py#L175-L300)
-
-### MSA Processing
-
- The MSA processing step annotates sequences with taxonomy information and prepares them for training\.
-
-  The MSA processing pipeline requires:
-
- - Raw MSA files in `.a3m` format \(typically from ColabFold\)
-- Redis server for sharing taxonomy database across workers
-- Taxonomy database \(`taxonomy.rdb`\) for sequence annotation
-- Processing requirements: `redis`, `p_tqdm`, and other dependencies
-
- Key processing components:
-
- - `Resource` class: Manages Redis connection for taxonomy lookup
-- `process_msa()`: Worker function that processes individual MSA files
-- `parse_a3m()`: Parses A3M format files with taxonomy annotation
-- Parallel processing: Uses `p_umap()` for multi\-CPU processing with up to `cpu_count()` workers
-
- Processing configuration:
-
- - `max_seqs`: Maximum number of sequences per MSA \(default: 16384\)
-- `num_processes`: Number of parallel workers \(default: CPU count\)
-- `redis_host` and `redis_port`: Redis server connection details
-
- The script processes MSAs by:
-
- 1. Loading taxonomy database into Redis for shared access
-2. Scanning for `.a3m` and `.a3m.gz` files in the input directory
-3. Processing files in parallel using the `Resource` class for taxonomy lookup
-4. Saving processed MSAs as compressed NPZ files
-
- Sources: [training\.md?plain=1 L204-L236](https://github.com/jwohlwend/boltz/blob/cb04aecc/docs/training.md?plain=1#L204-L236) [msa\.py L16-L47](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/msa.py#L16-L47) [msa\.py L49-L90](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/msa.py#L49-L90)
-
-## Processing Requirements
-
- The data processing pipeline requires additional dependencies beyond the core Boltz package:
-
-  **Required packages:**
-
- - `gemmi`: For mmCIF file parsing and crystallographic data handling
-- `pdbeccdutils`: For Chemical Components Dictionary processing
-- `redis`: For sharing large datasets across parallel workers
-- `scikit-learn`: For molecular clash detection using KDTree
-- `p_tqdm`: For parallel processing with progress bars
-
- **External dependencies:**
-
- - `mmseqs2`: For sequence clustering \([https://github\.com/soedinglab/mmseqs2](https://github.com/soedinglab/mmseqs2)\)
-- `redis-server`: For running Redis database server
-
- Sources: [requirements\.txt L1-L5](https://github.com/jwohlwend/boltz/blob/cb04aecc/scripts/process/requirements.txt#L1-L5) [training\.md?plain=1 L126-L135](https://github.com/jwohlwend/boltz/blob/cb04aecc/docs/training.md?plain=1#L126-L135)
-
-## Training Data Loading
-
- The processed data is loaded through training data modules that orchestrate data sampling, tokenization, and featurization for training\.
-
-### Training Data Architecture
-
-  The training data system implements several key patterns:
-
- **Configuration Classes:**
-
- - `DatasetConfig`: Specifies dataset paths, sampling probability, and processing parameters
-- Dataset configuration supports multiple data sources \(PDB, OpenFold distillation\)
-- Sampling strategies include cluster\-based sampling and random sampling
-
- **Processing Pipeline:**
-
- - Data loading from compressed NPZ files containing structures and MSAs
-- Tokenization converts molecular structures into model\-compatible representations
-- Spatial cropping applies size limits \(`max_tokens`, `max_atoms`\) for GPU memory management
-- Featurization generates final tensor inputs for neural network training
-
- **Training Integration:**
-
- - PyTorch Lightning data modules handle train/validation splits
-- Parallel data loading with configurable worker processes
-- Batch collation assembles variable\-size structures into fixed\-size tensors
-
- Sources: [training\.md?plain=1 L57-L96](https://github.com/jwohlwend/boltz/blob/cb04aecc/docs/training.md?plain=1#L57-L96)
-
-### Data Processing Pipeline
-
-  Each training sample undergoes a processing pipeline:
-
- 1. **Sample Selection**: Choose a record from the dataset manifest
-2. **Data Loading**: Load structure \(`.npz`\) and MSA data
-3. **Tokenization**: Convert molecular structure to token representation
-4. **Cropping**: Apply spatial and sequence length limits
-5. **Featurization**: Compute model input features \(embeddings, distances, etc\.\)
-
- Sources: [training\.py L240-L324](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/module/training.py#L240-L324) [training\.py L386-L472](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/module/training.py#L386-L472)
-
-## Key Data Formats
-
-### Structure Data Format
-
- Processed structures are stored as `.npz` files containing:
-
-| Array | Type | Description |
-| --- | --- | --- |
-| atoms | Atom | Atomic coordinates, elements, charges |
-| bonds | Bond | Covalent bond connectivity |
-| residues | Residue | Residue\-level information |
-| chains | Chain | Chain\-level metadata |
-| connections | Connection | Inter\-residue connections |
-| interfaces | Interface | Chain\-chain interfaces |
-| mask | bool | Chain visibility mask |
-
-### MSA Data Format
-
- MSA data is stored as `.npz` files with `MSA` structure containing aligned sequences and metadata for evolutionary information\.
-
-### Training Configuration
-
- Training datasets are configured through `DatasetConfig` objects specifying:
-
- - `target_dir`: Directory containing processed structures
-- `msa_dir`: Directory containing processed MSAs
-- `prob`: Sampling probability for multi\-dataset training
-- `sampler`: Strategy for selecting training samples
-- `cropper`: Spatial cropping configuration
-- `filters`: Data filtering criteria
-
- Sources: [training\.py L21-L33](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/module/training.py#L21-L33) [src/boltz/data/types\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/types.py) [training\.md?plain=1 L57-L96](https://github.com/jwohlwend/boltz/blob/cb04aecc/docs/training.md?plain=1#L57-L96)
+subgraph subGraph0 ["Confidence Stage Logic"]
+    S_Z
+    CONF_MOD
+    DIFF_OUT
+    PLDDT
+    PAE
+    PDE
+    S_Z --> CONF_MOD
+    DIFF_OUT --> CONF_MOD
+    CONF_MOD --> PLDDT
+    CONF_MOD --> PAE
+    CONF_MOD --> PDE
+end
+```
+
+ Sources: [confidence\.yaml L129-L144](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/confidence.yaml#L129-L144) [src/boltz/model/model\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/model.py)
+
+## Summary of Configuration Parameters
+
+ The following table highlights the critical parameters in `DataConfig` and `Model` that change across stages\.
+
+| Parameter | Structure | Full | Confidence |
+| --- | --- | --- | --- |
+| resolution filter | 9\.0 | 4\.0 | 4\.0 |
+| confidence\_prediction | false | true | true |
+| structure\_prediction\_training | N/A | true | false |
+| diffusion\_samples \(train\) | 2 | 1 | 1 |
+| confidence\_loss\_weight | 1e\-4 | 3e\-3 | 3e\-3 |
+| sampling\_steps \(train\) | 20 | 200 | 200 |
+
+ Sources: [scripts/train/configs/structure\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/structure.yaml) [scripts/train/configs/full\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/full.yaml) [scripts/train/configs/confidence\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/train/configs/confidence.yaml)
 
 ---
 *Source: [https://deepwiki.com/jwohlwend/boltz/5.2-training-stages](https://deepwiki.com/jwohlwend/boltz/5.2-training-stages) on DeepWiki*

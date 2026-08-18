@@ -28,3 +28,4 @@
 - [boltz-Training-Stages.md](boltz-Training-Stages.md)
 - [boltz-Loss-Functions-and-Optimization.md](boltz-Loss-Functions-and-Optimization.md)
 - [boltz-Developer-Guide.md](boltz-Developer-Guide.md)
+- [boltz-Glossary.md](boltz-Glossary.md)

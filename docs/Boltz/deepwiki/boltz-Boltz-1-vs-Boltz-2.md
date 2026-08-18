@@ -10,17 +10,16 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 # Boltz\-1 vs Boltz\-2
 
 > **Relevant source files**
-> - [README\.md](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1)
-> - [src/boltz/data/msa/mmseqs2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py)
-> - [src/boltz/main\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py)
-> - [src/boltz/model/models/boltz1\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py)
-> - [src/boltz/model/models/boltz2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py)
+> - [README\.md](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1)
+> - [src/boltz/model/models/boltz1\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py)
+> - [src/boltz/model/models/boltz2\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py)
+> - [src/boltz/model/modules/utils\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/modules/utils.py)
 
 ## Purpose
 
  This document compares the architectural and capability differences between the Boltz\-1 and Boltz\-2 models\. Boltz\-1 focuses exclusively on biomolecular structure prediction, while Boltz\-2 extends this capability with binding affinity prediction, template integration, and enhanced conditioning mechanisms\. Understanding these differences is essential for selecting the appropriate model for your use case and understanding the codebase organization\.
 
- For information about running predictions with either model, see [Command\-Line Interface](https://deepwiki.com/jwohlwend/boltz/2.1-command-line-interface)\. For details about the prediction pipeline, see [Prediction Pipeline](https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline)\. For training configurations, see [Training System](https://deepwiki.com/jwohlwend/boltz/5-training-system)\.
+ For information about running predictions with either model, see [Command\-Line Interface](https://github.com/jwohlwend/boltz/blob/b1ebfc46/Command-Line Interface)\(\)\. For details about the prediction pipeline, see [Prediction Pipeline](https://github.com/jwohlwend/boltz/blob/b1ebfc46/Prediction Pipeline)\(\)\. For training configurations, see [Training System](https://github.com/jwohlwend/boltz/blob/b1ebfc46/Training System)\(\)\.
 
 ---
 
@@ -28,7 +27,43 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
  The codebase supports both models through the `--model` flag in the CLI\. The models are downloaded from different sources with separate checkpoints\.
 
-  **Sources:** [main\.py L36-L52](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L36-L52) [main\.py L161-L259](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L161-L259) [main\.py L974-L978](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L974-L978)
+ Title: Boltz Model Asset Flow
+
+```mermaid
+flowchart TD
+
+CLI["boltz predict<br>--model boltz1/boltz2"]
+B1CCD["ccd.pkl<br>CCD Dictionary"]
+B1Ckpt["boltz1_conf.ckpt<br>Structure + Confidence"]
+B2Mols["mols/<br>Expanded CCD"]
+B2Ckpt["boltz2_conf.ckpt<br>Structure + Confidence"]
+B2Aff["boltz2_aff.ckpt<br>Affinity Prediction"]
+Cache["~/.boltz/"]
+
+CLI -->|"model=boltz1"| B1CCD
+CLI -->|"model=boltz1"| B1Ckpt
+CLI -->|"model=boltz2"| B2Mols
+CLI -->|"model=boltz2"| B2Ckpt
+CLI --> B2Aff
+B1CCD --> Cache
+B1Ckpt --> Cache
+B2Mols --> Cache
+B2Ckpt --> Cache
+B2Aff --> Cache
+
+subgraph subGraph1 ["Boltz-2 Assets"]
+    B2Mols
+    B2Ckpt
+    B2Aff
+end
+
+subgraph subGraph0 ["Boltz-1 Assets"]
+    B1CCD
+    B1Ckpt
+end
+```
+
+ **Sources:** [main\.py L36-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L36-L52) [main\.py L161-L259](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L161-L259) [main\.py L974-L978](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L974-L978)
 
 ### Download Functions
 
@@ -37,7 +72,7 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 | download\_boltz1\(\) | Boltz\-1 | ccd\.pkl, boltz1\_conf\.ckpt | src/boltz/main\.py161\-195 |
 | download\_boltz2\(\) | Boltz\-2 | mols\.tar, boltz2\_conf\.ckpt, boltz2\_aff\.ckpt | src/boltz/main\.py197\-259 |
 
- **Sources:** [main\.py L161-L259](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L161-L259)
+ **Sources:** [main\.py L161-L259](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L161-L259)
 
 ---
 
@@ -45,23 +80,85 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
  The two models share a common trunk architecture \(MSA Module \+ Pairformer\) but differ significantly in their input processing, conditioning, and output heads\.
 
-  **Sources:** [boltz1\.py L40-L257](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L40-L257) [boltz2\.py L40-L350](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L40-L350)
+ Title: Architectural Evolution from Boltz\-1 to Boltz\-2
+
+```mermaid
+flowchart TD
+
+B2Input["Input Features +<br>Templates +<br>Method"]
+B2Embed["InputEmbedder<br>enhanced features"]
+B2Template["TemplateModule<br>structural priors"]
+B2MSA["MSAModule<br>4 blocks<br>with templates"]
+B2Pair["PairformerModule<br>64 blocks<br>16 heads"]
+B2Disto["DistogramModule"]
+B2Cond["DiffusionConditioning<br>method-specific"]
+B2Diff["AtomDiffusion<br>conditioned sampling"]
+B2Conf["ConfidenceModule<br>pLDDT, PAE, PDE"]
+B2Aff["AffinityModule<br>IC50 + Binary"]
+B1Input["Input Features"]
+B1Embed["InputEmbedder<br>token_s, atom_s"]
+B1MSA["MSAModule<br>4 blocks<br>no templates"]
+B1Pair["PairformerModule<br>48 blocks<br>16 heads"]
+B1Disto["DistogramModule"]
+B1Diff["AtomDiffusion<br>σ_data=16<br>no conditioning"]
+B1Conf["ConfidenceModule<br>pLDDT, PAE, PDE"]
+
+subgraph subGraph1 ["Boltz-2 Architecture"]
+    B2Input
+    B2Embed
+    B2Template
+    B2MSA
+    B2Pair
+    B2Disto
+    B2Cond
+    B2Diff
+    B2Conf
+    B2Aff
+    B2Input --> B2Embed
+    B2Embed --> B2Template
+    B2Template --> B2MSA
+    B2MSA --> B2Pair
+    B2Pair --> B2Disto
+    B2Pair --> B2Cond
+    B2Cond --> B2Diff
+    B2Diff --> B2Conf
+    B2Diff --> B2Aff
+end
+
+subgraph subGraph0 ["Boltz-1 Architecture"]
+    B1Input
+    B1Embed
+    B1MSA
+    B1Pair
+    B1Disto
+    B1Diff
+    B1Conf
+    B1Input --> B1Embed
+    B1Embed --> B1MSA
+    B1MSA --> B1Pair
+    B1Pair --> B1Disto
+    B1Pair --> B1Diff
+    B1Diff --> B1Conf
+end
+```
+
+ **Sources:** [boltz1\.py L40-L257](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L40-L257) [boltz2\.py L40-L350](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L40-L350)
 
 ### Core Module Comparison
 
 | Component | Boltz\-1 | Boltz\-2 |
 | --- | --- | --- |
-| Model Class | Boltz1 | Boltz2 |
-| Input Embedder | InputEmbedder \(basic\) | InputEmbedder \(enhanced with method conditioning\) |
-| Template Module | ❌ None | ✅ TemplateModule or TemplateV2Module |
+| Model Class | Boltz1 src/boltz/model/models/boltz1\.py40 | Boltz2 src/boltz/model/models/boltz2\.py41 |
+| Input Embedder | InputEmbedder \(basic\) src/boltz/model/modules/trunk\.py44 | InputEmbedder \(enhanced\) src/boltz/model/modules/trunkv2\.py44 |
+| Template Module | ❌ None | ✅ TemplateModule src/boltz/model/modules/trunkv2\.py642 |
 | MSA Module | MSAModule \(4 blocks\) | MSAModule \(4 blocks, template\-aware\) |
-| Pairformer Blocks | 48 \(default\) | 64 \(default\) |
+| Pairformer Blocks | 48 \(default\) src/boltz/main\.py73 | 64 \(default\) src/boltz/main\.py82 |
 | Pairformer Heads | 16 | 16 |
-| Diffusion Conditioning | ❌ None | ✅ DiffusionConditioning |
-| Confidence Module | ConfidenceModule | ConfidenceModule \(extended\) |
-| Affinity Module | ❌ None | ✅ AffinityModule \(optional ensemble\) |
+| Diffusion Conditioning | ❌ None | ✅ DiffusionConditioning src/boltz/model/modules/diffusion\_conditioning\.py11 |
+| Confidence Module | ConfidenceModule src/boltz/model/modules/confidence\.py34 | ConfidenceModule \(extended\) src/boltz/model/modules/confidencev2\.py44 |
+| Affinity Module | ❌ None | ✅ AffinityModule src/boltz/model/modules/affinity\.py16 |
 
- **Sources:** [main\.py L68-L89](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L68-L89) [boltz1\.py L188-L228](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L188-L228) [boltz2\.py L217-L349](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L217-L349)
+ **Sources:** [main\.py L68-L89](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L68-L89) [boltz1\.py L188-L228](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L188-L228) [boltz2\.py L217-L349](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L217-L349)
 
 ---
 
@@ -82,11 +179,59 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 | sigma\_max | 160\.0 | 160\.0 | Maximum noise level |
 | sigma\_data | 16\.0 | 16\.0 | Data distribution scale |
 
- **Sources:** [main\.py L109-L145](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L109-L145)
+ **Sources:** [main\.py L109-L145](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L109-L145)
 
 ### Diffusion Architecture Differences
 
-  **Sources:** [boltz1\.py L350-L377](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L350-L377) [boltz2\.py L503-L543](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L503-L543)
+ Title: ScoreModel Conditioning in Boltz\-1 vs Boltz\-2
+
+```mermaid
+flowchart TD
+
+B2S["s_trunk"]
+B2DC["DiffusionConditioning"]
+B2Z["z_trunk"]
+B2RPE["relative_position_encoding"]
+B2Q["q<br>query features"]
+B2C["c<br>context features"]
+B2Score["ScoreModel<br>conditioned"]
+B1S["s_trunk<br>sequence repr"]
+B1Score["ScoreModel<br>unconditional"]
+B1Z["z_trunk<br>pair repr"]
+B1SI["s_inputs"]
+B1RPE["relative_position_encoding"]
+
+subgraph subGraph1 ["Boltz-2 Diffusion"]
+    B2S
+    B2DC
+    B2Z
+    B2RPE
+    B2Q
+    B2C
+    B2Score
+    B2S --> B2DC
+    B2Z --> B2DC
+    B2RPE --> B2DC
+    B2DC --> B2Q
+    B2DC --> B2C
+    B2Q --> B2Score
+    B2C --> B2Score
+end
+
+subgraph subGraph0 ["Boltz-1 Diffusion"]
+    B1S
+    B1Score
+    B1Z
+    B1SI
+    B1RPE
+    B1S --> B1Score
+    B1Z --> B1Score
+    B1SI --> B1Score
+    B1RPE --> B1Score
+end
+```
+
+ **Sources:** [boltz1\.py L350-L377](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L350-L377) [boltz2\.py L503-L543](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L503-L543)
 
 ---
 
@@ -94,30 +239,104 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
  Boltz\-2 introduces template integration to leverage known structural information, a feature absent in Boltz\-1\.
 
-### Template Module Flow
+ Title: Boltz\-2 Template Data Flow
 
-  **Sources:** [boltz2\.py L217-L228](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L217-L228) [boltz2\.py L458-L466](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L458-L466)
+```mermaid
+flowchart TD
+
+Input["Template Input<br>CIF/PDB files"]
+Parse["parse_yaml<br>template loading"]
+Feat["Template Features<br>alignments, coords"]
+TModule["TemplateModule or<br>TemplateV2Module"]
+ZUpdate["z + template_embeddings"]
+Trunk["Pairformer Trunk"]
+Note["❌ Not available in Boltz-1"]
+
+Input --> Parse
+Parse --> Feat
+Feat --> TModule
+TModule --> Note
+
+subgraph subGraph0 ["Boltz-2 Only"]
+    TModule
+    ZUpdate
+    Trunk
+    TModule --> ZUpdate
+    ZUpdate --> Trunk
+end
+```
+
+ **Sources:** [boltz2\.py L217-L228](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L217-L228) [boltz2\.py L458-L466](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L458-L466)
 
 ### Template Configuration Options
 
 | Option | Type | Purpose |
 | --- | --- | --- |
-| use\_templates | bool | Enable template module |
-| use\_templates\_v2 | bool | Use enhanced template module version |
-| compile\_templates | bool | Compile template module for speed |
-| template\_args | dict | Template module hyperparameters |
+| use\_templates | bool | Enable TemplateModule src/boltz/model/models/boltz2\.py101 |
+| use\_templates\_v2 | bool | Use enhanced TemplateV2Module src/boltz/model/models/boltz2\.py106 |
+| compile\_templates | bool | Compile template module for speed src/boltz/model/models/boltz2\.py102 |
+| template\_args | dict | Template module hyperparameters src/boltz/model/models/boltz2\.py66 |
 
- **Sources:** [boltz2\.py L100-L106](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L100-L106) [boltz2\.py L217-L228](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L217-L228)
+ **Sources:** [boltz2\.py L100-L106](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L100-L106) [boltz2\.py L217-L228](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L217-L228)
 
 ---
 
 ## Affinity Prediction
 
- Boltz\-2's key enhancement is joint structure and affinity prediction, enabling in silico screening at 1000x the speed of physics\-based methods\.
+ Boltz\-2's key enhancement is joint structure and affinity prediction, enabling in silico screening at 1000x the speed of physics\-based methods [README\.md?plain=1 L17](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L17-L17)
 
-### Affinity Module Architecture
+ Title: AffinityModule and Multi\-task Prediction
 
-  **Sources:** [boltz2\.py L321-L349](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L321-L349) [boltz2\.py L608-L720](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L608-L720)
+```mermaid
+flowchart TD
+
+SInputs["s_inputs<br>enhanced embeddings"]
+ZAff["z_affinity<br>cross-interface pairs"]
+XPred["best_coords<br>from structure module"]
+AffMod["AffinityModule"]
+ValueHead["Value Head<br>log10(IC50)"]
+BinaryHead["Binary Head<br>binder probability"]
+Mod1["AffinityModule1"]
+Mod2["AffinityModule2"]
+Avg["Average predictions"]
+MWCorr["MW Correction"]
+
+SInputs --> AffMod
+ZAff --> AffMod
+XPred --> AffMod
+SInputs --> Mod1
+SInputs --> Mod2
+ZAff --> Mod1
+ZAff --> Mod2
+XPred --> Mod1
+XPred --> Mod2
+
+subgraph subGraph2 ["Ensemble (Optional)"]
+    Mod1
+    Mod2
+    Avg
+    MWCorr
+    Mod1 --> Avg
+    Mod2 --> Avg
+    Avg --> MWCorr
+end
+
+subgraph subGraph1 ["Affinity Module"]
+    AffMod
+    ValueHead
+    BinaryHead
+    AffMod --> ValueHead
+    AffMod --> BinaryHead
+end
+
+subgraph subGraph0 ["Affinity Inputs"]
+    SInputs
+    ZAff
+    XPred
+end
+```
+
+ **Sources:** [boltz2\.py L321-L349](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L321-L349) [boltz2\.py L608-L720](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L608-L720)
 
 ### Affinity Outputs
 
@@ -126,15 +345,13 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 | affinity\_pred\_value | log₁₀\(IC50 in μM\) | IC50 measurements | Lead optimization, measuring relative binding strength |
 | affinity\_probability\_binary | 0\.0 \- 1\.0 | Binary binder/non\-binder labels | Hit discovery, distinguishing binders from decoys |
 
- The value head is trained with molecular weight correction:
+ The value head is trained with molecular weight correction in `Boltz2.forward` [boltz2\.py L687-L697](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L687-L697):
 
-  **Sources:** [boltz2\.py L608-L720](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L608-L720) [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L51-L52)
+```
+# Boltz-2 MW correctionmodel_coef = 1.03525938mw_coef = -0.59992683bias = 2.83288489mw = affinity_mw ** 0.3affinity_pred_value = model_coef * raw_prediction + mw_coef * mw + bias
+```
 
-### Affinity Ensemble Mode
-
- Boltz\-2 can optionally use two separate affinity models and average their predictions for improved robustness:
-
-  **Sources:** [boltz2\.py L629-L701](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L629-L701)
+ **Sources:** [boltz2\.py L608-L720](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L608-L720) [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L51-L52)
 
 ---
 
@@ -142,7 +359,52 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
 ### Model Initialization Parameters
 
-  **Sources:** [boltz1\.py L43-L80](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L43-L80) [boltz2\.py L43-L107](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L43-L107)
+ Title: Boltz1 vs Boltz2 Initialization
+
+```mermaid
+flowchart TD
+
+AS["atom_s: int"]
+AZ["atom_z: int"]
+TS["token_s: int"]
+TZ["token_z: int"]
+B1SP["structure_prediction_training"]
+B1CP["confidence_prediction"]
+B1NM["no_msa: bool"]
+B1NA["no_atom_encoder: bool"]
+B2TA["template_args: dict"]
+B2AM["affinity_model_args: dict"]
+B2AE["affinity_ensemble: bool"]
+B2MC["affinity_mw_correction: bool"]
+B2DC["checkpoint_diffusion_conditioning"]
+
+AS --> B1SP
+AS --> B2TA
+
+subgraph subGraph2 ["Boltz-2 Specific"]
+    B2TA
+    B2AM
+    B2AE
+    B2MC
+    B2DC
+end
+
+subgraph subGraph1 ["Boltz-1 Specific"]
+    B1SP
+    B1CP
+    B1NM
+    B1NA
+end
+
+subgraph subGraph0 ["Common Parameters"]
+    AS
+    AZ
+    TS
+    TZ
+end
+```
+
+ **Sources:** [boltz1\.py L43-L80](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L43-L80) [boltz2\.py L43-L107](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L43-L107)
 
 ### Inference Sampling Steps
 
@@ -151,7 +413,7 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 | Boltz\-1 | 200 | 1 | ✅ \-\-sampling\_steps, \-\-diffusion\_samples |
 | Boltz\-2 | 200 \(structure\)200 \(affinity\) | 5 \(structure\)5 \(affinity\) | ✅ \-\-sampling\_steps, \-\-diffusion\_samples✅ \-\-sampling\_steps\_affinity, \-\-diffusion\_samples\_affinity |
 
- **Sources:** [main\.py L858-L1007](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L858-L1007)
+ **Sources:** [main\.py L858-L1007](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L858-L1007)
 
 ---
 
@@ -159,29 +421,119 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
 ### Boltz\-1 Forward Pass
 
-  **Sources:** [boltz1\.py L272-L400](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L272-L400)
+ Title: Boltz1\.forward Execution Flow
+
+```mermaid
+flowchart TD
+
+B1F["forward()"]
+B1IE["input_embedder"]
+B1Init["s_init, z_init"]
+B1Rec["Recycling Loop<br>0 to N steps"]
+B1MSA["msa_module"]
+B1PF["pairformer_module"]
+B1Dist["distogram_module"]
+B1Str["structure_module.sample()"]
+B1Conf["confidence_module"]
+
+B1F --> B1IE
+B1IE --> B1Init
+B1Init --> B1Rec
+B1Rec --> B1MSA
+B1MSA --> B1PF
+B1PF --> B1Dist
+B1PF --> B1Str
+B1Str --> B1Conf
+```
+
+ **Sources:** [boltz1\.py L272-L400](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L272-L400)
 
 ### Boltz\-2 Forward Pass
 
-  **Sources:** [boltz2\.py L401-L722](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L401-L722)
+ Title: Boltz2\.forward Execution Flow
 
-### Key Differences in Forward Pass
+```mermaid
+flowchart TD
 
-| Aspect | Boltz\-1 | Boltz\-2 |
-| --- | --- | --- |
-| Template Integration | No | Yes, applied before MSA module |
-| Diffusion Conditioning | Direct from trunk | Separate DiffusionConditioning module |
-| Output Modules | Structure \+ Confidence | Structure \+ Confidence \+ Affinity |
-| Gradient Handling | Simple detach for confidence | Complex multi\-task gradient flow |
-| Checkpointing | Not used | Optional for diffusion\_conditioning |
+B2F["forward()"]
+B2IE["input_embedder"]
+B2Init["s_init, z_init"]
+B2Rec["Recycling Loop<br>0 to N steps"]
+B2Temp["template_module<br>(if enabled)"]
+B2MSA["msa_module"]
+B2PF["pairformer_module"]
+B2Dist["distogram_module"]
+B2DC["diffusion_conditioning"]
+B2Str["structure_module.sample()"]
+B2Conf["confidence_module"]
+B2Aff["affinity_module<br>(if enabled)"]
 
- **Sources:** [boltz1\.py L272-L400](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L272-L400) [boltz2\.py L401-L722](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L401-L722)
+B2F --> B2IE
+B2IE --> B2Init
+B2Init --> B2Rec
+B2Rec --> B2Temp
+B2Temp --> B2MSA
+B2MSA --> B2PF
+B2PF --> B2Dist
+B2PF --> B2DC
+B2DC --> B2Str
+B2Str --> B2Conf
+B2Str --> B2Aff
+```
+
+ **Sources:** [boltz2\.py L401-L722](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L401-L722)
 
 ---
 
 ## File Organization
 
-  **Sources:** [boltz1\.py L1-L1293](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L1-L1293) [boltz2\.py L1-L1256](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L1-L1256)
+ Title: Code Entity Mapping
+
+```mermaid
+flowchart TD
+
+B1["src/boltz/model/models/boltz1.py<br>Boltz1 class"]
+B2["src/boltz/model/models/boltz2.py<br>Boltz2 class"]
+MSA["src/boltz/model/modules/trunk.py<br>MSAModule"]
+PF["src/boltz/model/layers/pairformer.py<br>PairformerModule"]
+Diff["src/boltz/model/modules/diffusion*.py<br>AtomDiffusion"]
+Conf["src/boltz/model/modules/confidence*.py<br>ConfidenceModule"]
+Temp["src/boltz/model/modules/trunkv2.py<br>TemplateModule"]
+Aff["src/boltz/model/modules/affinity.py<br>AffinityModule"]
+DCond["src/boltz/model/modules/diffusion_conditioning.py<br>DiffusionConditioning"]
+
+B1 --> MSA
+B1 --> PF
+B1 --> Diff
+B1 --> Conf
+B2 --> MSA
+B2 --> PF
+B2 --> Diff
+B2 --> Conf
+B2 --> Temp
+B2 --> Aff
+B2 --> DCond
+
+subgraph subGraph2 ["Boltz-2 Exclusive"]
+    Temp
+    Aff
+    DCond
+end
+
+subgraph subGraph1 ["Shared Modules"]
+    MSA
+    PF
+    Diff
+    Conf
+end
+
+subgraph subGraph0 ["Model Definitions"]
+    B1
+    B2
+end
+```
+
+ **Sources:** [boltz1\.py L1-L1292](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L1-L1292) [boltz2\.py L1-L1256](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L1-L1256)
 
 ---
 
@@ -189,11 +541,11 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
 ### Command\-Line Interface
 
-  **Sources:** [main\.py L974-L1009](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L974-L1009) [README\.md?plain=1 L42-L52](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L42-L52)
+```
+# Boltz-1 predictionboltz predict input.yaml --model boltz1 --use_msa_server # Boltz-2 structure predictionboltz predict input.yaml --model boltz2 --use_msa_server # Boltz-2 with affinity predictionboltz predict input.yaml --model boltz2 --use_msa_server \    --sampling_steps_affinity 200 \    --diffusion_samples_affinity 5 \    --affinity_mw_correction
+```
 
-### Pairformer Configuration Classes
-
-  **Sources:** [main\.py L68-L89](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L68-L89)
+ **Sources:** [main\.py L974-L1009](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L974-L1009) [README\.md?plain=1 L42-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L42-L52)
 
 ---
 
@@ -201,11 +553,101 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
 ### Boltz\-1 Outputs
 
-  **Sources:** [boltz1\.py L1153-L1196](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L1153-L1196)
+ Title: Boltz1 predict\_step Return Structure
+
+```mermaid
+flowchart TD
+
+B1["Boltz-1<br>predict_step()"]
+Coords["coords<br>predicted coordinates"]
+Masks["masks<br>atom padding mask"]
+SE["s, z<br>embeddings"]
+PLDDT["plddt<br>per-residue"]
+PAE["pae<br>error matrix"]
+PDE["pde<br>distance error"]
+PTM["ptm, iptm<br>global scores"]
+
+B1 --> Coords
+B1 --> Masks
+B1 --> SE
+B1 --> PLDDT
+B1 --> PAE
+B1 --> PDE
+B1 --> PTM
+
+subgraph subGraph1 ["Confidence Outputs"]
+    PLDDT
+    PAE
+    PDE
+    PTM
+end
+
+subgraph subGraph0 ["Structure Outputs"]
+    Coords
+    Masks
+    SE
+end
+```
+
+ **Sources:** [boltz1\.py L1153-L1196](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L1153-L1196)
 
 ### Boltz\-2 Outputs
 
-  **Sources:** [boltz2\.py L1057-L1121](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L1057-L1121)
+ Title: Boltz2 predict\_step Return Structure
+
+```mermaid
+flowchart TD
+
+B2["Boltz-2<br>predict_step()"]
+Coords["coords<br>predicted coordinates"]
+Masks["masks<br>atom padding mask"]
+SE["s, z<br>embeddings"]
+PLDDT["plddt<br>per-residue"]
+PAE["pae<br>error matrix"]
+PDE["pde<br>distance error"]
+PTM["ptm, iptm<br>global scores"]
+Score["confidence_score<br>combined metric"]
+Value["affinity_pred_value<br>log10(IC50)"]
+Binary["affinity_probability_binary<br>binder probability"]
+V1["affinity_pred_value1<br>ensemble"]
+V2["affinity_pred_value2<br>ensemble"]
+
+B2 --> Coords
+B2 --> Masks
+B2 --> SE
+B2 --> PLDDT
+B2 --> PAE
+B2 --> PDE
+B2 --> PTM
+B2 --> Score
+B2 -->|"if ensemble"| Value
+B2 -->|"if ensemble"| Binary
+B2 -->|"if ensemble"| V1
+B2 -->|"if ensemble"| V2
+
+subgraph subGraph2 ["Affinity Outputs"]
+    Value
+    Binary
+    V1
+    V2
+end
+
+subgraph subGraph1 ["Confidence Outputs"]
+    PLDDT
+    PAE
+    PDE
+    PTM
+    Score
+end
+
+subgraph subGraph0 ["Structure Outputs"]
+    Coords
+    Masks
+    SE
+end
+```
+
+ **Sources:** [boltz2\.py L1057-L1121](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L1057-L1121)
 
 ---
 
@@ -213,22 +655,19 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
 ### Boltz\-1 Loss Components
 
-  **Sources:** [boltz1\.py L458-L540](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L458-L540)
+```
+# src/boltz/model/models/boltz1.py:516-520loss = (    confidence_loss_weight * confidence_loss    + diffusion_loss_weight * diffusion_loss    + distogram_loss_weight * distogram_loss)
+```
+
+ **Sources:** [boltz1\.py L458-L540](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz1.py#L458-L540)
 
 ### Boltz\-2 Loss Components
 
-  **Sources:** [boltz2\.py L793-L929](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L793-L929)
+```
+# src/boltz/model/models/boltz2.py:898-903loss = (    confidence_loss_weight * confidence_loss    + diffusion_loss_weight * diffusion_loss    + distogram_loss_weight * distogram_loss    + bfactor_loss_weight * bfactor_loss  # Optional)
+```
 
-### Training Stage Differences
-
-| Stage | Boltz\-1 | Boltz\-2 |
-| --- | --- | --- |
-| Structure Training | ✅ Supported | ✅ Supported |
-| Confidence Training | ✅ Supported | ✅ Supported |
-| Affinity Training | ❌ Not applicable | ✅ Supported \(separate checkpoints\) |
-| Multi\-task Training | No | Yes \(structure \+ confidence \+ affinity\) |
-
- **Sources:** [boltz1\.py L458-L540](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L458-L540) [boltz2\.py L793-L929](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L793-L929)
+ **Sources:** [boltz2\.py L793-L929](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L793-L929)
 
 ---
 
@@ -236,44 +675,20 @@ url: https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2
 
 ### When to Use Boltz\-1
 
- - **Pure structure prediction** without need for binding affinity
-- **Lower computational requirements** \(fewer parameters, 48 blocks vs 64\)
-- **Baseline comparisons** with the original model
-- **No template information** available or needed
-- **Simpler deployment** with fewer dependencies
-
- **Sources:** [README\.md?plain=1 L17](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L17-L17)
+ - **Pure structure prediction** without need for binding affinity [README\.md?plain=1 L17](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L17-L17)
+- **Lower computational requirements** \(48 blocks vs 64\) [main\.py L73-L82](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L73-L82)
+- **Baseline comparisons** with the original model\.
+- **No template information** available or needed\.
 
 ### When to Use Boltz\-2
 
- - **Binding affinity prediction** for drug discovery workflows
-- **Template\-guided modeling** when structural priors are available
-- **Hit discovery** using binary binder classification
-- **Lead optimization** using IC50 value prediction
-- **State\-of\-the\-art accuracy** for both structure and affinity
-- **Multi\-task learning** scenarios
+ - **Binding affinity prediction** for drug discovery workflows [README\.md?plain=1 L17-L18](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L17-L18)
+- **Template\-guided modeling** when structural priors are available [boltz2\.py L101](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L101-L101)
+- **Hit discovery** using binary binder classification [README\.md?plain=1 L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L52-L52)
+- **Lead optimization** using IC50 value prediction [README\.md?plain=1 L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L52-L52)
+- **Multi\-task learning** scenarios including B\-factor prediction [boltz2\.py L103](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L103-L103)
 
- **Sources:** [README\.md?plain=1 L17-L18](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L17-L18) [README\.md?plain=1 L51-L52](https://github.com/jwohlwend/boltz/blob/cb04aecc/README.md?plain=1#L51-L52)
-
----
-
-## Migration Considerations
-
-### Code Changes Required
-
- When migrating from Boltz\-1 to Boltz\-2, consider:
-
- 1. **Template Support**: Boltz\-2 can accept template files in input YAML
-2. **Affinity Outputs**: New output files \(`affinity_*.json`\) are generated
-3. **Sampling Parameters**: Separate parameters for structure and affinity sampling
-4. **Checkpoint Loading**: Different checkpoint paths and formats
-5. **Memory Requirements**: Boltz\-2 requires more GPU memory due to additional modules
-
-### API Compatibility
-
- Both models share the same prediction interface:
-
-  **Sources:** [boltz1\.py L272-L400](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz1.py#L272-L400) [boltz2\.py L401-L722](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/model/models/boltz2.py#L401-L722)
+ **Sources:** [README\.md?plain=1 L17-L52](https://github.com/jwohlwend/boltz/blob/b1ebfc46/README.md?plain=1#L17-L52) [boltz2\.py L41-L107](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/model/models/boltz2.py#L41-L107)
 
 ---
 *Source: [https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2](https://deepwiki.com/jwohlwend/boltz/1.2-boltz-1-vs-boltz-2) on DeepWiki*

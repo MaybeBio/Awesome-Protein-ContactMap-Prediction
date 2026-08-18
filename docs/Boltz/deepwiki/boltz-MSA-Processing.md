@@ -10,11 +10,12 @@ url: https://deepwiki.com/jwohlwend/boltz/4.4-msa-processing
 # MSA Processing
 
 > **Relevant source files**
-> - [examples/pocket\.yaml](https://github.com/jwohlwend/boltz/blob/cb04aecc/examples/pocket.yaml)
-> - [src/boltz/data/feature/featurizer\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizer.py)
-> - [src/boltz/data/feature/featurizerv2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizerv2.py)
-> - [src/boltz/data/msa/mmseqs2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py)
-> - [src/boltz/main\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py)
+> - [examples/pocket\.yaml](https://github.com/jwohlwend/boltz/blob/b1ebfc46/examples/pocket.yaml)
+> - [scripts/process/msa\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/msa.py)
+> - [src/boltz/data/feature/featurizer\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py)
+> - [src/boltz/data/feature/featurizerv2\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizerv2.py)
+> - [src/boltz/data/filter/static/polymer\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/filter/static/polymer.py)
+> - [src/boltz/data/parse/a3m\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/parse/a3m.py)
 
  This page documents the Multiple Sequence Alignment \(MSA\) processing pipeline in Boltz, including MSA generation, taxonomy\-based pairing algorithms, and the construction of paired/unpaired sequence features for the model\.
 
@@ -24,7 +25,72 @@ url: https://deepwiki.com/jwohlwend/boltz/4.4-msa-processing
 
  **MSA Processing Workflow**
 
-  Sources: [main\.py L415-L523](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L415-L523) [featurizer\.py L151-L334](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizer.py#L151-L334)
+```mermaid
+flowchart TD
+
+FASTA["Protein Sequences"]
+USER_MSA["User-Provided MSAs<br>(optional)"]
+MMSEQS["run_mmseqs2()<br>MMseqs2 API Server"]
+A3M["A3M Files<br>(uniref, bfd, mgnify)"]
+CSV["CSV Files<br>(key, sequence)"]
+PARSE_A3M["parse_a3m()"]
+PARSE_CSV["parse_csv()"]
+MSA_OBJ["MSA Objects<br>(residues, deletions, sequences)"]
+TAXONOMY["Taxonomy-based Matching"]
+PAIRING["construct_paired_msa()"]
+PAIRED["Paired MSA Rows<br>(8192 max)"]
+UNPAIRED["Unpaired MSA Rows<br>(16384 total max)"]
+FEATURES["process_msa_features()"]
+MSA_TENSOR["MSA Tensors<br>(msa, deletion, paired_mask)"]
+
+FASTA --> MMSEQS
+USER_MSA --> PARSE_A3M
+USER_MSA --> PARSE_CSV
+A3M --> PARSE_A3M
+CSV --> PARSE_CSV
+MSA_OBJ --> TAXONOMY
+PAIRED --> FEATURES
+UNPAIRED --> FEATURES
+
+subgraph subGraph4 ["Featurization Stage"]
+    FEATURES
+    MSA_TENSOR
+    FEATURES --> MSA_TENSOR
+end
+
+subgraph subGraph3 ["Pairing Stage"]
+    TAXONOMY
+    PAIRING
+    PAIRED
+    UNPAIRED
+    TAXONOMY --> PAIRING
+    PAIRING --> PAIRED
+    PAIRING --> UNPAIRED
+end
+
+subgraph subGraph2 ["Parsing Stage"]
+    PARSE_A3M
+    PARSE_CSV
+    MSA_OBJ
+    PARSE_A3M --> MSA_OBJ
+    PARSE_CSV --> MSA_OBJ
+end
+
+subgraph subGraph1 ["Generation Stage"]
+    MMSEQS
+    A3M
+    CSV
+    MMSEQS --> A3M
+    MMSEQS --> CSV
+end
+
+subgraph subGraph0 ["Input Stage"]
+    FASTA
+    USER_MSA
+end
+```
+
+ Sources: [featurizer\.py L151-L334](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L151-L334) [a3m\.py L11-L101](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/parse/a3m.py#L11-L101) [msa\.py L35-L47](https://github.com/jwohlwend/boltz/blob/b1ebfc46/scripts/process/msa.py#L35-L47)
 
 ## MSA Data Structures
 
@@ -42,45 +108,54 @@ url: https://deepwiki.com/jwohlwend/boltz/4.4-msa-processing
 
  The `MSA` dataclass aggregates these components and provides serialization:
 
-  **MSA Storage Layout**
+```python
+@dataclass(frozen=True)class MSA(NumpySerializable):    sequences: np.ndarray    # MSASequence dtype    deletions: np.ndarray    # MSADeletion dtype      residues: np.ndarray     # MSAResidue dtype
+```
 
-  The `sequences` array contains metadata for each aligned sequence, with `res_start` and `res_end` indexing into the `residues` array, and `del_start` and `del_end` indexing into the `deletions` array\. This flat representation enables efficient slicing and random access\.
+ **MSA Storage Layout**
 
- Sources: [types\.py L449-L475](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/types.py#L449-L475)
+```mermaid
+flowchart TD
 
-## MSA Generation via MMseqs2
+SEQ["sequences array"]
+DEL["deletions array"]
+RES["residues array"]
+SEQ0["seq_idx=0<br>taxonomy=-1<br>res_start=0<br>res_end=150"]
+RES0["residues[0:150]<br>MET, ALA, GLY, ..."]
+DEL0["deletions[0:0]<br>(empty)"]
+SEQ1["seq_idx=1<br>taxonomy=9606<br>res_start=150<br>res_end=300"]
+RES1["residues[150:300]<br>MET, ALA, -, GLY, ..."]
+DEL1["deletions[0:2]<br>(res_idx=75, deletion=3)"]
 
- When MSAs are not provided by the user, Boltz automatically generates them using the MMseqs2 server API\.
+SEQ --> SEQ0
+SEQ --> SEQ1
+RES --> RES0
+RES --> RES1
+DEL --> DEL0
+DEL --> DEL1
 
-### MMseqs2 Server Interface
+subgraph subGraph2 ["Sequence 1 (Homolog)"]
+    SEQ1
+    RES1
+    DEL1
+end
 
- The `run_mmseqs2()` function submits protein sequences to a remote MMseqs2 server and retrieves A3M\-format alignments:
+subgraph subGraph1 ["Sequence 0 (Query)"]
+    SEQ0
+    RES0
+    DEL0
+end
 
- **MMseqs2 API Workflow**
+subgraph subGraph0 ["MSA Object"]
+    SEQ
+    DEL
+    RES
+end
+```
 
-### Authentication Methods
+ The `sequences` array contains metadata for each aligned sequence, with `res_start` and `res_end` indexing into the `residues` array, and `del_start` and `del_end` indexing into the `deletions` array\. This flat representation enables efficient slicing and random access\.
 
- The MMseqs2 interface supports three authentication methods:
-
-| Method | Configuration | Use Case |
-| --- | --- | --- |
-| None | No credentials | Public ColabFold API |
-| Basic Auth | msa\_server\_username, msa\_server\_password | Private servers with HTTP Basic Auth |
-| API Key | api\_key\_header, api\_key\_value | Private servers with custom authentication |
-
-### MSA Generation Modes
-
-| Mode | Databases | Filtering | Pairing | Use Case |
-| --- | --- | --- | --- | --- |
-| env | UniRef30 \+ BFD \+ Mgnify | Yes | No | Single\-chain proteins |
-| all | All databases | Yes | No | Comprehensive search |
-| env\-nofilter | UniRef30 \+ BFD \+ Mgnify | No | No | Raw alignments |
-| pairgreedy\-env | UniRef30 \+ BFD \+ Mgnify | Yes | Greedy | Multi\-chain complexes \(fast\) |
-| paircomplete\-env | UniRef30 \+ BFD \+ Mgnify | Yes | Complete | Multi\-chain complexes \(thorough\) |
-
- The pairing strategy determines how sequences from different chains are matched\. The `greedy` strategy pairs sequences with the same taxonomy ID incrementally, while `complete` strategy generates all possible pairings for each taxonomy\.
-
- Sources: [mmseqs2\.py L21-L286](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py#L21-L286) [main\.py L415-L495](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L415-L495)
+ Sources: [types\.py L449-L475](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/types.py#L449-L475) [a3m\.py L81-L93](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/parse/a3m.py#L81-L93)
 
 ## Taxonomy\-Based MSA Pairing Algorithm
 
@@ -88,129 +163,169 @@ url: https://deepwiki.com/jwohlwend/boltz/4.4-msa-processing
 
 ### Pairing Algorithm Overview
 
- The `construct_paired_msa()` function implements a sophisticated pairing algorithm:
+ The `construct_paired_msa()` function implements the pairing logic:
 
  **Taxonomy\-Based Pairing Process**
+
+```mermaid
+flowchart TD
+
+TAX_MAP["Build taxonomy_map<br>{taxonomy_id: [(chain_id, seq_idx), ...]}"]
+FILTER["Filter to taxonomies<br>with multiple chains"]
+SORT["Sort by number of chains<br>(descending)"]
+VISITED["Mark paired sequences<br>as visited"]
+AVAILABLE["Create available queue<br>per chain (unpaired seqs)"]
+QUERY["Add query sequence<br>(seq_idx=0) for all chains"]
+ITERATE["Iterate taxonomies<br>(best to worst)"]
+MULTI["Handle multiple occurrences<br>per chain"]
+FILL["Fill missing chains<br>from available queue"]
+COUNT["Add up to 8192<br>paired rows"]
+ADD_UNPAIRED["Add remaining available<br>sequences (unpaired)"]
+TOTAL["Limit to 16384 total rows"]
+
+SORT --> VISITED
+AVAILABLE --> QUERY
+QUERY --> ITERATE
+COUNT --> ADD_UNPAIRED
+
+subgraph subGraph4 ["Step 5: Unpaired Rows"]
+    ADD_UNPAIRED
+    TOTAL
+    ADD_UNPAIRED --> TOTAL
+end
+
+subgraph subGraph3 ["Step 4: Paired Rows"]
+    ITERATE
+    MULTI
+    FILL
+    COUNT
+    ITERATE --> MULTI
+    MULTI --> FILL
+    FILL --> COUNT
+end
+
+subgraph subGraph2 ["Step 3: First Row"]
+    QUERY
+end
+
+subgraph subGraph1 ["Step 2: Available Sequences"]
+    VISITED
+    AVAILABLE
+    VISITED --> AVAILABLE
+end
+
+subgraph subGraph0 ["Step 1: Taxonomy Mapping"]
+    TAX_MAP
+    FILTER
+    SORT
+    TAX_MAP --> FILTER
+    FILTER --> SORT
+end
+```
 
 ### Pairing Logic Details
 
  The algorithm maintains three key data structures:
 
- 1. **taxonomy\_map**: Maps taxonomy IDs to sequences
-2. **pairing**: List of dictionaries mapping chains to sequence indices
-3. **is\_paired**: List of dictionaries indicating pairing status
+ 1. **taxonomy\_map**: Maps taxonomy IDs to sequences [featurizer\.py L190-L197](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L190-L197)
+2. **pairing**: List of dictionaries mapping chains to sequence indices [featurizer\.py L219-L223](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L219-L223)
+3. **is\_paired**: List of dictionaries indicating pairing status [featurizer\.py L218-L222](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L218-L222)
 
 ### Handling Multiple Occurrences
 
- When a taxonomy has multiple sequences from the same chain, the algorithm creates multiple pairing rows by rolling over the sequence indices:
-
-  This maximizes diversity while maintaining taxonomic consistency\.
-
- Sources: [featurizer\.py L151-L334](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizer.py#L151-L334) [featurizerv2\.py L214-L448](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizerv2.py#L214-L448)
-
-## Paired vs Unpaired MSA Construction
-
- The final MSA structure contains three types of information encoded in tensors:
-
-### MSA Data Tensor
-
- The `msa_data` tensor has shape `(N_tokens, N_seqs)` where each element is a token ID:
-
-| Value | Meaning |
-| --- | --- |
-| 0\-31 | Standard amino acid or nucleotide |
-| 32 \(gap\) | Gap character \- |
-| Other | Special tokens \(UNK, etc\.\) |
-
-### Paired Mask Tensor
-
- The `paired_data` tensor has shape `(N_tokens, N_seqs)` indicating whether each position is part of a paired row:
-
-| Value | Meaning |
-| --- | --- |
-| 1 | Sequence is paired \(part of a multi\-chain organism match\) |
-| 0 | Sequence is unpaired \(filler or single\-chain match\) |
-
-### Deletion Value Tensor
-
- The `del_data` tensor has shape `(N_tokens, N_seqs)` storing deletion counts:
-
-### Row Construction Example
-
- For a two\-chain complex \(A and B\):
+ When a taxonomy has multiple sequences from the same chain, the algorithm creates multiple pairing rows by rolling over the sequence indices using modulo arithmetic:
 
 ```
-Row 0 (Query):          Chain A: [MET ALA GLY], Chain B: [VAL LEU], paired=1
-Row 1 (Human, 9606):    Chain A: [MET - GLY],   Chain B: [VAL LEU], paired=1
-Row 2 (Unpaired A):     Chain A: [MET ALA GLY], Chain B: [- - -],   paired=0
-Row 3 (Unpaired B):     Chain A: [- - -],       Chain B: [VAL -],   paired=0
+# From construct_paired_msa in featurizer.pyfor i in range(max_occurence):    row_pairing = {}    row_is_paired = {}    for c in chain_ids:        seq_idxs = group.get(c, [])        if len(seq_idxs) > 0:            row_pairing[c] = seq_idxs[i % len(seq_idxs)]            row_is_paired[c] = 1        ...
 ```
 
- The first row always contains the query sequences\. Subsequent rows alternate between paired \(same taxonomy\) and unpaired \(independent sequences\) based on availability\.
-
- Sources: [featurizer\.py L326-L334](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizer.py#L326-L334) [featurizerv2\.py L440-L448](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizerv2.py#L440-L448)
+ Sources: [featurizer\.py L151-L334](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L151-L334) [featurizerv2\.py L214-L448](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizerv2.py#L214-L448)
 
 ## Dummy MSA Creation
 
- When no MSA is available for a chain \(e\.g\., for non\-protein chains or when MSA generation is disabled\), Boltz creates a dummy MSA containing only the query sequence\.
+ When no MSA is available for a chain \(e\.g\., for non\-polymer tokens or when MSA generation is disabled\), Boltz creates a dummy MSA containing only the query sequence\.
 
 ### dummy\_msa\(\) Function
 
  The `dummy_msa()` function creates a minimal valid MSA:
 
-### Usage Scenarios
+```python
+def dummy_msa(residues: np.ndarray) -> MSA:    """Create a dummy MSA for a chain."""    residues = [res["res_type"] for res in residues]    deletions = []    sequences = [(0, -1, 0, len(residues), 0, 0)]    return MSA(        residues=np.array(residues, dtype=MSAResidue),        deletions=np.array(deletions, dtype=MSADeletion),        sequences=np.array(sequences, dtype=MSASequence),    )
+```
 
-| Scenario | MSA Source |
-| --- | --- |
-| Protein chain with msa\_id=0 | Generate via MMseqs2 or user\-provided |
-| Protein chain with msa\_id=\-1 | Dummy MSA \(query only\) |
-| DNA/RNA chain | Dummy MSA \(no generation supported\) |
-| Ligand chain | Dummy MSA \(not applicable\) |
-| Missing MSA file | Dummy MSA \(fallback\) |
+ During the pairing process, chains without MSAs are automatically assigned a dummy MSA constructed from their structure residues [featurizer\.py L181-L187](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L181-L187)
 
- During the pairing process, dummy MSAs are treated like regular MSAs but contribute no homology information beyond the query sequence\.
-
- Sources: [featurizer\.py L127-L148](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizer.py#L127-L148) [featurizerv2\.py L190-L211](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizerv2.py#L190-L211)
+ Sources: [featurizer\.py L127-L148](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L127-L148) [featurizerv2\.py L190-L211](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizerv2.py#L190-L211)
 
 ## MSA Feature Tensor Construction
 
- The final step converts paired MSA data into model\-ready tensors via `process_msa_features()`\.
+ The final step converts paired MSA data into model\-ready tensors\.
 
 ### Feature Computation
 
- The function performs several transformations:
+ The pipeline performs several transformations, including one\-hot encoding and deletion value normalization:
 
  **MSA Feature Pipeline**
 
-### Feature Descriptions
+```mermaid
+flowchart TD
 
-| Feature | Shape | dtype | Description |
-| --- | --- | --- | --- |
-| msa | \(N\_seqs, N\_tokens, 32\) | long | One\-hot encoded residue types |
-| msa\_paired | \(N\_seqs, N\_tokens\) | float | Binary mask indicating paired sequences |
-| deletion\_value | \(N\_seqs, N\_tokens\) | float | Encoded deletion counts \(arctan transform\) |
-| has\_deletion | \(N\_seqs, N\_tokens\) | bool | Binary mask for positions with deletions |
-| deletion\_mean | \(N\_tokens,\) | float | Average deletion value per position |
-| profile | \(N\_tokens, 32\) | float | Average MSA composition per position |
-| msa\_mask | \(N\_seqs, N\_tokens\) | float | Valid sequence mask \(all 1s before padding\) |
+PAIRED["Paired MSA Arrays<br>(N_tokens × N_seqs)"]
+ONEHOT["One-hot Encoding<br>(N_seqs × N_tokens × 32)"]
+PROFILE["MSA Profile<br>(mean over sequences)"]
+DEL_ENCODE["Deletion Encoding<br>arctan(deletion/3) * π/2"]
+TRANSPOSE["Transpose<br>(N_seqs, N_tokens) → (N_tokens, N_seqs)"]
+MSA_FEAT["msa: (N_seqs, N_tokens, 32)"]
+PAIRED_FEAT["msa_paired: (N_seqs, N_tokens)"]
+DEL_FEAT["deletion_value: (N_seqs, N_tokens)"]
+HAS_DEL["has_deletion: (N_seqs, N_tokens)"]
+DEL_MEAN["deletion_mean: (N_tokens,)"]
+PROFILE_FEAT["profile: (N_tokens, 32)"]
+MASK_FEAT["msa_mask: (N_seqs, N_tokens)"]
+
+PAIRED --> TRANSPOSE
+ONEHOT --> MSA_FEAT
+PROFILE --> PROFILE_FEAT
+PAIRED --> PAIRED_FEAT
+PAIRED --> DEL_ENCODE
+DEL_ENCODE --> DEL_FEAT
+DEL_ENCODE --> HAS_DEL
+DEL_ENCODE --> DEL_MEAN
+ONEHOT --> MASK_FEAT
+
+subgraph subGraph2 ["Output Features"]
+    MSA_FEAT
+    PAIRED_FEAT
+    DEL_FEAT
+    HAS_DEL
+    DEL_MEAN
+    PROFILE_FEAT
+    MASK_FEAT
+end
+
+subgraph Transformations ["Transformations"]
+    ONEHOT
+    PROFILE
+    DEL_ENCODE
+    TRANSPOSE
+    TRANSPOSE --> ONEHOT
+    ONEHOT --> PROFILE
+end
+
+subgraph Input ["Input"]
+    PAIRED
+end
+```
 
 ### Deletion Encoding
 
- Deletions are encoded using an arctan transformation to bound the values:
+ Deletions are encoded using an arctan transformation to bound the values: `deletion = np.pi / 2 * np.arctan(deletion / 3)` [featurizer\.py L927](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L927-L927)
 
-  This maps deletion counts `[0, ∞)` to the range `[0, π/2)`, with most values concentrated near zero\.
-
-### Random Subsampling
-
- During training, MSA sequences may be randomly subsampled to a maximum size \(`max_seqs`\)\. The first row \(query sequence\) is always retained:
-
-  During inference, deterministic subsampling takes the first `max_seqs` rows to ensure reproducibility\.
-
- Sources: [featurizer\.py L894-L966](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizer.py#L894-L966) [featurizerv2\.py L1098-L1160](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizerv2.py#L1098-L1160)
+ Sources: [featurizer\.py L894-L966](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L894-L966) [featurizerv2\.py L1098-L1160](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizerv2.py#L1098-L1160)
 
 ## Numba\-Optimized MSA Array Preparation
 
- To efficiently construct MSA feature arrays from pairing dictionaries, Boltz uses a Numba JIT\-compiled inner function\.
+ To efficiently construct MSA feature arrays from pairing dictionaries, Boltz uses a Numba JIT\-compiled inner function `_prepare_msa_arrays_inner`\.
 
 ### prepare\_msa\_arrays\(\) Function
 
@@ -218,42 +333,80 @@ Row 3 (Unpaired B):     Chain A: [- - -],       Chain B: [VAL -],   paired=0
 
  **Array Preparation Process**
 
-### Numba Type Annotations
+```mermaid
+flowchart TD
 
- The inner function uses explicit Numba type annotations for performance:
+PAIRING["pairing: list[dict]<br>{chain_id: seq_idx}"]
+IS_PAIRED["is_paired: list[dict]<br>{chain_id: 1 or 0}"]
+DELETIONS["deletions: dict<br>(chain_id, seq_idx, res_idx): count"]
+MSA_DICT["msa: dict[chain_id, MSA]"]
+TOKEN_ARRAYS["Extract token arrays<br>(asym_id, res_idx)"]
+CHAIN_MAPPING["Build chain_id_to_idx mapping"]
+PAIRING_ARRAY["Convert pairing to 2D array<br>(N_pairs × N_chains)"]
+MSA_ARRAYS["Extract MSA sequences/residues<br>into 2D arrays"]
+JIT["_prepare_msa_arrays_inner()<br>(Numba JIT compiled)"]
+INNER_LOOP["Nested loops over<br>tokens and pairs"]
+LOOKUP["Dictionary lookup for<br>deletions and residues"]
+MSA_DATA["msa_data: (N_tokens, N_pairs)"]
+DEL_DATA["del_data: (N_tokens, N_pairs)"]
+PAIRED_DATA["paired_data: (N_tokens, N_pairs)"]
 
-  The JIT compilation provides significant speedup for the nested loop over tokens and sequence pairs, which can involve millions of iterations for large MSAs\.
+PAIRING --> PAIRING_ARRAY
+IS_PAIRED --> PAIRING_ARRAY
+MSA_DICT --> MSA_ARRAYS
+DELETIONS --> JIT
+TOKEN_ARRAYS --> JIT
+CHAIN_MAPPING --> JIT
+PAIRING_ARRAY --> JIT
+MSA_ARRAYS --> JIT
+LOOKUP --> MSA_DATA
+LOOKUP --> DEL_DATA
+LOOKUP --> PAIRED_DATA
 
- Sources: [featurizer\.py L337-L458](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizer.py#L337-L458) [featurizerv2\.py L451-L572](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/feature/featurizerv2.py#L451-L572)
+subgraph Output ["Output"]
+    MSA_DATA
+    DEL_DATA
+    PAIRED_DATA
+end
+
+subgraph subGraph2 ["Numba Processing"]
+    JIT
+    INNER_LOOP
+    LOOKUP
+    JIT --> INNER_LOOP
+    INNER_LOOP --> LOOKUP
+end
+
+subgraph subGraph1 ["Array Conversion"]
+    TOKEN_ARRAYS
+    CHAIN_MAPPING
+    PAIRING_ARRAY
+    MSA_ARRAYS
+end
+
+subgraph subGraph0 ["Python Input"]
+    PAIRING
+    IS_PAIRED
+    DELETIONS
+    MSA_DICT
+end
+```
+
+ The JIT compilation provides significant speedup for the nested loop over tokens and sequence pairs, which can involve millions of iterations for large MSAs\.
+
+ Sources: [featurizer\.py L337-L458](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizer.py#L337-L458) [featurizerv2\.py L451-L572](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/feature/featurizerv2.py#L451-L572)
 
 ## Processing Pipeline Types
 
-### Target and Input Types
+ The system defines aggregate types for different processing stages, such as `Target`, `Input`, and `Tokenized`\.
 
- The system defines two key aggregate types for different processing stages:
+| Type | Purpose |
+| --- | --- |
+| Target | Raw parsed data from YAML/FASTA src/boltz/data/types\.py641\-654 |
+| Input | Processing\-ready data including parsed MSAs src/boltz/data/types\.py657\-670 |
+| Tokenized | ML\-ready data with tokenized representations src/boltz/data/types\.py673\-708 |
 
- **Processing Pipeline Data Flow**
-
-### Key Differences
-
-| Type | Purpose | Key Features |
-| --- | --- | --- |
-| Target | Raw parsed data | Contains sequences as strings, represents initial parsing result |
-| Input | Processing\-ready data | Contains MSAs as structured arrays, ready for tokenization |
-| Tokenized | ML\-ready data | Contains tokenized representations, ready for model input |
-
- Sources: [types\.py L641-L708](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/types.py#L641-L708)
-
-## Schema Versioning and Evolution
-
- The type system shows clear versioning patterns:
-
- - **V1 → V2 Migration**: `Structure` → `StructureV2`, `Token` → `TokenV2`, `Bond` → `BondV2`
-- **Enhanced Features**: V2 versions add quality scores, local frames, and additional metadata
-- **Backward Compatibility**: Both versions coexist in the codebase
-- **Serialization Consistency**: Both versions use the same `NumpySerializable` interface
-
- This design allows for gradual migration while maintaining compatibility with existing data and models\.
+ Sources: [types\.py L641-L708](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/types.py#L641-L708)
 
 ---
 *Source: [https://deepwiki.com/jwohlwend/boltz/4.4-msa-processing](https://deepwiki.com/jwohlwend/boltz/4.4-msa-processing) on DeepWiki*

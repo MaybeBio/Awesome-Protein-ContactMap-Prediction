@@ -10,14 +10,14 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 # Prediction Pipeline
 
 > **Relevant source files**
-> - [docs/prediction\.md](https://github.com/jwohlwend/boltz/blob/cb04aecc/docs/prediction.md?plain=1)
-> - [src/boltz/data/msa/mmseqs2\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py)
-> - [src/boltz/data/parse/pdb\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/parse/pdb.py)
-> - [src/boltz/main\.py](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py)
+> - [docs/prediction\.md](https://github.com/jwohlwend/boltz/blob/b1ebfc46/docs/prediction.md?plain=1)
+> - [src/boltz/data/msa/mmseqs2\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/msa/mmseqs2.py)
+> - [src/boltz/data/parse/pdb\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/parse/pdb.py)
+> - [src/boltz/main\.py](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py)
 
  This document covers the complete prediction workflow in Boltz, from input processing through model inference to output generation\. The prediction pipeline orchestrates all components needed to transform molecular input data into structural predictions and confidence metrics\.
 
- For detailed information about the command\-line interface options, see [Command\-Line Interface](https://deepwiki.com/jwohlwend/boltz/2.1-command-line-interface)\. For input format specifications, see [Input Formats](https://deepwiki.com/jwohlwend/boltz/2.2-input-formats)\. For MSA generation details, see [MSA Processing](https://deepwiki.com/jwohlwend/boltz/2.3-msa-generation)\. For output interpretation, see [Output Formats and Interpretation](https://deepwiki.com/jwohlwend/boltz/2.4-output-formats-and-interpretation)\.
+ For detailed information about the command\-line interface options, see [Command\-Line Interface](https://deepwiki.com/jwohlwend/boltz/2.1-command-line-interface)\. For input format specifications, see [Input Formats](https://deepwiki.com/jwohlwend/boltz/2.2-input-formats)\. For MSA generation details, see [MSA Generation](https://deepwiki.com/jwohlwend/boltz/2.3-msa-generation)\. For output interpretation, see [Output Formats and Interpretation](https://deepwiki.com/jwohlwend/boltz/2.4-output-formats-and-interpretation)\.
 
 ## Pipeline Overview
 
@@ -25,13 +25,13 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 
 ### High\-Level Prediction Flow
 
-  Sources: [main\.py L946-L1284](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L946-L1284)
+  Sources: [main\.py L946-L1284](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L946-L1284)
 
 ### Core Pipeline Stages
 
  The prediction pipeline implements five primary stages, each handling a specific aspect of the molecular prediction workflow:
 
-  Sources: [main\.py L487-L616](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L487-L616) [main\.py L619-L737](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L619-L737) [main\.py L1126-L1212](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1126-L1212)
+  Sources: [main\.py L487-L616](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L487-L616) [main\.py L619-L737](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L619-L737) [main\.py L1126-L1212](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1126-L1212)
 
 ## Input Processing and Validation
 
@@ -46,7 +46,7 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 | \.fa, \.fas, \.fasta | FASTA | Simple sequence format |
 | \.yml, \.yaml | YAML | Complex molecular specification |
 
- Sources: [main\.py L281-L316](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L281-L316)
+ Sources: [main\.py L281-L316](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L281-L316)
 
 ### Input Parsing Functions
 
@@ -60,13 +60,13 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 - `residue_constraints`: Distance and contact constraints
 - `extra_mols`: Additional molecules for Boltz\-2
 
- Sources: [main\.py L547-L560](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L547-L560)
+ Sources: [main\.py L547-L560](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L547-L560)
 
 ### Data Processing Pipeline
 
  Each input file undergoes comprehensive processing through the `process_input()` function:
 
-  Sources: [main\.py L525-L656](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L525-L656)
+  Sources: [main\.py L525-L656](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L525-L656)
 
 ## MSA Generation and Server Authentication
 
@@ -85,10 +85,10 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 
  The MSA generation process handles sequence pairing using configurable strategies:
 
- - `greedy`: Default pairing strategy for faster processing
-- `complete`: Comprehensive pairing for better alignment quality
+ - `greedy`: Default pairing strategy for faster processing [mmseqs2\.py L27](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/msa/mmseqs2.py#L27-L27)
+- `complete`: Comprehensive pairing for better alignment quality [mmseqs2\.py L174-L175](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/msa/mmseqs2.py#L174-L175)
 
- Sources: [main\.py L415-L523](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L415-L523) [mmseqs2\.py L21-L85](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/msa/mmseqs2.py#L21-L85)
+ Sources: [main\.py L415-L523](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L415-L523) [mmseqs2\.py L21-L85](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/msa/mmseqs2.py#L21-L85)
 
 ## Model Setup and Configuration
 
@@ -113,11 +113,11 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 
  The two model variants use different diffusion process parameters optimized for their respective architectures:
 
-  Sources: [main\.py L109-L146](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L109-L146) [main\.py L1228-L1244](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1228-L1244)
+  Sources: [main\.py L109-L146](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L109-L146) [main\.py L1228-L1244](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1228-L1244)
 
 ### Model Loading and Setup
 
-  Sources: [main\.py L1021-L1027](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1021-L1027) [main\.py L1108-L1124](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1108-L1124) [main\.py L1192-L1204](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1192-L1204)
+  Sources: [main\.py L1021-L1027](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1021-L1027) [main\.py L1108-L1124](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1108-L1124) [main\.py L1192-L1204](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1192-L1204)
 
 ## Inference Execution
 
@@ -145,17 +145,17 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 
   For affinity prediction, all steering mechanisms are disabled to ensure consistent scoring:
 
- - `fk_steering: False`
-- `physical_guidance_update: False`
-- `contact_guidance_update: False`
+ - `fk_steering: False` [main\.py L1255](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1255-L1255)
+- `physical_guidance_update: False` [main\.py L1258](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1258-L1258)
+- `contact_guidance_update: False` [main\.py L1259](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1259-L1259)
 
- Sources: [main\.py L1299-L1324](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1299-L1324) [main\.py L1372-L1400](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1372-L1400) [main\.py L148-L158](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L148-L158)
+ Sources: [main\.py L1299-L1324](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1299-L1324) [main\.py L1372-L1400](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1372-L1400) [main\.py L148-L158](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L148-L158)
 
 ### Affinity Prediction Pipeline
 
  For inputs with affinity requirements, the pipeline executes a separate affinity prediction stage:
 
-  Sources: [main\.py L1215-L1284](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1215-L1284)
+  Sources: [main\.py L1215-L1284](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1215-L1284)
 
 ## Output Generation and Organization
 
@@ -176,7 +176,7 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 - Confidence summary JSON
 - Optional full PAE/PDE matrices \(NPZ format\)
 
- Sources: [writer\.py L32](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/data/write/writer.py#L32-L32) [main\.py L1126-L1132](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1126-L1132) [main\.py L1233-L1236](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L1233-L1236)
+ Sources: [writer\.py L32](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/write/writer.py#L32-L32) [main\.py L1126-L1132](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1126-L1132) [main\.py L1233-L1236](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L1233-L1236)
 
 ## Pipeline Configuration Classes
 
@@ -184,7 +184,7 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 
 ### Core Configuration Classes
 
-  Sources: [main\.py L55-L158](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L55-L158)
+  Sources: [main\.py L55-L158](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L55-L158)
 
 ## Error Handling and Validation
 
@@ -192,13 +192,13 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 
 ### Input Validation Errors
 
- - Unsupported file extensions
-- Missing MSA files when `--use_msa_server` not set
-- Invalid directory structures
+ - Unsupported file extensions [main\.py L314-L316](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L314-L316)
+- Missing MSA files when `--use_msa_server` not set [main\.py L440-L443](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L440-L443)
+- Invalid directory structures [main\.py L289-L291](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L289-L291)
 
 ### Processing Errors
 
- - Failed MSA generation
+ - Failed MSA generation [mmseqs2\.py L91-L94](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/data/msa/mmseqs2.py#L91-L94)
 - Corrupted molecular data
 - Template alignment failures
 
@@ -206,11 +206,11 @@ url: https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline
 
  - Insufficient GPU memory
 - Invalid checkpoint files
-- Network download failures
+- Network download failures [main\.py L191-L193](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L191-L193)
 
  The pipeline uses `@rank_zero_only` decorators for functions like `download_boltz1()`, `download_boltz2()`, and `process_inputs()` to ensure download operations only occur on the main process in distributed settings, preventing race conditions during model and data downloads\.
 
- Sources: [main\.py L158-L252](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L158-L252) [main\.py L601-L605](https://github.com/jwohlwend/boltz/blob/cb04aecc/src/boltz/main.py#L601-L605)
+ Sources: [main\.py L158-L252](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L158-L252) [main\.py L601-L605](https://github.com/jwohlwend/boltz/blob/b1ebfc46/src/boltz/main.py#L601-L605)
 
 ---
 *Source: [https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline](https://deepwiki.com/jwohlwend/boltz/2-prediction-pipeline) on DeepWiki*
