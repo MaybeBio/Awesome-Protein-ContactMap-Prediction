@@ -1,0 +1,55 @@
+# baker-laboratory/RoseTTAFold-All-Atom
+
+Source: https://zread.ai/baker-laboratory/RoseTTAFold-All-Atom
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/安装与设置](3-installation-and-setup.md)
+- [入门指南/使用 Docker 运行推理](4-running-inference-with-docker.md)
+- [入门指南/理解模型输出](5-understanding-model-outputs.md)
+
+## 深入探究
+
+### 配置系统
+
+- [深入探究/配置系统/Hydra 配置管理](6-hydra-configuration-management.md)
+- [深入探究/配置系统/基础配置参数](7-base-configuration-parameters.md)
+- [深入探究/配置系统/自定义推理配置](8-custom-inference-configs.md)
+
+### 输入准备
+
+- [深入探究/输入准备/蛋白质结构预测](9-protein-structure-prediction.md)
+- [深入探究/输入准备/蛋白质-核酸复合物预测](10-protein-nucleic-acid-complex-prediction.md)
+- [深入探究/输入准备/蛋白质-小分子复合物预测](11-protein-small-molecule-complex-prediction.md)
+- [深入探究/输入准备/高级生物分子复合物](12-higher-order-biomolecular-complexes.md)
+- [深入探究/输入准备/共价修饰蛋白质预测](13-covalently-modified-protein-prediction.md)
+
+### 模型架构
+
+- [深入探究/模型架构/三轨设计概述](14-three-track-design-overview.md)
+- [深入探究/模型架构/RoseTTAFoldModule 核心组件](15-rosettafoldmodule-core-components.md)
+- [深入探究/模型架构/用于 3D 等变的 SE3Transformer](16-se3transformer-for-3d-equivariance.md)
+- [深入探究/模型架构/注意力机制与嵌入](17-attention-mechanisms-and-embeddings.md)
+
+### 数据管道
+
+- [深入探究/数据管道/输入数据结构](18-input-data-structures.md)
+- [深入探究/数据管道/数据加载与特征化](19-data-loading-and-featurization.md)
+- [深入探究/数据管道/MSA 生成与模板整合](20-msa-generation-and-template-integration.md)
+- [深入探究/数据管道/化学特征处理](21-chemical-feature-processing.md)
+
+### 推理与预测
+
+- [深入探究/推理与预测/ModelRunner 工作流](22-modelrunner-workflow.md)
+- [深入探究/推理与预测/前向传播与循环](23-forward-pass-and-recycling.md)
+- [深入探究/推理与预测/置信度指标计算](24-confidence-metrics-calculation.md)
+- [深入探究/推理与预测/结构输出生成](25-structure-output-generation.md)
+
+### 高级功能
+
+- [深入探究/高级功能/共价键指定](26-covalent-bond-specification.md)
+- [深入探究/高级功能/手性处理](27-chirality-handling.md)
+- [深入探究/高级功能/对称性与重复处理](28-symmetry-and-repeat-handling.md)
+
