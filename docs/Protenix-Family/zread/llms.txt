@@ -1,0 +1,55 @@
+# bytedance/Protenix
+
+Source: https://zread.ai/bytedance/Protenix
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/模型选择与比较](3-model-selection-and-comparison.md)
+- [入门指南/输入 JSON 格式](4-input-json-format.md)
+
+## 动态资讯
+
+- [动态资讯/最新更新](5-latest-updates.md)
+- [动态资讯/问题与反馈](6-issues-and-feedbacks.md)
+- [动态资讯/关于贡献者](7-about-contributors.md)
+
+## 深入探索
+
+- [深入探索/架构概述](8-architecture-overview.md)
+### 模型架构
+
+- [深入探索/模型架构/Pairformer 堆栈](9-pairformer-stack.md)
+- [深入探索/模型架构/扩散模块](10-diffusion-module.md)
+- [深入探索/模型架构/置信度头部](11-confidence-head.md)
+- [深入探索/模型架构/输入特征嵌入器](12-input-feature-embedder.md)
+
+### 数据处理
+
+- [深入探索/数据处理/特征化流水线](13-featurization-pipeline.md)
+- [深入探索/数据处理/分词器与 AtomArray](14-tokenizer-and-atomarray.md)
+- [深入探索/数据处理/MSA 特征处理](15-msa-feature-processing.md)
+- [深入探索/数据处理/模板特征处理](16-template-feature-processing.md)
+
+### 训练与推理
+
+- [深入探索/训练与推理/训练运行器](17-training-runner.md)
+- [深入探索/训练与推理/推理运行器](18-inference-runner.md)
+- [深入探索/训练与推理/扩散采样与生成器](19-diffusion-sampling-and-generator.md)
+- [深入探索/训练与推理/损失函数](20-loss-functions.md)
+
+### 性能与优化
+
+- [深入探索/性能与优化/自定义 Triton Attention Kernel](21-custom-triton-attention-kernel.md)
+- [深入探索/性能与优化/三角乘法操作](22-triangular-multiplicative-operations.md)
+- [深入探索/性能与优化/自定义 LayerNorm CUDA Kernel](23-custom-layernorm-cuda-kernel.md)
+- [深入探索/性能与优化/免训练引导引擎](24-training-free-guidance-engine.md)
+
+### 生态与扩展
+
+- [深入探索/生态与扩展/约束特征](25-constraint-features.md)
+- [深入探索/生态与扩展/配置系统](26-configuration-system.md)
+- [深入探索/生态与扩展/评估指标](27-metrics-evaluation.md)
+- [深入探索/生态与扩展/Protenix 生态系统](28-protenix-ecosystem.md)
+
