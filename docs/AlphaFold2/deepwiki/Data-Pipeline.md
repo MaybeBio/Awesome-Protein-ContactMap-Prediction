@@ -37,8 +37,127 @@ The Data Pipeline executes the following stages:
 
 ### Data Pipeline Architecture Diagram
 
-```
+```mermaid
+flowchart TD
 
+fasta["FASTA File"]
+process["process()"]
+parse["parsers.parse_fasta()"]
+seq_feat["make_sequence_features()"]
+jack_uni["jackhmmer_uniref90_runner"]
+jack_mgn["jackhmmer_mgnify_runner"]
+jack_bfd["jackhmmer_small_bfd_runner"]
+hhblits["hhblits_bfd_uniref_runner"]
+parse_sto["parsers.parse_stockholm()"]
+parse_a3m["parsers.parse_a3m()"]
+msa_feat["make_msa_features()"]
+temp_search["template_searcher"]
+temp_feat["template_featurizer"]
+hhsearch_class["hhsearch.HHSearch"]
+hmmsearch_class["hmmsearch.Hmmsearch"]
+jackhmmer_bin["jackhmmer"]
+hhblits_bin["hhblits"]
+hhsearch_bin["hhsearch"]
+hmmsearch_bin["hmmsearch"]
+kalign_bin["kalign"]
+uniref90_db["uniref90_database_path"]
+mgnify_db["mgnify_database_path"]
+bfd_db["bfd_database_path"]
+small_bfd_db["small_bfd_database_path"]
+uniref30_db["uniref30_database_path"]
+pdb70_db["pdb70_database_path"]
+pdb_seqres["pdb_seqres_database_path"]
+template_mmcif["template_mmcif_dir"]
+feature_dict["feature_dict"]
+
+fasta --> process
+jack_uni --> jackhmmer_bin
+jack_mgn --> jackhmmer_bin
+jack_bfd --> jackhmmer_bin
+hhblits --> hhblits_bin
+jackhmmer_bin --> uniref90_db
+jackhmmer_bin --> mgnify_db
+jackhmmer_bin --> small_bfd_db
+hhblits_bin --> bfd_db
+hhblits_bin --> uniref30_db
+hhsearch_class --> hhsearch_bin
+hmmsearch_class --> hmmsearch_bin
+hhsearch_bin --> pdb70_db
+hmmsearch_bin --> pdb_seqres
+temp_feat --> template_mmcif
+temp_feat --> kalign_bin
+seq_feat --> feature_dict
+msa_feat --> feature_dict
+temp_feat --> feature_dict
+
+subgraph Output ["Output Features"]
+    feature_dict
+end
+
+subgraph Databases ["Sequence Databases"]
+    uniref90_db
+    mgnify_db
+    bfd_db
+    small_bfd_db
+    uniref30_db
+    pdb70_db
+    pdb_seqres
+    template_mmcif
+end
+
+subgraph ExternalTools ["External Binaries"]
+    jackhmmer_bin
+    hhblits_bin
+    hhsearch_bin
+    hmmsearch_bin
+    kalign_bin
+end
+
+subgraph Pipeline ["pipeline.DataPipeline"]
+    process
+    process --> parse
+    process --> jack_uni
+    process --> jack_mgn
+    process --> jack_bfd
+    process --> hhblits
+    process --> temp_search
+
+subgraph TemplateProcessing ["Template Processing"]
+    temp_search
+    temp_feat
+    hhsearch_class
+    hmmsearch_class
+    temp_search --> hhsearch_class
+    temp_search --> hmmsearch_class
+    temp_search --> temp_feat
+end
+
+subgraph MSAGeneration ["MSA Generation"]
+    jack_uni
+    jack_mgn
+    jack_bfd
+    hhblits
+    parse_sto
+    parse_a3m
+    msa_feat
+    jack_uni --> parse_sto
+    jack_mgn --> parse_sto
+    jack_bfd --> parse_sto
+    hhblits --> parse_a3m
+    parse_sto --> msa_feat
+    parse_a3m --> msa_feat
+end
+
+subgraph SeqProcessing ["Sequence Processing"]
+    parse
+    seq_feat
+    parse --> seq_feat
+end
+end
+
+subgraph Input ["Input Layer"]
+    fasta
+end
 ```
 
 Sources:
@@ -52,8 +171,52 @@ The `DataPipeline` class is instantiated with configuration for various genetic 
 
 ### DataPipeline Class Structure
 
-```
-
+```mermaid
+classDiagram
+    class DataPipeline {
+        +jackhmmer_uniref90_runner: Jackhmmer
+        +jackhmmer_mgnify_runner: Jackhmmer
+        +jackhmmer_small_bfd_runner: Jackhmmer
+        +hhblits_bfd_uniref_runner: HHBlits
+        +template_searcher: HHSearch or Hmmsearch
+        +template_featurizer: TemplateHitFeaturizer
+        +use_small_bfd: bool
+        +mgnify_max_hits: int
+        +uniref_max_hits: int
+        +use_precomputed_msas: bool
+        +init(...)
+        +process(input_fasta_path, msa_output_dir) : : FeatureDict
+    }
+    class DataPipelineMultimer {
+        +monomer_data_pipeline: DataPipeline
+        +jackhmmer_uniprot_runner: Jackhmmer
+        +uniprot_max_hits: int
+        +use_precomputed_msas: bool
+        +init(monomer_data_pipeline, ...)
+        +process(input_fasta_path, msa_output_dir) : : FeatureDict
+    }
+    class Jackhmmer {
+        +binary_path: str
+        +database_path: str
+        +n_cpu: int
+        +query(input_fasta_path) : : ResultDict
+    }
+    class HHSearch {
+        +binary_path: str
+        +databases: List<str>
+        +maxseq: int
+        +query(a3m_string) : : str
+    }
+    class Hmmsearch {
+        +binary_path: str
+        +hmmbuild_binary_path: str
+        +database_path: str
+        +query(msa) : : str
+    }
+    DataPipeline --> Jackhmmer
+    DataPipeline --> HHSearch
+    DataPipelineMultimer --> DataPipeline
+    DataPipelineMultimer --> Jackhmmer
 ```
 
 ### Initialization Parameters
@@ -82,8 +245,36 @@ The `process()` method orchestrates the complete feature generation pipeline. It
 
 ### Process Execution Sequence
 
-```
+```mermaid
+sequenceDiagram
+  participant DataPipeline
+  participant parsers module
+  participant Jackhmmer
+  participant HHBlits
+  participant template_searcher
+  participant template_featurizer
 
+  DataPipeline->>parsers module: parse_fasta(input_fasta_path)
+  parsers module-->>DataPipeline: input_sequence, input_description
+  DataPipeline->>DataPipeline: make_sequence_features()
+  loop [use_small_bfd is True]
+    DataPipeline->>DataPipeline: run_msa_tool(use_precomputed_msas=True)
+    DataPipeline-->>DataPipeline: Load cached MSAs
+    DataPipeline->>Jackhmmer: jackhmmer_uniref90_runner.query()
+    Jackhmmer-->>DataPipeline: uniref90_msa (stockholm)
+    DataPipeline->>Jackhmmer: jackhmmer_mgnify_runner.query()
+    Jackhmmer-->>DataPipeline: mgnify_msa (stockholm)
+    DataPipeline->>Jackhmmer: jackhmmer_small_bfd_runner.query()
+    Jackhmmer-->>DataPipeline: bfd_msa (stockholm)
+    DataPipeline->>HHBlits: hhblits_bfd_uniref_runner.query()
+    HHBlits-->>DataPipeline: bfd_uniref_msa (a3m)
+  end
+  DataPipeline->>DataPipeline: make_msa_features()
+  DataPipeline->>template_searcher: query(msa_for_templates)
+  template_searcher-->>DataPipeline: template_hits
+  DataPipeline->>template_featurizer: get_templates(query_seq, hits)
+  template_featurizer-->>DataPipeline: templates_result
+  DataPipeline-->>DataPipeline: Complete feature_dict
 ```
 
 ### MSA Caching

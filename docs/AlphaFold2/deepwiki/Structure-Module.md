@@ -17,8 +17,39 @@ The Structure Module is a critical component of AlphaFold that transforms the ab
 
 The Structure Module is the final major computational step in the AlphaFold architecture that performs the actual 3D structure prediction. It receives pair and single representations from the Evoformer and outputs atomic coordinates.
 
-```
+```mermaid
+flowchart TD
 
+MSA["MSA Representation"]
+Single["Single Representation"]
+Pair["Pair Representation"]
+StructMod["Structure Module"]
+FoldIter["Iterative Folding"]
+Frames["Rigid Body Frames"]
+Coords["3D Coordinates"]
+Output["Final Structure<br>PDB/mmCIF"]
+
+Single --> StructMod
+Pair --> StructMod
+Coords --> Output
+
+subgraph subGraph1 ["Structure Module"]
+    StructMod
+    FoldIter
+    Frames
+    Coords
+    StructMod --> FoldIter
+    FoldIter --> Frames
+    Frames --> Coords
+end
+
+subgraph subGraph0 ["Evoformer Processing"]
+    MSA
+    Single
+    Pair
+    MSA --> Single
+    MSA --> Pair
+end
 ```
 
 Sources:
@@ -29,8 +60,44 @@ Sources:
 
 The Structure Module follows an iterative refinement approach where it gradually improves the 3D structure through multiple folding iterations.
 
-```
+```mermaid
+flowchart TD
 
+Input["Input Representations"]
+SM["StructureModule"]
+GMR["generate_monomer_rigids"]
+FI["FoldIteration"]
+IPA["InvariantPointAttention"]
+TR["Transition Layers"]
+RU["Rigid Update"]
+SC["MultiRigidSidechain"]
+AA14["Atom14 Positions"]
+AA37["Atom37 Positions"]
+Output["Final Protein Structure"]
+
+Input --> SM
+SC --> AA14
+AA14 --> AA37
+AA37 --> Output
+
+subgraph subGraph1 ["Structure Module"]
+    SM
+    SM --> GMR
+
+subgraph subGraph0 ["Iterative Folding"]
+    GMR
+    FI
+    IPA
+    TR
+    RU
+    SC
+    GMR --> FI
+    FI --> IPA
+    FI --> TR
+    FI --> RU
+    FI --> SC
+end
+end
 ```
 
 Sources:
@@ -48,8 +115,19 @@ The Structure Module uses rigid body transformations (`Rigid3Array`) to represen
 1. **Rotation**: Represented using `Rot3Array` (often parameterized as quaternions)
 2. **Translation**: Represented using `Vec3Array` for 3D positions
 
-```
-
+```mermaid
+classDiagram
+    class Rigid3Array {
+        rotation: Rot3Array
+        translation: Vec3Array
+        apply_to_point()
+        inverse()
+        compose()
+    }
+    class QuatRigid {
+        call(activations) : -> Rigid3Array
+    }
+    Rigid3Array -- QuatRigid : creates
 ```
 
 Sources:
@@ -67,8 +145,49 @@ The `InvariantPointAttention` module is a specialized attention mechanism that w
 3. Combines 3D point-based attention with traditional scalar attention.
 4. Enables the model to reason about spatial relationships in a geometrically meaningful way.
 
-```
+```mermaid
+flowchart TD
 
+I1D["Inputs 1D<br>(N, C)"]
+QPointProj["q_point_projection"]
+KPointProj["k_point_projection"]
+QScalarProj["q_scalar_projection"]
+KScalarProj["k_scalar_projection"]
+VScalarProj["v_scalar_projection"]
+VPointProj["v_point_projection"]
+I2D["Inputs 2D<br>(N, M, C')"]
+Attn2D["attention_2d"]
+PointDist["Point Distance<br>Computation"]
+ScalarAttn["Scalar Attention<br>Computation"]
+AttnLogits["Attention Logits"]
+AttnWeights["Attention Weights"]
+ResultScalar["Result Scalar"]
+ResultPoint["Result Point"]
+OutputFeatures["Output Features"]
+OutputProj["Output Projection"]
+
+I1D --> QPointProj
+I1D --> KPointProj
+I1D --> QScalarProj
+I1D --> KScalarProj
+I1D --> VScalarProj
+I1D --> VPointProj
+I2D --> Attn2D
+QPointProj --> PointDist
+KPointProj --> PointDist
+QScalarProj --> ScalarAttn
+KScalarProj --> ScalarAttn
+PointDist --> AttnLogits
+ScalarAttn --> AttnLogits
+Attn2D --> AttnLogits
+AttnLogits --> AttnWeights
+AttnWeights --> ResultScalar
+VScalarProj --> ResultScalar
+AttnWeights --> ResultPoint
+VPointProj --> ResultPoint
+ResultScalar --> OutputFeatures
+ResultPoint --> OutputFeatures
+OutputFeatures --> OutputProj
 ```
 
 Sources:
@@ -97,8 +216,37 @@ The `MultiRigidSidechain` class predicts the positions of sidechain atoms using:
 2. Conversion of torsion angles to 3D frames via `torsion_angles_to_frames` [alphafold/model/all_atom_multimer.py L374-L438](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/all_atom_multimer.py#L374-L438)
 3. Placement of atoms according to standard residue templates via `frames_and_literature_positions_to_atom14_pos` [alphafold/model/all_atom_multimer.py L441-L472](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/all_atom_multimer.py#L441-L472)
 
-```
+```mermaid
+flowchart TD
 
+Rigid["Rigid Frames"]
+MRSC["MultiRigidSidechain"]
+Repr["Representations"]
+AAtype["Amino Acid Types"]
+Act["Activations"]
+Angles["Torsion Angles"]
+Frames["All Frames"]
+AtomPos["Atom Positions"]
+Output["Output Dict"]
+
+Rigid --> MRSC
+Repr --> MRSC
+AAtype --> MRSC
+Frames --> Output
+AtomPos --> Output
+Angles --> Output
+
+subgraph MultiRigidSidechain ["MultiRigidSidechain"]
+    MRSC
+    Act
+    Angles
+    Frames
+    AtomPos
+    MRSC --> Act
+    Act --> Angles
+    Angles --> Frames
+    Frames --> AtomPos
+end
 ```
 
 Sources:
@@ -115,8 +263,30 @@ The Structure Module implements protein folding as an iterative process through 
 2. **Iterative Refinement**: Apply multiple layers of `FoldIteration` [alphafold/model/folding_multimer.py L514-L531](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/folding_multimer.py#L514-L531)
 3. **Final Structure**: Produce the final atom positions and frames [alphafold/model/folding_multimer.py L533-L553](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/folding_multimer.py#L533-L553)
 
-```
+```mermaid
+sequenceDiagram
+  participant StructureModule
+  participant generate_monomer_rigids
+  participant FoldIteration
+  participant InvariantPointAttention
+  participant MultiRigidSidechain
+  participant User
 
+  StructureModule->>generate_monomer_rigids: Call with representations
+  generate_monomer_rigids->>generate_monomer_rigids: Initialize rigid frames
+  loop [For each layer]
+    generate_monomer_rigids->>FoldIteration: Apply fold iteration
+    FoldIteration->>InvariantPointAttention: Apply attention
+    InvariantPointAttention-->>FoldIteration: Updated activations
+    FoldIteration->>FoldIteration: Apply transition layers
+    FoldIteration->>FoldIteration: Update rigid frames
+    FoldIteration->>MultiRigidSidechain: Predict sidechains
+    MultiRigidSidechain-->>FoldIteration: Sidechain positions
+    FoldIteration-->>generate_monomer_rigids: Updated activations and outputs
+  end
+  generate_monomer_rigids-->>StructureModule: Final structure (rigid frames & atom positions)
+  StructureModule->>StructureModule: Convert to atom37 representation
+  StructureModule-->>User: Final atom positions and masks
 ```
 
 Sources:
@@ -137,8 +307,25 @@ The module converts between these formats as needed using `atom14_to_atom37` [al
 
  and `atom37_to_atom14` [alphafold/model/all_atom.py L95-L112](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/all_atom.py#L95-L112)
 
-```
+```mermaid
+flowchart TD
 
+A14["14 atoms per residue"]
+A14Pos["Local atom positions"]
+A37["37 atoms per residue"]
+A37Pos["Standard PDB format"]
+
+A14 --> A37
+
+subgraph subGraph1 ["atom37 Representation"]
+    A37
+    A37Pos
+end
+
+subgraph subGraph0 ["atom14 Representation"]
+    A14
+    A14Pos
+end
 ```
 
 Sources:
@@ -155,8 +342,20 @@ The module uses a hierarchical system of rigid body frames:
 2. **Sidechain Frames**: 8 frames per residue (1 backbone + 7 for sidechains/torsions) [alphafold/model/all_atom.py L115-L147](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/all_atom.py#L115-L147)
 3. **Global Coordinates**: Final atom positions in global coordinate system.
 
-```
+```mermaid
+flowchart TD
 
+BackboneFrame["Backbone Frame<br>(N, CA, C atoms)"]
+ChiFrames["Chi Frames<br>(χ1, χ2, χ3, χ4)"]
+AtomPos["Atom Positions"]
+
+subgraph subGraph0 ["Hierarchy of Frames"]
+    BackboneFrame
+    ChiFrames
+    AtomPos
+    BackboneFrame --> ChiFrames
+    ChiFrames --> AtomPos
+end
 ```
 
 Sources:
@@ -177,8 +376,44 @@ The module also includes comprehensive violation detection via `find_structural_
 
 :
 
-```
+```mermaid
+flowchart TD
 
+Pred["Predicted Structure"]
+VD["Violation Detection"]
+BR["Between-Residue Violations"]
+WR["Within-Residue Violations"]
+Bond["Bond Length Violations"]
+Angle["Bond Angle Violations"]
+Clash["Clashes Between Residues"]
+Internal["Internal Clashes"]
+Constraints["Distance Constraint Violations"]
+VM["Violation Metrics"]
+
+Pred --> VD
+Bond --> VM
+Angle --> VM
+Clash --> VM
+Internal --> VM
+Constraints --> VM
+
+subgraph subGraph0 ["Structural Violation Detection"]
+    VD
+    BR
+    WR
+    Bond
+    Angle
+    Clash
+    Internal
+    Constraints
+    VD --> BR
+    VD --> WR
+    BR --> Bond
+    BR --> Angle
+    BR --> Clash
+    WR --> Internal
+    WR --> Constraints
+end
 ```
 
 Sources:
@@ -195,8 +430,44 @@ The Structure Module produces several key outputs:
 2. **Atom Masks**: Binary indicators of which atoms are present.
 3. **Rigid Frames**: Positional and orientational information for residues.
 
-```
+```mermaid
+flowchart TD
 
+SM["StructureModule"]
+BasicOut["Basic Outputs"]
+FullOut["Complete Outputs"]
+FinalAtomPos["final_atom_positions<br>(N, 37, 3)"]
+FinalAtomMask["final_atom_mask<br>(N, 37)"]
+ActOut["act<br>Activations for confidence"]
+Traj["traj<br>All iteration frames"]
+SC["sidechains<br>Detailed sidechain info"]
+Atom14Pos["final_atom14_positions<br>(N, 14, 3)"]
+Atom14Mask["final_atom14_mask<br>(N, 14)"]
+
+SM --> BasicOut
+SM --> FullOut
+
+subgraph subGraph1 ["Complete Outputs (additional)"]
+    FullOut
+    Traj
+    SC
+    Atom14Pos
+    Atom14Mask
+    FullOut --> Traj
+    FullOut --> SC
+    FullOut --> Atom14Pos
+    FullOut --> Atom14Mask
+end
+
+subgraph subGraph0 ["Basic Outputs"]
+    BasicOut
+    FinalAtomPos
+    FinalAtomMask
+    ActOut
+    BasicOut --> FinalAtomPos
+    BasicOut --> FinalAtomMask
+    BasicOut --> ActOut
+end
 ```
 
 Sources:

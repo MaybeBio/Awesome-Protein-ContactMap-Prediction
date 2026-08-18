@@ -18,8 +18,41 @@ AlphaFold uses Docker to create a consistent, isolated environment with all nece
 
 The following diagram maps high-level execution steps to the specific code entities responsible for managing the Docker environment.
 
-```
+```mermaid
+flowchart TD
 
+User["User"]
+RunDockerPy["docker/run_docker.py"]
+DockerImage["AlphaFold Docker Image"]
+DockerContainer["Docker Container"]
+InputFASTA["FASTA Input Files"]
+Databases["Genetic Databases"]
+OutputDir["Output Directory"]
+RunAlphafoldPy["run_alphafold.py"]
+Dependencies["Dependencies (JAX, OpenMM, HHsuite)"]
+AlphafoldCode["AlphaFold Code"]
+
+User --> RunDockerPy
+RunDockerPy --> DockerImage
+RunDockerPy --> DockerContainer
+InputFASTA --> DockerContainer
+Databases --> DockerContainer
+DockerContainer --> OutputDir
+DockerContainer --> RunAlphafoldPy
+
+subgraph subGraph1 ["Docker Container"]
+    RunAlphafoldPy
+    Dependencies
+    AlphafoldCode
+    RunAlphafoldPy --> Dependencies
+    RunAlphafoldPy --> AlphafoldCode
+end
+
+subgraph subGraph0 ["Host System"]
+    InputFASTA
+    Databases
+    OutputDir
+end
 ```
 
 Sources: [docker/Dockerfile L1-L91](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/Dockerfile#L1-L91)
@@ -43,8 +76,32 @@ The Docker image is based on `nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu20.04` [do
 5. **Python Dependencies**: JAX 0.4.26 with CUDA 12 support, plus packages from `requirements.txt` [docker/Dockerfile L69-L73](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/Dockerfile#L69-L73)
 6. **AlphaFold Code**: The complete codebase copied to `/app/alphafold` [docker/Dockerfile L63](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/Dockerfile#L63-L63)
 
-```
+```mermaid
+flowchart TD
 
+BaseImage["nvidia/cuda Runtime (12.2.2)"]
+SystemDeps["System Dependencies<br>(build-essential, cmake, hmmer, kalign)"]
+HHsuite["HHsuite v3.3.0<br>(compiled from source)"]
+Miniconda["Miniconda Package Manager"]
+CondaPackages["Conda Packages<br>(Python 3.11, CUDA libraries)"]
+PipPackages["Pip Packages<br>(JAX 0.4.26, requirements.txt)"]
+AlphafoldCode["AlphaFold Codebase<br>(/app/alphafold)"]
+
+subgraph subGraph0 ["Docker Image Layers"]
+    BaseImage
+    SystemDeps
+    HHsuite
+    Miniconda
+    CondaPackages
+    PipPackages
+    AlphafoldCode
+    BaseImage --> SystemDeps
+    SystemDeps --> HHsuite
+    HHsuite --> Miniconda
+    Miniconda --> CondaPackages
+    CondaPackages --> PipPackages
+    PipPackages --> AlphafoldCode
+end
 ```
 
 Sources: [docker/Dockerfile L15-L74](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/Dockerfile#L15-L74)
@@ -53,8 +110,17 @@ Sources: [docker/Dockerfile L15-L74](https://github.com/google-deepmind/alphafol
 
 The Docker image configures an entrypoint script (`/app/run_alphafold.sh`) that runs `ldconfig` to ensure GPU visibility, then executes `run_alphafold.py` [docker/Dockerfile L87-L91](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/Dockerfile#L87-L91)
 
-```
+```mermaid
+flowchart TD
 
+EntryPoint["/app/run_alphafold.sh"]
+Ldconfig["ldconfig"]
+RunAlphafold["python /app/alphafold/run_alphafold.py"]
+CommandArgs["$@"]
+
+EntryPoint --> Ldconfig
+Ldconfig --> RunAlphafold
+RunAlphafold --> CommandArgs
 ```
 
 The `ldconfig` command is necessary due to a quirk with Debian-based NVIDIA Docker images where GPUs are not visible until the dynamic linker cache is updated [docker/Dockerfile L81-L83](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/Dockerfile#L81-L83)
@@ -71,8 +137,38 @@ The repository provides `docker/run_docker.py` to simplify running AlphaFold in 
 
 The script uses `docker.types.Mount` to bind host directories into the container [docker/run_docker.py L150-L155](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/run_docker.py#L150-L155)
 
-```
+```mermaid
+flowchart TD
 
+ParseArgs["Parse flags.FLAGS"]
+CreateMounts["_create_mount()"]
+ConfigGPU["Configure DeviceRequests"]
+LaunchContainer["docker.containers.run()"]
+FASTA["FASTA files"]
+Databases["Genetic databases"]
+OutputDir["Output directory"]
+ContainerFASTA["/mnt/fasta_path_*"]
+ContainerDBs["/mnt/data_dir/..."]
+
+FASTA --> ContainerFASTA
+Databases --> ContainerDBs
+LaunchContainer --> OutputDir
+
+subgraph subGraph1 ["Input & Mounted Directories"]
+    FASTA
+    Databases
+    OutputDir
+end
+
+subgraph subGraph0 ["run_docker.py Flow"]
+    ParseArgs
+    CreateMounts
+    ConfigGPU
+    LaunchContainer
+    ParseArgs --> CreateMounts
+    CreateMounts --> ConfigGPU
+    ConfigGPU --> LaunchContainer
+end
 ```
 
 Sources: [docker/run_docker.py L133-L157](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/run_docker.py#L133-L157)
@@ -123,15 +219,42 @@ Sources: [requirements.txt L1-L14](https://github.com/google-deepmind/alphafold/
 To build the image manually:
 
 ```
-
+docker build -f docker/Dockerfile -t alphafold .
 ```
 
 ### Mount Points and Data Organization
 
 The script `run_docker.py` maps host paths to a standard container structure under `_ROOT_MOUNT_DIRECTORY = '/mnt/'` [docker/run_docker.py L130](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/run_docker.py#L130-L130)
 
-```
+```mermaid
+flowchart TD
 
+RootMount["/mnt/"]
+FastaPaths["/mnt/fasta_path_*"]
+DataDir["/mnt/data_dir"]
+OutputDir["/mnt/output"]
+DBPaths["Database Paths"]
+Uniref90["/mnt/uniref90_database_path"]
+Mgnify["/mnt/mgnify_database_path"]
+Templates["/mnt/template_mmcif_dir"]
+
+subgraph subGraph0 ["Docker Container Mount Structure"]
+    RootMount
+    FastaPaths
+    DataDir
+    OutputDir
+    DBPaths
+    Uniref90
+    Mgnify
+    Templates
+    RootMount --> FastaPaths
+    RootMount --> DataDir
+    RootMount --> OutputDir
+    RootMount --> DBPaths
+    DBPaths --> Uniref90
+    DBPaths --> Mgnify
+    DBPaths --> Templates
+end
 ```
 
 Sources: [docker/run_docker.py L130-L215](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/run_docker.py#L130-L215)

@@ -43,8 +43,34 @@ The `main()` function [run_alphafold.py L558-L717](https://github.com/google-dee
 
 Title: AlphaFold Execution Flow
 
-```
+```mermaid
+flowchart TD
 
+Start["main() [run_alphafold.py:558]"]
+ValidateTools["Validate External Tools<br>jackhmmer, hhblits, hhsearch<br>hmmsearch, hmmbuild, kalign"]
+CheckFlags["Check Flag Consistency<br>_check_flag() calls [run_alphafold.py:576]"]
+DetermineMode["Model Preset"]
+MultimerMode["Multimer Mode<br>run_multimer_system = True<br>model_type = 'Multimer'"]
+MonomerMode["Monomer Mode<br>run_multimer_system = False<br>model_type = 'Monomer'"]
+SetupTemplateM["Setup HMMsearch<br>hmmsearch.Hmmsearch()<br>templates.HmmsearchHitFeaturizer()"]
+SetupTemplateH["Setup HHSearch<br>hhsearch.HHSearch()<br>templates.HhsearchHitFeaturizer()"]
+CreatePipeline["Create Data Pipeline"]
+LoadModels["Load Model Runners<br>config.MODEL_PRESETS<br>data.get_model_haiku_params()<br>model.RunModel()"]
+SetupRelaxer["Setup Amber Relaxer<br>relax.AmberRelaxation()"]
+PredictLoop["Prediction Loop<br>For each FASTA file<br>predict_structure()"]
+
+Start --> ValidateTools
+ValidateTools --> CheckFlags
+CheckFlags --> DetermineMode
+DetermineMode --> MultimerMode
+DetermineMode --> MonomerMode
+MultimerMode --> SetupTemplateM
+MonomerMode --> SetupTemplateH
+SetupTemplateM --> CreatePipeline
+SetupTemplateH --> CreatePipeline
+CreatePipeline --> LoadModels
+LoadModels --> SetupRelaxer
+SetupRelaxer --> PredictLoop
 ```
 
 **Sources**: [run_alphafold.py L558-L717](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/run_alphafold.py#L558-L717)
@@ -65,7 +91,7 @@ The mode selection logic occurs at [run_alphafold.py L585-L599](https://github.c
 :
 
 ```
-
+run_multimer_system = 'multimer' in FLAGS.model_presetmodel_type = 'Multimer' if run_multimer_system else 'Monomer'
 ```
 
 For multimer predictions, the data pipeline [run_alphafold.py L656-L664](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/run_alphafold.py#L656-L664)
@@ -111,8 +137,30 @@ The script loads model configurations and parameters for all models specified by
 
 Title: Model Runner Initialization
 
-```
+```mermaid
+flowchart TD
 
+Preset["MODEL_PRESETS<br>config.MODEL_PRESETS[preset]"]
+ModelNames["Model Names List<br>e.g. ['model_1', 'model_2', ...]"]
+Loop["For each model"]
+GetConfig["model_config()<br>config.model_config(name)"]
+GetParams["get_model_haiku_params()<br>data.get_model_haiku_params()"]
+CreateRunner["RunModel<br>model.RunModel(config, params)"]
+MultiSeeds["Multimer?"]
+MakeN["Create N instances<br>num_multimer_predictions_per_model"]
+Make1["Create 1 instance"]
+Runners["model_runners<br>Dict[str, RunModel]"]
+
+Preset --> ModelNames
+ModelNames --> Loop
+Loop --> GetConfig
+GetConfig --> GetParams
+GetParams --> CreateRunner
+CreateRunner --> MultiSeeds
+MultiSeeds --> MakeN
+MultiSeeds --> Make1
+MakeN --> Runners
+Make1 --> Runners
 ```
 
 ### Model Preset Selection
@@ -124,7 +172,7 @@ The available model presets are defined in `config.MODEL_PRESETS` [run_alphafold
 :
 
 ```
-
+if FLAGS.model_preset == 'monomer_casp14':  num_ensemble = 8else:  num_ensemble = 1
 ```
 
 For multimer predictions, multiple seeds are generated per model [run_alphafold.py L678-L682](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/run_alphafold.py#L678-L682)
@@ -149,8 +197,54 @@ The core prediction logic is implemented in `predict_structure()` [run_alphafold
 
 Title: predict_structure Execution
 
-```
+```mermaid
+flowchart TD
 
+Start["predict_structure()<br>[run_alphafold.py:345]"]
+CreateDirs["Create Output Directories<br>output_dir/{fasta_name}/<br>output_dir/{fasta_name}/msas/"]
+Features["Generate Features<br>data_pipeline.process()<br>→ feature_dict"]
+SaveFeatures["Save features.pkl<br>Pickled NumPy arrays"]
+ModelLoop["For each model_runner"]
+ProcessFeatures["Process Features<br>model_runner.process_features()<br>Add random seed, crop/pad"]
+Predict["Run Prediction<br>model_runner.predict()<br>JAX inference (JIT compiled)"]
+SaveConfidence["Save Confidence Metrics<br>confidence_{model}.json<br>pae_{model}.json"]
+SaveResults["Save Prediction Results<br>result_{model}.pkl<br>NumPy arrays"]
+CreateProtein["Create Protein Object<br>protein.from_prediction()<br>Convert to atom coordinates"]
+SaveUnrelaxed["Save Unrelaxed Structure<br>unrelaxed_{model}.pdb<br>unrelaxed_{model}.cif"]
+NextModel["More models?"]
+Rank["Rank Models<br>Sort by ranking_confidence<br>(pLDDT or iptm+ptm)"]
+SelectRelax["models_to_relax"]
+RelaxBest["Relax Top-Ranked Model"]
+RelaxAll["Relax All Models"]
+SkipRelax["Skip Relaxation"]
+DoRelax["Amber Relaxation<br>amber_relaxer.process()<br>OpenMM energy minimization"]
+SaveRelaxed["Save Relaxed Structures<br>relaxed_{model}.pdb<br>relaxed_{model}.cif"]
+SaveRanked["Save Ranked Structures<br>ranked_{0,1,2,3,4}.pdb<br>ranked_{0,1,2,3,4}.cif"]
+SaveMetadata["Save Metadata<br>ranking_debug.json<br>timings.json<br>relax_metrics.json"]
+
+Start --> CreateDirs
+CreateDirs --> Features
+Features --> SaveFeatures
+SaveFeatures --> ModelLoop
+ModelLoop --> ProcessFeatures
+ProcessFeatures --> Predict
+Predict --> SaveConfidence
+SaveConfidence --> SaveResults
+SaveResults --> CreateProtein
+CreateProtein --> SaveUnrelaxed
+SaveUnrelaxed --> NextModel
+NextModel --> ModelLoop
+NextModel --> Rank
+Rank --> SelectRelax
+SelectRelax --> RelaxBest
+SelectRelax --> RelaxAll
+SelectRelax --> SkipRelax
+RelaxBest --> DoRelax
+RelaxAll --> DoRelax
+DoRelax --> SaveRelaxed
+SaveRelaxed --> SaveRanked
+SkipRelax --> SaveRanked
+SaveRanked --> SaveMetadata
 ```
 
 **Sources**: [run_alphafold.py L345-L556](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/run_alphafold.py#L345-L556)

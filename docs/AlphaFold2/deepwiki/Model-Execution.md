@@ -21,8 +21,69 @@ The `RunModel` class ([alphafold/model/model.py L72-L184](https://github.com/goo
 
 ### Class Structure
 
-```
+```mermaid
+flowchart TD
 
+Constructor["RunModel.init[alphafold/model/model.py:75-102]<br>(config, params)"]
+SetConfig["self.config = config"]
+SetParams["self.params = params"]
+CheckMode["Check multimer_mode<br>from config.model.global_config"]
+MultimerFn["Define _forward_fn<br>modules_multimer.AlphaFold[alphafold/model/modules_multimer.py]"]
+MonomerFn["Define _forward_fn<br>modules.AlphaFold[alphafold/model/modules.py]"]
+Transform1["hk.transform(_forward_fn)"]
+Transform2["hk.transform(_forward_fn)"]
+JIT1["jax.jit(transform.apply)"]
+JIT2["jax.jit(transform.init)"]
+JIT3["jax.jit(transform.apply)"]
+JIT4["jax.jit(transform.init)"]
+Apply["self.apply[alphafold/model/model.py:101]"]
+Init["self.init[alphafold/model/model.py:102]"]
+Predict["predict(feat, random_seed)[alphafold/model/model.py:153]"]
+InitParams["init_params(feat, random_seed)[alphafold/model/model.py:104]"]
+Process["process_features(raw_features, random_seed)[alphafold/model/model.py:122]"]
+EvalShape["eval_shape(feat)[alphafold/model/model.py:143]"]
+
+Apply --> Predict
+Init --> InitParams
+
+subgraph RunModel_Methods ["RunModel_Methods"]
+    Predict
+    InitParams
+    Process
+    EvalShape
+end
+
+subgraph RunModel_Initialization ["RunModel_Initialization"]
+    Constructor
+    SetConfig
+    SetParams
+    CheckMode
+    MultimerFn
+    MonomerFn
+    Transform1
+    Transform2
+    JIT1
+    JIT2
+    JIT3
+    JIT4
+    Apply
+    Init
+    Constructor --> SetConfig
+    Constructor --> SetParams
+    Constructor --> CheckMode
+    CheckMode --> MultimerFn
+    CheckMode --> MonomerFn
+    MultimerFn --> Transform1
+    MonomerFn --> Transform2
+    Transform1 --> JIT1
+    Transform1 --> JIT2
+    Transform2 --> JIT3
+    Transform2 --> JIT4
+    JIT1 --> Apply
+    JIT2 --> Init
+    JIT3 --> Apply
+    JIT4 --> Init
+end
 ```
 
 **Sources:** [alphafold/model/model.py L72-L103](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L72-L103)
@@ -49,8 +110,39 @@ AlphaFold uses Haiku's functional programming paradigm combined with JAX's JIT c
 
 ### Haiku Transform Process
 
-```
+```mermaid
+flowchart TD
 
+ForwardDef["def _forward_fn(batch):<br>model = modules.AlphaFold(config)<br>return model(batch, ...)"]
+Transform["hk.transform(_forward_fn)"]
+TransObj["Transformed Object<br>.apply(params, rng, batch)<br>.init(rng, batch)"]
+JITApply["jax.jit(transform.apply)[alphafold/model/model.py:101]"]
+JITInit["jax.jit(transform.init)[alphafold/model/model.py:102]"]
+CompiledApply["Compiled Apply Function<br>XLA-optimized"]
+CompiledInit["Compiled Init Function<br>XLA-optimized"]
+
+ForwardDef --> Transform
+TransObj --> JITApply
+TransObj --> JITInit
+
+subgraph Step_3_JAX_JIT_Compilation ["Step_3_JAX_JIT_Compilation"]
+    JITApply
+    JITInit
+    CompiledApply
+    CompiledInit
+    JITApply --> CompiledApply
+    JITInit --> CompiledInit
+end
+
+subgraph Step_2_Haiku_Transform ["Step_2_Haiku_Transform"]
+    Transform
+    TransObj
+    Transform --> TransObj
+end
+
+subgraph Step_1_Define_Forward_Function ["Step_1_Define_Forward_Function"]
+    ForwardDef
+end
 ```
 
 **Sources:** [alphafold/model/model.py L86-L102](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L86-L102)
@@ -63,16 +155,16 @@ The forward function differs between monomer and multimer modes:
 
 ):
 
-```
-
+```python
+def _forward_fn(batch):    model = modules.AlphaFold(self.config.model)    return model(        batch,        is_training=False,        compute_loss=False,        ensemble_representations=True,    )
 ```
 
 **Multimer Mode** ([alphafold/model/model.py L86-L88](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L86-L88)
 
 ):
 
-```
-
+```python
+def _forward_fn(batch):    model = modules_multimer.AlphaFold(self.config.model)    return model(batch, is_training=False)
 ```
 
 **Sources:** [alphafold/model/model.py L84-L99](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L84-L99)
@@ -92,8 +184,33 @@ JAX's JIT compilation ([alphafold/model/model.py L101-L102](https://github.com/g
 
 The complete prediction workflow involves several stages, coordinated by methods of the `RunModel` class.
 
-```
+```mermaid
+flowchart TD
 
+Start["Input: raw_features<br>(NumPy dict from data pipeline)"]
+Process["process_features()[alphafold/model/model.py:122]<br>Prepare features for model"]
+MultFeat["Return raw_features<br>(no processing needed)"]
+MonoFeat["np_example_to_features()[alphafold/model/features.py:45]<br>TensorFlow pipeline<br>Cropping, MSA sampling, etc."]
+CheckParams["Parameters<br>initialized?"]
+InitParams["init_params()[alphafold/model/model.py:104]<br>Initialize randomly or<br>load from checkpoint"]
+Predict["predict(feat, random_seed)[alphafold/model/model.py:153]<br>Run model inference"]
+Apply["self.apply(params, rng, feat)<br>JIT-compiled forward pass"]
+Block["Block until ready<br>tree.map(block_until_ready)[alphafold/model/model.py:179]"]
+Confidence["get_confidence_metrics()[alphafold/model/model.py:31]<br>Compute pLDDT, pTM, ipTM, PAE"]
+Result["Return: prediction_result<br>+ confidence_metrics"]
+
+Start --> Process
+Process --> MultFeat
+Process --> MonoFeat
+MultFeat --> CheckParams
+MonoFeat --> CheckParams
+CheckParams --> InitParams
+CheckParams --> Predict
+InitParams --> Predict
+Predict --> Apply
+Apply --> Block
+Block --> Confidence
+Confidence --> Result
 ```
 
 **Sources:** [alphafold/model/model.py L104-L184](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L104-L184)
@@ -106,8 +223,25 @@ The `init_params` method ([alphafold/model/model.py L104-L120](https://github.co
 
 ) handles model parameter initialization:
 
-```
+```mermaid
+flowchart TD
 
+Entry["init_params(feat, random_seed=0)"]
+Check["self.params<br>exists?"]
+Skip["Skip initialization<br>Use provided params"]
+Random["Generate random seed<br>jax.random.PRNGKey(random_seed)"]
+CallInit["self.init(rng, feat)<br>Initialize parameters"]
+Convert["hk.data_structures.to_mutable_dict()[alphafold/model/model.py:119]<br>Convert to mutable dict"]
+Store["self.params = initialized params"]
+Warn["Log warning:<br>'Initialized parameters randomly'"]
+
+Entry --> Check
+Check --> Skip
+Check --> Random
+Random --> CallInit
+CallInit --> Convert
+Convert --> Store
+Store --> Warn
 ```
 
 **Sources:** [alphafold/model/model.py L104-L120](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L104-L120)
@@ -129,8 +263,31 @@ For monomer mode, features are processed through a TensorFlow pipeline ([alphafo
 
 ):
 
-```
+```mermaid
+flowchart TD
 
+RawFeat["raw_features<br>(NumPy dict)"]
+NumRes["Extract num_res<br>from seq_length"]
+MakeConfig["make_data_config()[alphafold/model/features.py:28]<br>Set crop_size = num_res"]
+DelMatrix["Convert deletion_matrix_int<br>to float32 deletion_matrix"]
+TFGraph["Create tf.Graph()[alphafold/model/features.py:60]"]
+Convert["np_to_tensor_dict()[alphafold/model/tf/proteins_dataset.py:109]<br>Convert NumPy to TF tensors"]
+Reshape["parse_reshape_logic()[alphafold/model/tf/proteins_dataset.py:29]<br>Reshape features to correct dims"]
+Process["input_pipeline.process_tensors_from_config()<br>Crop, sample MSA, add random seed"]
+Session["tf.Session.run()[alphafold/model/features.py:74]<br>Execute TensorFlow graph"]
+Filter["Filter out object dtype<br>features"]
+Output["Processed features<br>(NumPy dict)"]
+
+RawFeat --> NumRes
+NumRes --> MakeConfig
+MakeConfig --> DelMatrix
+DelMatrix --> TFGraph
+TFGraph --> Convert
+Convert --> Reshape
+Reshape --> Process
+Process --> Session
+Session --> Filter
+Filter --> Output
 ```
 
 **Sources:** [alphafold/model/features.py L45-L76](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/features.py#L45-L76)
@@ -162,8 +319,35 @@ The `get_confidence_metrics` function ([alphafold/model/model.py L31-L69](https:
 
 ) post-processes model outputs to compute confidence scores.
 
-```
+```mermaid
+flowchart TD
 
+Input["prediction_result<br>(model outputs)"]
+pLDDT["confidence.compute_plddt()[alphafold/common/confidence.py]<br>Per-residue confidence"]
+CheckPAE["Has predicted_aligned_error?"]
+PAE["compute_predicted_aligned_error()[alphafold/common/confidence.py]<br>Pairwise confidence matrix"]
+pTM["predicted_tm_score()[alphafold/common/confidence.py]<br>Global confidence metric"]
+CheckMultimer["multimer_mode?"]
+ipTM["predicted_tm_score(interface=True)[alphafold/common/confidence.py]<br>Interface confidence"]
+MonoRank["ranking_confidence =<br>mean(plddt)[alphafold/model/model.py:65]"]
+MultiRank["ranking_confidence =<br>0.8 * iptm + 0.2 * ptm[alphafold/model/model.py:59]"]
+Output["confidence_metrics dict:<br>plddt, ptm, iptm (multimer),<br>pae, ranking_confidence"]
+
+Input --> pLDDT
+Input --> CheckPAE
+CheckPAE --> PAE
+PAE --> pTM
+pTM --> CheckMultimer
+CheckMultimer --> ipTM
+CheckMultimer --> MonoRank
+ipTM --> MultiRank
+pLDDT --> Output
+PAE --> Output
+pTM --> Output
+ipTM --> Output
+MonoRank --> Output
+MultiRank --> Output
+CheckPAE --> Output
 ```
 
 **Sources:** [alphafold/model/model.py L31-L69](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L31-L69)
@@ -211,8 +395,21 @@ The `eval_shape` method ([alphafold/model/model.py L143-L151](https://github.com
 
 ) is a utility for determining output shapes without running the full computation using `jax.eval_shape`.
 
-```
+```mermaid
+flowchart TD
 
+Input["eval_shape(feat)"]
+Init["init_params(feat)<br>Ensure params exist"]
+Log1["Log input shapes"]
+Eval["jax.eval_shape(self.apply, ...)[alphafold/model/model.py:149]<br>Trace computation without execution"]
+Log2["Log output shapes"]
+Return["Return ShapeDtypeStruct"]
+
+Input --> Init
+Init --> Log1
+Log1 --> Eval
+Eval --> Log2
+Log2 --> Return
 ```
 
 **Sources:** [alphafold/model/model.py L143-L151](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L143-L151)

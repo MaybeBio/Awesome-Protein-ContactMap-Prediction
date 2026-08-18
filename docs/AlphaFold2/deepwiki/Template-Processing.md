@@ -42,8 +42,50 @@ The process is managed by the `DataPipeline` [alphafold/data/pipeline.py L123-L1
 
 ## Template Search Workflow
 
-```
+```mermaid
+flowchart TD
 
+QuerySeq["Query Sequence<br>(FASTA)"]
+HHsearch["HHSearch<br>(hhsearch.py:29-117)"]
+HMMsearch["Hmmsearch<br>(hmmsearch.py:29-145)"]
+PDB70["PDB70 Database<br>(HHsearch)"]
+PDBSeqres["PDB Seqres<br>(HMMsearch)"]
+HHR["HHR File<br>(HHsearch output)"]
+STO["Stockholm File<br>(HMMsearch output)"]
+ParseHHR["parse_hhr()<br>(parsers.py:518-533)"]
+ParseHMM["parse_hmmsearch_a3m()<br>(parsers.py:601-642)"]
+TemplateHits["TemplateHit Objects<br>(parsers.py:62-73)"]
+
+QuerySeq --> HHsearch
+QuerySeq --> HMMsearch
+HHsearch --> PDB70
+HMMsearch --> PDBSeqres
+PDB70 --> HHR
+PDBSeqres --> STO
+HHR --> ParseHHR
+STO --> ParseHMM
+ParseHHR --> TemplateHits
+ParseHMM --> TemplateHits
+
+subgraph subGraph3 ["Parsing (alphafold/data/parsers.py)"]
+    ParseHHR
+    ParseHMM
+end
+
+subgraph subGraph2 ["Output Formats"]
+    HHR
+    STO
+end
+
+subgraph subGraph1 ["Template Databases"]
+    PDB70
+    PDBSeqres
+end
+
+subgraph subGraph0 ["Search Tools (alphafold/data/tools/)"]
+    HHsearch
+    HMMsearch
+end
 ```
 
 **Template Search Workflow**: The query sequence is compared against template databases using either HHsearch (for HMM-HMM comparison) or HMMsearch (for HMM-sequence comparison). The tools produce different output formats, which are parsed into a unified `TemplateHit` representation.
@@ -74,8 +116,49 @@ The `Hmmsearch` class [alphafold/data/tools/hmmsearch.py L29-L30](https://github
 
 After template search identifies candidate structures, their atomic coordinates and metadata are extracted from mmCIF format files.
 
-```
+```mermaid
+flowchart TD
 
+mmCIFString["mmCIF File String"]
+MMCIFParser["PDB.MMCIFParser<br>(Biopython)"]
+Structure["PDB Structure Object"]
+MMCIFDict["_mmcif_dict<br>(raw field data)"]
+GetHeader["_get_header()<br>(307-339)"]
+GetProteinChains["_get_protein_chains()<br>(359-408)"]
+GetAtomSites["_get_atom_site_list()<br>(342-356)"]
+SeqToStructure["seqres_to_structure<br>(SEQRES index → ResidueAtPosition)"]
+ChainToSeqres["chain_to_seqres<br>(chain_id → sequence)"]
+MmcifObject["MmcifObject<br>(mmcif_parsing.py:71-94)"]
+
+mmCIFString --> MMCIFParser
+MMCIFDict --> GetHeader
+MMCIFDict --> GetProteinChains
+MMCIFDict --> GetAtomSites
+GetHeader --> MmcifObject
+Structure --> MmcifObject
+GetProteinChains --> ChainToSeqres
+GetAtomSites --> SeqToStructure
+ChainToSeqres --> MmcifObject
+SeqToStructure --> MmcifObject
+
+subgraph Mappings ["Mappings"]
+    SeqToStructure
+    ChainToSeqres
+end
+
+subgraph subGraph1 ["Data Extraction (mmcif_parsing.py)"]
+    GetHeader
+    GetProteinChains
+    GetAtomSites
+end
+
+subgraph subGraph0 ["Biopython Parsing"]
+    MMCIFParser
+    Structure
+    MMCIFDict
+    MMCIFParser --> Structure
+    MMCIFParser --> MMCIFDict
+end
 ```
 
 **mmCIF Parsing Workflow**: The parsing process uses Biopython to extract the 3D structure and raw mmCIF dictionary, then processes this data to create SEQRES-to-structure mappings.
@@ -99,8 +182,35 @@ After template search identifies candidate structures, their atomic coordinates 
 
 Template processing relies on `residue_constants.py` for atom definitions and rigid group coordinates.
 
-```
+```mermaid
+flowchart TD
 
+restype_3to1["restype_3to1<br>(ALA→A, ARG→R, ...)"]
+HHBLITS_AA["HHBLITS_AA_TO_ID<br>(A→0, C→1, ...)"]
+atom_types["atom_types<br>(37 standard atoms)"]
+atom_order["atom_order<br>(atom_name → index)"]
+chi_angles_atoms["chi_angles_atoms<br>(dihedral definitions)"]
+rigid_group_pos["rigid_group_atom_positions<br>(local coordinates)"]
+
+restype_3to1 --> atom_types
+atom_order --> rigid_group_pos
+
+subgraph subGraph2 ["Structural Properties"]
+    chi_angles_atoms
+    rigid_group_pos
+    chi_angles_atoms --> rigid_group_pos
+end
+
+subgraph subGraph1 ["Atom Definitions"]
+    atom_types
+    atom_order
+    atom_types --> atom_order
+end
+
+subgraph subGraph0 ["Residue Mappings"]
+    restype_3to1
+    HHBLITS_AA
+end
 ```
 
 **Residue Constants Structure**: The module provides mappings used throughout template processing and coordinate transformations.

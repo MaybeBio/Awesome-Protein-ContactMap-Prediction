@@ -18,8 +18,69 @@ For information about how configurations are used during model execution, see [M
 
 The configuration system is built on a hierarchical class structure with two parallel representations: mutable dictionary-based configs and immutable dataclass-based configs.
 
-```
+```mermaid
+flowchart TD
 
+ConfigMeta["ConfigMeta<br>(metaclass)"]
+BaseConfig["BaseConfig<br>base_config.py"]
+MLConfig["ml_collections.ConfigDict<br>(external library)"]
+AlphaFoldConfig["AlphaFoldConfig<br>Root config dataclass"]
+CONFIG["CONFIG<br>Monomer ConfigDict"]
+CONFIG_MULTIMER["CONFIG_MULTIMER<br>Multimer ConfigDict"]
+Data["Data<br>data.common, data.eval"]
+Model["Model<br>embeddings_and_evoformer<br>heads, global_config"]
+EmbEvo["EmbeddingsAndEvoformer<br>evoformer, template"]
+Heads["Heads<br>distogram, structure_module<br>predicted_lddt, masked_msa"]
+GlobalConfig["GlobalConfig<br>deterministic, multimer_mode"]
+MODEL_PRESETS["MODEL_PRESETS<br>{'monomer', 'monomer_ptm', 'multimer'}"]
+CONFIG_DIFFS["CONFIG_DIFFS<br>Model-specific overrides"]
+CONFIG_DIFF_OPS["CONFIG_DIFF_OPS<br>Dataclass modification functions"]
+
+BaseConfig --> AlphaFoldConfig
+BaseConfig --> Data
+BaseConfig --> Model
+BaseConfig --> EmbEvo
+BaseConfig --> Heads
+BaseConfig --> GlobalConfig
+MLConfig --> CONFIG
+MLConfig --> CONFIG_MULTIMER
+CONFIG_DIFFS --> CONFIG
+CONFIG_DIFFS --> CONFIG_MULTIMER
+CONFIG_DIFF_OPS --> AlphaFoldConfig
+AlphaFoldConfig --> Data
+AlphaFoldConfig --> Model
+
+subgraph subGraph3 ["Model Selection"]
+    MODEL_PRESETS
+    CONFIG_DIFFS
+    CONFIG_DIFF_OPS
+    MODEL_PRESETS --> CONFIG_DIFFS
+    MODEL_PRESETS --> CONFIG_DIFF_OPS
+end
+
+subgraph subGraph2 ["Major Configuration Sections"]
+    Data
+    Model
+    EmbEvo
+    Heads
+    GlobalConfig
+    Model --> EmbEvo
+    Model --> Heads
+    Model --> GlobalConfig
+end
+
+subgraph subGraph1 ["Root Configuration Classes"]
+    AlphaFoldConfig
+    CONFIG
+    CONFIG_MULTIMER
+end
+
+subgraph subGraph0 ["Base Infrastructure"]
+    ConfigMeta
+    BaseConfig
+    MLConfig
+    ConfigMeta --> BaseConfig
+end
 ```
 
 **Sources:** [alphafold/model/base_config.py L69-L131](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/base_config.py#L69-L131)
@@ -39,8 +100,8 @@ The legacy configuration format uses `ml_collections.ConfigDict`, a mutable dict
 
 The `model_config()` function returns a `ConfigDict` by applying model-specific overrides from `CONFIG_DIFFS`:
 
-```
-
+```python
+def model_config(name: str) -> ml_collections.ConfigDict
 ```
 
 This function:
@@ -64,14 +125,47 @@ The modern configuration format uses frozen dataclasses derived from `BaseConfig
 * **Automatic coercion**: Dictionary values are automatically converted to nested config objects in `__post_init__` [alphafold/model/base_config.py L94-L128](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/base_config.py#L94-L128)
 * **Default factories**: Fields can use `autocreate()` for automatic initialization [alphafold/model/base_config.py L48-L50](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/base_config.py#L48-L50)
 
-```
+```mermaid
+flowchart TD
 
+ConfigMeta_post_init["post_init<br>Auto-coerces dicts to Config instances"]
+freeze["freeze()<br>Makes config immutable"]
+unfreeze["unfreeze()<br>Context manager for temp modifications"]
+as_dict["as_dict()<br>Converts to dict representation"]
+autocreate_func["autocreate(**defaults)<br>Default factory marker"]
+Construction["Construction<br>BaseConfig(**kwargs)"]
+Coercion["Automatic Coercion<br>Mappings → Config instances"]
+Frozen["Frozen State<br>_is_frozen = True"]
+Usage["Model Execution<br>Read-only access"]
+
+autocreate_func --> Construction
+ConfigMeta_post_init --> Coercion
+freeze --> Frozen
+unfreeze --> Coercion
+
+subgraph subGraph1 ["Configuration Lifecycle"]
+    Construction
+    Coercion
+    Frozen
+    Usage
+    Construction --> Coercion
+    Coercion --> Frozen
+    Frozen --> Usage
+end
+
+subgraph subGraph0 ["BaseConfig Features"]
+    ConfigMeta_post_init
+    freeze
+    unfreeze
+    as_dict
+    autocreate_func
+end
 ```
 
 The `get_model_config()` function returns a frozen `AlphaFoldConfig` dataclass:
 
-```
-
+```python
+@functools.lru_cachedef get_model_config(name: str, frozen: bool = True) -> AlphaFoldConfig
 ```
 
 This function:
@@ -89,8 +183,46 @@ This function:
 
 The preset system defines three categories of models with five variants each:
 
-```
+```mermaid
+flowchart TD
 
+monomer["'monomer'<br>model_1 through model_5"]
+monomer_ptm["'monomer_ptm'<br>model_1_ptm through model_5_ptm"]
+multimer["'multimer'<br>model_1_multimer_v3 through model_5_multimer_v3"]
+model_1["model_1/1_ptm/1_multimer_v3<br>max_extra_msa: 5120<br>templates: enabled<br>embed_torsion_angles: enabled"]
+model_2["model_2/2_ptm/2_multimer_v3<br>max_extra_msa: 1024<br>templates: enabled<br>embed_torsion_angles: enabled"]
+model_3["model_3/3_ptm/3_multimer_v3<br>max_extra_msa: 5120<br>templates: disabled"]
+model_4["model_4/4_ptm/4_multimer_v3<br>max_extra_msa: 5120<br>templates: disabled<br>(multimer: num_extra_msa: 1152)"]
+model_5["model_5/5_ptm/5_multimer_v3<br>max_extra_msa: 1024<br>templates: disabled<br>(multimer: num_extra_msa: 1152)"]
+ptm["PTM variants<br>predicted_aligned_error.weight: 0.1<br>Enables pTM/ipTM scoring"]
+multimer_features["Multimer-specific<br>num_recycle: 20<br>recycle_early_stop_tolerance: 0.5<br>bfloat16: True"]
+
+monomer --> model_1
+monomer --> model_2
+monomer --> model_3
+monomer --> model_4
+monomer --> model_5
+monomer_ptm --> ptm
+multimer --> multimer_features
+
+subgraph subGraph2 ["Additional Features"]
+    ptm
+    multimer_features
+end
+
+subgraph subGraph1 ["Model Variants (1-5)"]
+    model_1
+    model_2
+    model_3
+    model_4
+    model_5
+end
+
+subgraph MODEL_PRESETS ["MODEL_PRESETS"]
+    monomer
+    monomer_ptm
+    multimer
+end
 ```
 
 ### Configuration Override Details
@@ -111,8 +243,55 @@ The preset system defines three categories of models with five variants each:
 
 ## Configuration Construction Flow
 
-```
+```mermaid
+flowchart TD
 
+model_name_dc["model_name<br>(e.g., 'model_3_ptm')"]
+get_model_config_func["get_model_config(name, frozen=True)<br>config.py:1008-1022"]
+lru_cache["@functools.lru_cache<br>Cache per model"]
+select_base_dc["Select base:<br>CONFIG or CONFIG_MULTIMER"]
+construct_dc["AlphaFoldConfig(**base.to_dict())"]
+apply_diff_ops["CONFIG_DIFF_OPSUnsupported markdown: link<br>Modify dataclass in-place"]
+freeze_dc["cfg.freeze()<br>Make immutable"]
+result_dc["AlphaFoldConfig<br>Frozen dataclass"]
+model_name_dict["model_name<br>(e.g., 'model_3_ptm')"]
+model_config_func["model_config(name)<br>config.py:995-1005"]
+select_base_dict["Select base:<br>CONFIG or CONFIG_MULTIMER"]
+deep_copy_dict["copy.deepcopy()"]
+apply_diffs_dict["update_from_flattened_dict()<br>CONFIG_DIFFS[name]"]
+result_dict["ml_collections.ConfigDict<br>Mutable configuration"]
+
+subgraph subGraph1 ["Dataclass-Based Path"]
+    model_name_dc
+    get_model_config_func
+    lru_cache
+    select_base_dc
+    construct_dc
+    apply_diff_ops
+    freeze_dc
+    result_dc
+    model_name_dc --> get_model_config_func
+    get_model_config_func --> lru_cache
+    lru_cache --> select_base_dc
+    select_base_dc --> construct_dc
+    construct_dc --> apply_diff_ops
+    apply_diff_ops --> freeze_dc
+    freeze_dc --> result_dc
+end
+
+subgraph subGraph0 ["Dictionary-Based Path"]
+    model_name_dict
+    model_config_func
+    select_base_dict
+    deep_copy_dict
+    apply_diffs_dict
+    result_dict
+    model_name_dict --> model_config_func
+    model_config_func --> select_base_dict
+    select_base_dict --> deep_copy_dict
+    deep_copy_dict --> apply_diffs_dict
+    apply_diffs_dict --> result_dict
+end
 ```
 
 ### Dataclass Modification Functions
@@ -177,8 +356,51 @@ The `data.eval.feat` dictionary defines expected tensor shapes using placeholder
 
 ### Model Configuration Section
 
-```
+```mermaid
+flowchart TD
 
+Model["Model"]
+EmbEvo["embeddings_and_evoformer"]
+Global["global_config"]
+Heads["heads"]
+Recycle["num_recycle<br>resample_msa_in_recycling"]
+Evo["evoformer<br>48 blocks"]
+Template["template<br>enabled, max_templates"]
+Channels["Channels<br>msa_channel: 256<br>pair_channel: 128<br>seq_channel: 384"]
+MSA_Attn["msa_row_attention_with_pair_bias<br>msa_column_attention<br>msa_transition"]
+Pair_Ops["triangle_attention_starting_node<br>triangle_attention_ending_node<br>triangle_multiplication_incoming<br>triangle_multiplication_outgoing<br>pair_transition"]
+Outer["outer_product_mean"]
+Distogram["distogram<br>Distance predictions"]
+StructMod["structure_module<br>IPA + side chains"]
+LDDT["predicted_lddt<br>Confidence per residue"]
+PAE["predicted_aligned_error<br>Pairwise confidence"]
+MaskedMSA["masked_msa<br>BERT-style loss"]
+ExpRes["experimentally_resolved<br>Resolution filtering"]
+MultMode["multimer_mode: bool"]
+BFloat["bfloat16: bool"]
+Deterministic["deterministic: bool"]
+Remat["use_remat: bool"]
+
+Model --> EmbEvo
+Model --> Global
+Model --> Heads
+Model --> Recycle
+EmbEvo --> Evo
+EmbEvo --> Template
+EmbEvo --> Channels
+Evo --> MSA_Attn
+Evo --> Pair_Ops
+Evo --> Outer
+Heads --> Distogram
+Heads --> StructMod
+Heads --> LDDT
+Heads --> PAE
+Heads --> MaskedMSA
+Heads --> ExpRes
+Global --> MultMode
+Global --> BFloat
+Global --> Deterministic
+Global --> Remat
 ```
 
 **Key Configuration Classes:**
@@ -199,8 +421,8 @@ The `data.eval.feat` dictionary defines expected tensor shapes using placeholder
 
 The `structure_module` head contains settings for 3D structure prediction:
 
-```
-
+```yaml
+structure_module:  num_layer: 8                          # IPA iterations [alphafold/model/config.py:934]  num_head: 12                          # Attention heads [alphafold/model/config.py:935]  num_channel: 384                      # Hidden dimension [alphafold/model/config.py:936]    # Invariant Point Attention  num_point_qk: 4                       # Point query/key pairs [alphafold/model/config.py:937]  num_point_v: 8                        # Point value pairs [alphafold/model/config.py:938]  num_scalar_qk: 16                     # Scalar query/key dim [alphafold/model/config.py:939]  num_scalar_v: 16                      # Scalar value dim [alphafold/model/config.py:940]    # Loss configurations  fape:                                 # Frame Aligned Point Error    clamp_distance: 10.0                # [alphafold/model/config.py:945]    loss_unit_distance: 10.0            # [alphafold/model/config.py:946]
 ```
 
 **Monomer vs Multimer Differences:**
@@ -241,8 +463,8 @@ The `global_config` section contains settings that affect the entire model:
 
 Both configuration formats are tested to ensure consistency in `alphafold/model/config_test.py`:
 
-```
-
+```python
+@parameterized.parameters(config.CONFIG_DIFFS.keys())def test_config_dict_and_dataclass_agree(self, model_name):    """Ensures model_config() and get_model_config() return same values."""    config_dict_json = json.dumps(config.model_config(model_name).to_dict())    config_dataclass_json = json.dumps(        config.get_model_config(model_name).as_dict(include_none=False)    )    self.assertJsonEqual(config_dict_json, config_dataclass_json)
 ```
 
 This test runs for all models in `CONFIG_DIFFS.keys()` to ensure both construction paths produce equivalent configurations.

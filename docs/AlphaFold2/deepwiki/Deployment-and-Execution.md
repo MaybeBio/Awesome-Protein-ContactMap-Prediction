@@ -24,8 +24,72 @@ For specific topics:
 
 AlphaFold is primarily deployed via Docker containerization to ensure reproducibility and consistent dependency management. The deployment consists of three main components: the Docker container image, genetic databases, and pre-trained model parameters.
 
-```
+```mermaid
+flowchart TD
 
+HostFS["Host Filesystem"]
+Docker["Docker Engine<br>+ NVIDIA Container Toolkit"]
+RunDockerScript["docker/run_docker.py"]
+DBDir["Database Directory<br>600GB-2.6TB<br>BFD/UniRef/MGnify/PDB"]
+ParamsDir["Model Parameters<br>~5GB<br>params/"]
+EntryScript["run_alphafold.sh"]
+MainScript["run_alphafold.py"]
+AlphaFoldPkg["alphafold/ package"]
+CUDA["CUDA 12.2.2"]
+JAX["JAX 0.4.26"]
+OpenMM["OpenMM 8.2.0"]
+HHsuite["HHsuite 3.3.0"]
+HMMER["HMMER Suite"]
+GPU["NVIDIA GPU"]
+CPUs["CPU Cores"]
+
+DBDir --> RunDockerScript
+ParamsDir --> RunDockerScript
+Docker --> EntryScript
+EntryScript --> GPU
+GPU --> JAX
+GPU --> OpenMM
+CPUs --> HHsuite
+CPUs --> HMMER
+
+subgraph subGraph4 ["Execution Environment"]
+    GPU
+    CPUs
+end
+
+subgraph subGraph3 ["Docker Container"]
+    EntryScript
+    MainScript
+    AlphaFoldPkg
+    EntryScript --> MainScript
+    MainScript --> AlphaFoldPkg
+    AlphaFoldPkg --> CUDA
+    AlphaFoldPkg --> JAX
+    AlphaFoldPkg --> OpenMM
+    AlphaFoldPkg --> HHsuite
+    AlphaFoldPkg --> HMMER
+
+subgraph Dependencies ["Dependencies"]
+    CUDA
+    JAX
+    OpenMM
+    HHsuite
+    HMMER
+end
+end
+
+subgraph subGraph1 ["Data Dependencies"]
+    DBDir
+    ParamsDir
+end
+
+subgraph subGraph0 ["Host System"]
+    HostFS
+    Docker
+    RunDockerScript
+    HostFS --> RunDockerScript
+    RunDockerScript --> Docker
+end
 ```
 
 **Docker Image Construction**
@@ -49,8 +113,40 @@ Sources: [docker/Dockerfile L1-L92](https://github.com/google-deepmind/alphafold
 
 The execution flow involves three script layers that orchestrate container launching, GPU configuration, and the prediction pipeline.
 
-```
+```mermaid
+sequenceDiagram
+  participant User
+  participant run_docker.py
+  participant Docker
+  participant run_alphafold.sh
+  participant run_alphafold.py
+  participant DataPipeline
+  participant RunModel
+  participant AmberRelaxation
 
+  User->>run_docker.py: python3 docker/run_docker.py --fasta_paths=... --data_dir=...
+  run_docker.py->>run_docker.py: Parse flags.FLAGS
+  run_docker.py->>run_docker.py: _create_mount() for volumes
+  run_docker.py->>Docker: docker.from_env().containers.run(...)
+  Docker->>run_alphafold.sh: ENTRYPOINT execution
+  run_alphafold.sh->>run_alphafold.sh: ldconfig (configure GPU libraries)
+  run_alphafold.sh->>run_alphafold.py: python run_alphafold.py "$@"
+  run_alphafold.py->>run_alphafold.py: main() - Parse flags
+  run_alphafold.py->>run_alphafold.py: Initialize DataPipeline
+  run_alphafold.py->>run_alphafold.py: Initialize RunModel instances
+  loop [For each model in model_runners]
+    run_alphafold.py->>run_alphafold.py: predict_structure()
+    run_alphafold.py->>DataPipeline: process(fasta_path)
+    DataPipeline-->>run_alphafold.py: feature_dict
+    run_alphafold.py->>RunModel: process_features()
+    run_alphafold.py->>RunModel: predict()
+    RunModel-->>run_alphafold.py: prediction_result
+    run_alphafold.py->>run_alphafold.py: Rank models by ranking_confidence
+    run_alphafold.py->>AmberRelaxation: process(unrelaxed_protein)
+    AmberRelaxation-->>run_alphafold.py: relaxed_pdb_str
+    run_alphafold.py->>run_alphafold.py: Save outputs (PDB, mmCIF, JSON)
+  end
+  run_alphafold.py-->>User: Exit
 ```
 
 Sources: [docker/run_docker.py L159-L250](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/docker/run_docker.py#L159-L250)

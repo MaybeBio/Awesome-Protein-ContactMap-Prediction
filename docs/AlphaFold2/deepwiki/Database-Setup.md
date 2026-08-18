@@ -46,8 +46,54 @@ The `scripts/` directory contains shell scripts for downloading databases. The m
 
 ### Download Script Architecture
 
-```
+```mermaid
+flowchart TD
 
+MasterScript["scripts/download_all_data.sh<br>Orchestrates all downloads"]
+BFD["scripts/download_bfd.sh<br>Source: Google Storage Mirror<br>aria2c download"]
+SmallBFD["scripts/download_small_bfd.sh<br>Source: Google Storage<br>aria2c download"]
+MGnify["scripts/download_mgnify.sh<br>Source: Google Storage Mirror<br>aria2c download"]
+UniRef30["scripts/download_uniref30.sh<br>Source: Google Storage<br>aria2c download"]
+UniRef90["scripts/download_uniref90.sh<br>Source: UniProt FTP<br>aria2c download"]
+UniProt["scripts/download_uniprot.sh<br>Source: UniProt FTP<br>aria2c download"]
+PDB70["scripts/download_pdb70.sh<br>Source: MPI Bioinformatics<br>aria2c download"]
+PDBMMCIF["scripts/download_pdb_mmcif.sh<br>Source: RCSB PDB<br>rsync + gunzip + flatten"]
+PDBSeqres["scripts/download_pdb_seqres.sh<br>Source: RCSB PDB FTP<br>aria2c + grep filter"]
+Params["scripts/download_alphafold_params.sh<br>Source: Google Storage<br>aria2c + tar extract"]
+
+MasterScript --> BFD
+MasterScript --> SmallBFD
+MasterScript --> MGnify
+MasterScript --> UniRef30
+MasterScript --> UniRef90
+MasterScript --> UniProt
+MasterScript --> PDB70
+MasterScript --> PDBMMCIF
+MasterScript --> PDBSeqres
+MasterScript --> Params
+
+subgraph subGraph3 ["Model Weights"]
+    Params
+end
+
+subgraph subGraph2 ["Structure Database Scripts"]
+    PDB70
+    PDBMMCIF
+    PDBSeqres
+end
+
+subgraph subGraph1 ["Sequence Database Scripts"]
+    BFD
+    SmallBFD
+    MGnify
+    UniRef30
+    UniRef90
+    UniProt
+end
+
+subgraph subGraph0 ["Master Script"]
+    MasterScript
+end
 ```
 
 ### Prerequisites
@@ -65,13 +111,13 @@ Sources: `scripts/download_all_data.sh:22-35` [scripts/download_all_data.sh L22-
 Download full databases (default):
 
 ```
-
+bash scripts/download_all_data.sh <DOWNLOAD_DIR>
 ```
 
 Download reduced databases:
 
 ```
-
+bash scripts/download_all_data.sh <DOWNLOAD_DIR> reduced_dbs
 ```
 
 The script checks for `aria2c` and `rsync` before proceeding [scripts/download_all_data.sh L27-L35](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/scripts/download_all_data.sh#L27-L35)
@@ -84,8 +130,23 @@ Individual download scripts perform post-processing to prepare databases for use
 
 ### PDB mmCIF Processing (scripts/download_pdb_mmcif.sh)
 
-```
+```mermaid
+flowchart TD
 
+Rsync["rsync --recursive --links --perms<br>from rsync.rcsb.org"]
+RawDir["RAW_DIR<br>(nested .cif.gz files)"]
+Gunzip["find + gunzip<br>Decompress all .gz files"]
+Flatten["find + mv<br>Flatten to MMCIF_DIR/mmcif_files/"]
+Cleanup["find -type d -empty -delete<br>Remove empty directories"]
+Obsolete["aria2c obsolete.dat<br>Track obsolete entries"]
+Ready["Ready for data/mmcif_parsing.py"]
+
+Rsync --> RawDir
+RawDir --> Gunzip
+Gunzip --> Flatten
+Flatten --> Cleanup
+Cleanup --> Obsolete
+Obsolete --> Ready
 ```
 
 The script flattens the nested directory structure into a single `mmcif_files/` directory [scripts/download_pdb_mmcif.sh L56-L60](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/scripts/download_pdb_mmcif.sh#L56-L60)
@@ -96,8 +157,17 @@ Sources: `scripts/download_pdb_mmcif.sh:48-65` [scripts/download_pdb_mmcif.sh L4
 
 ### PDB Seqres Processing (scripts/download_pdb_seqres.sh)
 
-```
+```mermaid
+flowchart TD
 
+Aria2["aria2c pdb_seqres.txt<br>from wwpdb.org"]
+Filter["grep '>.* mol:protein'<br>Filter protein sequences"]
+Output["pdb_seqres.txt<br>(protein sequences only)"]
+Ready["Ready for hmmsearch<br>(multimer mode)"]
+
+Aria2 --> Filter
+Filter --> Output
+Output --> Ready
 ```
 
 The script filters the full PDB seqres file to include only protein sequences (excluding DNA/RNA), ensuring compatibility with multimer search requirements [scripts/download_pdb_seqres.sh L41-L42](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/scripts/download_pdb_seqres.sh#L41-L42)
@@ -155,8 +225,21 @@ The `--db_preset` flag in `run_alphafold.py` controls which databases are querie
 
 ### Database Selection Flow
 
-```
+```mermaid
+flowchart TD
 
+RunAlphaFold["run_alphafold.py<br>--db_preset flag"]
+CheckPreset["db_preset value?"]
+FullConfig["Use full BFD<br>scripts/download_bfd.sh"]
+ReducedConfig["Use Small BFD<br>scripts/download_small_bfd.sh"]
+HHBlitsFull["hhblits search:<br>- BFD database"]
+HHBlitsReduced["hhblits search:<br>- small_bfd (FASTA)"]
+
+RunAlphaFold --> CheckPreset
+CheckPreset --> FullConfig
+CheckPreset --> ReducedConfig
+FullConfig --> HHBlitsFull
+ReducedConfig --> HHBlitsReduced
 ```
 
 The `download_all_data.sh` script uses the second argument to decide between `full_dbs` and `reduced_dbs` [scripts/download_all_data.sh L38-L43](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/scripts/download_all_data.sh#L38-L43)
@@ -173,8 +256,8 @@ To update databases, it is generally recommended to remove the existing director
 
 ### Update Procedure
 
-1. **UniProt (Multimer)**: ``` ```
-2. **PDB Structure Data**: ``` ``` *Note: PDB mmCIF and Seqres should be updated together to maintain synchronization.*
+1. **UniProt (Multimer)**: ``` rm -rf <DOWNLOAD_DIR>/uniprotbash scripts/download_uniprot.sh <DOWNLOAD_DIR> ```
+2. **PDB Structure Data**: ``` rm -rf <DOWNLOAD_DIR>/pdb_mmcifbash scripts/download_pdb_mmcif.sh <DOWNLOAD_DIR>bash scripts/download_pdb_seqres.sh <DOWNLOAD_DIR> ``` *Note: PDB mmCIF and Seqres should be updated together to maintain synchronization.*
 3. **Model Parameters**: The current version uses the `2022-12-06` parameters [scripts/download_alphafold_params.sh L34](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/scripts/download_alphafold_params.sh#L34-L34)
 
 Sources: `scripts/download_alphafold_params.sh:34` [scripts/download_alphafold_params.sh L34](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/scripts/download_alphafold_params.sh#L34-L34)

@@ -20,8 +20,67 @@ The Evoformer processes two primary types of representations:
 
 These representations flow through a stack of identical Evoformer blocks, each applying a series of attention mechanisms and transformations.
 
-```
+```mermaid
+flowchart TD
 
+MSA_Input["MSA Features"]
+Pair_Input["Pair Features"]
+Extra_MSA["Extra MSA Features"]
+ExtraEvo_1["EvoformerIteration (is_extra_msa=True)"]
+ExtraEvo_2["..."]
+ExtraEvo_N["EvoformerIteration N"]
+Updated_Pair["Updated Pair Representation"]
+Main_MSA["Main MSA Features"]
+Evo_1["EvoformerIteration (is_extra_msa=False)"]
+Evo_2["..."]
+Evo_N["EvoformerIteration N"]
+MSA_Out["MSA Representation"]
+Pair_Out["Pair Representation"]
+Single_Out["Single Representation"]
+First_Row["MSA First Row"]
+
+MSA_Input --> Extra_MSA
+MSA_Input --> Main_MSA
+Pair_Input --> Extra_MSA
+Updated_Pair --> Main_MSA
+Evo_N --> MSA_Out
+Evo_N --> Pair_Out
+
+subgraph subGraph3 ["Output Representations"]
+    MSA_Out
+    Pair_Out
+    Single_Out
+    First_Row
+    MSA_Out --> Single_Out
+    MSA_Out --> First_Row
+end
+
+subgraph subGraph2 ["Main Evoformer Stack"]
+    Main_MSA
+    Evo_1
+    Evo_2
+    Evo_N
+    Main_MSA --> Evo_1
+    Evo_1 --> Evo_2
+    Evo_2 --> Evo_N
+end
+
+subgraph subGraph1 ["Extra MSA Stack"]
+    Extra_MSA
+    ExtraEvo_1
+    ExtraEvo_2
+    ExtraEvo_N
+    Updated_Pair
+    Extra_MSA --> ExtraEvo_1
+    ExtraEvo_1 --> ExtraEvo_2
+    ExtraEvo_2 --> ExtraEvo_N
+    ExtraEvo_N --> Updated_Pair
+end
+
+subgraph subGraph0 ["Input Representations"]
+    MSA_Input
+    Pair_Input
+end
 ```
 
 Sources: [alphafold/model/modules.py L1904-L2148](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L1904-L2148)
@@ -36,8 +95,48 @@ The `EvoformerIteration` class [alphafold/model/modules.py L1751-L1901](https://
 
 **Diagram: Single EvoformerIteration Block Processing Flow**
 
-```
+```mermaid
+flowchart TD
 
+Input_MSA["activations['msa']<br>[N_seq, N_res, c_m]"]
+Input_Pair["activations['pair']<br>[N_res, N_res, c_z]"]
+RowAttn["MSARowAttentionWithPairBias<br>modules.py:795-856"]
+ColAttn["is_extra_msa?"]
+ColAttn_Main["MSAColumnAttention<br>modules.py:858-907"]
+ColAttn_Extra["MSAColumnGlobalAttention<br>modules.py:910-960"]
+MSA_Trans["Transition<br>modules.py:515-570<br>name='msa_transition'"]
+OPM_Check["config.outer_product_mean.first?"]
+Already_Applied["OPM already applied<br>before MSA processing"]
+OPM["OuterProductMean<br>modules.py:1600-1689"]
+Pair_Ops["Pair Processing Chain"]
+TMO["TriangleMultiplication<br>outgoing<br>equation='ikc,jkc->ijc'"]
+TMI["TriangleMultiplication<br>incoming<br>equation='kjc,kic->ijc'"]
+TA_Start["TriangleAttention<br>starting_node<br>orientation='per_row'"]
+TA_End["TriangleAttention<br>ending_node<br>orientation='per_column'"]
+PT["Transition<br>name='pair_transition'"]
+Output_MSA["Updated MSA"]
+Output_Pair["Updated Pair"]
+
+Input_MSA --> RowAttn
+Input_Pair --> RowAttn
+RowAttn --> ColAttn
+ColAttn --> ColAttn_Main
+ColAttn --> ColAttn_Extra
+ColAttn_Main --> MSA_Trans
+ColAttn_Extra --> MSA_Trans
+MSA_Trans --> OPM_Check
+OPM_Check --> Already_Applied
+OPM_Check --> OPM
+OPM --> Pair_Ops
+Already_Applied --> Pair_Ops
+Input_Pair --> Pair_Ops
+Pair_Ops --> TMO
+TMO --> TMI
+TMI --> TA_Start
+TA_Start --> TA_End
+TA_End --> PT
+MSA_Trans --> Output_MSA
+PT --> Output_Pair
 ```
 
 Sources: [alphafold/model/modules.py L1751-L1901](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L1751-L1901)
@@ -48,8 +147,51 @@ The MSA is processed using axial attention, alternating between rows and columns
 
 **Diagram: MSA Processing Module Details**
 
-```
+```mermaid
+flowchart TD
 
+GSwap1["jnp.swapaxes(msa_act, -2, -3)"]
+GNorm["LayerNorm<br>name='query_norm'"]
+GAttnMod["GlobalAttention<br>uses mask_mean"]
+GSwap2["jnp.swapaxes back"]
+Swap1["jnp.swapaxes(msa_act, -2, -3)"]
+ColNorm["LayerNorm<br>name='query_norm'"]
+ColAttnMod["Attention module"]
+Swap2["jnp.swapaxes back"]
+RowNorm["LayerNorm<br>name='query_norm'"]
+RowAttnMod["Attention module<br>with pair bias"]
+PairNorm["LayerNorm<br>name='feat_2d_norm'"]
+PairBias["pair_act @ feat_2d_weights<br>→ nonbatched_bias"]
+
+subgraph MSAColumnGlobalAttention ["MSAColumnGlobalAttention (modules.py:910-960)"]
+    GSwap1
+    GNorm
+    GAttnMod
+    GSwap2
+    GSwap1 --> GNorm
+    GNorm --> GAttnMod
+    GAttnMod --> GSwap2
+end
+
+subgraph MSAColumnAttention ["MSAColumnAttention (modules.py:858-907)"]
+    Swap1
+    ColNorm
+    ColAttnMod
+    Swap2
+    Swap1 --> ColNorm
+    ColNorm --> ColAttnMod
+    ColAttnMod --> Swap2
+end
+
+subgraph MSARowAttentionWithPairBias ["MSARowAttentionWithPairBias (modules.py:795-856)"]
+    RowNorm
+    RowAttnMod
+    PairNorm
+    PairBias
+    RowNorm --> RowAttnMod
+    PairNorm --> PairBias
+    PairBias --> RowAttnMod
+end
 ```
 
 1. **`MSARowAttentionWithPairBias`** [alphafold/model/modules.py L795-L856](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L795-L856) : * Performs multihead attention along MSA rows (per sequence, across residue positions). * Incorporates pair representation as bias: `nonbatched_bias = einsum('qkc,ch->hqk', pair_act, weights)` [alphafold/model/modules.py L837-L842](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L837-L842) * Uses `config.orientation = 'per_row'`.
@@ -68,8 +210,55 @@ The pair representation is updated using triangle operations that enforce geomet
 
 **Diagram: Pair Representation Processing Modules**
 
-```
+```mermaid
+flowchart TD
 
+TA_Norm["LayerNorm<br>name='query_norm'"]
+TA_Bias["einsum('qkc,ch->hqk', pair_act, feat_2d_weights)"]
+TA_Attn["Attention module<br>with nonbatched_bias"]
+TA_Swap["orientation == 'per_column'?"]
+TM_Norm["LayerNorm<br>name='layer_norm_input'"]
+TM_Proj["Linear projections<br>with gating"]
+TM_Einsum["einsum(config.equation)<br>outgoing: 'ikc,jkc->ijc'<br>incoming: 'kjc,kic->ijc'"]
+TM_Gate["Sigmoid gate<br>name='gating_linear'"]
+OPM_Norm["LayerNorm<br>name='layer_norm_input'"]
+OPM_Left["Linear(num_outer_channel)<br>name='left_projection'"]
+OPM_Right["Linear(num_outer_channel)<br>name='right_projection'"]
+OPM_Einsum["einsum('abc,ade->bdce', left, right)<br>then average over sequence dim 'b'"]
+OPM_Final["Linear(num_output_channel)<br>name='output_projection'"]
+
+subgraph TriangleAttention ["TriangleAttention (modules.py:963-1024)"]
+    TA_Norm
+    TA_Bias
+    TA_Attn
+    TA_Swap
+    TA_Norm --> TA_Bias
+    TA_Bias --> TA_Attn
+    TA_Attn --> TA_Swap
+end
+
+subgraph TriangleMultiplication ["TriangleMultiplication (modules.py:1358-1516)"]
+    TM_Norm
+    TM_Proj
+    TM_Einsum
+    TM_Gate
+    TM_Norm --> TM_Proj
+    TM_Proj --> TM_Einsum
+    TM_Einsum --> TM_Gate
+end
+
+subgraph OuterProductMean ["OuterProductMean (modules.py:1600-1689)"]
+    OPM_Norm
+    OPM_Left
+    OPM_Right
+    OPM_Einsum
+    OPM_Final
+    OPM_Norm --> OPM_Left
+    OPM_Norm --> OPM_Right
+    OPM_Left --> OPM_Einsum
+    OPM_Right --> OPM_Einsum
+    OPM_Einsum --> OPM_Final
+end
 ```
 
 1. **`OuterProductMean`** [alphafold/model/modules.py L1600-L1689](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L1600-L1689) : * Captures pairwise residue correlations by averaging outer products across the MSA. * Projects MSA to `num_outer_channel`, computes outer product, and averages [alphafold/model/modules.py L1653-L1669](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L1653-L1669) * Normalized by number of sequences to handle variable MSA depth.
@@ -91,8 +280,39 @@ Sources: [alphafold/model/modules.py L1600-L1689](https://github.com/google-deep
 
 **Diagram: Evoformer Class Structure and Relationships**
 
-```
-
+```mermaid
+classDiagram
+    class EmbeddingsAndEvoformer {
+        +config: ml_collections.ConfigDict
+        +global_config: ml_collections.ConfigDict
+        +call(batch, is_training) : dict
+        -_create_embeddings()
+    }
+    class EvoformerIteration {
+        +config: ml_collections.ConfigDict
+        +global_config: ml_collections.ConfigDict
+        +is_extra_msa: bool
+        +call(activations, masks, is_training, safe_key) : dict
+    }
+    class layer_stack {
+        «module»
+        +layer_stack(num_layers)
+        +call(x, *args_ys)
+    }
+    class dropout_wrapper {
+        «function»
+        Applies module + dropout + residual
+        +dropout_wrapper(module, input_act, mask, safe_key, global_config)
+    }
+    class MSARowAttentionWithPairBias {
+    }
+    class OuterProductMean {
+    }
+    EmbeddingsAndEvoformer ..> EvoformerIteration : instantiates
+    EmbeddingsAndEvoformer ..> layer_stack : uses for iteration
+    EvoformerIteration ..> dropout_wrapper : uses for all sub-modules
+    EvoformerIteration ..> MSARowAttentionWithPairBias : contains
+    EvoformerIteration ..> OuterProductMean : contains
 ```
 
 Sources: [alphafold/model/modules.py L1904-L2148](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L1904-L2148)
@@ -127,8 +347,32 @@ AlphaFold-Multimer uses specialized logic in `modules_multimer.py` to handle mul
 
 **Diagram: Multimer-Specific Components in Evoformer**
 
-```
+```mermaid
+flowchart TD
 
+Input["batch with chain info:<br>asym_id, entity_id, sym_id"]
+RelEnc["_relative_encoding()<br>modules_multimer.py:550-627"]
+RelEnc_Details["If use_chain_relative:<br>- One-hot relative position<br>- entity_id_same indicator<br>- Relative sym_id<br>Else: standard relative position"]
+MSA_Sample["sample_msa(key, batch, max_seq)<br>modules_multimer.py:266-298"]
+Masking["make_masked_msa(batch, key, config)<br>modules_multimer.py:121-161"]
+Template["TemplateEmbedding<br>modules_multimer.py:846-938"]
+Template_Details["multichain_mask_2d masks<br>inter-chain distances"]
+
+subgraph subGraph0 ["Multimer EmbeddingsAndEvoformer"]
+    Input
+    RelEnc
+    RelEnc_Details
+    MSA_Sample
+    Masking
+    Template
+    Template_Details
+    Input --> RelEnc
+    RelEnc --> RelEnc_Details
+    Input --> MSA_Sample
+    MSA_Sample --> Masking
+    Input --> Template
+    Template --> Template_Details
+end
 ```
 
 1. **Chain-Relative Position Encoding** [alphafold/model/modules_multimer.py L550-L627](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules_multimer.py#L550-L627) : * Extends standard relative encoding to include chain-level offsets and indicators for whether residues belong to the same entity.

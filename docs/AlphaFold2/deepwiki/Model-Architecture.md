@@ -14,8 +14,48 @@ The AlphaFold model architecture is a deep learning system designed to predict p
 
 AlphaFold transforms sequence and evolutionary information into 3D coordinates through a series of specialized neural network modules. The process is iterative, using a recycling mechanism to refine the structural representation.
 
-```
+```mermaid
+flowchart TD
 
+RawFeat["Raw Features (NumPy)"]
+ProcFeat["Processed Features (JAX Tensors)"]
+Embed["EmbeddingsAndEvoformer"]
+Evo["Evoformer Stack"]
+SM["Structure Module"]
+LDDT["Predicted LDDT Head"]
+Dist["Distogram Head"]
+PAE["Predicted Aligned Error Head"]
+Results["Prediction Results"]
+
+Embed --> Evo
+SM --> Embed
+SM --> LDDT
+Evo --> Dist
+Evo --> PAE
+LDDT --> Results
+Dist --> Results
+PAE --> Results
+SM --> Results
+
+subgraph subGraph2 ["Output Heads"]
+    LDDT
+    Dist
+    PAE
+end
+
+subgraph subGraph1 ["Iterative Refinement"]
+    Evo
+    SM
+    Evo --> SM
+end
+
+subgraph subGraph0 ["Input Processing"]
+    RawFeat
+    ProcFeat
+    Embed
+    RawFeat --> ProcFeat
+    ProcFeat --> Embed
+end
 ```
 
 Sources: [alphafold/model/modules.py L134-L213](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/modules.py#L134-L213)
@@ -83,8 +123,34 @@ Sources: [alphafold/model/utils.py L1-L50](https://github.com/google-deepmind/al
 
 The following diagram maps the high-level architecture concepts to the specific classes and functions in the codebase.
 
-```
+```mermaid
+flowchart TD
 
+RM["RunModel"]
+AF["AlphaFold (Monomer)"]
+AFI["AlphaFoldIteration"]
+EAE["EmbeddingsAndEvoformer"]
+AFM["AlphaFold (Multimer)"]
+
+RM --> AF
+RM --> AFM
+AFM --> AFI
+
+subgraph alphafold/model/modules_multimer.py ["alphafold/model/modules_multimer.py"]
+    AFM
+end
+
+subgraph alphafold/model/modules.py ["alphafold/model/modules.py"]
+    AF
+    AFI
+    EAE
+    AF --> AFI
+    AFI --> EAE
+end
+
+subgraph alphafold/model/model.py ["alphafold/model/model.py"]
+    RM
+end
 ```
 
 Sources: [alphafold/model/model.py L86-L99](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/model/model.py#L86-L99)

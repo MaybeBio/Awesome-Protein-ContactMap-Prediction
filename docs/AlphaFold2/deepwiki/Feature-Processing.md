@@ -28,8 +28,58 @@ The processing ensures that all features have correct:
 * **Data types**: Conversion to appropriate numeric types (e.g., casting `int64` to `int32`).
 * **Values**: Application of masks, crops, and other transformations specified in the model configuration.
 
-```
+```mermaid
+flowchart TD
 
+RawFeatures["Raw Features<br>(FeatureDict)<br>NumPy arrays"]
+ProcessFeatures["RunModel.process_features()<br>alphafold/model/model.py:122-141"]
+ModeCheck["multimer_mode?"]
+PairMerge["pair_and_merge()<br>alphafold/data/feature_processing.py:74-107"]
+CropChains["crop_chains()"]
+ProcessFinal["process_final()"]
+NPToFeatures["features.np_example_to_features()<br>alphafold/model/features.py:45-76"]
+NPToTensorDict["proteins_dataset.np_to_tensor_dict()"]
+InputPipeline["input_pipeline.process_tensors_from_config()"]
+TFSess["tf.Session.run()"]
+ModelReady["Model-Ready Features<br>(FeatureDict)"]
+
+RawFeatures --> ProcessFeatures
+ModeCheck --> PairMerge
+ModeCheck --> NPToFeatures
+ProcessFinal --> ModelReady
+TFSess --> ModelReady
+
+subgraph Output ["Output"]
+    ModelReady
+end
+
+subgraph subGraph3 ["Monomer Path"]
+    NPToFeatures
+    NPToTensorDict
+    InputPipeline
+    TFSess
+    NPToFeatures --> NPToTensorDict
+    NPToTensorDict --> InputPipeline
+    InputPipeline --> TFSess
+end
+
+subgraph subGraph2 ["Multimer Path"]
+    PairMerge
+    CropChains
+    ProcessFinal
+    PairMerge --> CropChains
+    CropChains --> ProcessFinal
+end
+
+subgraph subGraph1 ["Mode Selection"]
+    ProcessFeatures
+    ModeCheck
+    ProcessFeatures --> ModeCheck
+end
+
+subgraph Input ["Input"]
+    RawFeatures
+end
 ```
 
 **Feature Processing Pipeline Overview**
@@ -100,8 +150,33 @@ Sources: [alphafold/data/feature_processing.py L74-L217](https://github.com/goog
 
 The `proteins_dataset` module handles the conversion of NumPy arrays to TensorFlow tensors with proper validation in the monomer pipeline.
 
-```
+```mermaid
+flowchart TD
 
+NPToTensor["np_to_tensor_dict()<br>alphafold/model/tf/proteins_dataset.py:109-131"]
+ParseReshape["parse_reshape_logic()<br>alphafold/model/tf/proteins_dataset.py:29-92"]
+GetDims["Extract num_residues,<br>num_msa, num_templates"]
+CalcShape["Compute target shape per feature<br>using protein_features.shape()"]
+AssertSize["tf.assert_equal(tf.size(v), new_shape_size)"]
+ApplyReshape["tf.reshape(v, new_shape)"]
+
+ParseReshape --> GetDims
+
+subgraph Logic ["Logic"]
+    GetDims
+    CalcShape
+    AssertSize
+    ApplyReshape
+    GetDims --> CalcShape
+    CalcShape --> AssertSize
+    AssertSize --> ApplyReshape
+end
+
+subgraph proteins_dataset.py ["proteins_dataset.py"]
+    NPToTensor
+    ParseReshape
+    NPToTensor --> ParseReshape
+end
 ```
 
 **Feature Reshaping Logic**

@@ -27,8 +27,25 @@ MSA generation transforms a query FASTA sequence into a multiple sequence alignm
 
 ### System Flow: From Sequence to MSA Object
 
-```
+```mermaid
+flowchart TD
 
+Input["FASTA Query<br>Sequence"]
+JH["Jackhmmer / HHblits<br>Sequence Search Tools"]
+DB["Genetic Databases<br>UniRef90/BFD/MGnify"]
+Raw["Stockholm/A3M Format<br>Raw Alignment Output"]
+Parse["Parsers<br>parse_stockholm()<br>parse_a3m()"]
+MSA["Msa Object<br>sequences<br>deletion_matrix<br>descriptions"]
+PostProc["Post-Processing<br>truncate<br>deduplicate<br>remove_empty_columns"]
+Final["Processed MSA"]
+
+Input --> JH
+DB --> JH
+JH --> Raw
+Raw --> Parse
+Parse --> MSA
+MSA --> PostProc
+PostProc --> Final
 ```
 
 **Sources:** [alphafold/data/tools/jackhmmer.py L31-L170](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/data/tools/jackhmmer.py#L31-L170)
@@ -144,8 +161,17 @@ AlphaFold includes several utilities to manage the size and quality of MSAs:
 
 ### Species Identifier Logic
 
-```
+```mermaid
+flowchart TD
 
+Desc["MSA Description Line"]
+Ext["_extract_sequence_identifier()<br>Split by whitespace"]
+Regex["_UNIPROT_PATTERN<br>Regex Match"]
+ID["Identifiers Object<br>species_id"]
+
+Desc --> Ext
+Ext --> Regex
+Regex --> ID
 ```
 
 **Sources:** [alphafold/data/parsers.py L294-L314](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/data/parsers.py#L294-L314)

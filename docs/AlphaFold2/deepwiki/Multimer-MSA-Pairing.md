@@ -30,8 +30,26 @@ In multimer prediction, each chain has its own MSA generated independently (see 
 2. **Match sequences** from the same species across chains based on sequence similarity to the target.
 3. **Merge features**—paired sequences are concatenated horizontally, while unpaired sequences are block-diagonalized.
 
-```
+```mermaid
+flowchart TD
 
+Chain1MSA["Chain 1 MSA<br>(msa_all_seq)"]
+Chain2MSA["Chain 2 MSA<br>(msa_all_seq)"]
+SpeciesID["Species Identification<br>msa_species_identifiers_all_seq"]
+Pairing["Sequence Pairing<br>pair_sequences()"]
+PairedRows["Paired Rows<br>(concatenated)"]
+UnpairedRows["Unpaired Rows<br>(block-diagonalized)"]
+Merge["Feature Merging<br>merge_chain_features()"]
+Output["Merged FeatureDict<br>(model input)"]
+
+Chain1MSA --> SpeciesID
+Chain2MSA --> SpeciesID
+SpeciesID --> Pairing
+Pairing --> PairedRows
+Pairing --> UnpairedRows
+PairedRows --> Merge
+UnpairedRows --> Merge
+Merge --> Output
 ```
 
 **Diagram: High-Level MSA Pairing and Merging Flow**
@@ -65,8 +83,19 @@ The `MSAStatistics` class [alphafold/data/msa_pairing.py L70-L151](https://githu
 * **`to_species_dict()`** [alphafold/data/msa_pairing.py L132-L150](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/data/msa_pairing.py#L132-L150) : Groups MSA rows by species identifier, returning a mapping from species bytes to `MSAStatistics` objects.
 * **`get_top_msa_rows()`** [alphafold/data/msa_pairing.py L127-L130](https://github.com/google-deepmind/alphafold/blob/c77e5d2a/alphafold/data/msa_pairing.py#L127-L130) : Returns row indices sorted by descending sequence similarity.
 
-```
+```mermaid
+flowchart TD
 
+ChainFeats["Chain Features<br>(pipeline.FeatureDict)"]
+Constructor["MSAStatistics.from_chain_features()"]
+Stats["MSAStatistics Object<br>(row, similarity, gap)"]
+SpeciesMap["to_species_dict()"]
+Lookup["Mapping:<br>species_id -> MSAStatistics"]
+
+ChainFeats --> Constructor
+Constructor --> Stats
+Stats --> SpeciesMap
+SpeciesMap --> Lookup
 ```
 
 **Diagram: MSAStatistics Construction and Species Grouping**
@@ -140,8 +169,24 @@ The function `merge_chain_features()` [alphafold/data/msa_pairing.py L513-L543](
 
  is the high-level orchestrator that assembles the final model features.
 
-```
+```mermaid
+flowchart TD
 
+Input["List of chain FeatureDicts"]
+Templates["_pad_templates()<br>Standardize template counts"]
+Homomers["_merge_homomers_dense_msa()<br>Merge identical entities"]
+Unpaired["_merge_features_from_multiple_chains()<br>Diagonalize unpaired MSAs"]
+PairCheck["pair_msa_sequences?"]
+PairedMerge["_concatenate_paired_and_unpaired_features()<br>Combine paired rows with diagonalized ones"]
+Correction["_correct_post_merged_feats()<br>Finalize shapes and masks"]
+
+Input --> Templates
+Templates --> Homomers
+Homomers --> Unpaired
+Unpaired --> PairCheck
+PairCheck --> PairedMerge
+PairCheck --> Correction
+PairedMerge --> Correction
 ```
 
 **Diagram: merge_chain_features() Execution Flow**
