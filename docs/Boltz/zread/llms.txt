@@ -1,0 +1,45 @@
+# jwohlwend/boltz
+
+Source: https://zread.ai/jwohlwend/boltz
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速上手](2-quick-start.md)
+- [入门指南/输入格式指南](3-input-format-guide.md)
+
+## 动态
+
+- [动态/最新更新](4-latest-updates.md)
+- [动态/问题与反馈](5-issues-and-feedbacks.md)
+- [动态/关于贡献者](6-about-contributors.md)
+
+## 深入探索
+
+- [深入探索/架构概述](7-architecture-overview.md)
+- [深入探索/Boltz-1 与 Boltz-2 差异](21-boltz-1-vs-boltz-2-differences.md)
+### 模型核心
+
+- [深入探索/模型核心/主干与 Pairformer 流水线](8-trunk-and-pairformer-pipeline.md)
+- [深入探索/模型核心/基于扩散的结构模块](9-diffusion-based-structure-module.md)
+- [深入探索/模型核心/置信度预测模块](10-confidence-prediction-module.md)
+- [深入探索/模型核心/结合亲和力预测](11-binding-affinity-prediction.md)
+
+### 数据处理流水线
+
+- [深入探索/数据处理流水线/解析与输入处理](12-parsing-and-input-handling.md)
+- [深入探索/数据处理流水线/分词系统](13-tokenization-system.md)
+- [深入探索/数据处理流水线/特征化与特征工程](14-featurization-and-feature-engineering.md)
+
+### 训练与推理
+
+- [深入探索/训练与推理/训练流水线与配置](15-training-pipeline-and-configuration.md)
+- [深入探索/训练与推理/推理工作流与编排](16-inference-workflow-and-orchestration.md)
+- [深入探索/训练与推理/MSA 生成与整合](17-msa-generation-and-integration.md)
+
+### 高级功能
+
+- [深入探索/高级功能/导向势与引导](18-steering-potentials-and-guidance.md)
+- [深入探索/高级功能/模板与接触条件化](19-template-and-contact-conditioning.md)
+- [深入探索/高级功能/损失函数与验证](20-loss-functions-and-validation.md)
+
