@@ -582,6 +582,8 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ## Entry template
 
+> ⚠️ Note that deepwiki must use `https://github.com/zxmfke/deepwiki-md-chrome-extension`, and if there are any code/graph missing pages, please use the plugin to redownload the missing pages only again, and manually check it
+
 Each tool uses a collapsible `<details>` block with consistent fields. The `<summary>` is a minimal **type tag** (the tool name lives in the `####` heading, so it is not repeated):
 
 ```markdown
