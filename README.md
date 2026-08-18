@@ -27,6 +27,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - [Datasets](#datasets)
 - [Entry template](#entry-template)
 - [Contributing](#contributing)
+- 
 
 ---
 
@@ -561,6 +562,7 @@ Type tags used in this repo:
 
 Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to flag "known but not yet filled" entries and "empty niches to be added".
 
+- [ ] Add TIMELINE graph for each category
 
 ## Reference
 
