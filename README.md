@@ -25,9 +25,9 @@ A curated collection of computational tools for `intermolecular interaction pred
   - [B. Sequence-based](#b-sequence-based-contact-map-prediction)
   - [C. IDR-specific](#c-idr--fuzzy-binding-specific)
 - [Datasets](#datasets)
+- [Bench](#bench)
 - [Entry template](#entry-template)
 - [Contributing](#contributing)
-- 
 
 ---
 
@@ -519,6 +519,16 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 </details>
 
+---
+
+## Bench
+
+<details>
+<summary>FoldBench</summary>
+
+- Description: FoldBench is a low-homology benchmark spanning proteins, nucleic acids, ligands, and six major interaction types, enabling assessments that were previously infeasible with task-specific datasets. (Benchmarking all-atom biomolecular structure prediction with FoldBench)
+- Paper: [Benchmarking all-atom biomolecular structure prediction with FoldBench](https://www.nature.com/articles/s41467-025-67127-3) (Nature Communications, 2025)
+- Code: https://github.com/BEAM-Labs/FoldBench
 
 
 ## Entry template
