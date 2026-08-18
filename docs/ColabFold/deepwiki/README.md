@@ -26,3 +26,4 @@
 - [ColabFold-Testing-Framework.md](ColabFold-Testing-Framework.md)
 - [ColabFold-Continuous-Integration.md](ColabFold-Continuous-Integration.md)
 - [ColabFold-Legacy-Components.md](ColabFold-Legacy-Components.md)
+- [ColabFold-Glossary.md](ColabFold-Glossary.md)

@@ -10,9 +10,10 @@ url: https://deepwiki.com/sokrypton/ColabFold/2.1-installation
 # Installation
 
 > **Relevant source files**
-> - [README\.md](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1)
-> - [poetry\.lock](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/poetry.lock)
-> - [pyproject\.toml](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml)
+> - [\.github/workflows/docker\.yml](https://github.com/sokrypton/ColabFold/blob/0c788a0e/.github/workflows/docker.yml)
+> - [Dockerfile](https://github.com/sokrypton/ColabFold/blob/0c788a0e/Dockerfile)
+> - [poetry\.lock](https://github.com/sokrypton/ColabFold/blob/0c788a0e/poetry.lock)
+> - [pyproject\.toml](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml)
 
  This document covers the installation and setup procedures for ColabFold, a protein structure prediction toolkit\. It includes both cloud\-based usage through Google Colab notebooks and local installation options for running ColabFold on your own hardware\.
 
@@ -22,100 +23,140 @@ url: https://deepwiki.com/sokrypton/ColabFold/2.1-installation
 
  ColabFold provides multiple installation and execution paths depending on your computational needs and environment:
 
-  Sources: [README\.md?plain=1 L10-L67](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L10-L67) [README\.md?plain=1 L65-L204](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L65-L204)
+```mermaid
+flowchart TD
 
-## Cloud\-Based Usage \(Google Colab\)
+A["User Requirements"]
+B["Computational Needs"]
+C["Google Colab Notebooks"]
+D["Local Python Installation"]
+E["Docker Container"]
+C1["AlphaFold2.ipynb"]
+C2["AlphaFold2_batch.ipynb"]
+D1["pip install colabfold[alphafold,openmm]"]
+D2["colabfold_batch CLI"]
+E1["ghcr.io/sokrypton/colabfold"]
+E2["Pre-configured CUDA/Conda"]
 
- The simplest way to use ColabFold requires no installation\. Google Colab notebooks provide immediate access to GPU\-accelerated protein structure prediction:
+A --> B
+B --> C
+B -->|"Batch processing, custom workflows"| D
+B --> E
+C --> C1
+C --> C2
+D --> D1
+D --> D2
+E --> E1
+E --> E2
+```
 
-| Notebook | Purpose | URL Pattern |
-| --- | --- | --- |
-| AlphaFold2\.ipynb | Single sequences and complexes | colab\.research\.google\.com/github/sokrypton/ColabFold/blob/main/AlphaFold2\.ipynb |
-| AlphaFold2\_batch\.ipynb | Batch processing | colab\.research\.google\.com/github/sokrypton/ColabFold/blob/main/batch/AlphaFold2\_batch\.ipynb |
-| RoseTTAFold2\.ipynb | Alternative model | colab\.research\.google\.com/github/sokrypton/ColabFold/blob/main/RoseTTAFold2\.ipynb |
-| ESMFold\.ipynb | Language model\-based | colab\.research\.google\.com/github/sokrypton/ColabFold/blob/main/ESMFold\.ipynb |
-
-### GPU Requirements and Limitations
-
- - Maximum sequence length depends on allocated GPU memory
-- Tesla T4 \(~16GB\): approximately 2000 residues maximum
-- Check available GPU: `!nvidia-smi` in a Colab cell
-- Single IP serial queries only for MSA server access
-
- Sources: [README\.md?plain=1 L12-L27](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L12-L27) [README\.md?plain=1 L34-L39](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L34-L39)
+ Sources: [pyproject\.toml L1-L60](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L1-L60) [Dockerfile L28-L59](https://github.com/sokrypton/ColabFold/blob/0c788a0e/Dockerfile#L28-L59)
 
 ## Local Python Package Installation
 
 ### Prerequisites
 
- - Python 3\.9 or higher
-- CUDA\-compatible GPU \(recommended\)
-- Sufficient disk space for models and dependencies
+ - **Python**: Version 3\.10 or higher is required \[pyproject\.toml:22\-22\]\.
+- **Hardware**: CUDA\-compatible GPU is recommended for AlphaFold2 model inference\.
 
-### Core Package Installation
+### Core Package Installation via Pip
 
-### Command Line Interface Verification
+ The installation is managed through `poetry` or `pip`\. The `pyproject.toml` defines several "extras" to manage heavy dependencies like AlphaFold and OpenMM \[pyproject\.toml:47\-50\]\.
 
- After installation, verify the following CLI tools are available:
+```
+# Basic installation (core utilities only)pip install colabfold # Recommended: Full installation with AlphaFold and OpenMM (for relaxation)pip install "colabfold[alphafold,openmm]" # Installation for CPU-only or external JAX managementpip install colabfold[alphafold-minus-jax]
+```
 
-  Sources: [pyproject\.toml L54-L58](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L54-L58) [pyproject\.toml L21-L39](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L21-L39)
+### Dependency Management
 
-### Dependencies and Versions
+ The `pyproject.toml` configuration specifies the following key dependencies and optional extras:
 
- The package includes these critical dependencies:
-
-| Component | Version | Purpose |
+| Component | Version | Role |
 | --- | --- | --- |
-| tensorflow\-cpu | ^2\.16\.2 | Neural network inference |
-| alphafold\-colabfold | 2\.3\.9 | AlphaFold model weights |
-| jax | ^0\.5\.2 | Array computing \(optional\) |
-| biopython | <1\.86 | Sequence processing |
-| numpy | ^2\.0\.2 | Numerical computing |
-| requests | ^2\.26\.0 | MSA server communication |
+| alphafold\-colabfold | 2\.3\.18 | Patched AlphaFold v2\.3\.1 inference pipeline \[pyproject\.toml:29\-29\] |
+| jax | \>=0\.5\.2, <0\.11 | High\-performance array computing \[pyproject\.toml:24\-24\] |
+| biopython | <1\.86 | Sequence and PDB file handling \[pyproject\.toml:26\-26\] |
+| openmm | ^8\.2\.0 | Force field simulations for structure relaxation \[pyproject\.toml:39\-39\] |
+| numpy | ^2\.0\.2 | Numerical backend \[pyproject\.toml:27\-27\] |
 
- Sources: [pyproject\.toml L23-L39](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L23-L39) [pyproject\.toml L47-L49](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L47-L49)
+ **Extras Definition:**
 
-## Database Setup for Local Use
+ - `alphafold`: Includes `alphafold-colabfold`, `jax`, `absl-py`, `dm-tree`, `dm-haiku`, and `py3Dmol` \[pyproject\.toml:48\-48\]\.
+- `openmm`: Includes `openmm` and `pdbfixer` \[pyproject\.toml:50\-50\]\.
 
-### Small Scale Predictions with MSA Server
+ Sources: [pyproject\.toml L21-L51](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L21-L51) [poetry\.lock L17-L41](https://github.com/sokrypton/ColabFold/blob/0c788a0e/poetry.lock#L17-L41)
 
- For moderate usage, use the public MSA server without local databases:
+## Docker Installation
 
-### Large Scale Local Database Setup
+ ColabFold provides a multi\-stage Dockerfile for reproducible environments\. It utilizes a Debian\-based image with a Miniforge \(Conda\) environment \[Dockerfile:28\-45\]\.
 
- For extensive use, set up local databases to avoid server dependency:
+### Docker Build Process
 
-### Database Configuration Options
+ The Docker image automates the installation of complex bioinformatics tools:
 
-### GPU\-Accelerated Database Setup
+ 1. **MMseqs2**: Downloads and extracts GPU\-optimized binaries \[Dockerfile:1\-26\]\.
+2. **Conda Environment**: Installs `kalign2` \(v2\.04\) and `hhsuite` \(v3\.3\.0\) via bioconda \[Dockerfile:48\-49\]\.
+3. **Python Stack**: Installs the `colabfold` package with `alphafold` and `openmm` extras, specifically targeting the requested CUDA version for JAX \[Dockerfile:55\-58\]\.
 
-  Sources: [README\.md?plain=1 L81-L112](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L81-L112) [README\.md?plain=1 L157-L204](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L157-L204)
+### Building and Running
 
-## Alternative Installation Methods
+ The GitHub Actions workflow automates builds for `cuda12` and `cuda13` across `amd64` and `arm64` platforms \[\.github/workflows/docker\.yml:22\-26\]\.
 
-### LocalColabFold
+```
+# Build locallydocker build -t colabfold --build-arg CUDA=cuda12 . # Run with GPU supportdocker run --gpus all -v $(pwd)/cache:/cache colabfold colabfold_batch input.fasta output/
+```
 
- For cross\-platform local installation with automated setup:
+ Sources: [Dockerfile L1-L59](https://github.com/sokrypton/ColabFold/blob/0c788a0e/Dockerfile#L1-L59) [docker\.yml L60-L69](https://github.com/sokrypton/ColabFold/blob/0c788a0e/.github/workflows/docker.yml#L60-L69)
 
- - Project: [YoshitakaMo/localcolabfold](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/YoshitakaMo/localcolabfold)
-- Supports: Windows 10\+ \(WSL2\), macOS, Linux
-- Provides: Complete environment setup with dependencies
+## Code Entity Mapping: CLI Entrypoints
 
-### Docker Installation
+ When installed, the package registers several executable scripts defined in the `[tool.poetry.scripts]` section of `pyproject.toml` \[pyproject\.toml:55\-59\]\.
 
- For containerized deployment, refer to the [Running ColabFold in Docker](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/Running ColabFold in Docker) wiki page\.
+```mermaid
+flowchart TD
 
- Sources: [README\.md?plain=1 L56-L57](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L56-L57) [README\.md?plain=1 L66](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L66-L66)
+CB["colabfold_batch"]
+CS["colabfold_search"]
+CR["colabfold_relax"]
+CSM["colabfold_split_msas"]
+CB_FN["colabfold.batch:main"]
+CS_FN["colabfold.mmseqs.search:main"]
+CR_FN["colabfold.relax:main"]
+CSM_FN["colabfold.mmseqs.split_msas:main"]
 
-## Installation Verification
+CB --> CB_FN
+CS --> CS_FN
+CR --> CR_FN
+CSM --> CSM_FN
 
-### Basic Functionality Test
+subgraph subGraph1 ["Code Entities"]
+    CB_FN
+    CS_FN
+    CR_FN
+    CSM_FN
+end
 
-### Expected Output Structure
+subgraph subGraph0 ["CLI Entrypoints"]
+    CB
+    CS
+    CR
+    CSM
+end
+```
 
- After successful prediction, verify output files:
+ Sources: [pyproject\.toml L55-L59](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L55-L59)
 
-  Sources: [README\.md?plain=1 L70-L100](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L70-L100)
+## Configuration and Development
+
+### Project Structure
+
+ The project uses `poetry-core` as the build backend \[pyproject\.toml:77\-79\]\. Development dependencies include `black` for formatting and `pytest` for testing \[pyproject\.toml:42\-45\]\.
+
+### Formatting Rules
+
+ `black` is configured to format the `colabfold` and `tests` directories, while explicitly excluding legacy components like `colabfold/colabfold.py` \[pyproject\.toml:61\-75\]\.
+
+ Sources: [pyproject\.toml L42-L79](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L42-L79)
 
 ---
 *Source: [https://deepwiki.com/sokrypton/ColabFold/2.1-installation](https://deepwiki.com/sokrypton/ColabFold/2.1-installation) on DeepWiki*

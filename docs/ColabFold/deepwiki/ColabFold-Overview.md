@@ -10,335 +10,206 @@ url: https://deepwiki.com/sokrypton/ColabFold/1-overview
 # Overview
 
 > **Relevant source files**
-> - [README\.md](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1)
-> - [poetry\.lock](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/poetry.lock)
-> - [pyproject\.toml](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml)
+> - [README\.md](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1)
+> - [pyproject\.toml](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml)
 
 ## Purpose and Scope
 
- ColabFold is a comprehensive protein structure prediction system that makes advanced folding models accessible through Google Colab notebooks and command\-line interfaces\. This system provides end\-to\-end workflows for predicting protein structures using AlphaFold2, RoseTTAFold2, ESMFold, and other state\-of\-the\-art models, with integrated multiple sequence alignment \(MSA\) generation and visualization capabilities\.
+ ColabFold is a comprehensive protein structure prediction system designed to make advanced folding models accessible through both interactive Google Colab notebooks and high\-performance command\-line interfaces\. By integrating fast Multiple Sequence Alignment \(MSA\) generation via MMseqs2 with state\-of\-the\-art models like AlphaFold2, AlphaFold3 \(OpenFold3\), RoseTTAFold2, and ESMFold, ColabFold significantly accelerates the structural biology workflow [README\.md?plain=1 L1-L23](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L1-L23)
 
- This document provides a high\-level overview of ColabFold's architecture, core components, and data flow\. For detailed installation instructions, see [Installation](https://deepwiki.com/sokrypton/ColabFold/2.1-installation)\. For specific usage patterns including batch processing and complex prediction workflows, see [Basic Usage](https://deepwiki.com/sokrypton/ColabFold/2.2-basic-usage) and [Advanced Usage](https://deepwiki.com/sokrypton/ColabFold/5-advanced-usage)\.
+ The system is architected to handle single sequences, protein complexes \(multimers\), and batch processing, providing a unified pipeline from raw sequence input to refined 3D structures and confidence metrics [README\.md?plain=1 L9-L23](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L9-L23)
 
 ## System Architecture
 
- ColabFold operates as a multi\-layered system with three primary execution environments: interactive Google Colab notebooks, command\-line batch processing tools, and local database\-driven workflows\.
+ ColabFold operates as a modular ecosystem\. The core logic resides in the `colabfold` Python package, which orchestrates sequence parsing, MSA generation, model inference via JAX, and output serialization\.
 
 ### Core Component Architecture
+
+ This diagram maps the high\-level functional blocks to their specific implementation entities within the codebase\.
 
 ```mermaid
 flowchart TD
 
 UI1["AlphaFold2.ipynb"]
-UI2["AlphaFold2_batch.ipynb"]
-UI3["AlphaFold2_advanced.ipynb"]
-UI4["RoseTTAFold2.ipynb"]
-UI5["ESMFold.ipynb"]
-CLI1["colabfold_batch"]
-CLI2["colabfold_search"]
-CLI3["colabfold_relax"]
-BATCH["colabfold.batch.run"]
+UI2["batch/AlphaFold2_batch.ipynb"]
+UI3["beta/AlphaFold2_advanced.ipynb"]
+CLI1["colabfold_batch (colabfold.batch:main)"]
+CLI2["colabfold_search (colabfold.mmseqs.search:main)"]
+RUN["colabfold.batch.run"]
+PREDICT["colabfold.batch.predict_structure"]
 INPUT["colabfold.input.get_queries"]
-UTILS["colabfold.utils"]
-MMSEQS["colabfold.run_mmseqs2"]
+MMSEQS_API["colabfold.batch.run_mmseqs2"]
 SEARCH["colabfold.mmseqs.search"]
-DATABASES["setup_databases.sh"]
-AF2["AlphaFold2_Models"]
-AF2M["AlphaFold2_Multimer"]
-RTF2["RoseTTAFold2_Models"]
-ESM["ESMFold_Models"]
-RELAX["Amber_Relaxation"]
-VIZ["py3Dmol_Visualization"]
-FILES["PDB_JSON_PNG_Output"]
+SPLIT["colabfold.mmseqs.split_msas"]
+AF2["AlphaFold2 (alphafold-colabfold)"]
+AF3["AlphaFold3 (OpenFold3)"]
+RTF2["RoseTTAFold2"]
+ESM["ESMFold"]
+RELAX["colabfold.relax.relax_me"]
+VIZ["colabfold.batch.plot_protein"]
+OUT["colabfold.utils.CFMMCIFIO"]
 
-UI1 --> BATCH
-UI2 --> BATCH
-UI3 --> BATCH
-CLI1 --> BATCH
+UI1 --> RUN
+UI2 --> RUN
+CLI1 --> RUN
 CLI2 --> SEARCH
-BATCH --> MMSEQS
-INPUT --> MMSEQS
-BATCH --> AF2
-BATCH --> AF2M
-BATCH --> RTF2
-BATCH --> ESM
+RUN --> MMSEQS_API
+PREDICT --> AF2
+PREDICT --> AF3
 AF2 --> RELAX
-AF2M --> RELAX
-RTF2 --> RELAX
-ESM --> RELAX
 
-subgraph Output_Processing ["Output_Processing"]
+subgraph Post_Processing ["Post_Processing"]
     RELAX
     VIZ
-    FILES
+    OUT
     RELAX --> VIZ
-    VIZ --> FILES
+    VIZ --> OUT
 end
 
-subgraph Model_Prediction_Layer ["Model_Prediction_Layer"]
+subgraph Model_Layer ["Model_Layer"]
     AF2
-    AF2M
+    AF3
     RTF2
     ESM
 end
 
-subgraph MSA_Generation_System ["MSA_Generation_System"]
-    MMSEQS
+subgraph MSA_Generation ["MSA_Generation"]
+    MMSEQS_API
     SEARCH
-    DATABASES
-    MMSEQS --> SEARCH
-    SEARCH --> DATABASES
+    SPLIT
 end
 
-subgraph Core_Processing_Engine ["Core_Processing_Engine"]
-    BATCH
+subgraph Orchestration_Layer ["Orchestration_Layer"]
+    RUN
+    PREDICT
     INPUT
-    UTILS
-    BATCH --> INPUT
-    BATCH --> UTILS
+    RUN --> INPUT
+    RUN --> PREDICT
 end
 
 subgraph User_Interfaces ["User_Interfaces"]
     UI1
     UI2
     UI3
-    UI4
-    UI5
     CLI1
     CLI2
-    CLI3
 end
 ```
 
- **Sources:** [README\.md?plain=1 L1-L239](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L1-L239) [pyproject\.toml L54-L58](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L54-L58)
+ **Sources:** [pyproject\.toml L55-L59](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L55-L59) [README\.md?plain=1 L11-L23](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L11-L23) [pyproject\.toml L29-L39](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L29-L39)
 
 ### Data Flow and Processing Pipeline
+
+ The pipeline follows a two\-stage process: MSA generation \(Stage 1\) and Structure Prediction \(Stage 2\)\.
 
 ```mermaid
 flowchart TD
 
-FASTA["FASTA_Sequences"]
-CSV["CSV_Batch_Files"]
-A3M["A3M_MSA_Files"]
-API["MMseqs2_API_Server"]
-LOCAL["Local_MMseqs2_Search"]
-TEMPLATES["Template_Search"]
-PARSE["get_queries"]
-MSA_GEN["get_msa_and_templates"]
-PREDICT["predict_structure"]
-PROCESS["post_process_results"]
-LOAD["model_loading"]
-INFERENCE["structure_prediction"]
-CONFIDENCE["confidence_scoring"]
-PDB["PDB_Structures"]
-JSON["Confidence_Metrics"]
-PNG["Structure_Images"]
-ZIP["Result_Archives"]
+FASTA["FASTA/A3M/CSV"]
+PARSE["colabfold.input.get_queries"]
+MSA_GET["colabfold.batch.get_msa_and_templates"]
+MMSEQS["MMseqs2 API / Local Search"]
+MODEL_LOAD["colabfold.batch.load_models_and_params"]
+INFERENCE["JAX Inference"]
+RANK["Model Ranking (pLDDT/pTM)"]
+PDB["PDB/mmCIF"]
+JSON["Confidence JSON"]
+PLOTS["PAE/pLDDT Plots"]
 
-FASTA --> PARSE
-CSV --> PARSE
-A3M --> PARSE
-MSA_GEN --> API
-MSA_GEN --> LOCAL
-MSA_GEN --> TEMPLATES
-API --> PREDICT
-LOCAL --> PREDICT
-TEMPLATES --> PREDICT
-PREDICT --> LOAD
-CONFIDENCE --> PROCESS
-PROCESS --> PDB
-PROCESS --> JSON
-PROCESS --> PNG
-PROCESS --> ZIP
+PARSE --> MSA_GET
+MMSEQS --> MODEL_LOAD
+RANK --> PDB
+RANK --> JSON
+RANK --> PLOTS
 
-subgraph Output_Generation ["Output_Generation"]
+subgraph Output_Stage ["Output_Stage"]
     PDB
     JSON
-    PNG
-    ZIP
+    PLOTS
 end
 
-subgraph Model_Execution ["Model_Execution"]
-    LOAD
+subgraph Stage_2_Prediction ["Stage_2_Prediction"]
+    MODEL_LOAD
     INFERENCE
-    CONFIDENCE
-    LOAD --> INFERENCE
-    INFERENCE --> CONFIDENCE
+    RANK
+    MODEL_LOAD --> INFERENCE
+    INFERENCE --> RANK
 end
 
-subgraph colabfold_batch_run ["colabfold_batch_run"]
-    PARSE
-    MSA_GEN
-    PREDICT
-    PROCESS
-    PARSE --> MSA_GEN
-end
-
-subgraph MSA_Generation ["MSA_Generation"]
-    API
-    LOCAL
-    TEMPLATES
+subgraph Stage_1_MSA ["Stage_1_MSA"]
+    MSA_GET
+    MMSEQS
+    MSA_GET --> MMSEQS
 end
 
 subgraph Input_Stage ["Input_Stage"]
     FASTA
-    CSV
-    A3M
+    PARSE
+    FASTA --> PARSE
 end
 ```
 
- **Sources:** [README\.md?plain=1 L70-L131](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L70-L131) [pyproject\.toml L21-L39](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L21-L39)
+ **Sources:** [README\.md?plain=1 L68-L79](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L68-L79) [pyproject\.toml L21-L40](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L21-L40)
 
 ## Key Components
 
 ### Notebook Interfaces
 
- ColabFold provides specialized Jupyter notebooks for different prediction scenarios, each optimized for specific use cases and model types\.
+ ColabFold provides specialized notebooks for different modeling needs, abstracting the complexity of environment setup and hardware allocation\.
 
-| Notebook | Primary Use Case | Supported Models | MSA Method |
-| --- | --- | --- | --- |
-| AlphaFold2\.ipynb | Single sequences and complexes | AlphaFold2, AlphaFold2\-multimer | MMseqs2 API |
-| AlphaFold2\_batch\.ipynb | High\-throughput processing | AlphaFold2, AlphaFold2\-multimer | MMseqs2 API |
-| AlphaFold2\_advanced\.ipynb | Experimental features | AlphaFold2 with custom options | MMseqs2 API |
-| RoseTTAFold2\.ipynb | Alternative folding model | RoseTTAFold2 | MMseqs2 API |
-| ESMFold\.ipynb | Language model\-based folding | ESMFold | No MSA required |
+| Notebook | Model Support | Key Features |
+| --- | --- | --- |
+| AlphaFold2\.ipynb | AF2, AF2\-Multimer | Standard monomer/complex prediction README\.md11 |
+| AlphaFold3\_of3\.ipynb | OpenFold3 | Latest AF3 architecture support README\.md12 |
+| AlphaFold2\_batch\.ipynb | AF2 | High\-throughput sequence processing README\.md13 |
+| RoseTTAFold2\.ipynb | RTF2 | Experimental RoseTTAFold support README\.md19 |
+| Boltz1\.ipynb | Boltz\-1 | Alternative biomolecular modeling README\.md20 |
 
- **Sources:** [README\.md?plain=1 L12-L26](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L12-L26)
+### Command Line Interface \(CLI\)
 
-### Command Line Interface
+ For local or HPC usage, ColabFold exposes entrypoints defined in the project configuration:
 
- The system exposes four primary command\-line tools for programmatic access and automation:
-
- - `colabfold_batch`: Main pipeline orchestrator for structure prediction workflows
-- `colabfold_search`: MSA generation using local MMseqs2 databases
-- `colabfold_split_msas`: MSA file processing and manipulation utilities
-- `colabfold_relax`: Structure refinement using Amber molecular dynamics
-
- **Sources:** [pyproject\.toml L54-L58](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L54-L58) [README\.md?plain=1 L70-L98](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L70-L98)
+ - `colabfold_batch`: The primary tool for running structure predictions locally [pyproject\.toml L56](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L56-L56)
+- `colabfold_search`: Handles MSA generation against local databases [pyproject\.toml L57](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L57-L57)
+- `colabfold_relax`: Standalone tool for Amber energy minimization [pyproject\.toml L59](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L59-L59)
+- `colabfold_split_msas`: Utility for manipulating large A3M files [pyproject\.toml L58](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L58-L58)
 
 ### MSA Generation System
 
-```mermaid
-flowchart TD
+ ColabFold uses MMseqs2 for rapid sequence searching\. It supports two modes:
 
-SEQ["Input_Sequences"]
-QUERY["Query_Preparation"]
-API_SERVER["MMseqs2_API_colabfold.mmseqs.com"]
-LOCAL_DB["Local_MMseqs2_Databases"]
-GPU_SEARCH["GPU_Accelerated_Search"]
-UNIREF["UniRef30_Database"]
-COLABFOLD_DB["ColabFold_Database"]
-ENV_DB["Environmental_Database"]
-PDB_DB["PDB_Templates"]
-A3M_FILES["A3M_Format_MSAs"]
-JSON_AF3["AlphaFold3_JSON"]
-TEMPLATES["Template_Structures"]
-
-QUERY --> API_SERVER
-QUERY --> LOCAL_DB
-QUERY --> GPU_SEARCH
-API_SERVER --> UNIREF
-API_SERVER --> COLABFOLD_DB
-LOCAL_DB --> UNIREF
-LOCAL_DB --> COLABFOLD_DB
-LOCAL_DB --> ENV_DB
-GPU_SEARCH --> UNIREF
-GPU_SEARCH --> COLABFOLD_DB
-UNIREF --> A3M_FILES
-COLABFOLD_DB --> A3M_FILES
-ENV_DB --> A3M_FILES
-PDB_DB --> TEMPLATES
-
-subgraph Output_Processing ["Output_Processing"]
-    A3M_FILES
-    JSON_AF3
-    TEMPLATES
-    A3M_FILES --> JSON_AF3
-    TEMPLATES --> JSON_AF3
-end
-
-subgraph Database_Components ["Database_Components"]
-    UNIREF
-    COLABFOLD_DB
-    ENV_DB
-    PDB_DB
-end
-
-subgraph Search_Backends ["Search_Backends"]
-    API_SERVER
-    LOCAL_DB
-    GPU_SEARCH
-end
-
-subgraph MSA_Input_Processing ["MSA_Input_Processing"]
-    SEQ
-    QUERY
-    SEQ --> QUERY
-end
-```
-
- **Sources:** [README\.md?plain=1 L38-L41](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L38-L41) [README\.md?plain=1 L83-L204](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L83-L204)
+ 1. **API Mode**: Queries the ColabFold MMseqs2 server \(`colabfold.mmseqs.com`\), reducing local compute requirements [README\.md?plain=1 L35-L38](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L35-L38)
+2. **Local Mode**: Uses `colabfold_search` to query local databases \(UniRef30, ColabFoldDB, Environmental DB\) [README\.md?plain=1 L83-L112](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L83-L112)
 
 ## Execution Environments
 
-### Google Colab Integration
+### Google Colab
 
- ColabFold leverages Google Colab's cloud infrastructure to provide GPU/TPU access without local installation requirements\. The notebook interfaces handle dependency management, model downloading, and result visualization automatically\.
+ Leverages free GPU/TPU resources\. The notebooks handle the installation of dependencies like `jax`, `openmm`, and `alphafold-colabfold` dynamically [README\.md?plain=1 L7-L23](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L7-L23)
 
-### Local Installation Options
+### Local and Docker
 
- For high\-throughput or private data processing, ColabFold supports local execution through:
+ ColabFold can be installed via `conda` or `pip` with specific extras for hardware acceleration:
 
- - **LocalColabFold**: Standalone installer for Windows, macOS, and Linux systems
-- **Docker containers**: Containerized deployment for reproducible environments
-- **Direct pip installation**: Python package installation with manual dependency management
-
- **Sources:** [README\.md?plain=1 L56-L57](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L56-L57) [README\.md?plain=1 L65-L66](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L65-L66)
-
-### Database Management
-
- Large\-scale local deployments require database setup using `setup_databases.sh`, which downloads and configures:
-
- - UniRef30 \(930GB\): Primary sequence database
-- ColabFold Database: Curated protein sequences
-- Environmental Database: Metagenomic sequences
-- PDB Templates: Structure templates for homology modeling
-
- **Sources:** [README\.md?plain=1 L83-L112](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L83-L112)
+ - `pip install colabfold[alphafold,openmm]`: Installs the core prediction engine [README\.md?plain=1 L72-L76](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L72-L76)
+- **Docker**: A pre\-configured image `ghcr.io/sokrypton/colabfold` is provided for reproducible execution [README\.md?plain=1 L84](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L84-L84)
 
 ## Input and Output Formats
 
-### Supported Input Formats
+### Supported Inputs
 
- - **FASTA**: Single or multiple protein sequences
-- **CSV**: Batch processing with metadata
-- **A3M**: Pre\-computed multiple sequence alignments
-- **Complex notation**: Protein complexes using `:` separator
-- **AlphaFold3 extensions**: Non\-protein molecules \(DNA, RNA, ligands\) using `molecule_type|sequence|copies` format
+ - **FASTA**: Standard protein sequences\.
+- **A3M**: Pre\-computed MSAs\.
+- **CSV**: Batch files containing identifiers and sequences\.
+- **Complexes**: Defined using a colon \(`:`\) separator between chains [README\.md?plain=1 L51-L52](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L51-L52)
 
 ### Generated Outputs
 
- - **PDB files**: 3D structure coordinates
-- **JSON files**: Confidence metrics \(pLDDT, PAE, pTM scores\)
-- **PNG images**: Structure visualizations and confidence plots
-- **ZIP archives**: Complete result packages
-- **AlphaFold3 JSON**: Compatible input for AlphaFold3 server
+ - **Structures**: PDB or mmCIF files containing coordinates\.
+- **Metrics**: JSON files containing pLDDT \(predicted Local Distance Difference Test\) and PAE \(Predicted Aligned Error\) [README\.md?plain=1 L31](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L31-L31)
+- **Visuals**: PNG plots for MSA coverage, pLDDT per residue, and PAE heatmaps\.
 
- **Sources:** [README\.md?plain=1 L114-L155](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L114-L155)
-
-## Integration with External Systems
-
- ColabFold integrates with multiple external tools and databases:
-
- - **MMseqs2**: Sequence search and MSA generation
-- **AlphaFold models**: DeepMind's trained neural networks
-- **Amber/OpenMM**: Molecular dynamics for structure refinement
-- **py3Dmol**: Interactive 3D structure visualization
-- **BioPython**: Sequence and structure data handling
-
- The system abstracts these dependencies through standardized interfaces, allowing users to focus on biological questions rather than technical implementation details\.
-
- **Sources:** [pyproject\.toml L21-L39](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/pyproject.toml#L21-L39) [README\.md?plain=1 L219-L222](https://github.com/sokrypton/ColabFold/blob/c3e8ab01/README.md?plain=1#L219-L222)
+ **Sources:** [README\.md?plain=1 L31-L49](https://github.com/sokrypton/ColabFold/blob/0c788a0e/README.md?plain=1#L31-L49) [pyproject\.toml L25-L28](https://github.com/sokrypton/ColabFold/blob/0c788a0e/pyproject.toml#L25-L28)
 
 ---
 *Source: [https://deepwiki.com/sokrypton/ColabFold/1-overview](https://deepwiki.com/sokrypton/ColabFold/1-overview) on DeepWiki*
