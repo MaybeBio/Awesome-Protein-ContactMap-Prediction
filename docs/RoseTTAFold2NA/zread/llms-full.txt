@@ -1,0 +1,2898 @@
+# uw-ipd/RoseTTAFold2NA
+
+Source: https://zread.ai/uw-ipd/RoseTTAFold2NA
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/uw-ipd/RoseTTAFold2NA/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+RoseTTAFold2NA 是一种先进的深度学习模型，用于预测蛋白质-核酸复合物的三维结构。作为原始 RoseTTAFold 的扩展版本，这个专门版本增加了对 RNA 和 DNA 分子的支持，使研究人员能够在原子水平上预测蛋白质与核酸的相互作用。这种能力对于理解基本生物过程和开发新疗法至关重要。
+
+## 什么是 RoseTTAFold2NA？
+
+RoseTTAFold2NA 在 RoseTTAFold 的成功基础上，将核酸纳入其结构预测流程。该模型使用三轨神经网络，同时处理蛋白质序列、氨基酸配对关系和三维坐标，以生成准确的结构预测。RoseTTAFold2NA 的独特之处在于它能够处理包含蛋白质、RNA 和 DNA 的各种组合的复合物，使其成为结构生物学研究的多功能工具。
+
+该模型利用 **SE(3)-Transformers**，这是一种在三维旋转和平移下等变的图神经网络。这种数学特性确保无论输入分子在空间中如何取向，模型的预测都能保持一致，从而产生更稳定可靠的预测。
+
+来源：[README.md#L1-L2](README.md#L1-L2), [SE3Transformer/README.md#L51-L53](SE3Transformer/README.md#L51-L53)
+
+## 主要功能和特性
+
+RoseTTAFold2NA 提供了多项强大功能，使其在结构预测领域脱颖而出：
+
+1. **多分子支持**：该模型可以预测各种生物分子组合的结构：
+   - 纯蛋白质结构
+   - 蛋白质-RNA 复合物
+   - 蛋白质-DNA 复合物
+   - 包含不同类型多条链的复合物
+
+2. **置信度指标**：对于每个预测，RoseTTAFold2NA 提供每个残基的置信度分数（LDDT）和预测对齐误差（PAE），帮助研究人员评估预测结构不同部分的可靠性。
+
+3. **模板整合**：当存在同源结构时，该模型可以整合已知结构（模板）的信息来提高预测准确性。
+
+4. **MSA 生成**：该流程包含专门工具，用于为蛋白质和 RNA 生成多序列比对（MSA），这是准确结构预测的关键输入。
+
+5. **迭代优化**：该模型使用回收机制迭代优化其预测，从而产生越来越准确的结构。
+
+来源：[README.md#L89-L99](README.md#L89-L99), [RoseTTAFoldModel.py#L75-L84](network/RoseTTAFoldModel.py#L75-L84)
+
+## 架构概述
+
+RoseTTAFold2NA 架构由几个关键组件组成，它们协同工作以预测三维结构：
+
+```mermaid
+flowchart TD
+    A[输入序列] --> B[输入准备]
+    B --> C[MSA 生成]
+    C --> D[神经网络模型]
+    D --> E[结构预测]
+    
+    subgraph 输入准备
+        B1[蛋白质 MSA] --> B3[特征提取]
+        B2[RNA MSA] --> B3
+        B4[模板搜索] --> B3
+    end
+    
+    subgraph 神经网络模型
+        D1[嵌入层] --> D2[SE3-Transformer]
+        D2 --> D3[迭代模拟器]
+        D3 --> D4[辅助预测器]
+    end
+    
+    subgraph 结构预测
+        E1[三维坐标] --> E2[置信度分数]
+        E2 --> E3[输出文件]
+    end
+```
+
+该模型通过几个阶段处理输入序列：
+
+1. **输入准备**：处理序列以生成 MSA 并搜索结构模板。对于蛋白质，这涉及使用 HHblits 对 UniRef30 和 BFD 数据库进行搜索。对于 RNA，该流程使用 cmscan 对 Rfam 数据库和 blastn 对 RNAcentral 及 nt 数据库进行搜索。
+
+2. **嵌入层**：通过专门的嵌入层将处理后的输入转换为数值表示，这些层处理 MSA 数据、附加特征和模板信息。
+
+3. **SE3-Transformer**：该组件以旋转和平移等变的方式处理三维结构信息，确保无论输入取向如何都能保持一致的预测。
+
+4. **迭代模拟器**：模型的核心，通过回收先前迭代的信息来迭代优化预测结构。
+
+5. **辅助预测器**：这些组件生成额外输出，如距离预测、掩码标记预测和置信度分数。
+
+来源：[run_RF2NA.sh#L27-L53](run_RF2NA.sh#L27-L53), [RoseTTAFoldModel.py#L23-L31](network/RoseTTAFoldModel.py#L23-L31), [RoseTTAFoldModel.py#L34-L53](network/RoseTTAFoldModel.py#L34-L53)
+
+## 实际应用
+
+RoseTTAFold2NA 在基础研究和药物发现中有众多应用：
+
+1. **理解蛋白质-核酸相互作用**：研究人员可以预测蛋白质如何与 RNA 或 DNA 结合，为基因调控、蛋白质合成和其他基本过程提供见解。
+
+2. **药物发现**：通过揭示蛋白质-核酸复合物的详细结构，该模型可以帮助识别治疗化合物的潜在结合位点。
+
+3. **蛋白质工程**：通过预测突变如何影响蛋白质-核酸相互作用，该模型可以指导设计具有所需结合特性的蛋白质。
+
+4. **RNA 结构预测**：该模型可以预测 RNA 分子及其与蛋白质的复合物的三维结构，鉴于 RNA 在治疗中的重要性日益增加，这尤其有价值。
+
+5. **假设生成**：当实验结构不可用时，RoseTTAFold2NA 的预测可以生成关于分子相互作用和功能的可检验假设。
+
+<CgxTip>
+当能够为输入序列生成高质量的 MSA 时，RoseTTAFold2NA 的预测最为准确。对于同源物较少的新序列，预测准确性可能较低，应仔细检查置信度指标。
+</CgxTip>
+
+来源：[README.md#L83-L86](README.md#L83-L86), [README.md#L95-L99](README.md#L95-L99)
+
+## 开始使用 RoseTTAFold2NA
+
+要开始使用 RoseTTAFold2NA，您需要遵循几个设置步骤：
+
+1. **安装**：克隆存储库并使用提供的配置文件创建 conda 环境。
+
+2. **依赖项**：安装 SE3-Transformer 组件，这对于三维等变处理至关重要。
+
+3. **模型权重**：下载预训练的模型权重，其中包含在蛋白质-核酸复合物上训练的学习参数。
+
+4. **数据库**：下载并设置所需的序列和结构数据库，包括 UniRef30、BFD、PDB 模板以及 Rfam 和 RNAcentral 等 RNA 特定数据库。
+
+5. **运行预测**：使用提供的脚本对您的序列运行预测，使用适当的标签指定每个分子的类型（蛋白质、RNA 或 DNA）。
+
+典型的工作流程包括以 FASTA 格式准备输入序列，运行预测脚本，以及分析输出的 PDB 文件及其置信度指标。
+
+来源：[README.md#L11-L39](README.md#L11-L39), [README.md#L79-L87](README.md#L79-L87)
+
+## 结论
+
+RoseTTAFold2NA 通过将 AI 驱动的结构预测能力扩展到包括蛋白质-核酸复合物，代表了计算结构生物学领域的重大进步。它整合了用于等变三维处理的 SE3-Transformers，并结合针对不同分子类型的专门输入准备，使其成为研究构成生命过程基础的分子相互作用的研究人员的强大工具。
+
+随着我们继续探索蛋白质-核酸相互作用的广阔领域，像 RoseTTAFold2NA 这样的工具将在加速发现和加深我们对分子水平生物系统的理解方面发挥越来越重要的作用。
+
+---
+
+- [入门指南/快速开始](https://zread.ai/uw-ipd/RoseTTAFold2NA/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+RoseTTAFold2NA 是一种先进的深度学习模型，用于预测蛋白质-核酸复合物的三维结构。本指南将帮助您在几分钟内完成首次预测。
+
+## 您将完成的内容
+
+通过本指南，您将能够：
+- 安装 RoseTTAFold2NA 及其依赖项
+- 为蛋白质-RNA 和蛋白质-DNA 复合物准备输入文件
+- 运行您的首次结构预测
+- 理解和解释输出文件
+
+## 前置要求
+
+开始前，请确保您具备：
+- 搭载 NVIDIA GPU 的 Linux 系统（推荐）
+- 已安装 Conda 包管理器
+- 至少 100GB 可用磁盘空间用于存储数据库
+- 可以下载数据库和模型权重的网络连接
+
+## 安装
+
+安装过程包括环境设置、依赖项下载以及获取必要的数据库。
+
+### 1. 克隆仓库
+
+首先，从 GitHub 克隆 RoseTTAFold2NA 仓库：
+
+```bash
+git clone https://github.com/uw-ipd/RoseTTAFold2NA.git
+cd RoseTTAFold2NA
+```
+
+### 2. 创建 Conda 环境
+
+RoseTTAFold2NA 需要特定的 Python 环境以及多种生物信息学工具。提供的 conda 环境文件可简化此过程：
+
+```bash
+conda env create -f RF2na-linux.yml
+conda activate RF2NA
+```
+
+### 3. 安装 SE3 Transformer
+
+SE3 Transformer 是三维结构预测的关键组件。使用包含的版本进行安装：
+
+```bash
+cd SE3Transformer
+pip install --no-cache-dir -r requirements.txt
+python setup.py install
+cd ..
+```
+
+### 4. 下载模型权重
+
+下载预训练模型权重，其中包含结构预测的学习参数：
+
+```bash
+cd network
+wget https://files.ipd.uw.edu/dimaio/RF2NA_apr23.tgz
+tar xvfz RF2NA_apr23.tgz
+cd ..
+```
+
+<CgxTip>
+模型权重文件约为 1.1GB。下载前请确保有足够的磁盘空间和稳定的网络连接。
+</CgxTip>
+
+### 5. 下载所需数据库（快速启动时可选）
+
+为获得完整功能，RoseTTAFold2NA 需要多个生物数据库。虽然这些是获得最佳性能所必需的，但首次运行时可以使用提供的示例跳过此步骤：
+
+```bash
+# 蛋白质数据库
+wget http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+mkdir -p UniRef30_2020_06
+tar xfz UniRef30_2020_06_hhsuite.tar.gz -C ./UniRef30_2020_06
+
+# 结构模板
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
+tar xfz pdb100_2021Mar03.tar.gz
+```
+
+来源：[README.md#L11-L39](README.md#L11-L39), [RF2na-linux.yml](RF2na-linux.yml)
+
+## 首次预测
+
+让我们使用提供的示例文件运行您的首次结构预测。我们将预测蛋白质-RNA 复合物结构。
+
+### 理解输入格式
+
+RoseTTAFold2NA 接受带有特定前缀的 FASTA 文件以指示分子类型：
+- `P:` 表示蛋白质序列
+- `R:` 表示 RNA 序列  
+- `D:` 表示双链 DNA
+- `S:` 表示单链 DNA
+
+### 运行预测
+
+导航到示例目录并运行预测脚本：
+
+```bash
+cd example
+../run_RF2NA.sh rna_pred P:rna_binding_protein.fa R:RNA.fa
+```
+
+此命令指示 RoseTTAFold2NA：
+1. 创建名为 `rna_pred` 的输出文件夹
+2. 处理来自 `rna_binding_protein.fa` 的蛋白质序列
+3. 处理来自 `RNA.fa` 的 RNA 序列
+4. 预测复合物的三维结构
+
+对于蛋白质-DNA 复合物，应使用：
+
+```bash
+../run_RF2NA.sh dna_pred P:dna_binding_protein.fa D:DNA.fa
+```
+
+来源：[run_RF2NA.sh#L22-L132](run_RF2NA.sh#L22-L132), [README.md#L84-L86](README.md#L84-L86)
+
+### 预测过程说明
+
+预测过程涉及多个自动化步骤：
+
+1. **MSA 生成**：对蛋白质，使用 HHblits 创建多序列比对；对 RNA，使用专门工具生成比对。
+2. **模板搜索**：对蛋白质，在 PDB 数据库中搜索结构同源物。
+3. **联合处理**：预测蛋白质-RNA 复合物时，基于分类学信息合并 MSA。
+4. **结构预测**：神经网络预测复合物中所有原子的三维坐标。
+
+整个过程通常需要 10-30 分钟，具体取决于序列长度和可用计算资源。
+
+来源：[run_RF2NA.sh#L28-L118](run_RF2NA.sh#L28-L118)
+
+## 理解输出
+
+成功完成后，您将在指定目录（如 `rna_pred/`）中找到多个输出文件：
+
+### 主要输出文件
+
+| 文件 | 描述 | 格式 |
+|------|-------------|---------|
+| `models/model_00.pdb` | 带置信度分数的预测三维结构 | PDB 格式 |
+| `models/model_00.npz` | 详细预测数据 | NumPy 存档 |
+
+### 解释 PDB 文件
+
+PDB 文件包含预测的三维结构，其中：
+- 原子坐标表示预测位置
+- B 因子列包含每个残基的置信度分数（值越高表示越可信）
+- 链标识符分隔不同分子（蛋白质、RNA、DNA）
+
+您可以在任何分子查看器（如 PyMOL、Chimera 或 NGLView）中可视化此文件。
+
+### 理解 NPZ 文件
+
+NumPy 存档包含可使用 Python 加载的附加预测指标：
+
+```python
+import numpy as np
+data = np.load('rna_pred/models/model_00.npz')
+
+# 访问预测指标
+distogram = data['dist']  # 预测距离矩阵 (L x L x 37)
+lddt_scores = data['lddt']  # 每残基置信度分数 (L)
+pae_matrix = data['pae']  # 预测比对误差 (L x L)
+```
+
+这些指标有助于评估预测质量：
+- **LDDT 分数**：范围 0-100，表示局部置信度
+- **PAE 矩阵**：显示残基对之间的预期误差
+- **距离图**：预测残基间的距离分布
+
+来源：[README.md#L93-L99](README.md#L93-L99), [predict.py#L24-L28](network/predict.py#L24-L28)
+
+## 后续步骤
+
+恭喜！您已成功使用 RoseTTAFold2NA 完成首次结构预测。以下是继续探索的几种方式：
+
+1. **尝试您自己的序列**：使用您的蛋白质和核酸序列创建 FASTA 文件
+2. **探索高级功能**：了解配对的蛋白质-RNA MSA 以提高准确性
+3. **优化性能**：在运行脚本中调整 CPU 和内存参数
+4. **可视化结果**：使用分子可视化工具分析您的预测
+
+更多详细信息，请查看[安装指南](3-installation-guide)和[输入准备](5-input-preparation-for-proteins-and-rna)文档。
+
+<CgxTip>
+请记住，预测质量在很大程度上取决于输入序列质量和可用的同源序列。为获得最佳结果，请确保您的序列完整且错误最少。
+</CgxTip>
+
+---
+
+- [入门指南/安装指南](https://zread.ai/uw-ipd/RoseTTAFold2NA/3-installation-guide)
+
+---
+slug:3-installation-guide
+blog_type:normal
+---
+
+
+RoseTTAFold2NA是一款用于预测蛋白质-核酸复合物结构的强大工具。本指南将引导您完成完整的安装过程，从系统要求到验证步骤。通过本指南，您将拥有一个功能完备的RoseTTAFold2NA环境，随时可以进行结构预测。
+
+## 系统要求
+
+在安装RoseTTAFold2NA之前，请确保您的系统满足以下要求：
+
+- **操作系统**：Linux（已在Ubuntu 18.04/20.04上测试）
+- **GPU**：支持CUDA 11.7的NVIDIA GPU
+- **内存**：至少64GB RAM（推荐用于数据库操作）
+- **存储**：数据库和模型需要至少500GB可用磁盘空间
+- **软件**：Conda包管理器（Miniconda或Anaconda）
+
+<CgxTip>安装过程需要下载大型数据库（总计超过500GB）。在开始之前，请确保您有足够的磁盘空间和稳定的网络连接。</CgxTip>
+
+## 分步安装指南
+
+### 1. 克隆代码库
+
+首先，从GitHub克隆RoseTTAFold2NA代码库：
+
+```bash
+git clone https://github.com/uw-ipd/RoseTTAFold2NA.git
+cd RoseTTAFold2NA
+```
+
+这将创建代码库的本地副本，包含所有必需的脚本和配置文件。
+来源：[README.md#L11-L15](README.md#L11-L15)
+
+### 2. 创建Conda环境
+
+RoseTTAFold2NA使用Conda环境管理依赖项。`RF2na-linux.yml`文件包含所有必需的包：
+
+```bash
+conda env create -f RF2na-linux.yml
+```
+
+此命令创建一个名为`RF2NA`的新Conda环境，包含Python 3.10和所有必需的包，包括：
+- 支持CUDA 11.7的PyTorch
+- 生物信息学工具（HHsuite、BLAST、HMMER、Infernal）
+- 深度学习库（DGL、PyG）
+- 序列比对工具（MAFFT、CD-HIT）
+
+根据您的网络连接速度，此过程可能需要10-20分钟。
+来源：[RF2na-linux.yml](RF2na-linux.yml)、[README.md#L17-L22](README.md#L17-L22)
+
+### 3. 安装SE3 Transformer
+
+RoseTTAFold2NA需要NVIDIA的SE(3)-Transformer进行3D等变变换。请单独安装：
+
+```bash
+conda activate RF2NA
+cd SE3Transformer
+pip install --no-cache-dir -r requirements.txt
+python setup.py install
+cd ..
+```
+
+SE3 Transformer通过`e3nn`库和其他依赖项添加了专门的3D几何深度学习功能。
+来源：[README.md#L23-L30](README.md#L23-L30)、[SE3Transformer/requirements.txt](SE3Transformer/requirements.txt)、[SE3Transformer/setup.py](SE3Transformer/setup.py)
+
+### 4. 下载预训练权重
+
+将预训练模型权重（1.1GB）下载到网络目录：
+
+```bash
+cd network
+wget https://files.ipd.uw.edu/dimaio/RF2NA_apr23.tgz
+tar xvfz RF2NA_apr23.tgz
+ls weights/  # 应包含1.1GB的权重文件
+cd ..
+```
+
+这些权重包含结构预测的训练参数，是工具正常运行所必需的。
+来源：[README.md#L32-L39](README.md#L32-L39)
+
+## 数据库设置
+
+RoseTTAFold2NA需要多个生物数据库进行序列比对和模板检测。请按以下顺序下载：
+
+### 蛋白质数据库
+
+```bash
+# UniRef30 [46GB]
+wget http://wwwuser.gwdg.de/~compbiol/uniclust/2020_06/UniRef30_2020_06_hhsuite.tar.gz
+mkdir -p UniRef30_2020_06
+tar xfz UniRef30_2020_06_hhsuite.tar.gz -C ./UniRef30_2020_06
+
+# BFD [272GB]
+wget https://bfd.mmseqs.com/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz
+mkdir -p bfd
+tar xfz bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt.tar.gz -C ./bfd
+
+# 结构模板
+wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
+tar xfz pdb100_2021Mar03.tar.gz
+```
+
+### RNA数据库
+
+```bash
+mkdir -p RNA
+cd RNA
+
+# Rfam [300MB]
+wget ftp://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.full_region.gz
+wget ftp://ftp.ebi.ac.uk/pub/databases/Rfam/CURRENT/Rfam.cm.gz
+gunzip Rfam.cm.gz
+cmpress Rfam.cm
+
+# RNAcentral [12GB]
+wget ftp://ftp.ebi.ac.uk/pub/databases/RNAcentral/current_release/rfam/rfam_annotations.tsv.gz
+wget ftp://ftp.ebi.ac.uk/pub/databases/RNAcentral/current_release/id_mapping/id_mapping.tsv.gz
+wget ftp://ftp.ebi.ac.uk/pub/databases/RNAcentral/current_release/sequences/rnacentral_species_specific_ids.fasta.gz
+../input_prep/reprocess_rnac.pl id_mapping.tsv.gz rfam_annotations.tsv.gz  # 约8分钟
+gunzip -c rnacentral_species_specific_ids.fasta.gz | makeblastdb -in - -dbtype nucl -parse_seqids -out rnacentral.fasta -title "RNACentral"
+
+# NCBI nt数据库 [151GB]
+update_blastdb.pl --decompress nt
+cd ..
+```
+
+<CgxTip>数据库下载可能需要几小时甚至几天，具体取决于您的网络速度。建议在夜间下载或使用下载管理器处理大文件。</CgxTip>
+
+这些数据库有不同的用途：
+- **UniRef30**和**BFD**：用于生成蛋白质多序列比对（MSA）
+- **PDB100**：用于结构模板检测
+- **Rfam**和**RNAcentral**：用于RNA序列比对和注释
+- **NCBI nt**：用于核苷酸序列搜索
+来源：[README.md#L41-L77](README.md#L41-L77)
+
+## 验证安装
+
+使用提供的示例文件运行测试预测来验证您的安装：
+
+```bash
+conda activate RF2NA
+cd example
+
+# 测试蛋白质/RNA预测
+../run_RF2NA.sh rna_pred rna_binding_protein.fa R:RNA.fa
+
+# 测试蛋白质/DNA预测
+../run_RF2NA.sh dna_pred dna_binding_protein.fa D:DNA.fa
+```
+
+### 预期输出
+
+如果安装成功，您应该看到：
+
+1. **日志文件**：在`log`目录中显示MSA生成和结构预测的进度
+2. **模型输出**：在`models`子目录中：
+   - `model_00.pdb`：预测的3D结构，B因子列中包含每个残基的置信度分数
+   - `model_00.npz`：NumPy存档文件，包含：
+     - `dist`（L × L × 37）：预测的距离直方图
+     - `lddt`（L）：每个残基的置信度分数
+     - `pae`（L × L）：预测的比对误差矩阵
+
+预测过程通常需要10-30分钟，具体取决于序列长度和可用的计算资源。
+来源：[README.md#L79-L100](README.md#L79-L100)、[run_RF2NA.sh](run_RF2NA.sh)
+
+## 故障排除
+
+### 常见问题
+
+1. **CUDA错误**：确保您已安装CUDA 11.7和兼容的NVIDIA驱动程序
+2. **内存问题**：如果遇到内存不足错误，请增加`run_RF2NA.sh`中的`MEM`变量
+3. **数据库路径问题**：验证所有数据库都已解压到正确的目录中
+4. **Conda环境激活**：运行预测前始终激活RF2NA环境
+
+### 环境变量
+
+脚本会自动设置必需的环境变量，但您可以自定义：
+- `CPU`：使用的CPU数量（默认：8）
+- `MEM`：最大内存（GB）（默认：64）
+- `HHDB`：PDB数据库路径（自动设置为`pdb100_2021Mar03/pdb100_2021Mar03`）
+
+这些参数可以在`run_RF2NA.sh`脚本中修改以匹配您的系统规格。
+来源：[run_RF2NA.sh#L19-L20](run_RF2NA.sh#L19-L20)
+
+## 后续步骤
+
+成功安装和验证后，您可以：
+
+1. **准备您自己的序列**：按照输入准备指南格式化您的蛋白质和核酸序列
+2. **运行自定义预测**：使用已学习的命令结构预测您的序列结构
+3. **探索高级功能**：了解配对的蛋白质/RNA预测和自定义参数设置
+
+安装过程已完成，您现在拥有一个功能完备的RoseTTAFold2NA环境，可用于蛋白质-核酸结构预测！
+
+---
+
+- [入门指南/示例工作流](https://zread.ai/uw-ipd/RoseTTAFold2NA/4-example-workflows)
+
+---
+slug:4-example-workflows
+blog_type:normal
+---
+
+
+RoseTTAFold2NA 提供了几个示例工作流程，帮助您开始进行蛋白质、RNA 以及蛋白质-RNA 复合体结构预测。在本指南中，我们将使用提供的示例文件演示三个主要工作流程，说明如何准备输入并成功运行预测。
+
+## 了解主要工作流程
+
+运行预测的主要入口点是 `run_RF2NA.sh` 脚本，它协调整个流程，从输入准备到最终结构预测。该脚本处理多种输入类型，并根据分子类型自动处理它们。
+
+脚本接受特定格式的输入：`TYPE:fasta_file`，其中 TYPE 可以是：
+- **P**: 蛋白质序列
+- **R**: RNA 序列  
+- **D**: DNA 序列
+- **S**: 单链 DNA 序列
+- **PR**: 蛋白质-RNA 复合体（当提供一个蛋白质和一个 RNA 时自动生成）
+
+<CgxTip>
+当您恰好提供一个蛋白质和一个 RNA 序列时，工作流程会自动检测，并为蛋白质-RNA 复合体预测创建联合 MSA。这是 RoseTTAFold2NA 最强大的功能！
+</CgxTip>
+
+来源：[run_RF2NA.sh#L73-118](run_RF2NA.sh#L73-118)
+
+## 工作流程 1：蛋白质结构预测
+
+让我们从最简单的工作流程开始——预测单条蛋白质链的结构。我们将使用提供的 DNA 结合蛋白示例。
+
+### 步骤 1：准备输入
+
+仓库在 `example/dna_binding_protein.fa` 中提供了一个示例蛋白质序列：
+
+```fasta
+> ANTENNAPEDIA HOMEODOMAIN|Drosophila melanogaster (7227)
+MERKRGRQTYTRYQTLELEKEFHFNRYLTRRRRIEIAHALSLTERQIKIWFQNRRMKWKKEN
+```
+
+这是一个来自果蝇（Drosophila melanogaster）的结合 DNA 的同源域蛋白。
+
+### 步骤 2：运行预测
+
+使用蛋白质输入执行主脚本：
+
+```bash
+./run_RF2NA.sh working_directory P:example/dna_binding_protein.fa
+```
+
+### 幕后发生了什么
+
+脚本执行几个关键步骤：
+
+1. **MSA 生成**：使用 HHblits 搜索 UniRef30 和 BFD 数据库，创建捕获进化信息的多序列比对。
+2. **模板搜索**：对 PDB 数据库运行 hhsearch 以查找结构模板。
+3. **结构预测**：将 MSA 和模板信息输入 RoseTTAFold2NA 神经网络以预测 3D 结构。
+
+```mermaid
+flowchart TD
+    A[输入蛋白质 FASTA] --> B[MSA 生成<br/>HHblits vs UniRef30/BFD]
+    B --> C[模板搜索<br/>hhsearch vs PDB]
+    C --> D[结构预测<br/>RoseTTAFold2NA 模型]
+    D --> E[输出 PDB 文件]
+```
+
+### 预期输出
+
+预测在 `working_directory/models/` 目录中生成几个输出文件：
+- `model_*.pdb`：PDB 格式的预测 3D 结构
+- `model_*.json`：附加模型信息和置信度分数
+
+来源：[run_RF2NA.sh#L27-53](run_RF2NA.sh#L27-53), [example/dna_binding_protein.fa](example/dna_binding_protein.fa)
+
+## 工作流程 2：RNA 结构预测
+
+接下来，让我们使用提供的 RNA 示例预测 RNA 分子的结构。
+
+### 步骤 1：准备输入
+
+示例 RNA 序列在 `example/RNA.fa` 中提供：
+
+```fasta
+> RNA
+GAGAGAGAAGTCAACCAGAGAAACACACCAACCCATTGCACTCCGGGTTGGTGGTATATTACCTGGTACGGGGGAAACTTCGTGGTGGCCGGCCACCTGACA
+```
+
+### 步骤 2：运行预测
+
+使用 RNA 输入执行脚本：
+
+```bash
+./run_RF2NA.sh working_directory R:example/RNA.fa
+```
+
+### RNA 特定处理
+
+RNA 处理遵循与蛋白质不同的流程：
+
+1. **Rfam 搜索**：使用 cmscan 识别 RNA 家族和结构域
+2. **同源性搜索**：对 RNACentral 和 nt 数据库执行 blastn 搜索
+3. **序列聚类**：使用 CD-HIT 去除冗余序列
+4. **重新比对**：使用 nhmmer 进行最终序列比对
+
+```mermaid
+flowchart TD
+    A[输入 RNA FASTA] --> B[Rfam 搜索<br/>cmscan]
+    B --> C[同源性搜索<br/>blastn vs RNACentral/nt]
+    C --> D[序列聚类<br/>CD-HIT]
+    D --> E[重新比对<br/>nhmmer]
+    E --> F[结构预测<br/>RoseTTAFold2NA 模型]
+    F --> G[输出 PDB 文件]
+```
+
+由于 RNA 数据库的多样性以及处理序列和结构同源性的需要，RNA MSA 生成更为复杂。
+
+来源：[run_RF2NA.sh#L55-69](run_RF2NA.sh#L55-69), [example/RNA.fa](example/RNA.fa), [input_prep/make_rna_msa.sh#L58-132](input_prep/make_rna_msa.sh#L58-132)
+
+## 工作流程 3：蛋白质-RNA 复合体预测
+
+这是最先进和最强大的工作流程，预测蛋白质-RNA 复合体的结构。我们将使用 RNA 结合蛋白示例结合 RNA 序列。
+
+### 步骤 1：准备输入
+
+我们需要蛋白质和 RNA 序列：
+- 蛋白质：`example/rna_binding_protein.fa`
+- RNA：`example/RNA.fa`
+
+### 步骤 2：运行预测
+
+使用两个输入执行脚本：
+
+```bash
+./run_RF2NA.sh working_directory P:example/rna_binding_protein.fa R:example/RNA.fa
+```
+
+### 联合 MSA 处理的魔力
+
+当您恰好提供一个蛋白质和一个 RNA 序列时，RoseTTAFold2NA 执行特殊的联合 MSA 处理：
+
+1. **单独 MSA 生成**：为蛋白质和 RNA 创建单独的 MSA
+2. **基于分类学的匹配**：在两个 MSA 中识别来自相同生物体的序列
+3. **联合 MSA 创建**：组合来自匹配分类群的蛋白质和 RNA 序列
+4. **复合体结构预测**：使用联合 MSA 预测蛋白质-RNA 复合体结构
+
+```mermaid
+flowchart TD
+    A[蛋白质 FASTA] --> B[蛋白质 MSA<br/>HHblits]
+    C[RNA FASTA] --> D[RNA MSA<br/>cmscan/blastn]
+    B --> E[分类学匹配<br/>查找共同生物体]
+    D --> E
+    E --> F[联合 MSA 创建<br/>按 TaxID 合并]
+    F --> G[复合体预测<br/>RoseTTAFold2NA]
+    G --> H[蛋白质-RNA 复合体 PDB]
+```
+
+联合 MSA 方法是革命性的，因为它利用了来自相同生物体的蛋白质和 RNA 序列之间的共进化信号，显著提高了复合体结构预测的准确性。
+
+### 了解合并过程
+
+`merge_msa_prot_rna.py` 脚本执行复杂的匹配：
+
+1. **解析 TaxID**：从两个 MSA 文件中提取分类学 ID
+2. **查找匹配**：识别来自相同生物体的序列
+3. **创建配对**：组合匹配的蛋白质-RNA 序列
+4. **处理单链**：添加带间隙字符的未配对序列
+5. **输出联合 MSA**：为复合体预测创建统一的 MSA
+
+此过程确保模型接收有关蛋白质和 RNA 在自然界中如何共同进化的进化信息。
+
+来源：[run_RF2NA.sh#L112-118](run_RF2NA.sh#L112-118), [example/rna_binding_protein.fa](example/rna_binding_protein.fa), [input_prep/merge_msa_prot_rna.py#L146-232](input_prep/merge_msa_prot_rna.py#L146-232)
+
+## 高级用法：多条链和 DNA
+
+RoseTTAFold2NA 还支持更复杂的场景：
+
+### 多条蛋白质链
+
+对于具有多条链的蛋白质复合体：
+
+```bash
+./run_RF2NA.sh working_directory P:protein1.fa P:protein2.fa P:protein3.fa
+```
+
+### DNA 序列
+
+对于 DNA 或单链 DNA：
+
+```bash
+# 双链 DNA
+./run_RF2NA.sh working_directory D:dna_sequence.fa
+
+# 单链 DNA  
+./run_RF2NA.sh working_directory S:ssdna_sequence.fa
+```
+
+### 混合复合体
+
+对于蛋白质-DNA 或蛋白质-RNA-DNA 复合体：
+
+```bash
+# 蛋白质-DNA 复合体
+./run_RF2NA.sh working_directory P:protein.fa D:dna.fa
+
+# 蛋白质-RNA-DNA 复合体
+./run_RF2NA.sh working_directory P:protein.fa R:rna.fa D:dna.fa
+```
+
+<CgxTip>
+处理混合复合体时，联合 MSA 功能仅适用于蛋白质-RNA 对。DNA 序列单独处理，不进行共进化分析。
+</CgxTip>
+
+来源：[run_RF2NA.sh#L84-107](run_RF2NA.sh#L84-107), [network/predict.py#L24-29](network/predict.py#L24-29)
+
+## 常见问题故障排除
+
+### MSA 生成失败
+
+如果 MSA 生成失败，请检查：
+1. 脚本中数据库路径设置正确
+2. 有足够的可用磁盘空间（MSA 文件可能很大）
+3. 数据库文件已正确下载和解压
+
+### 内存问题
+
+对于大序列，您可能需要调整内存分配：
+```bash
+# 在 run_RF2NA.sh 中，修改这些行：
+CPU="16"  # 增加 CPU 数量
+MEM="128" # 以 GB 为单位增加内存
+```
+
+### 输出解释
+
+预测输出具有置信度分数的多个模型。通常：
+- 较高的模型编号表示较高的置信度
+- 检查 JSON 文件获取每个残基的置信度分数
+- pLDDT 分数 > 70 的模型通常是可靠的
+
+来源：[run_RF2NA.sh#L19-20](run_RF2NA.sh#L19-20)
+
+## 后续步骤
+
+成功运行这些示例工作流程后，您可以：
+
+1. **准备您自己的序列**：使用您的蛋白质、RNA 或 DNA 序列创建 FASTA 文件
+2. **尝试不同组合**：尝试各种蛋白质-RNA 对以研究相互作用
+3. **分析结果**：使用 PyMOL 或 Chimera 等分子可视化工具检查预测结构
+4. **验证预测**：在可用时与实验结构进行比较
+
+示例工作流程为探索 RoseTTAFold2NA 在预测核酸结构及其与蛋白质复合体方面的能力提供了坚实的基础。
+
+---
+
+- [入门指南/蛋白质和RNA的输入准备](https://zread.ai/uw-ipd/RoseTTAFold2NA/5-input-preparation-for-proteins-and-rna)
+
+---
+slug:5-input-preparation-for-proteins-and-rna
+blog_type:normal
+---
+
+
+在运行 RoseTTAFold2NA 预测之前，您需要通过为蛋白质和 RNA 分子生成多序列比对（MSA）来正确准备输入序列。这个过程至关重要，因为 MSA 提供了进化背景，帮助模型理解序列与结构的关系。在本指南中，我们将详细介绍蛋白质和 RNA 序列的完整输入准备流程。
+
+## 理解输入准备流程
+
+RoseTTAFold2NA 的输入准备过程包含三个主要阶段：
+
+1. **蛋白质 MSA 生成**：使用 HHblits 针对 UniRef30 和 BFD 数据库为蛋白质序列创建多序列比对
+2. **RNA MSA 生成**：使用 cmscan、blastn 和 nhmmer 等专业工具为 RNA 序列创建多序列比对
+3. **MSA 合并**：基于共享的分类学信息合并蛋白质和 RNA MSA，用于蛋白质-RNA 复合物预测
+
+这个流程旨在最大化模型可用的进化信息，同时确保最高质量的比对，以实现准确的结构预测。
+
+## 输入序列格式
+
+RoseTTAFold2NA 接受标准 FASTA 格式的蛋白质和 RNA 序列文件。让我们看看预期的格式：
+
+### 蛋白质输入格式
+
+蛋白质序列应以 FASTA 格式提供，头部以 '>' 开头，后跟序列：
+
+```
+> ANTENNAPEDIA HOMEODOMAIN|Drosophila melanogaster (7227)
+MERKRGRQTYTRYQTLELEKEFHFNRYLTRRRRIEIAHALSLTERQIKIWFQNRRMKWKKEN
+```
+
+头部可以包含蛋白质的描述信息，但只有序列本身用于 MSA 生成。
+
+### RNA 输入格式
+
+RNA 序列遵循相同的 FASTA 格式约定：
+
+```
+> RNA
+GAGAGAGAAGTCAACCAGAGAAACACACCAACCCATTGCACTCCGGGTTGGTGGTATATTACCTGGTACGGGGGAAACTTCGTGGTGGCCGGCCACCTGACA
+```
+
+RNA 序列应使用标准核苷酸代码（A、C、G、U/T）。
+
+## 蛋白质 MSA 生成
+
+蛋白质 MSA 生成由 `make_protein_msa.sh` 脚本处理，该脚本对大型蛋白质数据库执行迭代搜索以找到同源序列。
+
+### 蛋白质 MSA 生成原理
+
+该脚本遵循一个复杂的流程：
+
+1. **迭代 HHblits 搜索**：脚本对 UniRef30 执行多轮 HHblits 搜索，使用逐渐放宽的 E 值阈值（1e-10、1e-6、1e-3）来寻找远缘同源序列。
+
+2. **序列过滤**：每轮搜索后，使用 hhfilter 过滤序列，保持 90% 相似性和 75% 或 50% 的覆盖度阈值。
+
+3. **质量控制**：脚本继续运行，直到找到：
+   - 超过 2000 个具有 75% 覆盖度的序列，或
+   - 超过 4000 个具有 50% 覆盖度的序列
+
+4. **回退到 BFD**：如果 UniRef30 未能产生足够序列，脚本会搜索更大的 BFD 数据库作为备份。
+
+```mermaid
+flowchart TD
+    A[输入蛋白质 FASTA] --> B[HHblits vs UniRef30 E=1e-10]
+    B --> C[过滤: 90% 相似性, 75% 覆盖度]
+    B --> D[过滤: 90% 相似性, 50% 覆盖度]
+    C --> E{序列足够?}
+    D --> E
+    E -->|是| F[输出 MSA]
+    E -->|否| G[HHblits vs UniRef30 E=1e-6]
+    G --> C
+    G --> D
+    E -->|尝试所有 E 值| H[HHblits vs BFD E=1e-3]
+    H --> I[过滤序列]
+    I --> F
+```
+
+### 运行蛋白质 MSA 生成
+
+要生成蛋白质 MSA，使用以下命令：
+
+```bash
+./input_prep/make_protein_msa.sh input.fasta output_dir tag cpu memory
+```
+
+其中：
+- `input.fasta`：您的 FASTA 格式蛋白质序列
+- `output_dir`：输出文件将保存的目录
+- `tag`：您运行的唯一标识符
+- `cpu`：要使用的 CPU 核心数
+- `memory`：最大内存（GB）
+
+该脚本生成包含过滤后 MSA 的 `.a3m` 文件，这是 RoseTTAFold2NA 使用的标准格式。
+
+来源：[make_protein_msa.sh#L1-L87](input_prep/make_protein_msa.sh), [run_RF2NA.sh#L27-L53](run_RF2NA.sh#L27-L53)
+
+## RNA MSA 生成
+
+由于 RNA 数据库的不同性质和二级结构的重要性，RNA MSA 生成比蛋白质 MSA 生成更复杂。`make_rna_msa.sh` 脚本使用专业工具组合处理此过程。
+
+### RNA MSA 生成原理
+
+RNA MSA 生成流程涉及几个复杂步骤：
+
+1. **Rfam 数据库搜索**：使用 `cmscan` 识别序列中的 RNA 家族和结构域。
+
+2. **序列检索**：基于 Rfam 命中，从 RNACentral 和 NT 数据库检索相关序列。
+
+3. **BLAST 搜索**：使用 `blastn` 对 RNACentral 和 NT 数据库执行额外搜索，以找到更远的同源序列。
+
+4. **序列聚类**：使用 CD-HIT 在不同相似性阈值（100%、99%、95%、90%）下聚类并去除冗余序列。
+
+5. **重新比对**：使用 `nhmmer` 将所有序列与查询序列重新比对，确保正确的比对质量。
+
+```mermaid
+flowchart TD
+    A[输入 RNA FASTA] --> B[cmscan vs Rfam]
+    B --> C[从 RNACentral 检索]
+    B --> D[从 NT 检索]
+    C --> E[blastn vs RNACentral]
+    D --> F[blastn vs NT]
+    E --> G[合并序列]
+    F --> G
+    G --> H[CD-HIT 聚类]
+    H --> I[nhmmer 重新比对]
+    I --> J[最终 RNA MSA]
+```
+
+### 运行 RNA MSA 生成
+
+要生成 RNA MSA，使用以下命令：
+
+```bash
+./input_prep/make_rna_msa.sh input.fasta output_dir tag cpu memory
+```
+
+参数与蛋白质 MSA 生成类似，但输出是 `.afa` 文件（比对 FASTA 格式）而不是 `.a3m`。
+
+该脚本包含几个质量控制参数：
+- `max_aln_seqs=50000`：比对中的最大序列数
+- `max_target_seqs=50000`：BLAST 搜索的最大目标序列数
+- `max_hhfilter_seqs=5000`：过滤后的最大序列数
+
+来源：[make_rna_msa.sh#L1-L135](input_prep/make_rna_msa.sh), [run_RF2NA.sh#L55-L69](run_RF2NA.sh#L55-L69)
+
+<CgxTip>
+由于涉及更复杂的流程和更大的搜索空间，RNA MSA 生成可能比蛋白质 MSA 生成耗时显著更长。为获得最佳性能，请确保您有足够的计算资源，并且 RNA 数据库已正确索引。
+</CgxTip>
+
+## 合并蛋白质和 RNA MSA
+
+在预测蛋白质-RNA 复合物时，RoseTTAFold2NA 需要一个包含来自相同生物体的配对蛋白质和 RNA 序列的联合 MSA。`merge_msa_prot_rna.py` 脚本处理这个关键步骤。
+
+### MSA 合并原理
+
+合并过程旨在创建具有生物学意义的配对：
+
+1. **基于分类学的配对**：脚本读取蛋白质（.a3m）和 RNA（.afa）MSA，识别共享相同 TaxID 的序列。
+
+2. **序列选择**：对于每个 TaxID，根据与查询序列的相似性选择最佳的蛋白质和 RNA 序列。
+
+3. **配对比对构建**：创建联合比对，其中：
+   - 配对序列（相同 TaxID）表示为 protein_sequence/RNA_sequence
+   - 未配对的蛋白质序列在 RNA 部分用空位表示
+   - 未配对的 RNA 序列在蛋白质部分用空位表示
+
+4. **输出格式**：最终合并的 MSA 以 RoseTTAFold2NA 可解释的特殊格式保存，用于蛋白质-RNA 复合物预测。
+
+### 运行 MSA 合并
+
+要合并蛋白质和 RNA MSA，使用以下命令：
+
+```bash
+python ./input_prep/merge_msa_prot_rna.py protein.a3m rna.afa output.a3m
+```
+
+脚本将输出有关找到的配对序列数量的统计信息，这对于评估联合 MSA 的质量至关重要。
+
+来源：[merge_msa_prot_rna.py#L1-L246](input_prep/merge_msa_prot_rna.py), [run_RF2NA.sh#L110-L118](run_RF2NA.sh#L110-L118)
+
+## 完整流程示例
+
+主要的 `run_RF2NA.sh` 脚本协调整个输入准备和预测过程。以下是它处理不同输入场景的方式：
+
+### 单个蛋白质-RNA 复合物预测
+
+对于预测蛋白质-RNA 复合物，流程为：
+
+```bash
+./run_RF2NA.sh output_dir P:protein.fa R:rna.fa
+```
+
+这将：
+1. 使用 `make_protein_msa.sh` 生成蛋白质 MSA
+2. 使用 `make_rna_msa.sh` 生成 RNA MSA
+3. 使用 `merge_msa_prot_rna.py` 合并 MSA
+4. 运行 RoseTTAFold2NA 预测
+
+### 多组分预测
+
+您还可以预测具有多个组分的结构：
+
+```bash
+./run_RF2NA.sh output_dir P:protein1.fa P:protein2.fa R:rna1.fa R:rna2.fa
+```
+
+脚本将单独处理每个组分，然后为最终预测适当组合它们。
+
+来源：[run_RF2NA.sh#L71-L118](run_RF2NA.sh#L71-L118)
+
+## 数据库要求
+
+为了成功进行输入准备，您需要几个大型数据库：
+
+### 蛋白质数据库
+- **UniRef30**（约 46GB）：用于初始蛋白质同源搜索
+- **BFD**（约 272GB）：当 UniRef30 未能产生足够序列时使用的更大数据库
+
+### RNA 数据库
+- **Rfam**：RNA 家族和协方差模型数据库
+- **RNACentral**：非编码 RNA 序列的综合数据库
+- **NT**：NCBI 核苷酸数据库
+
+<CgxTip>
+数据库设置是一次性过程，但需要大量磁盘空间（总计超过 300GB）。在开始数据库设置过程之前，请确保您有足够的存储空间和下载带宽。
+</CgxTip>
+
+## 质量评估和故障排除
+
+### 检查 MSA 质量
+
+生成 MSA 后，您应该评估其质量：
+
+1. **蛋白质 MSA 质量**：检查 `.a3m` 文件中的序列数量。良好的蛋白质 MSA 应该至少有 100-1000 个序列，具体取决于蛋白质家族。
+
+2. **RNA MSA 质量**：RNA MSA 通常较小。检查您的 `.afa` 文件的序列数量和比对质量。
+
+3. **合并 MSA 质量**：对于蛋白质-RNA 复合物，配对序列（相同 TaxID）的数量至关重要。更多的配对序列通常会导致更好的预测。
+
+### 常见问题和解决方案
+
+| 问题 | 可能原因 | 解决方案 |
+|-------|----------------|----------|
+| 蛋白质 MSA 序列少 | 蛋白质新颖或同源序列少 | 尝试降低覆盖度阈值或使用 BFD 数据库 |
+| RNA MSA 生成失败 | 缺少 RNA 数据库或格式问题 | 验证所有 RNA 数据库都已正确安装和索引 |
+| 合并 MSA 配对少 | 数据库中共同出现有限 | 考虑使用未配对的 MSA 运行或扩展搜索参数 |
+| 内存错误 | 大型搜索超过可用 RAM | 减少 CPU 数量或增加内存分配 |
+
+来源：[make_protein_msa.sh#L38-L87](input_prep/make_protein_msa.sh#L38-L87), [make_rna_msa.sh#L95-L132](input_prep/make_rna_msa.sh#L95-L132)
+
+## 后续步骤
+
+准备好 MSA 后，您就可以运行 RoseTTAFold2NA 预测了。输入准备过程是整个流程中最耗时的部分，但对于获得准确的结构预测至关重要。
+
+有关使用准备好的输入运行预测的更多信息，请参阅我们文档系列中的[运行自定义预测](11-running-custom-predictions)指南。
+
+---
+
+# 深入解析
+
+- [深入解析/计算方法与理论](https://zread.ai/uw-ipd/RoseTTAFold2NA/6-computational-method-and-theory)
+
+---
+slug:6-computational-method-and-theory
+blog_type:normal
+---
+
+
+RoseTTAFold2NA代表了蛋白质结构预测领域的重大进展，它扩展了RoseTTAFold的功能，能够精确模拟蛋白质-核酸复合物。本文探讨了使RoseTTAFold2NA能够预测与DNA和RNA分子相互作用的蛋白质三维结构的计算方法和理论基础。
+
+## 三轨神经网络架构
+
+RoseTTAFold2NA的核心采用了一种先进的**三轨神经网络**，能够同时在多个层面处理和整合信息：序列、成对关系和三维结构。这种架构使模型能够通过在这三个相互关联的轨道上迭代优化预测，从而全面理解蛋白质-核酸复合物。
+
+三轨方法处理：
+1. **序列轨道**：通过多序列比对（MSA）表示处理氨基酸和核苷酸序列
+2. **成对轨道**：捕获整个复合物中残基之间的成对相互作用
+3. **结构轨道**：通过SE(3)等变变换维护和优化三维坐标
+
+这种集成方法使模型能够利用MSA中的进化信息，同时构建蛋白质-核酸复合物的精确三维结构模型。
+
+来源：[RoseTTAFoldModel.py#L1-L114](network/RoseTTAFoldModel.py#L1-L114)
+
+## 输入嵌入与表示
+
+RoseTTAFold2NA首先将输入序列转换为丰富的数值表示，这些表示既包含序列信息又包含结构潜力。嵌入过程通过专门组件处理蛋白质和核酸序列：
+
+### MSA嵌入
+
+`MSA_emb`类将输入序列及其多序列比对转换为初始特征表示。它处理：
+- 蛋白质序列（20种标准氨基酸加未知和掩码标记）
+- DNA序列（A、T、C、G和未知标记）
+- RNA序列（A、U、C、G和未知标记）
+- 捕获相对序列位置和链信息的位置编码
+
+嵌入过程生成三个关键表示：
+- `msa`：表示MSA特征的三维张量（批次×序列×长度×特征）
+- `pair`：捕获残基成对相互作用的四维张量（批次×长度×长度×特征）
+- `state`：三维结构预测的初始节点特征
+
+来源：[Embeddings.py#L19-L65](network/Embeddings.py#L19-L65), [chemical.py#L1-L40](network/chemical.py#L1-L40)
+
+### 化学表示
+
+模型使用全面的化学表示系统，定义了氨基酸和核苷酸的原子结构。`chemical.py`文件包含详细映射：
+- 20种标准氨基酸
+- DNA核苷酸（dA、dT、dC、dG）
+- RNA核苷酸（A、U、C、G）
+- 每种残基类型的原子坐标和连接性
+
+这种详细的化学表示使模型能够从预测的主链坐标准确生成全原子结构。
+
+来源：[chemical.py#L1-L40](network/chemical.py#L1-L40)
+
+## 迭代结构优化
+
+RoseTTAFold2NA计算方法的核心是`IterativeSimulator`类，它实现了一个迭代优化过程，逐步改进预测的三维结构。该过程包含三个主要阶段：
+
+### 1. 额外块处理
+
+初始额外块处理额外的MSA序列以提取进化信息：
+- 在降维的更大序列集上运行
+- 使用全局注意力捕获长程依赖关系
+- 为主要优化过程奠定基础
+
+### 2. 主块处理
+
+主块执行核心结构优化：
+- 以更高维度处理目标序列
+- 应用局部注意力机制进行精确的局部结构预测
+- 迭代更新三轨表示（MSA、成对和结构）
+
+### 3. 结构优化
+
+最终优化阶段应用专门的SE(3)等变变换：
+- 通过基于梯度的力整合物理约束
+- 应用键几何、范德华力和氢键约束
+- 生成最终的高精度三维结构
+
+```mermaid
+flowchart TD
+    A[输入序列] --> B[初始嵌入]
+    B --> C[额外块处理]
+    C --> D[主块处理]
+    D --> E[结构优化]
+    E --> F[最终三维结构]
+    
+    subgraph 迭代循环
+        D --> G[更新MSA轨道]
+        D --> H[更新成对轨道]
+        D --> I[更新结构轨道]
+        G --> D
+        H --> D
+        I --> D
+    end
+```
+
+来源：[Track_module.py#L400-L501](network/Track_module.py#L400-L501)
+
+## SE(3)-等变Transformer集成
+
+RoseTTAFold2NA的一个关键创新是集成了SE(3)-等变transformer，这确保了模型的预测尊重三维空间的旋转和平移对称性。`SE3TransformerWrapper`类实现了这一关键组件：
+
+### 数学基础
+
+SE(3)-transformer基于**等变性**原理运行：如果输入坐标被旋转或平移，输出特征应经历相同的变换。这在数学上表示为：
+
+```
+f(R·x + t) = R·f(x) + t
+```
+
+其中R是旋转矩阵，t是平移向量，f是变换函数。
+
+### 实现细节
+
+SE(3)-transformer实现：
+- 使用球谐函数和Clebsch-Gordan系数进行旋转等变操作
+- 分别处理不同阶数的特征（标量、向量等）
+- 将等变注意力与不变注意力权重相结合
+- 无论输入方向如何，都能实现稳定一致的预测
+
+这种等变性质对于准确的三维结构预测至关重要，因为它确保模型不依赖于输入坐标的任意方向。
+
+来源：[SE3_network.py#L1-L90](network/SE3_network.py#L1-L90), [SE3Transformer/README.md#L1-L200](SE3Transformer/README.md#L1-L200)
+
+## 注意力机制
+
+RoseTTAFold2NA采用先进的注意力机制来捕获蛋白质-核酸复合物中的局部和长程相互作用：
+
+### MSA注意力
+
+`MSAPairStr2MSA`类实现了MSA处理的偏置自注意力：
+- 使用成对特征和结构信息作为注意力偏置
+- 结合行向和列向注意力模式
+- 整合来自结构轨道的反馈以优化序列表示
+
+### 成对注意力
+
+`PairStr2Pair`类更新残基成对相互作用：
+- 通过基于距离的特征整合结构信息
+- 使用注意力捕获长程依赖关系
+- 在整个优化过程中维护L×L相互作用矩阵
+
+这些注意力机制使模型能够有效捕获蛋白质-核酸复合物中序列进化与结构约束之间的复杂相互作用。
+
+来源：[Track_module.py#L19-L100](network/Track_module.py#L19-L100)
+
+## 损失函数与训练目标
+
+RoseTTAFold2NA使用多组件损失函数进行训练，同时优化结构准确性和辅助预测：
+
+### 结构损失
+
+主要结构损失基于**帧对齐点误差（FAPE）**：
+- 计算预测原子坐标与真实原子坐标之间的误差
+- 使用由主链原子定义的局部坐标帧
+- 对链内和链间相互作用应用不同的距离阈值
+- 对蛋白质-蛋白质、蛋白质-核酸和核酸-核酸相互作用采用不同处理方式
+
+### 辅助损失
+
+额外的损失组件包括：
+- **距离损失**：预测残基间距离分布
+- **PAE损失**：预测每残基对误差估计
+- **LDDT损失**：预测局部距离差异测试分数
+- **键几何损失**：确保适当的键长和键角
+- **范德华损失**：防止原子碰撞
+- **氢键损失**：稳定二级结构
+
+这些组合损失确保模型产生物理上合理的结构，同时为其预测提供置信度估计。
+
+来源：[loss.py#L1-L100](network/loss.py#L1-L100)
+
+<CgxTip>
+RoseTTAFold2NA的SE(3)-等变性质对其成功至关重要。与传统神经网络可能对旋转输入产生不同输出不同，RoseTTAFold2NA的预测无论输入方向如何都保持一致，这使其特别适用于三维结构预测任务。
+</CgxTip>
+
+## 模板集成
+
+RoseTTAFold2NA可以通过`Templ_emb`类选择性地整合已知模板的结构信息：
+
+- 处理模板结构以提取一维和二维特征
+- 将模板信息与目标序列对齐
+- 将模板特征与MSA和成对表示整合
+- 在同源结构可用时提供额外的结构约束
+
+这种模板集成能力使RoseTTAFold2NA能够利用现有结构知识，同时仍能预测没有模板的新折叠。
+
+来源：[RoseTTAFoldModel.py#L1-L114](network/RoseTTAFoldModel.py#L1-L114)
+
+## 回收机制
+
+模型采用回收机制，能够迭代优化其预测：
+
+- 将一次迭代的输出作为下一次迭代的输入
+- 逐步提高序列和结构预测的准确性
+- 通常在3-4次迭代内收敛
+- 使模型能够纠正错误并优化细节
+
+这种迭代方法类似于人类模型构建和优化的过程，其中初始粗略模型被逐步改进。
+
+来源：[RoseTTAFoldModel.py#L1-L114](network/RoseTTAFoldModel.py#L1-L114)
+
+## 结论
+
+RoseTTAFold2NA代表了多种计算方法的复杂集成，以解决蛋白质-核酸结构预测这一挑战性问题。通过结合三轨神经网络、SE(3)-等变transformer、迭代优化和多组件损失函数，该模型在预测这些重要生物复合物的三维结构方面实现了高精度。
+
+RoseTTAFold2NA的理论基础在于其同时处理进化信息、物理约束和几何关系的能力，这使其成为理解蛋白质-核酸相互作用分子基础的强大工具。
+
+---
+
+- [深入解析/运行自定义预测](https://zread.ai/uw-ipd/RoseTTAFold2NA/11-running-custom-predictions)
+
+---
+slug:11-running-custom-predictions
+blog_type:normal
+---
+
+
+RoseTTAFold2NA 使研究人员能够以极高的准确性预测蛋白质-核酸复合物的三维结构。本指南将引导您为自有序列运行自定义预测，详细解释从输入准备到结果解读的完整工作流程。
+
+## 理解预测工作流程
+
+在开始自定义预测之前，首先需要了解 RoseTTAFold2NA 如何处理您的输入。预测流水线采用系统化的方法：
+
+1. **输入准备**：您的蛋白质和/或核酸序列将被处理以生成多序列比对（MSA）
+2. **模板搜索**：对于蛋白质，系统会在已知蛋白质数据库中搜索结构模板
+3. **模型推理**：处理后的输入被输入神经网络以预测三维结构
+4. **输出生成**：模型生成包含预测结构和置信度指标的 PDB 文件
+
+整个工作流程由 `run_RF2NA.sh` 脚本协调执行，该脚本会自动处理所有中间步骤。不过，了解每个组件将帮助您在需要时排查问题并自定义预测。
+来源：[run_RF2NA.sh#L1-L134](run_RF2NA.sh), [README.md#L79-L87](README.md#L79-L87)
+
+## 准备输入序列
+
+RoseTTAFold2NA 接受多种类型的分子序列，每种序列都通过特定前缀标识：
+
+- **P:** 蛋白质序列
+- **R:** RNA 序列
+- **D:** 双链 DNA 序列
+- **S:** 单链 DNA 序列
+- **PR:** 配对的蛋白质-RNA 序列（用于共进化对）
+
+您的输入文件应为 FASTA 格式，这是一种简单的文本格式，其中每个序列以包含序列名的 ">" 行开头，后续行则为序列本身。
+
+例如，一个蛋白质 FASTA 文件可能如下所示：
+```
+> my_protein
+MAGICSEQWENCEHEREEXAMPLEPROTEINSEQUENCE
+```
+来源：[example/rna_binding_protein.fa](example/rna_binding_protein.fa), [example/RNA.fa](example/RNA.fa), [README.md#L89-L91](README.md#L89-L91)
+
+<CgxTip>
+请始终确保您的序列格式正确，且仅包含对应类型的有效字符（蛋白质为标准氨基酸，RNA 为 ACGU，DNA 为 ACGT）。无效字符将导致预测失败。
+</CgxTip>
+
+## 运行基本预测
+
+准备好输入文件后，您可以使用主脚本运行预测。基本语法如下：
+
+```bash
+../run_RF2NA.sh output_folder input1 input2 ...
+```
+
+其中每个输入都需指定其类型前缀。以下是一些常见示例：
+
+### 蛋白质-RNA 复合物预测
+```bash
+../run_RF2NA.sh protein_rna_complex P:protein.fa R:rna.fa
+```
+
+### 蛋白质-DNA 复合物预测
+```bash
+../run_RF2NA.sh protein_dna_complex P:protein.fa D:dna.fa
+```
+
+### 多链复合物预测
+```bash
+../run_RF2NA.sh multi_chain P:protein1.fa P:protein2.fa R:rna.fa
+```
+
+该脚本会自动适当处理每种序列类型，生成 MSA，搜索模板（仅限蛋白质），并运行预测模型。
+来源：[run_RF2NA.sh#L73-L107](run_RF2NA.sh#L73-L107), [README.md#L84-L86](README.md#L84-L86)
+
+## 理解预测过程
+
+当您运行预测脚本时，后台会执行多个步骤：
+
+### 1. MSA 生成
+
+对于蛋白质，系统使用 HHblits 搜索 UniRef30 和 BFD 数据库，创建捕获进化信息的多序列比对。此过程采用逐步放宽的 E 值阈值（1e-10、1e-6、1e-3）运行，以确保足够的序列覆盖度。
+
+对于 RNA 序列，流水线更为复杂：
+- 使用 cmscan 搜索 Rfam 以识别 RNA 家族
+- 使用 blastn 从 RNAcentral 和 nt 数据库检索相关序列
+- 使用 CD-HIT 对序列进行聚类以去除冗余
+- 使用不同 E 值阈值的 nhmmer 重新比对序列
+
+```mermaid
+flowchart TD
+    A[输入序列] --> B{序列类型？}
+    B -->|蛋白质| C[HHblits vs UniRef30/BFD]
+    B -->|RNA| D[cmscan vs Rfam]
+    C --> E[过滤后的 MSA]
+    D --> F[blastn vs RNAcentral/nt]
+    F --> G[使用 CD-HIT 聚类]
+    G --> H[nhmmer 重新比对]
+    H --> E
+    E --> I[模板搜索<br>(仅限蛋白质)]
+    I --> J[模型预测]
+```
+来源：[input_prep/make_protein_msa.sh#L26-L56](input_prep/make_protein_msa.sh#L26-L56), [input_prep/make_rna_msa.sh#L58-L132](input_prep/make_rna_msa.sh#L58-L132)
+
+### 2. 模板搜索（仅限蛋白质）
+
+对于蛋白质链，系统使用 hhsearch 针对 PDB 数据库搜索结构模板。此步骤识别可能与您的蛋白质相似的已知结构，为预测提供额外约束。
+
+模板信息存储在 `.hhr` 和 `.atab` 文件中，分别包含比对统计信息和模板坐标。
+来源：[run_RF2NA.sh#L46-L52](run_RF2NA.sh#L46-L52)
+
+### 3. 模型预测
+
+核心预测由 `predict.py` 脚本处理，该脚本加载预训练的 RoseTTAFold2NA 模型并通过神经网络处理您的输入。模型采用迭代优化过程，最多包含 10 个循环步骤以提高预测质量。
+
+在每个循环步骤中，模型会：
+1. 处理 MSA 和模板信息
+2. 预测残基间距离和角度
+3. 生成三维坐标
+4. 评估预测置信度（pLDDT）
+5. 将最佳预测用作下一次迭代的输入
+
+```mermaid
+sequenceDiagram
+    participant Input as 处理后的输入
+    participant Model as RoseTTAFold2NA 模型
+    participant Cycle as 循环回路
+    participant Output as 最终预测
+    
+    Input->>Model: MSA、模板、序列
+    Model->>Cycle: 初始三维坐标
+    loop 最多 10 个循环步骤
+        Cycle->>Cycle: 优化结构
+        Cycle->>Cycle: 更新 pLDDT 分数
+        Cycle->>Cycle: 检查改进
+    end
+    Cycle->>Output: 最佳结构 + 指标
+```
+来源：[network/predict.py#L291-L337](network/predict.py#L291-L337)
+
+## 解读预测输出
+
+预测完成后，您会在指定的输出目录中找到多个输出文件：
+
+### 主要输出
+
+1. **PDB 文件** (`models/model_00.pdb`)
+   - 包含标准 PDB 格式的预测三维结构
+   - B 因子列包含每个残基的置信度分数（pLDDT × 100）
+   - 较高值表示较高置信度（0-100 量表）
+
+2. **NPZ 文件** (`models/model_00.npz`)
+   - 包含额外预测指标的压缩 numpy 文件
+   - 可使用 `numpy.load()` 加载以进行进一步分析
+   - 包含三个关键数组：
+     - `dist`: 预测距离直方图（L × L × 37）
+     - `lddt`: 每残基置信度分数（L）
+     - `pae`: 预测比对误差矩阵（L × L）
+
+### 理解置信度指标
+
+- **pLDDT（局部距离差异检验）**: 每残基置信度分数
+  - > 90: 非常高置信度
+  - 70-90: 良好置信度
+  - 50-70: 低置信度
+  - < 50: 非常低置信度
+
+- **PAE（预测比对误差）**: 显示残基对之间预期误差的矩阵
+  - 低值（蓝色）表示相对位置置信度高
+  - 高值（红色）表示相对位置不确定
+
+<CgxTip>
+PDB 文件 B 因子列中的 pLDDT 分数可以直接在 PyMOL 或 ChimeraX 等分子查看器中可视化，让您能立即看到预测中哪些部分最可靠。
+</CgxTip>
+来源：[README.md#L93-L99](README.md#L93-L99), [network/predict.py#L350-L356](network/predict.py#L350-L356)
+
+## 高级自定义选项
+
+虽然基本的 `run_RF2NA.sh` 脚本能处理大多数用例，但您可能需要自定义预测过程的某些方面。
+
+### 直接调用模型
+
+为了获得更多控制权，您可以直接调用预测脚本：
+```bash
+python network/predict.py \
+    -inputs "P:protein.msa0.a3m:protein.hhr:protein.atab R:rna.afa" \
+    -prefix output/models/model \
+    -model network/weights/RF2NA_apr23.pt \
+    -db pdb100_2021Mar03/pdb100_2021Mar03
+```
+
+这允许您：
+- 使用预计算的 MSA 和模板结果
+- 指定不同的模型权重
+- 控制输出命名和位置
+来源：[network/predict.py#L21-L35](network/predict.py#L21-L35)
+
+### 模型参数
+
+预测模型有几个影响其行为的关键参数：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------------|-------------|
+| MAX_CYCLE | 10 | 循环迭代次数 |
+| MAXSEQ | 2048 | MSA 中的最大序列数 |
+| MAXLAT | 256 | 最大潜在维度 |
+| n_extra_block | 4 | 额外 Transformer 块数量 |
+| n_main_block | 32 | 主要 Transformer 块数量 |
+
+这些参数在 `predict.py` 中定义，如果您有特定需求可以修改，但默认值在大多数情况下效果良好。
+来源：[network/predict.py#L37-L58](network/predict.py#L37-L58)
+
+### 资源分配
+
+`run_RF2NA.sh` 中的默认分配使用 8 个 CPU 和 64GB 内存：
+```bash
+CPU="8"   # 使用的 CPU 数量
+MEM="64"  # 最大内存（GB）
+```
+
+对于较大的复合物或如果您有更多可用资源，可以在运行预测前在脚本中增加这些值。
+来源：[run_RF2NA.sh#L19-L20](run_RF2NA.sh#L19-L20)
+
+## 常见问题排查
+
+运行自定义预测时，您可能会遇到一些常见问题：
+
+### MSA 生成失败
+
+如果 MSA 生成步骤失败，请检查：
+1. 脚本中的数据库路径是否正确
+2. 是否有足够的磁盘空间
+3. 序列格式是否有效（无无效字符）
+4. 数据库文件是否已正确下载和解压
+
+### 内存不足错误
+
+对于大型复合物，您可能会遇到内存问题：
+1. 使用 `CPU` 参数减少 CPU 数量
+2. 确保有足够的 RAM（推荐 64GB）
+3. 考虑将大型复合物分解为更小的亚基
+
+### 预测质量不佳
+
+如果预测置信度低：
+1. 检查输入序列是否有错误
+2. 确保复合物类型正确指定（P、R、D、S）
+3. 验证 MSA 是否包含足够的多样性
+4. 如果序列是共进化的，考虑使用配对的蛋白质-RNA（PR）
+
+### 模板搜索问题
+
+对于蛋白质模板搜索问题：
+1. 验证 PDB 数据库路径是否正确
+2. 确保数据库文件已正确索引
+3. 检查 `.hhr` 和 `.atab` 文件是否已生成
+
+来源：[run_RF2NA.sh#L35-L40](run_RF2NA.sh#L35-L40), [run_RF2NA.sh#L46-L52](run_RF2NA.sh#L46-L52)
+
+## 结论
+
+一旦您了解了输入要求和输出格式，使用 RoseTTAFold2NA 运行自定义预测就是一个简单的过程。系统自动处理大部分复杂性，从 MSA 生成到模板搜索和模型推理。
+
+通过遵循本指南，您应该能够：
+- 以正确格式准备您的序列
+- 为各种复合物类型运行预测
+- 解读输出中的置信度指标
+- 排查可能出现的常见问题
+
+请记住，预测质量很大程度上取决于输入质量和数据库中进化信息的可用性。为获得最佳结果，请确保您的序列准确，并在研究共进化系统时考虑使用配对的蛋白质-RNA 输入。
+
+随着您对系统的熟悉，您可以探索高级自定义选项，以根据您的特定研究需求调整预测过程。
+
+---
+
+- [深入解析/性能优化](https://zread.ai/uw-ipd/RoseTTAFold2NA/12-performance-optimization)
+
+---
+slug:12-performance-optimization
+blog_type:normal
+---
+
+
+性能优化在使用复杂的分子结构预测模型（如RoseTTAFold2NA）时至关重要。本指南介绍了关键技术和配置，旨在最大化训练和推理流程的性能，帮助您减少计算时间并高效利用可用硬件资源。
+
+## 理解性能瓶颈
+
+RoseTTAFold2NA的性能主要受三个因素制约：神经网络的计算复杂度、内存带宽限制和数据预处理开销。该模型通过多个基于Transformer的模块处理多序列比对（MSA）、模板信息和3D坐标，每个模块具有不同的计算特性。
+
+主要性能瓶颈通常出现在：
+1. **MSA处理**：大型多序列比对需要大量内存和计算资源
+2. **SE3 Transformer操作**：3D旋转等变变换计算密集
+3. **模板处理**：从数据库处理结构模板会增加开销
+4. **循环迭代**：多次优化循环会增加总计算时间
+
+## 优化推理性能
+
+### GPU内存管理
+
+高效的GPU内存使用对推理性能至关重要。RoseTTAFold2NA在每次预测之间实现了自动内存清理：
+
+```python
+# 每次模型预测后清除GPU缓存
+torch.cuda.empty_cache()
+```
+
+此实践在预测流水线中每次模型运行后执行，以防止内存碎片化，确保多次预测的性能一致性。`来源：[predict.py#L251](network/predict.py#L251)`
+
+### 自动混合精度（AMP）
+
+启用自动混合精度可以显著提高推理速度，同时对精度影响最小：
+
+```bash
+# 在推理基准测试中启用AMP
+CUDA_VISIBLE_DEVICES=0 python -m se3_transformer.runtime.inference \
+  --amp true \
+  --batch_size 240 \
+  --use_layer_norm \
+  --norm \
+  --task homo \
+  --seed 42 \
+  --benchmark
+```
+
+AMP在可能的情况下使用FP16进行计算，同时对关键操作保持FP32，从而减少内存使用并加速现代GPU上的计算。`来源：[benchmark_inference.sh#L6-L11](SE3Transformer/scripts/benchmark_inference.sh#L6-L11)`
+
+### 批处理优化
+
+优化批大小对最大化GPU利用率至关重要：
+
+```bash
+# 尝试不同的批大小
+BATCH_SIZE=240  # 默认值，根据GPU内存调整
+AMP=true
+```
+
+较大的批大小可提高GPU利用率，但需要更多内存。最佳批大小取决于您特定的GPU内存容量和输入序列的大小。`来源：[benchmark_inference.sh#L5-L6](SE3Transformer/scripts/benchmark_inference.sh#L5-L6)`
+
+<CgxTip>
+使用`nvidia-smi`监控推理期间的GPU内存使用情况，以确定硬件的最佳批大小。从较小的批次开始，逐渐增加，直到达到80-90%的GPU内存利用率。
+</CgxTip>
+
+## 优化训练性能
+
+### 多GPU训练
+
+对于大规模训练，使用分布式训练利用多个GPU：
+
+```bash
+# 多GPU训练，自动扩展
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=gpu --max_restarts 0 --module \
+  se3_transformer.runtime.training \
+  --amp true \
+  --batch_size 240 \
+  --epochs 6 \
+  --use_layer_norm \
+  --norm \
+  --save_ckpt_path model_qm9.pth \
+  --task homo \
+  --precompute_bases \
+  --seed 42 \
+  --benchmark
+```
+
+此配置自动在单个节点上的所有可用GPU之间分配工作负载，显著减少大型数据集的训练时间。`来源：[benchmark_train_multi_gpu.sh#L8-L19](SE3Transformer/scripts/benchmark_train_multi_gpu.sh#L8-L19)`
+
+### 预计算策略
+
+预计算某些组件可以减少训练期间的运行时开销：
+
+```bash
+# 启用基函数预计算
+--precompute_bases
+```
+
+此标志预计算在SE3 transformer操作中重复使用的旋转基函数，以内存换取计算时间。`来源：[benchmark_train.sh#L16](SE3Transformer/scripts/benchmark_train.sh#L16)`
+
+### 单GPU优化
+
+对于单GPU训练，专注于最大化内存效率：
+
+```bash
+# 单GPU训练，优化设置
+CUDA_VISIBLE_DEVICES=0 python -m se3_transformer.runtime.training \
+  --amp true \
+  --batch_size 240 \
+  --epochs 6 \
+  --use_layer_norm \
+  --norm \
+  --save_ckpt_path model_qm9.pth \
+  --task homo \
+  --precompute_bases \
+  --seed 42 \
+  --benchmark
+```
+
+此配置确保单GPU得到充分利用，同时通过AMP和层归一化保持内存效率。`来源：[benchmark_train.sh#L8-L18](SE3Transformer/scripts/benchmark_train.sh#L8-L18)`
+
+## 模型配置优化
+
+### SE3 Transformer参数
+
+SE3 transformer组件具有可配置参数，影响性能：
+
+```python
+SE3_param = {
+    "num_layers": 1,        # SE3 transformer层数
+    "num_channels": 32,     # 通道维度
+    "num_degrees": 2,       # 度带数量
+    "l0_in_features": 64,   # 输入特征维度
+    "l0_out_features": 64,  # 输出特征维度
+    "l1_in_features": 3,    # 3D坐标输入维度
+    "l1_out_features": 2,   # 3D坐标输出维度
+    "num_edge_features": 64,# 边特征维度
+    "div": 4,               # 注意力头的除数
+    "n_heads": 4            # 注意力头数量
+}
+```
+
+减少`num_channels`或`num_layers`可以牺牲一些精度来提高性能。最佳配置取决于您的特定用例和精度要求。`来源：[predict.py#L60-L71](network/predict.py#L60-L71)`
+
+### 模型架构参数
+
+可以调整主要模型参数以优化性能：
+
+```python
+MODEL_PARAM = {
+    "n_extra_block": 4,    # 额外块数量
+    "n_main_block": 32,    # 主块数量（计算最密集）
+    "n_ref_block": 4,      # 优化块数量
+    "d_msa": 256,          # MSA特征维度
+    "d_pair": 128,         # 配对特征维度
+    "d_templ": 64,         # 模板特征维度
+    "n_head_msa": 8,       # MSA注意力头数量
+    "n_head_pair": 4,      # 配对注意力头数量
+    "p_drop": 0.0,         # 丢弃率
+    "lj_lin": 0.75         # 线性能量参数
+}
+```
+
+`n_main_block`参数对性能影响最大，因为这些块包含计算最密集的操作。`来源：[predict.py#L44-L58](network/predict.py#L44-L58)`
+
+## 数据处理优化
+
+### MSA处理优化
+
+多序列比对（MSA）处理是主要瓶颈。RoseTTAFold2NA流水线包含多项优化：
+
+```python
+# 带参数的MSA特征化
+seq, msa_seed_orig, msa_seed, msa_extra, mask_msa = MSAFeaturize(
+    msa_orig, ins_orig, p_mask=0.0, 
+    params={
+        'MAXLAT': 256,    # 最大潜在维度
+        'MAXSEQ': 2048,   # 最大序列长度
+        'MAXCYCLE': 10    # 最大循环次数
+    }
+)
+```
+
+这些参数控制MSA处理流水线的最大维度。根据典型输入大小调整它们可以提高内存效率。`来源：[predict.py#L256-L257](network/predict.py#L256-L257)`
+
+### 循环优化
+
+模型使用迭代循环来优化预测：
+
+```python
+MAX_CYCLE = 10  # 循环迭代次数
+```
+
+减少`MAX_CYCLE`可以显著提高性能，但会牺牲一些精度。对于许多应用，4-6次循环在速度和精度之间提供了良好的平衡。`来源：[predict.py#L37](network/predict.py#L37)`
+
+## 环境和硬件优化
+
+### CUDA和cuDNN配置
+
+conda环境配置为最佳GPU性能：
+
+```yaml
+name: RF2NA
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch
+  - pytorch-cuda=11.7
+  - dglteam/label/cu117::dgl
+  - pyg::pyg
+```
+
+此配置确保与CUDA 11.7和深度学习库的优化版本兼容。`来源：[RF2na-linux.yml#L1-L14](RF2na-linux.yml#L1-L14)`
+
+### CPU资源分配
+
+主要流水线脚本允许控制CPU资源：
+
+```bash
+CPU="8"   # 使用的CPU数量
+MEM="64"  # 最大内存（GB）
+```
+
+这些参数控制MSA生成和模板处理的资源分配，这些是CPU密集型任务。根据可用硬件进行调整。`来源：[run_RF2NA.sh#L19-L20](run_RF2NA.sh#L19-L20)`
+
+## 性能监控和基准测试
+
+### 内置基准测试
+
+存储库包含用于系统性能评估的基准测试脚本：
+
+```bash
+# 推理基准测试
+./benchmark_inference.sh [BATCH_SIZE] [AMP]
+
+# 单GPU训练基准测试
+./benchmark_train.sh [BATCH_SIZE] [AMP]
+
+# 多GPU训练基准测试
+./benchmark_train_multi_gpu.sh [BATCH_SIZE] [AMP]
+```
+
+这些脚本提供标准化的性能指标，并帮助识别优化机会。`来源：[benchmark_inference.sh](SE3Transformer/scripts/benchmark_inference.sh), [benchmark_train.sh](SE3Transformer/scripts/benchmark_train.sh), [benchmark_train_multi_gpu.sh](SE3Transformer/scripts/benchmark_train_multi_gpu.sh)`
+
+### 性能指标
+
+需要监控的关键指标包括：
+- **吞吐量**：每秒处理的结构数量
+- **内存使用**：峰值操作期间的GPU内存消耗
+- **延迟**：每次预测或训练迭代的时间
+- **GPU利用率**：GPU主动计算的时间百分比
+
+<CgxTip>
+始终使用与典型用例匹配的真实数据大小进行基准测试。性能特征可能因输入序列长度和MSA深度而有显著差异。
+</CgxTip>
+
+## 优化策略总结
+
+下表总结了关键优化策略及其影响：
+
+| 策略 | 性能影响 | 精度影响 | 实施难度 |
+|------|----------|----------|----------|
+| 自动混合精度 | 高 | 最小 | 低 |
+| 批大小优化 | 高 | 无 | 中 |
+| 多GPU训练 | 非常高 | 无 | 高 |
+| 预计算基函数 | 中 | 无 | 低 |
+| 减少循环次数 | 高 | 中 | 低 |
+| 模型参数减少 | 高 | 高 | 中 |
+
+通过系统应用这些优化技术，您可以显著提高RoseTTAFold2NA在特定用例中的性能，同时保持应用所需的精度。
+
+---
+
+## 模型架构
+
+- [深入解析/模型架构/神经网络组件](https://zread.ai/uw-ipd/RoseTTAFold2NA/7-neural-network-components)
+
+---
+slug:7-neural-network-components
+blog_type:normal
+---
+
+
+RoseTTAFold2NA的神经网络架构专为预测蛋白质-核酸复合物而设计，结合了先进的注意力机制和专门的嵌入层，以捕捉蛋白质与RNA/DNA序列之间的复杂关系。本文将探讨构成这一强大预测系统的关键神经网络组件。
+
+## 核心架构概述
+
+RoseTTAFold2NA的神经网络架构围绕几个关键组件构建，这些组件协同工作，将输入序列转化为3D结构预测。其核心是`RoseTTAFoldModule`类，该类通过整合嵌入层、注意力机制和专门的预测头来协调整个预测流程。
+
+该架构采用模块化设计，每个组件都有特定职责：
+- **嵌入层**将原始序列数据转换为丰富的向量表示
+- **注意力机制**捕捉残基之间的局部和全局相互作用
+- **迭代优化**逐步改进预测结构
+- **专门预测器**生成距离矩阵和结合概率等辅助输出
+
+## 输入嵌入
+
+### MSA嵌入
+
+多重序列比对（MSA）嵌入是处理输入序列的第一个关键组件。`MSA_emb`类将原始MSA数据转换为捕捉进化信息的丰富向量表示。
+
+```python
+class MSA_emb(nn.Module):
+    def __init__(self, d_msa=256, d_pair=128, d_state=32, d_init=2*NAATOKENS+2+2,
+                 minpos=-32, maxpos=32, p_drop=0.1):
+        super(MSA_emb, self).__init__()
+        self.emb = nn.Linear(d_init, d_msa)  # 通用MSA嵌入
+        self.emb_q = nn.Embedding(NAATOKENS, d_msa)  # 查询序列嵌入
+        self.emb_left = nn.Embedding(NAATOKENS, d_pair)  # 左侧成对嵌入
+        self.emb_right = nn.Embedding(NAATOKENS, d_pair)  # 右侧成对嵌入
+        self.emb_state = nn.Embedding(NAATOKENS, d_state)
+        self.pos = PositionalEncoding2D(d_pair, minpos=minpos, maxpos=maxpos)
+```
+
+MSA嵌入创建三种类型的表示：
+1. **MSA嵌入**（d_msa=256）：从多重序列比对中捕捉进化信息
+2. **成对嵌入**（d_pair=128）：表示残基对之间的相互作用
+3. **状态嵌入**（d_state=32）：编码每个残基的状态信息
+
+在前向传播过程中，MSA嵌入将通用序列信息与查询特定嵌入相结合，并添加位置编码以捕捉残基之间的空间关系。
+
+来源：[network/Embeddings.py#L32-L82](network/Embeddings.py#L32-L82)
+
+### 额外嵌入
+
+`Extra_emb`类处理补充主要MSA数据的额外序列信息。该组件处理二级结构预测或其他可提高预测准确性的辅助序列信息等特征。
+
+```python
+class Extra_emb(nn.Module):
+    def __init__(self, d_msa=256, d_init=NAATOKENS+1+2, p_drop=0.1):
+        super(Extra_emb, self).__init__()
+        self.emb = nn.Linear(d_init, d_msa)  # 通用MSA嵌入
+        self.emb_q = nn.Embedding(NAATOKENS, d_msa)  # 查询序列嵌入
+```
+
+该嵌入层遵循与MSA嵌入类似的模式，但专为不同类型的输入特征设计，为模型提供额外的上下文信息。
+
+来源：[network/Embeddings.py#L84-L100](network/Embeddings.py#L84-L100)
+
+### 模板嵌入
+
+模板嵌入在可用时整合来自已知蛋白质结构的信息。`Templ_emb`类处理模板特征以指导预测过程，利用结构同源性提高准确性。
+
+```python
+class Templ_emb(nn.Module):
+    def __init__(self, d_pair=128, d_templ=64, d_state=32,
+                 n_head=4, d_hidden=64, p_drop=0.25):
+        super(Templ_emb, self).__init__()
+        # 模板处理层
+```
+
+当预测具有已知同源物的序列结构时，模板嵌入特别有价值，因为它们提供可直接指导折叠过程的结构信息。
+
+来源：[network/Embeddings.py](network/Embeddings.py)
+
+## 注意力机制
+
+RoseTTAFold2NA采用几种专门的注意力机制来捕捉序列内部和序列之间的不同类型相互作用。这些注意力组件对于建模蛋白质-核酸复合物中的复杂关系至关重要。
+
+### 标准多头注意力
+
+基础的`Attention`类实现了具有适当初始化和缩放的标准多头注意力：
+
+```python
+class Attention(nn.Module):
+    def __init__(self, d_query, d_key, n_head, d_hidden, d_out, p_drop=0.1):
+        super(Attention, self).__init__()
+        self.h = n_head
+        self.dim = d_hidden
+        self.dim_out = d_out
+        #
+        self.to_q = nn.Linear(d_query, n_head*d_hidden, bias=False)
+        self.to_k = nn.Linear(d_key, n_head*d_hidden, bias=False)
+        self.to_v = nn.Linear(d_key, n_head*d_hidden, bias=False)
+        #
+        self.to_out = nn.Linear(n_head*d_hidden, d_out)
+        self.scaling = 1/math.sqrt(d_hidden)
+```
+
+该组件对查询/键/值投影使用Xavier初始化，对输出层使用零初始化以确保稳定训练。注意力机制包括推理的批处理优化，以高效处理大序列。
+
+来源：[network/Attention_module.py#L32-L97](network/Attention_module.py#L32-L97)
+
+### MSA行注意力
+
+`MSARowAttentionWithBias`类实现了MSA数据的行式注意力，将成对信息作为偏差纳入：
+
+```python
+class MSARowAttentionWithBias(nn.Module):
+    def __init__(self, d_msa=256, d_pair=128, n_head=8, d_hidden=32):
+        super(MSARowAttentionWithBias, self).__init__()
+        self.norm_msa = nn.LayerNorm(d_msa)
+        self.norm_pair = nn.LayerNorm(d_pair)
+        #
+        self.seq_weight = SequenceWeight(d_msa, n_head, d_hidden, p_drop=0.1)
+        self.to_q = nn.Linear(d_msa, n_head*d_hidden, bias=False)
+        self.to_k = nn.Linear(d_msa, n_head*d_hidden, bias=False)
+        self.to_v = nn.Linear(d_msa, n_head*d_hidden, bias=False)
+        self.to_b = nn.Linear(d_pair, n_head, bias=False)  # 来自成对特征的偏差
+        self.to_g = nn.Linear(d_msa, n_head*d_hidden)  # 门控机制
+        self.to_out = nn.Linear(n_head*d_hidden, d_msa)
+```
+
+该注意力机制对于捕捉MSA中的共进化信号特别重要。它使用序列权重关注信息量最大的序列，并将成对特征作为注意力偏差纳入以指导学习过程。
+
+来源：[network/Attention_module.py#L131-L191](network/Attention_module.py#L131-L191)
+
+### MSA列注意力
+
+`MSAColAttention`和`MSAColGlobalAttention`类实现了MSA数据的列式注意力，允许模型捕捉比对中不同序列的模式：
+
+```python
+class MSAColAttention(nn.Module):
+    def __init__(self, d_msa=256, n_head=8, d_hidden=32):
+        super(MSAColAttention, self).__init__()
+        self.norm_msa = nn.LayerNorm(d_msa)
+        #
+        self.to_q = nn.Linear(d_msa, n_head*d_hidden, bias=False)
+        self.to_k = nn.Linear(d_msa, n_head*d_hidden, bias=False)
+        self.to_v = nn.Linear(d_msa, n_head*d_hidden, bias=False)
+        self.to_g = nn.Linear(d_msa, n_head*d_hidden)  # 门控
+        self.to_out = nn.Linear(n_head*d_hidden, d_msa)
+```
+
+列注意力对于识别多重序列比对中的保守位置和模式至关重要，为行注意力提供补充信息。
+
+来源：[network/Attention_module.py#L193-L242](network/Attention_module.py#L193-L242)
+
+### 偏置轴向注意力
+
+`BiasedAxialAttention`类实现了成对特征的专门注意力机制，整合来自坐标信息的偏差：
+
+```python
+class BiasedAxialAttention(nn.Module):
+    def __init__(self, d_pair, d_bias, n_head, d_hidden, p_drop=0.1, is_row=True):
+        super(BiasedAxialAttention, self).__init__()
+        self.is_row = is_row
+        self.norm_pair = nn.LayerNorm(d_pair)
+        
+        self.to_q = nn.Linear(d_pair, n_head*d_hidden, bias=False)
+        self.to_k = nn.Linear(d_pair, n_head*d_hidden, bias=False)
+        self.to_v = nn.Linear(d_pair, n_head*d_hidden, bias=False)
+        self.to_b = nn.Linear(d_bias, n_head, bias=False)  # 来自坐标的偏差
+        self.to_g = nn.Linear(d_pair, n_head*d_hidden)  # 门控
+        self.to_out = nn.Linear(n_head*d_hidden, d_pair)
+```
+
+该注意力机制使用"绑定注意力"，即对行和列应用相同的变换，在保持表达能力的同时减少内存使用。它对于建模蛋白质结构中的成对相互作用特别有效。
+
+来源：[network/Attention_module.py#L297-L379](network/Attention_module.py#L297-L379)
+
+## 主模型架构
+
+`RoseTTAFoldModule`类将所有这些组件整合为一个连贯的架构：
+
+```python
+class RoseTTAFoldModule(nn.Module):
+    def __init__(
+        self, n_extra_block=4, n_main_block=8, n_ref_block=4,
+        d_msa=256, d_msa_full=64, d_pair=128, d_templ=64,
+        n_head_msa=8, n_head_pair=4, n_head_templ=4,
+        d_hidden=32, d_hidden_templ=64,
+        p_drop=0.15,
+        SE3_param_full={}, SE3_param_topk={},
+        # ... 其他参数
+    ):
+        super(RoseTTAFoldModule, self).__init__()
+        #
+        # 输入嵌入
+        d_state = SE3_param_topk['l0_out_features']
+        self.latent_emb = MSA_emb(d_msa=d_msa, d_pair=d_pair, d_state=d_state, p_drop=p_drop)
+        self.full_emb = Extra_emb(d_msa=d_msa_full, d_init=NAATOKENS-1+4, p_drop=p_drop)
+        self.templ_emb = Templ_emb(d_pair=d_pair, d_templ=d_templ, d_state=d_state,
+                                   n_head=n_head_templ,
+                                   d_hidden=d_hidden_templ, p_drop=0.25)
+        # 使用前一轮的输出更新输入
+        self.recycle = Recycling(d_msa=d_msa, d_pair=d_pair, d_state_in=d_state, d_state_out=d_state)
+```
+
+该模型遵循清晰的流程：
+1. **输入嵌入**将原始序列转换为向量表示
+2. **循环利用**整合来自前几轮预测的信息
+3. **模板整合**添加来自已知模板的结构信息
+4. **迭代模拟**优化结构预测
+5. **输出预测**生成最终结构和辅助预测
+
+来源：[network/RoseTTAFoldModel.py#L10-L53](network/RoseTTAFoldModel.py#L10-L53)
+
+## 前向传播和预测头
+
+模型的前向传播协调所有组件以生成预测：
+
+```python
+def forward(
+    self, msa_latent, msa_full, seq, seq_unmasked, xyz, sctors, idx, 
+    t1d=None, t2d=None, xyz_t=None, alpha_t=None, mask_t=None, same_chain=None,
+    msa_prev=None, pair_prev=None, state_prev=None, 
+    return_raw=False, return_full=False,
+    use_checkpoint=False
+):
+    B, N, L = msa_latent.shape[:3]
+    
+    # 获取嵌入
+    msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, same_chain)
+    msa_full = self.full_emb(msa_full, seq, idx)
+    
+    # 执行循环利用
+    if msa_prev == None:
+        msa_prev = torch.zeros_like(msa_latent[:,0])
+        pair_prev = torch.zeros_like(pair)
+        state_prev = torch.zeros_like(state)
+    
+    msa_recycle, pair_recycle, state_recycle = self.recycle(msa_prev, pair_prev, xyz, state_prev, sctors)
+    msa_latent[:,0] = msa_latent[:,0] + msa_recycle.reshape(B,L,-1)
+    pair = pair + pair_recycle
+    state = state + state_recycle
+```
+
+该模型包括几个专门的预测头：
+- **距离网络**（`c6d_pred`）：预测残基之间的距离矩阵和方向
+- **掩码标记网络**（`aa_pred`）：预测被掩码的氨基酸/核苷酸
+- **LDDT网络**（`lddt_pred`）：预测局部距离差异测试分数
+- **PAE网络**（`pae_pred`）：预测预测对齐误差
+- **结合网络**（`bind_pred`）：预测结合概率
+
+<CgxTip>
+循环利用机制是一项关键创新，允许模型通过使用前一轮的输出作为下一轮的输入来迭代优化预测，类似于AlphaFold2的运作方式。
+</CgxTip>
+
+来源：[network/RoseTTAFoldModel.py#L62-L113](network/RoseTTAFoldModel.py#L62-L113)
+
+## 关键设计原则
+
+RoseTTAFold2NA的神经网络组件遵循几个重要的设计原则：
+
+### 1. 适当的初始化
+
+所有组件都使用精心设计的初始化方案：
+- **Xavier/Glorot初始化**用于注意力投影
+- **零初始化**用于残差连接前的层
+- **LeCun正态初始化**用于偏置项
+- **门控机制**以开放门控开始（零权重，单位偏置）
+
+这确保了整个网络的稳定训练和适当的梯度流动。
+
+### 2. 模块化架构
+
+系统构建为专门模块的集合，每个模块都有明确的职责：
+- 嵌入模块处理输入转换
+- 注意力模块捕捉不同类型的相互作用
+- 预测头生成特定输出
+- 主模块协调整体流程
+
+这种模块化使系统更易于理解、维护和扩展。
+
+### 3. 内存效率
+
+包含了几种优化以处理大序列：
+- **批处理**具有可配置的推理批次大小
+- **绑定注意力**减少成对特征的内存使用
+- **梯度检查点**可在训练期间启用以节省内存
+
+### 4. 多尺度处理
+
+该架构在多个尺度上处理信息：
+- **残基级**嵌入捕捉局部特征
+- **成对级**表示捕捉相互作用
+- **MSA级**处理捕捉进化信息
+- **模板级**整合整合结构知识
+
+这种多尺度方法使模型能够捕捉蛋白质-核酸复合物中的局部和全局模式。
+
+## 与SE3 Transformer的集成
+
+神经网络组件设计为与SE3 Transformer无缝协作，后者处理3D坐标预测。该架构包括SE3操作的特定参数和接口：
+
+```python
+SE3_param_full={}, SE3_param_topk={},
+```
+
+这些参数控制SE3 transformer的行为，包括通道数、层数和其他架构细节。这种集成允许模型利用SE3 transformer的等变性质，同时保持基于注意力的组件的丰富特征表示。
+
+来源：[network/RoseTTAFoldModel.py#L17](network/RoseTTAFoldModel.py#L17)
+
+## 结论
+
+RoseTTAFold2NA的神经网络组件代表了一个专为蛋白质-核酸结构预测设计的复杂架构。通过结合专门的嵌入层、多种注意力机制和迭代优化，系统能够捕捉蛋白质与RNA/DNA序列之间的复杂关系。
+
+模块化设计、适当的初始化方案和内存高效的实现使该架构既强大又实用，适用于实际应用。随着我们继续探索该系统，我们将看到这些组件如何在完整的预测流程中协同工作，以生成蛋白质-核酸复合物的准确3D结构。
+
+---
+
+- [深入解析/模型架构/SE3 Transformer集成](https://zread.ai/uw-ipd/RoseTTAFold2NA/8-se3-transformer-integration)
+
+---
+slug:8-se3-transformer-integration
+blog_type:normal
+---
+
+
+SE3 Transformer 是 RoseTTAFold2NA 的核心组件，为蛋白质和核酸结构预测提供了几何基础。这种等变神经网络架构使模型能够推理三维结构，同时保持旋转和平移不变性——这是分子建模的关键特性。
+
+## 什么是 SE3 等变性？
+
+在深入实现之前，理解 SE3 等变性对分子建模的重要性至关重要。简单来说，SE3 等变性意味着如果旋转或平移分子的输入坐标，模型的预测应该以相同量进行旋转或平移。这一特性确保了无论分子在空间中的朝向如何，模型的预测都能保持一致。
+
+可以这样理解：如果旋转蛋白质结构，原子之间的距离和它们的相对朝向保持不变。SE3 等变模型"理解"三维空间的这一基本特性，使其特别适合分子结构预测。
+
+## 集成架构
+
+SE3 Transformer 通过名为 `SE3TransformerWrapper` 的包装类集成到 RoseTTAFold2NA 中，该类将通用 SE3 Transformer 适配为蛋白质-RNA 结构预测的特定需求。
+
+来源：[network/SE3_network.py#L12-L90](network/SE3_network.py#L12-L90)
+
+该包装类处理几个关键职责：
+
+1. **纤配置**：它使用"纤"定义输入、隐藏和输出特征表示——"纤"是一种描述不同等变类型（标量、向量、矩阵等）特征的数据结构。
+
+2. **参数初始化**：它适当初始化 SE3 Transformer 的权重，以在分子建模环境中实现最佳性能。
+
+3. **接口适配**：它提供简化的接口，匹配 RoseTTAFold2NA 架构预期的输入和输出。
+
+### 纤结构
+
+Fiber 类是 SE3 Transformer 表示不同等变类型特征的基础：
+
+来源：[SE3Transformer/se3_transformer/model/fiber.py#L37-50](SE3Transformer/se3_transformer/model/fiber.py#L37-50)
+
+```python
+class Fiber(dict):
+    """
+    描述某些特征集的结构。
+    特征分为类型（0, 1, 2, 3, ...）。k 型特征的维度为 2k+1。
+    0 型特征：不变标量
+    1 型特征：等变 3D 向量
+    2 型特征：等变对称无迹矩阵
+    ...
+    """
+```
+
+在 RoseTTAFold2NA 中，SE3 Transformer 通常处理：
+- 0 型特征：标量特征，如氨基酸身份、二级结构预测
+- 1 型特征：向量特征，如坐标位移、朝向向量
+
+## 在迭代结构优化中的使用
+
+SE3 Transformer 用于 RoseTTAFold2NA 迭代优化过程的 `Str2Str`（结构到结构）模块中。该模块负责基于当前序列和成对特征更新蛋白质和 RNA 的三维坐标。
+
+来源：[network/Track_module.py#L223-326](network/Track_module.py#L223-326)
+
+```python
+class Str2Str(nn.Module):
+    def __init__(self, d_msa=256, d_pair=128, d_state=16, 
+            SE3_param={}, 
+            nextra_l0=0, nextra_l1=0,
+            rbf_sigma=1.0, p_drop=0.1
+    ):
+        # ...
+        self.se3 = SE3TransformerWrapper(**SE3_param_temp)
+        # ...
+```
+
+`Str2Str` 模块通过 SE3 Transformer 处理当前三维坐标、序列特征和成对特征，以生成更新的坐标。过程如下：
+
+1. **特征处理**：MSA 和成对特征被组合并转换为 SE3 Transformer 期望的格式。
+
+2. **图构建**：创建一个图，其中节点代表残基，边代表空间关系或序列邻近性。
+
+3. **SE3 变换**：SE3 Transformer 处理该图，生成对节点特征（代表残基状态）和边特征（代表相互作用）的等变更新。
+
+4. **坐标更新**：使用基于四元数的旋转和平移，将 Transformer 的输出转换为实际的坐标更新。
+
+```mermaid
+flowchart TD
+    A[输入特征] --> B[特征处理]
+    B --> C[图构建]
+    C --> D[SE3 Transformer]
+    D --> E[坐标更新]
+    E --> F[更新后的结构]
+```
+
+来源：[network/Track_module.py#L268-326](network/Track_module.py#L268-326)
+
+## 在整体架构中的集成
+
+SE3 Transformer 在 RoseTTAFold2NA 架构的多个点使用：
+
+1. **主迭代块**：每个迭代块包含一个 `Str2Str` 模块，该模块使用 SE3 Transformer 基于当前预测优化结构。
+
+2. **最终优化**：在主迭代块之后，应用额外的基于 SE3 的优化步骤，结合梯度信息微调结构。
+
+来源：[network/Track_module.py#L373-501](network/Track_module.py#L373-501)
+
+```python
+class IterativeSimulator(nn.Module):
+    def __init__(self, 
+        n_extra_block=4, n_main_block=8, n_ref_block=4,
+        # ...
+        SE3_param_full={}, SE3_param_topk={},
+        # ...
+    ):
+        # ...
+        # 使用种子序列更新
+        if n_main_block > 0:
+            self.main_block = nn.ModuleList([IterBlock(
+                # ...
+                SE3_param=SE3_param_full
+            )])
+        
+        # 最终 SE(3) 优化
+        if n_ref_block > 0:
+            self.str_refiner = Str2Str(
+                # ...
+                SE3_param=SE3_param_topk,
+                # ...
+            )
+```
+
+<CgxTip>
+SE3 Transformer 参数可以为网络的不同部分进行不同配置。通常，主块使用"完整"图配置，而优化块使用"top-k"配置，仅考虑最近邻以提高效率。
+</CgxTip>
+
+## 配置参数
+
+RoseTTAFold2NA 中的 SE3 Transformer 配置了几个关键参数：
+
+来源：[network/SE3_network.py#L14-17](network/SE3_network.py#L14-17)
+
+```python
+def __init__(self, num_layers=2, num_channels=32, num_degrees=3, n_heads=4, div=4,
+             l0_in_features=32, l0_out_features=32,
+             l1_in_features=3, l1_out_features=2,
+             num_edge_features=32):
+```
+
+- `num_layers`：SE3 Transformer 层数（通常为 2）
+- `num_channels`：隐藏特征中的通道数
+- `num_degrees`：使用的球谐函数最大度（通常为 3）
+- `n_heads`：注意力头数
+- `l0_in_features`/`l0_out_features`：标量输入/输出特征的维度
+- `l1_in_features`/`l1_out_features`：向量输入/输出特征的维度
+- `num_edge_features`：边特征的维度
+
+## 性能考虑
+
+RoseTTAFold2NA 中的 SE3 Transformer 实现包含几个性能优化：
+
+1. **张量核支持**：实现可以利用现代 NVIDIA GPU 上的张量核进行更快的计算。
+
+2. **低内存模式**：提供低内存选项，使用稍慢的操作但显著减少内存使用。
+
+3. **Top-k 图构建**：在优化阶段，模型可以在仅包含 k 最近邻的稀疏图上运行，而不是完整图，提高效率。
+
+来源：[SE3Transformer/se3_transformer/model/transformer.py#L105-113](SE3Transformer/se3_transformer/model/transformer.py#L105-113)
+
+```python
+self.tensor_cores = tensor_cores
+self.low_memory = low_memory
+
+if low_memory and not tensor_cores:
+    logging.warning('低内存模式在没有张量核时将无效')
+
+# 使用张量核时完全融合卷积（且非低内存模式）
+fuse_level = ConvSE3FuseLevel.FULL if tensor_cores and not low_memory else ConvSE3FuseLevel.PARTIAL
+```
+
+## 结论
+
+SE3 Transformer 集成到 RoseTTAFold2NA 中代表了等变神经网络在蛋白质-RNA 结构预测这一挑战性问题上的复杂应用。通过在整个结构优化过程中保持 SE3 等变性，模型确保其预测尊重三维空间的基本对称性，从而产生更准确且物理上合理的结构。
+
+模块化设计——通过 SE3TransformerWrapper 将通用 Transformer 适配为分子建模的特定需求——展示了神经网络架构设计的最佳实践，实现了灵活性和专业化的平衡。
+
+---
+
+## 实现细节
+
+- [深入解析/实现细节/数据处理管道](https://zread.ai/uw-ipd/RoseTTAFold2NA/9-data-processing-pipeline)
+
+---
+slug:9-data-processing-pipeline
+blog_type:normal
+---
+
+
+<text>
+RoseTTAFold2NA中的数据处理管道是一个精密的系统，专为处理蛋白质和核酸序列的结构预测准备和加载而设计。该管道将原始序列数据转换为神经网络能够高效处理的格式化输入。
+
+## 管道概述
+
+数据处理管道包含三个主要阶段：
+1. **输入准备** - 将原始FASTA序列处理为多重序列比对（MSA）
+2. **数据合并** - 将蛋白质和RNA的MSA合并为统一格式
+3. **数据加载** - 将处理后的数据转换为适合模型训练和推理的张量
+
+每个阶段都以前一阶段为基础，构建了一个全面的处理流程，能够处理具有独特需求的蛋白质和核酸数据。
+
+## 输入准备阶段
+
+### 蛋白质MSA生成
+
+蛋白质MSA生成过程始于FASTA格式的原始蛋白质序列。`make_protein_msa.sh`脚本通过对序列数据库进行迭代搜索来构建全面的MSA。
+
+```bash
+#!/bin/bash
+# 输入参数
+in_fasta="$1"  # 输入FASTA文件
+out_dir="$2"   # 输出目录
+tag="$3"       # 输出标签
+```
+
+该脚本使用**HHblits**搜索两个主要数据库：
+- **UniRef30**：提供广泛覆盖的聚类序列数据库
+- **BFD**：在需要时用于更深入序列搜索的更大数据库
+
+搜索策略采用迭代过滤，使用逐渐放宽的E值阈值（1e-10、1e-6、1e-3）来平衡序列多样性和质量。每次迭代时，脚本在两个级别应用序列过滤：
+- **90%相似度且75%覆盖率** - 更严格的过滤条件
+- **90%相似度且50%覆盖率** - 更宽松的过滤条件
+
+该过程持续进行，直到找到足够数量的序列（75%覆盖率下>2000条序列或50%覆盖率下>4000条序列）或耗尽所有搜索选项。
+
+来源：[make_protein_msa.sh#L1-L87](input_prep/make_protein_msa.sh#L1-L87)
+
+### RNA MSA生成
+
+由于核酸的独特特性，RNA序列处理采用不同的方法。`make_rna_msa.sh`脚本实现了一个多步骤处理流程：
+
+```bash
+#!/bin/bash
+# 输入参数
+in_fasta="$1"  # 输入RNA FASTA文件
+out_dir="$2"   # 输出目录
+out_tag="$3"   # 输出标签
+```
+
+RNA处理流程包括：
+
+1. **Rfam数据库搜索**：使用`cmscan`识别RNA家族和结构域
+2. **序列检索**：从多个数据库获取相关序列：
+   - **RNACentral**：综合RNA序列数据库
+   - **NT**：NCBI核苷酸数据库
+3. **同源性搜索**：对RNACentral和NT数据库执行`blastn`搜索
+4. **序列聚类**：使用`cd-hit-est`在不同相似度阈值（1.00、0.99、0.95、0.90）下去除冗余序列
+5. **重新比对**：使用`nhmmer`以逐渐放宽的E值阈值重新比对序列，以获得最佳覆盖率
+
+由于需要处理二级结构考虑因素以及核酸的不同进化模式，RNA流程比蛋白质处理更为复杂。
+
+来源：[make_rna_msa.sh#L1-L135](input_prep/make_rna_msa.sh#L1-L135)
+
+## 数据合并阶段
+
+### 合并蛋白质和RNA MSA
+
+一旦为蛋白质和RNA生成了单独的MSA，`merge_msa_prot_rna.py`脚本会将它们合并为适合联合结构预测的统一格式。
+
+合并过程处理几个关键挑战：
+
+1. **序列格式转换**：
+   - 蛋白质序列为A3M格式
+   - RNA序列为AFA格式
+   - 两者都需要转换为数值表示
+
+```python
+# 定义蛋白质和RNA的字母表
+ALPHABET = np.array(list("ARNDCQEGHILKMFPSTWYV-"), dtype='|S1').view(np.uint8)
+RNA_ALPHABET = np.array(list("ACGT-"), dtype='|S1').view(np.uint8)
+
+def seq2number(seq):
+    # 将蛋白质序列转换为数值表示
+    seq_no_ins = seq.translate(TABLE)
+    seq_no_ins = np.array(list(seq_no_ins), dtype='|S1').view(np.uint8)
+    for i in range(ALPHABET.shape[0]):
+        seq_no_ins[seq_no_ins == ALPHABET[i]] = i
+    seq_no_ins[seq_no_ins > 20] = 20
+    return seq_no_ins
+```
+
+2. **基于分类学的过滤**：脚本确保每个分类学ID只包含一条序列，选择与查询序列相似度最高的序列。
+
+3. **配对序列处理**：来自蛋白质和RNA MSA中相同分类学ID的序列会配对在一起。未配对的序列会包含缺失组分的间隔字符。
+
+输出格式使用斜杠（`/`分隔符来区分同一比对条目内的蛋白质和RNA序列，创建一个表示两种分子类型的统一MSA。
+
+来源：[merge_msa_prot_rna.py#L1-L246](input_prep/merge_msa_prot_rna.py#L1-L246)
+
+## 数据加载阶段
+
+### 数据集组织
+
+`data_loader.py`文件实现了核心数据加载功能，将数据组织为几个类别：
+
+- **单链蛋白质**：单体蛋白质结构
+- **蛋白质复合物**：多链蛋白质组装体
+- **RNA结构**：单链和多链RNA分子
+- **蛋白质-RNA复合物**：包含蛋白质和RNA组分的结构
+- **负样本**：用于训练区分功能的非相互作用蛋白质-RNA对
+
+数据加载器维护独立的训练集和验证集，通过仔细过滤来防止集合间的数据泄露。
+
+来源：[data_loader.py#L285-L600](network/data_loader.py#L285-L600)
+
+### MSA特征提取
+
+`MSAFeaturize`函数将原始MSA数据转换为适合神经网络处理的丰富特征表示：
+
+```python
+def MSAFeaturize(msa, ins, params, p_mask=0.15, eps=1e-6, L_s=[]):
+    '''
+    输入：完整MSA信息和插入信息
+    输出：种子MSA特征和额外序列
+    
+    种子MSA特征包括：
+    - 种子序列的氨基酸类型（20种常规氨基酸 + 1个间隔/未知 + 1个掩码）
+    - 聚类序列的谱（22）
+    - 插入统计信息（2）
+    - N端或C端？（2）
+    '''
+```
+
+关键处理步骤包括：
+
+1. **序列掩码**：应用15%的随机掩码，采用不同策略：
+   - 70%替换为掩码标记
+   - 10%替换为随机氨基酸
+   - 10%替换为基于MSA谱的采样
+   - 10%保持不变
+
+2. **聚类**：将相似序列分组并计算聚类谱，比单独使用所有序列更有效地捕获进化信息。
+
+3. **特征工程**：创建多个特征通道，包括：
+   - 独热编码的氨基酸类型
+   - 位置特异性评分矩阵（PSSM）
+   - 插入/缺失统计信息
+   - 末端位置指示器
+
+来源：[data_loader.py#L89-L225](network/data_loader.py#L89-L225)
+
+### 模板处理
+
+`TemplFeaturize`函数处理结构模板，这些是与目标序列相似的已知蛋白质或RNA结构：
+
+```python
+def TemplFeaturize(tplt, qlen, params, offset=0, npick=1, npick_global=None, pick_top=True, random_noise=5.0):
+    # 将模板信息处理为3D坐标和特征
+    # 返回：xyz坐标、1D特征和有效性掩码
+```
+
+模板处理包括：
+- **序列相似度过滤**：排除高相似度模板以防止过拟合
+- **坐标提取**：从模板结构中提取3D坐标
+- **特征生成**：创建模板特征，包括比对置信度分数
+- **掩码生成**：识别模板结构中的有效/缺失原子
+
+来源：[data_loader.py#L227-L283](network/data_loader.py#L227-L283)
+
+### 裁剪策略
+
+为提高训练效率，管道实现了复杂的裁剪策略来处理大型结构：
+
+1. **单链裁剪**：从单链结构中随机选择连续片段
+2. **复合物裁剪**：处理多链结构同时保留界面
+3. **核酸感知裁剪**：对蛋白质-RNA复合物进行特殊处理以保留相互作用界面
+
+```python
+def get_na_crop(seq, xyz, mask, sel, len_s, params, negative=False, incl_protein=True, cutoff=12.0, bp_cutoff=4.0, eps=1e-6):
+    # 针对含核酸结构的专门裁剪
+    # 保留碱基配对和蛋白质-RNA相互作用
+```
+
+裁剪策略确保训练示例专注于生物学相关区域，同时保持计算效率。
+
+来源：[data_loader.py#L673-L799](network/data_loader.py#L673-L799)
+
+## 数据流可视化
+
+下图展示了完整的数据处理管道：
+
+```mermaid
+flowchart TD
+    A[原始FASTA文件] --> B[蛋白质MSA生成]
+    A --> C[RNA MSA生成]
+    B --> D[MSA合并]
+    C --> D
+    D --> E[特征提取]
+    E --> F[模板处理]
+    F --> G[数据加载]
+    G --> H[模型输入张量]
+    
+    B -->|HHblits| B1[UniRef30/BFD数据库]
+    C -->|cmscan/blastn| C1[Rfam/RNACentral/NT数据库]
+    D -->|分类学过滤| D2[配对序列]
+    E -->|MSAFeaturize| E1[序列特征]
+    F -->|TemplFeaturize| F1[3D模板]
+    G -->|裁剪| G1[训练批次]
+```
+
+## 关键设计原则
+
+数据处理管道体现了几个重要的设计原则：
+
+1. **模块化**：每个处理阶段都作为独立组件实现，允许独立开发和测试。
+
+2. **可扩展性**：通过智能裁剪和批处理策略，管道能够处理不同大小的结构。
+
+3. **生物学相关性**：特别关注保留重要的生物学特征，如蛋白质-RNA界面和RNA碱基配对。
+
+4. **效率**：多种优化策略，包括序列聚类和智能裁剪，确保计算效率而不牺牲信息内容。
+
+<CgxTip>
+数据处理管道计算密集，特别是MSA生成阶段。对于生产使用，考虑为频繁研究的序列预先计算MSA并缓存结果以加速预测时间。
+</CgxTip>
+
+## 结论
+
+RoseTTAFold2NA数据处理管道代表了为结构预测准备蛋白质和核酸数据的全面解决方案。通过仔细处理两种分子类型的独特特征并实现复杂的特征提取策略，该管道为准确的3D结构预测提供了丰富、信息丰富的输入。模块化设计允许随着新数据源或处理需求的出现而轻松扩展和修改。
+</text>
+
+---
+
+- [深入解析/实现细节/模型参数与配置](https://zread.ai/uw-ipd/RoseTTAFold2NA/10-model-parameters-and-configuration)
+
+---
+slug:10-model-parameters-and-configuration
+blog_type:normal
+---
+
+
+理解和配置模型参数对于充分发挥 RoseTTAFold2NA 的最佳性能至关重要。本指南将为您详细介绍不同类型的参数、它们如何影响模型行为，以及如何针对特定用例进行自定义设置。
+
+## 模型配置概述
+
+RoseTTAFold2NA 采用分层配置系统，让您可以控制从基础模型架构到细粒度训练参数的所有内容。该配置系统在保持灵活性设计的同时，提供了适用于大多数蛋白质-核酸结构预测任务的合理默认值。
+
+<CgxTip>
+RoseTTAFold2NA 中的模型参数按逻辑分组组织：主干参数、SE(3)-Transformer 参数、损失函数权重和数据加载参数。这种组织方式便于理解和修改模型的特定方面而不影响其他部分。
+</CgxTip>
+
+## 预定义模型配置
+
+RoseTTAFold2NA 提供两种开箱即用的预配置模型架构。这些配置在 `models.json` 中定义，代表了模型大小与性能之间的不同权衡。
+
+### full_bigSE3 配置
+
+`full_bigSE3` 配置使用更大的 SE(3)-Transformer，专为追求最高准确度而设计：
+
+```json
+{
+    "description": "在完全连接图上使用大型 SE(3)-Transformer 的深度架构。在生物单元上训练",
+    "model_param": {
+        "n_extra_block": 4,
+        "n_main_block": 32,
+        "n_ref_block": 4,
+        "d_msa": 256,
+        "d_pair": 128,
+        "d_templ": 64,
+        "n_head_msa": 8,
+        "n_head_pair": 4,
+        "n_head_templ": 4,
+        "d_hidden": 32,
+        "d_hidden_templ": 64,
+        "p_drop": 0.0,
+        "lj_lin": 0.75
+    }
+}
+```
+
+**主要特点：**
+- 使用 64 个输入/输出特征的大型 SE(3)-Transformer
+- 更高容量的模板处理能力（d_hidden_templ: 64）
+- 无 dropout（p_drop: 0.0）以实现最大模型利用率
+- 当计算资源充足时，最适合高精度预测
+
+来源：[models.json#L2-L33](network/models.json#L2-L33)
+
+### full_smallSE3 配置
+
+`full_smallSE3` 配置使用较小的 SE(3)-Transformer 以实现更快的推理速度：
+
+```json
+{
+    "description": "在完全连接图上使用小型 SE(3)-Transformer 的深度架构。在生物单元上训练",
+    "model_param": {
+        "n_extra_block": 4,
+        "n_main_block": 32,
+        "n_ref_block": 4,
+        "d_msa": 256,
+        "d_pair": 128,
+        "d_templ": 64,
+        "n_head_msa": 8,
+        "n_head_pair": 4,
+        "n_head_templ": 4,
+        "d_hidden": 32,
+        "d_hidden_templ": 32,
+        "p_drop": 0.0
+    }
+}
+```
+
+**主要特点：**
+- 使用减小特征维度的小型 SE(3)-Transformer
+- 推理速度更快，准确度略有降低
+- 使用双 SE(3)-Transformer 配置（完整版和 topk 版）
+- 在大多数应用中实现了速度与准确度的良好平衡
+
+来源：[models.json#L34-L76](network/models.json#L34-L76)
+
+## 参数类别及其用途
+
+### 主干模块参数
+
+主干模块构成 RoseTTAFold2NA 的核心，处理多序列比对（MSA）和模板信息。这些参数控制主要神经网络组件的架构和容量。
+
+```mermaid
+flowchart TD
+    A[主干模块] --> B[MSA 处理]
+    A --> C[配对特征]
+    A --> D[模板处理]
+    B --> E[d_msa: 256]
+    B --> F[n_head_msa: 8]
+    C --> G[d_pair: 128]
+    C --> H[n_head_pair: 4]
+    D --> I[d_templ: 64]
+    D --> J[n_head_templ: 4]
+    A --> K[迭代块]
+    K --> L[n_extra_block: 4]
+    K --> M[n_main_block: 32]
+    K --> N[n_ref_block: 4]
+```
+
+**关键主干参数：**
+
+| 参数 | 默认值 | 描述 | 影响 |
+|------|--------|------|------|
+| `n_main_block` | 32 | 主迭代块数量 | 较高值增加模型容量和准确度，但会减慢推理速度 |
+| `d_msa` | 256 | MSA 特征维度 | 较大值能捕获更复杂的模式，但会增加内存使用量 |
+| `d_pair` | 128 | 配对特征维度 | 控制保留多少成对信息 |
+| `n_head_msa` | 8 | MSA 处理的注意力头数 | 更多头可以捕获 MSA 中不同类型的关系 |
+| `p_drop` | 0.15 | Dropout 率 | 较高值减少过拟合，但可能降低模型容量 |
+
+来源：[arguments.py#L61-L87](network/arguments.py#L61-L87), [predict.py#L44-L58](network/predict.py#L44-L58)
+
+### SE(3)-Transformer 参数
+
+SE(3)-Transformer 负责处理 3D 结构信息，是实现准确蛋白质-核酸结构预测的关键组件。
+
+```mermaid
+flowchart TD
+    A[SE3-Transformer] --> B[层配置]
+    A --> C[特征维度]
+    A --> D[注意力机制]
+    B --> E[num_layers: 1-2]
+    B --> F[num_degrees: 2]
+    C --> G[num_channels: 32]
+    C --> H[l0_in_features: 8-64]
+    C --> I[l1_in_features: 3]
+    D --> J[n_heads: 4]
+    D --> K[div: 4]
+```
+
+**关键 SE(3) 参数：**
+
+| 参数 | 默认值 | 描述 | 影响 |
+|------|--------|------|------|
+| `num_layers` | 1-2 | 等变层数量 | 更多层增加几何推理能力 |
+| `num_channels` | 32 | 每层通道数 | 较高值增加模型容量 |
+| `l0_in_features` | 8-64 | 0 型（标量）输入特征 | 控制标量信息处理能力 |
+| `l1_in_features` | 3 | 1 型（向量）输入特征 | 3D 坐标通常为 3 |
+| `n_heads` | 4 | 注意力头数 | 更多头可以捕获不同的几何关系 |
+
+来源：[arguments.py#L91-L118](network/arguments.py#L91-L118), [predict.py#L60-L84](network/predict.py#L60-L84)
+
+### 损失函数参数
+
+损失函数参数控制训练期间不同预测方面的权重。这些参数对于在蛋白质-核酸复合物上获得良好性能至关重要。
+
+```python
+# 损失函数配置示例
+loss_param = {
+    'w_dist': 1.0,      # 距离损失权重
+    'w_str': 10.0,      # 结构损失权重  
+    'w_lddt': 0.1,      # LDDT 预测损失权重
+    'w_aa': 3.0,        # 氨基酸预测损失权重
+    'w_pae': 0.1,       # 预测比对误差损失权重
+    'w_bind': 5.0,      # 结合预测损失权重
+    'lj_lin': 0.75      # Lennard-Jones 线性参数
+}
+```
+
+**关键损失参数：**
+
+| 参数 | 默认值 | 描述 | 用途 |
+|------|--------|------|------|
+| `w_str` | 10.0 | 结构损失权重 | 强调准确的 3D 结构预测 |
+| `w_bind` | 5.0 | 结合预测权重 | 对蛋白质-核酸相互作用很重要 |
+| `w_dist` | 1.0 | 距离损失权重 | 控制原子间距离准确度 |
+| `w_aa` | 3.0 | 氨基酸预测权重 | 有助于保持序列-结构一致性 |
+| `w_pae` | 0.1 | 预测比对误差 | 控制置信度估计准确度 |
+
+来源：[arguments.py#L121-L143](network/arguments.py#L121-L143)
+
+### 数据加载参数
+
+这些参数控制输入数据的处理和馈送方式，对于处理大型蛋白质-核酸复合物尤为重要。
+
+**关键数据加载参数：**
+
+| 参数 | 默认值 | 描述 | 影响 |
+|------|--------|------|------|
+| `maxseq` | 1024 | 最大 MSA 深度 | 限制大型 MSA 的内存使用 |
+| `crop` | 260 | 训练裁剪大小 | 较小值加快训练速度，但可能丢失上下文 |
+| `rescut` | 4.5 | 分辨率阈值 | 过滤低质量模板结构 |
+| `maxcycle` | 4 | 最大循环迭代次数 | 更多迭代提高准确度，但增加推理时间 |
+| `subsmp` | "UNI" | MSA 子采样方法 | 控制为提高效率而对 MSA 进行子采样的方式 |
+
+来源：[arguments.py#L36-L58](network/arguments.py#L36-L58)
+
+## 为您的用例自定义参数
+
+### 基本配置更改
+
+对于大多数用户，默认配置效果良好。但是，您可能希望根据特定需求进行一些调整：
+
+```bash
+# 示例：使用自定义参数运行
+python network/predict.py \
+    -inputs "P:protein.msa0.a3m:protein.hhr:protein.atab R:rna.afa" \
+    -prefix output/models/model \
+    -model network/weights/RF2NA_apr23.pt \
+    -db /path/to/hhdb \
+    -maxcycle 6 \
+    -crop 300
+```
+
+此示例增加了循环迭代次数和裁剪大小，以便在更大复合物上获得更好的准确度。
+
+来源：[run_RF2NA.sh#L127-L131](run_RF2NA.sh#L127-L131)
+
+### 高级配置
+
+对于更高级的用户，您可以通过直接编辑代码中的参数字典来修改模型架构：
+
+```python
+# 示例：predict.py 中的自定义模型配置
+MODEL_PARAM = {
+    "n_extra_block": 4,
+    "n_main_block": 48,    # 从 32 增加以获得更大容量
+    "n_ref_block": 6,      # 从 4 增加以获得更好的优化
+    "d_msa": 320,          # 增加 MSA 特征维度
+    "d_pair": 160,         # 增加配对特征维度
+    "d_templ": 80,         # 增加模板特征维度
+    "n_head_msa": 12,      # 更多注意力头
+    "n_head_pair": 6,      # 更多配对注意力头
+    "d_hidden": 48,        # 更大的隐藏维度
+    "d_hidden_templ": 80,  # 更大的模板隐藏维度
+    "p_drop": 0.1,         # 小 dropout 用于正则化
+    "lj_lin": 0.75
+}
+```
+
+此配置创建了一个容量更大的模型，适合复杂的蛋白质-核酸相互作用。
+
+来源：[predict.py#L44-L58](network/predict.py#L44-L58)
+
+### 资源感知配置
+
+当计算资源有限时，您可以创建更高效的配置：
+
+```python
+# 示例：资源高效配置
+MODEL_PARAM = {
+    "n_extra_block": 2,      # 减少额外块
+    "n_main_block": 16,      # 减少主块
+    "n_ref_block": 2,        # 减少优化块
+    "d_msa": 128,            # 较小的 MSA 特征
+    "d_pair": 64,            # 较小的配对特征
+    "d_templ": 32,           # 较小的模板特征
+    "n_head_msa": 4,         # 更少的注意力头
+    "n_head_pair": 2,        # 更少的配对注意力头
+    "d_hidden": 16,          # 较小的隐藏维度
+    "d_hidden_templ": 32,    # 较小的模板隐藏维度
+    "p_drop": 0.0,           # 无 dropout 以实现最大效率
+    "lj_lin": 0.75
+}
+```
+
+此配置减少了内存使用并加快了推理速度，同时保持了合理的准确度。
+
+<CgxTip>
+修改模型参数时，请记住对架构参数（如 d_msa、n_main_block）的更改需要从头开始重新训练模型。但是，推理参数（如 maxcycle、crop）可以在不重新训练的情况下更改。
+</CgxTip>
+
+## 实用配置示例
+
+### 高准确度配置
+
+对于准确度至关重要且计算资源充足的研究应用：
+
+```bash
+# 高准确度配置
+python network/predict.py \
+    -inputs "PR:protein_rna.a3m:protein.hhr:protein.atab" \
+    -prefix high_accuracy/model \
+    -model network/weights/RF2NA_apr23.pt \
+    -db /path/to/hhdb \
+    -maxcycle 8 \
+    -crop 400 \
+    -maxseq 2048
+```
+
+此配置使用最大循环迭代次数、更大的裁剪大小和更深的 MSA 处理，以获得最佳的准确度。
+
+### 快速推理配置
+
+对于速度比最大准确度更重要的高通量应用：
+
+```bash
+# 快速推理配置
+python network/predict.py \
+    -inputs "P:protein.msa0.a3m:protein.hhr:protein.atab" \
+    -prefix fast/model \
+    -model network/weights/RF2NA_apr23.pt \
+    -db /path/to/hhdb \
+    -maxcycle 3 \
+    -crop 200 \
+    -maxseq 512
+```
+
+此配置减少了循环迭代次数，使用较小的裁剪区域，并限制 MSA 深度以实现更快的处理。
+
+### 内存高效配置
+
+对于非常大的复合物或 GPU 内存有限的系统：
+
+```bash
+# 内存高效配置
+python network/predict.py \
+    -inputs "P:large_protein.msa0.a3m:protein.hhr:protein.atab" \
+    -prefix memory_efficient/model \
+    -model network/weights/RF2NA_apr23.pt \
+    -db /path/to/hhdb \
+    -maxcycle 4 \
+    -crop 150 \
+    -maxseq 256
+```
+
+此配置使用较小的裁剪区域和较浅的 MSA 来减少内存需求。
+
+## 参数验证和最佳实践
+
+配置 RoseTTAFold2NA 时，请记住以下最佳实践：
+
+1. **从默认值开始**：默认配置已针对大多数蛋白质-核酸预测任务进行了良好调整。
+
+2. **一次更改一个参数**：进行实验时，一次只修改一个参数类别以了解其影响。
+
+3. **监控资源使用**：使用 `nvidia-smi` 等工具测试新配置时监控 GPU 内存使用情况。
+
+4. **使用已知结构验证**：在具有已知结构的蛋白质-核酸复合物上测试新配置，以确保准确度得到保持。
+
+5. **考虑输入大小**：较大的复合物可能受益于增加的 `crop` 和 `maxcycle` 值，而较小的复合物可以使用默认值。
+
+通过理解这些参数及其相互作用方式，您可以为特定的研究需求和计算约束优化 RoseTTAFold2NA。
+
+---

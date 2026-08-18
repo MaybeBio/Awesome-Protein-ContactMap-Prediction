@@ -1,0 +1,27 @@
+# uw-ipd/RoseTTAFold2NA
+
+Source: https://zread.ai/uw-ipd/RoseTTAFold2NA
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/安装指南](3-installation-guide.md)
+- [入门指南/示例工作流](4-example-workflows.md)
+- [入门指南/蛋白质和RNA的输入准备](5-input-preparation-for-proteins-and-rna.md)
+
+## 深入解析
+
+- [深入解析/计算方法与理论](6-computational-method-and-theory.md)
+- [深入解析/运行自定义预测](11-running-custom-predictions.md)
+- [深入解析/性能优化](12-performance-optimization.md)
+### 模型架构
+
+- [深入解析/模型架构/神经网络组件](7-neural-network-components.md)
+- [深入解析/模型架构/SE3 Transformer集成](8-se3-transformer-integration.md)
+
+### 实现细节
+
+- [深入解析/实现细节/数据处理管道](9-data-processing-pipeline.md)
+- [深入解析/实现细节/模型参数与配置](10-model-parameters-and-configuration.md)
+
