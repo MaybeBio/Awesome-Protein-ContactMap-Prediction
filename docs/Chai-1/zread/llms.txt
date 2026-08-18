@@ -1,0 +1,49 @@
+# chaidiscovery/chai-lab
+
+Source: https://zread.ai/chaidiscovery/chai-lab
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/CLI 参考](3-cli-reference.md)
+
+## 动态
+
+- [动态/最新更新](4-latest-updates.md)
+- [动态/问题与反馈](5-issues-and-feedbacks.md)
+- [动态/关于贡献者](6-about-contributors.md)
+
+## 深入剖析
+
+- [深入剖析/架构概述](7-architecture-overview.md)
+- [深入剖析/内存管理与设备策略](24-memory-management-and-device-strategy.md)
+- [深入剖析/扩散噪声调度](25-diffusion-noise-schedule.md)
+### 推理流水线
+
+- [深入剖析/推理流水线/特征上下文组装](8-feature-context-assembly.md)
+- [深入剖析/推理流水线/特征嵌入与 Token 嵌入](9-feature-embedding-and-token-embedding.md)
+- [深入剖析/推理流水线/主干回收与注意力机制](10-trunk-recycling-and-attention.md)
+- [深入剖析/推理流水线/扩散去噪过程](11-diffusion-denoising-process.md)
+- [深入剖析/推理流水线/置信度预测与评分](12-confidence-prediction-and-scoring.md)
+
+### 输入数据系统
+
+- [深入剖析/输入数据系统/FASTA 解析与实体类型](13-fasta-parsing-and-entity-types.md)
+- [深入剖析/输入数据系统/MSA 生成与加载](14-msa-generation-and-loading.md)
+- [深入剖析/输入数据系统/ESM 嵌入集成](15-esm-embeddings-integration.md)
+- [深入剖析/输入数据系统/模板处理流水线](16-template-processing-pipeline.md)
+- [深入剖析/输入数据系统/约束与共价键系统](17-restraint-and-covalent-bond-system.md)
+
+### 特征工程
+
+- [深入剖析/特征工程/特征生成器基础设计](18-feature-generator-base-design.md)
+- [深入剖析/特征工程/Token 与原子特征生成器](19-token-and-atom-feature-generators.md)
+- [深入剖析/特征工程/成对与约束特征生成器](20-pairwise-and-restraint-feature-generators.md)
+
+### 模型输出与评估
+
+- [深入剖析/模型输出与评估/结构排序与评分](21-structure-ranking-and-scoring.md)
+- [深入剖析/模型输出与评估/CIF 输出与链命名](22-cif-output-and-chain-naming.md)
+- [深入剖析/模型输出与评估/pTM、pLDDT 与冲突指标](23-ptm-plddt-and-clash-metrics.md)
+
