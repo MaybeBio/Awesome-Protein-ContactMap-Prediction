@@ -39,7 +39,15 @@ For installation instructions, see [Installation](/hpcaitech/FastFold/2.1-instal
 **Verification Steps**:
 
 ```
-
+# Check CUDA availability
+echo $CUDA_HOME
+nvcc --version
+ 
+# Check PyTorch CUDA version
+python -c "import torch; print(torch.version.cuda)"
+ 
+# Verify PyTorch version
+python -c "import torch; print(torch.__version__)"
 ```
 
 The build system checks version compatibility in [setup.py L23-L38](https://github.com/hpcaitech/FastFold/blob/eba49680/setup.py#L23-L38)
@@ -59,7 +67,14 @@ The build system checks version compatibility in [setup.py L23-L38](https://gith
 **Solution**:
 
 ```
-
+# Ensure CUDA 11.4+ is available
+nvcc --version  # Must show 11.4 or higher
+ 
+# Install Triton
+pip install -U --pre triton
+ 
+# Verify installation
+python -c "import triton; print(triton.__version__)"
 ```
 
 **Fallback Behavior**: FastFold's fused kernels automatically fall back to CUDA implementations when Triton is unavailable. Softmax and LayerNorm have CUDA fallbacks [fastfold/model/fastnn/kernel/](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/fastnn/kernel/)
@@ -81,13 +96,24 @@ The build system checks version compatibility in [setup.py L23-L38](https://gith
 Configure Docker to use NVIDIA runtime as default during builds:
 
 ```
-
+// /etc/docker/daemon.json
+{
+  "default-runtime": "nvidia",
+  "runtimes": {
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  }
+}
 ```
 
 Then restart Docker and rebuild:
 
 ```
-
+sudo systemctl restart docker
+cd FastFold
+docker build -t fastfold ./docker
 ```
 
 **Alternative**: Use the pre-built base image and install FastFold inside a running container instead of during build.
@@ -105,7 +131,19 @@ Then restart Docker and rebuild:
 **Solution**:
 
 ```
-
+# Clean conda cache
+conda clean --all
+ 
+# Create environment with explicit channel priority
+conda env create --name=fastfold -f environment.yml
+ 
+# If still failing, install packages sequentially
+conda create --name=fastfold python=3.8
+conda activate fastfold
+conda install pytorch=1.12 torchvision torchaudio cudatoolkit=11.3 -c pytorch
+conda install openmm=7.7.0 pdbfixer -c conda-forge
+conda install hmmer=3.3.2 hhsuite=3.3.0 kalign2=2.04 -c bioconda
+pip install -r requirements/requirements.txt
 ```
 
 **Sources**: environment.yml:1-33, README.md:39-50
@@ -140,13 +178,21 @@ Then restart Docker and rebuild:
 The `chunk_size` parameter controls memory-compute tradeoff by processing large tensors in chunks. It's set via:
 
 ```
-
+# Command line
+python inference.py target.fasta ... --chunk_size 4
+ 
+# Propagated to config [inference.py:130-131]()
+config.globals.chunk_size = args.chunk_size
+ 
+# Applied to model [inference.py:145]()
+set_chunk_size(model.globals.chunk_size)
 ```
 
 For extreme lengths (>10000 residues), set environment variable:
 
 ```
-
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:15000
+python inference.py ... --chunk_size 1 --gpus 4 --inplace
 ```
 
 **Sources**: README.md:141-164, inference.py:117-145
@@ -166,7 +212,16 @@ For extreme lengths (>10000 residues), set environment variable:
 **Solutions**:
 
 ```
-
+# Disable NCCL shared memory (common fix)
+export NCCL_SHM_DISABLE=1
+python inference.py ... --gpus 2
+ 
+# Set explicit master address/port
+export MASTER_ADDR=localhost
+export MASTER_PORT=29500
+ 
+# Check process environment setup [inference.py:123-125]()
+# Each spawned process sets RANK, LOCAL_RANK, WORLD_SIZE
 ```
 
 The spawning mechanism initializes each GPU worker in [inference.py L122-L159](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L122-L159)
@@ -174,7 +229,11 @@ The spawning mechanism initializes each GPU worker in [inference.py L122-L159](h
 :
 
 ```
-
+# Main process spawns workers [inference.py:293]() or [inference.py:443]()
+torch.multiprocessing.spawn(inference_model, nprocs=args.gpus, args=(args.gpus, result_q, batch, args))
+ 
+# Each worker initializes DAP [inference.py:127]()
+fastfold.distributed.init_dap()
 ```
 
 **CI Environment**: The GitHub Actions workflow sets `NCCL_SHM_DISABLE=1` by default [.github/workflows/build.yml L37](https://github.com/hpcaitech/FastFold/blob/eba49680/.github/workflows/build.yml#L37-L37)
@@ -218,7 +277,15 @@ For **multimer** inference, add:
 **Verification**:
 
 ```
-
+# Check binary availability
+which jackhmmer hhblits hhsearch kalign hmmsearch hmmbuild
+ 
+# For conda installation
+conda list | grep -E "hmmer|hhsuite|kalign"
+ 
+# Check database paths
+ls -lh data/uniref90/uniref90.fasta
+ls -lh data/mgnify/mgy_clusters_2022_05.fa
 ```
 
 **Pre-computed Alignments**: Skip alignment computation by providing `--use_precomputed_alignments <path>` [inference.py L501-L505](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L501-L505)
@@ -240,7 +307,14 @@ For **multimer** inference, add:
 **Solutions**:
 
 ```
-
+# Install Ray
+pip install ray==2.0.0 pyarrow pandas
+ 
+# Verify installation
+python -c "import ray; ray.init(); ray.shutdown()"
+ 
+# Check CPU allocation
+python inference.py ... --enable_workflow --cpus 12
 ```
 
 The workflow is invoked in [inference.py L396-L411](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L396-L411)
@@ -250,7 +324,9 @@ The workflow is invoked in [inference.py L396-L411](https://github.com/hpcaitech
  for multimers:
 
 ```
-
+if args.enable_workflow:
+    alignment_data_workflow_runner = FastFoldDataWorkFlow(...)
+    alignment_data_workflow_runner.run(fasta_path, alignment_dir=local_alignment_dir)
 ```
 
 **Fallback**: Remove `--enable_workflow` to use sequential `AlignmentRunner` instead. This is slower (~3x) but doesn't require Ray.
@@ -270,7 +346,11 @@ The workflow is invoked in [inference.py L396-L411](https://github.com/hpcaitech
 **Solution**:
 
 ```
-
+# Install specific version tested with FastFold
+pip install colossalai==0.2.7
+ 
+# Verify installation
+python -c "import colossalai; print(colossalai.__version__)"
 ```
 
 **Version Compatibility**: FastFold's `environment.yml` specifies ColossalAI 0.2.7 [environment.yml L20](https://github.com/hpcaitech/FastFold/blob/eba49680/environment.yml#L20-L20)
@@ -297,7 +377,11 @@ The workflow is invoked in [inference.py L396-L411](https://github.com/hpcaitech
 **Environment Setup**:
 
 ```
-
+# Recommended NCCL settings for multi-node training
+export NCCL_DEBUG=INFO  # For debugging
+export NCCL_SHM_DISABLE=1  # Disable shared memory
+export NCCL_IB_DISABLE=0  # Enable InfiniBand if available
+export NCCL_SOCKET_IFNAME=eth0  # Specify network interface
 ```
 
 **Sources**: .github/workflows/build.yml:37
@@ -347,7 +431,10 @@ warning: excessive register usage ... consider reducing -maxrregcount
 **Solution for Specific Architecture**:
 
 ```
-
+# Set target architecture explicitly
+export TORCH_CUDA_ARCH_LIST="8.0"  # For A100
+export TORCH_CUDA_ARCH_LIST="7.5"  # For T4/V100
+python setup.py install
 ```
 
 **Sources**: setup.py:107-125
@@ -381,7 +468,8 @@ For validation, use a past date like `--max_template_date 2020-05-14` to match t
 **Template Directory**: The `template_mmcif_dir` must point to a directory of mmCIF files, typically from PDB. Download via:
 
 ```
-
+./scripts/download_all_data.sh data/
+# Creates data/pdb_mmcif/mmcif_files/
 ```
 
 **Sources**: inference.py:111-116, 175-182, 344-351
@@ -400,7 +488,14 @@ For validation, use a past date like `--max_template_date 2020-05-14` to match t
 **Solutions**:
 
 ```
-
+# Use reduced databases for faster processing
+python inference.py ... --preset reduced_dbs --cpus 24
+ 
+# Or use pre-computed alignments
+python inference.py ... --use_precomputed_alignments ./precomputed_alignments/
+ 
+# Monitor progress (jackhmmer writes to stderr)
+python inference.py ... 2>&1 | tee inference.log
 ```
 
 **CPU Allocation**: The `--cpus` parameter is passed to alignment tools [inference.py L526-L529](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L526-L529)
@@ -408,7 +503,8 @@ For validation, use a past date like `--max_template_date 2020-05-14` to match t
 :
 
 ```
-
+parser.add_argument("--cpus", type=int, default=12,
+                   help="""Number of CPUs with which to run alignment tools""")
 ```
 
 **Ray Workflow Speedup**: Using `--enable_workflow` parallelizes across CPUs for ~3x speedup [README.md L138](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L138-L138)
@@ -428,7 +524,18 @@ For validation, use a past date like `--max_template_date 2020-05-14` to match t
 **Solutions**:
 
 ```
-
+# Reinstall in development mode
+cd FastFold
+pip install -e .
+ 
+# Verify installation
+python -c "from fastfold.utils import inject_fastnn; print('OK')"
+ 
+# Check if CUDA extensions built
+python -c "import fastfold_layer_norm_cuda; import fastfold_softmax_cuda; print('CUDA OK')"
+ 
+# If CUDA extensions missing
+python setup.py build_ext --inplace
 ```
 
 **CI Verification**: The GitHub Actions workflow tests this in [.github/workflows/build.yml L25-L32](https://github.com/hpcaitech/FastFold/blob/eba49680/.github/workflows/build.yml#L25-L32)
@@ -436,7 +543,9 @@ For validation, use a past date like `--max_template_date 2020-05-14` to match t
 :
 
 ```
-
+pip install -r requirements/requirements.txt
+pip install -e .
+pip install -r requirements/test_requirements.txt
 ```
 
 **Sources**: .github/workflows/build.yml:25-32, setup.py:129-143
@@ -456,7 +565,17 @@ For validation, use a past date like `--max_template_date 2020-05-14` to match t
 **Procedure**:
 
 ```
-
+# Build custom ops for Gaudi
+cd fastfold/habana/fastnn/custom_op/
+python setup.py build  # For Gaudi
+# OR
+python setup2.py build  # For Gaudi2
+ 
+cd -
+ 
+# Run inference/training
+bash habana/inference.sh
+bash habana/train.sh
 ```
 
 **Note**: Habana support is platform-specific. Scripts in `habana/` directory handle device initialization and operator dispatch differently from CUDA path.
@@ -472,7 +591,18 @@ For validation, use a past date like `--max_template_date 2020-05-14` to match t
 For debugging difficult issues, enable verbose output:
 
 ```
-
+# NCCL debugging
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=ALL
+ 
+# PyTorch distributed debugging
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+ 
+# CUDA kernel debugging
+export CUDA_LAUNCH_BLOCKING=1  # Synchronizes kernels (slow but helpful)
+ 
+# Run with Python warnings
+python -W all inference.py ...
 ```
 
 ### Testing Installation
@@ -480,7 +610,16 @@ For debugging difficult issues, enable verbose output:
 Verify all components work:
 
 ```
-
+# Run test suite
+cd FastFold
+NCCL_SHM_DISABLE=1 pytest tests/
+ 
+# Benchmark single component
+cd benchmark
+torchrun --nproc_per_node=1 perf.py --msa-length 128 --res-length 256
+ 
+# Test DAP
+torchrun --nproc_per_node=2 perf.py --msa-length 128 --res-length 256 --dap-size 2
 ```
 
 **Sources**: .github/workflows/build.yml:34-37, README.md:201-221
