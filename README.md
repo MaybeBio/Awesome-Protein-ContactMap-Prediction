@@ -62,7 +62,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Web server:** https://alphafoldserver.com/
 </details>
 
----
+--- 
 
 <details>
 <summary>AlphaFold-Multimer</summary>
@@ -222,10 +222,51 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 --- 
 
-- helixfold
+<details>
+<summary>HelixFold</summary>
+
+- **Paper:** [HelixFold: An Efficient Implementation of AlphaFold2 using PaddlePaddle](https://arxiv.org/abs/2207.05477) (arxiv, 2022)
+- **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
+- **Code:** https://github.com/PaddlePaddle/PaddleHelix/tree/dev/apps/protein_folding/helixfold
+- **Web server:** https://paddlehelix.baidu.com/
+</details>
+
+--- 
+
+<details>
+<summary>HelixFold-Single</summary>
+
+- **Paper:** [HelixFold-Single: MSA-free Protein Structure Prediction by Using Protein Language Model as an Alternative](https://arxiv.org/abs/2207.13921) (arxiv, 2023)
+- **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
+- **Code:** https://github.com/PaddlePaddle/PaddleHelix/tree/dev/apps/protein_folding/helixfold-single
+- **Web server:** https://paddlehelix.baidu.com/
+</details>
+
+--- 
+
+<details>
+<summary>HelixFold-Multimer</summary>
+
+- **Paper:** [HelixFold-Multimer: Elevating Protein Complex Structure Prediction to New Heights](https://arxiv.org/abs/2404.10260) (arxiv, 2024)
+- **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
+</details>
+
+--- 
+
+<details>
+<summary>HelixFold3</summary>
+
+- **Paper:** [Technical Report of HelixFold3 for Biomolecular Structure Prediction](https://arxiv.org/abs/2408.16975) (arxiv, 2024)
+- **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
+- **Code:** https://github.com/PaddlePaddle/PaddleHelix/tree/dev/apps/protein_folding/helixfold3
+- **Web server:** https://paddlehelix.baidu.com/
+</details>
+
+--- 
 
 <!-- More single_structure placeholders can be added here -->
 <!-- PLACEHOLDER: <another single-structure predictor> -->
+
 
 #### Conformational ensemble generation
 
