@@ -1,0 +1,46 @@
+# PaddlePaddle/PaddleHelix
+
+Source: https://zread.ai/PaddlePaddle/PaddleHelix
+
+## 快速入门
+
+- [快速入门/概述](1-overview.md)
+- [快速入门/快速开始](2-quick-start.md)
+- [快速入门/教程与笔记本](3-tutorials-and-notebooks.md)
+
+## 最新动态
+
+- [最新动态/最新更新](4-latest-updates.md)
+- [最新动态/关于贡献者](5-about-contributors.md)
+
+## 深度探索
+
+- [深度探索/架构概述](6-architecture-overview.md)
+- [深度探索/Transformer 模块实现](20-transformer-block-implementation.md)
+- [深度探索/竞赛解决方案与基准测试](21-competition-solutions-and-benchmarks.md)
+- [深度探索/C++ 扩展与 LinearRNA](22-c-extension-and-linearrna.md)
+### 核心库：pahelix
+
+- [深度探索/核心库：pahelix/InMemoryDataset 与数据流水线](7-inmemorydataset-and-data-pipeline.md)
+- [深度探索/核心库：pahelix/化合物与蛋白质特征化器](8-compound-and-protein-featurizers.md)
+- [深度探索/核心库：pahelix/化合物编码器与嵌入层](9-compound-encoder-and-embedding-layers.md)
+- [深度探索/核心库：pahelix/GNN 模块与网络架构](10-gnn-blocks-and-network-architecture.md)
+
+### 预训练模型
+
+- [深度探索/预训练模型/使用 GEM 进行化合物预训练](11-compound-pretraining-with-gem.md)
+- [深度探索/预训练模型/Pretrain-GNNs 框架](12-pretrain-gnns-framework.md)
+- [深度探索/预训练模型/使用 TAPE 进行蛋白质预训练](13-protein-pretraining-with-tape.md)
+
+### 药物发现应用
+
+- [深度探索/药物发现应用/药物-靶标相互作用模型](14-drug-target-interaction-models.md)
+- [深度探索/药物发现应用/分子生成流水线](15-molecular-generation-pipelines.md)
+- [深度探索/药物发现应用/小样本分子属性预测](16-few-shot-molecular-property-prediction.md)
+
+### 蛋白质结构预测
+
+- [深度探索/蛋白质结构预测/HelixFold：AlphaFold2 复现](17-helixfold-alphafold2-reproduction.md)
+- [深度探索/蛋白质结构预测/HelixFold-Single：无 MSA 预测](18-helixfold-single-msa-free-prediction.md)
+- [深度探索/蛋白质结构预测/HelixFold3：生物分子结构预测](19-helixfold3-biomolecular-structure-prediction.md)
+
