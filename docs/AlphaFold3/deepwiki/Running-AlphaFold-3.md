@@ -20,13 +20,13 @@ AlphaFold 3 is executed via the `run_alphafold.py` script, which requires specif
 ### Docker Execution
 
 ```
-
+docker run -it \    --volume $HOME/af_input:/root/af_input \    --volume $HOME/af_output:/root/af_output \    --volume <MODEL_PARAMETERS_DIR>:/root/models \    --volume <DB_DIR>:/root/public_databases \    --gpus all \    alphafold3 \    python run_alphafold.py \    --json_path=/root/af_input/fold_input.json \    --model_dir=/root/models \    --db_dir=/root/public_databases \    --output_dir=/root/af_output
 ```
 
 ### Singularity Execution
 
 ```
-
+singularity exec \    --nv \    --bind $HOME/af_input:/root/af_input \    --bind $HOME/af_output:/root/af_output \    --bind <MODEL_PARAMETERS_DIR>:/root/models \    --bind <DB_DIR>:/root/public_databases \    alphafold3.sif \    python run_alphafold.py \    --json_path=/root/af_input/fold_input.json \    --model_dir=/root/models \    --db_dir=/root/public_databases \    --output_dir=/root/af_output
 ```
 
 ### Multiple Database Directories
@@ -34,7 +34,7 @@ AlphaFold 3 is executed via the `run_alphafold.py` script, which requires specif
 When databases are split across multiple locations (e.g., fast SSD and slower disk), specify multiple `--db_dir` flags. The system searches directories in order [run_alphafold.py L124-L129](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L124-L129)
 
 ```
-
+python run_alphafold.py \    --json_path=/root/af_input/fold_input.json \    --db_dir=/root/public_databases \    --db_dir=/root/public_databases_fallback \    --output_dir=/root/af_output
 ```
 
 **Sources:** [run_alphafold.py L62-L130](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L62-L130)
@@ -102,8 +102,109 @@ The script uses `shutil.which` to auto-detect HMMER binaries by default [run_alp
 
 ## Diagram: Command-Line Flag Categories
 
-```
+```mermaid
+flowchart TD
 
+embeddings["--save_embeddings"]
+distogram["--save_distogram"]
+force["--force_output_dir"]
+compress["--compress_large_output_files"]
+gpu_device["--gpu_device"]
+buckets["--buckets"]
+flash_attn["--flash_attention_implementation"]
+num_recycles["--num_recycles"]
+num_diffusion["--num_diffusion_samples"]
+num_seeds["--num_seeds"]
+jax_cache["--jax_compilation_cache_dir"]
+cpu_jack["--jackhmmer_n_cpu"]
+parallel_jack["--jackhmmer_max_parallel_shards"]
+cpu_nhm["--nhmmer_n_cpu"]
+parallel_nhm["--nhmmer_max_parallel_shards"]
+template_date["--max_template_date"]
+resolve_msa["--resolve_msa_overlaps"]
+db_dir["--db_dir (multi)"]
+bfd["--small_bfd_database_path"]
+mgnify["--mgnify_database_path"]
+uniprot["--uniprot_cluster_annot_database_path"]
+uniref90["--uniref90_database_path"]
+ntrna["--ntrna_database_path"]
+rfam["--rfam_database_path"]
+rna_central["--rna_central_database_path"]
+pdb["--pdb_database_path"]
+seqres["--seqres_database_path"]
+jackhmmer["--jackhmmer_binary_path"]
+nhmmer["--nhmmer_binary_path"]
+hmmsearch["--hmmsearch_binary_path"]
+hmmalign["--hmmalign_binary_path"]
+hmmbuild["--hmmbuild_binary_path"]
+json_path["--json_path"]
+input_dir["--input_dir"]
+output_dir["--output_dir"]
+model_dir["--model_dir"]
+main["main() function"]
+run_data["--run_data_pipeline"]
+run_inf["--run_inference"]
+DataPipelineConfig["DataPipelineConfig dataclass"]
+ModelRunner["ModelRunner class"]
+
+subgraph Execution ["Execution Control"]
+    run_data
+    run_inf
+end
+
+subgraph Output ["Output Control"]
+    embeddings
+    distogram
+    force
+    compress
+end
+
+subgraph Inference ["Inference Config"]
+    gpu_device
+    buckets
+    flash_attn
+    num_recycles
+    num_diffusion
+    num_seeds
+    jax_cache
+end
+
+subgraph DataPipeline ["Data Pipeline Config"]
+    cpu_jack
+    parallel_jack
+    cpu_nhm
+    parallel_nhm
+    template_date
+    resolve_msa
+end
+
+subgraph Databases ["Database Paths"]
+    db_dir
+    bfd
+    mgnify
+    uniprot
+    uniref90
+    ntrna
+    rfam
+    rna_central
+    pdb
+    seqres
+end
+
+subgraph Binaries ["Binary Paths"]
+    jackhmmer
+    nhmmer
+    hmmsearch
+    hmmalign
+    hmmbuild
+end
+
+subgraph InputOutput ["Input/Output Flags"]
+    json_path
+    input_dir
+    output_dir
+    model_dir
+end
 ```
 
 **Sources:** [run_alphafold.py L62-L379](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L62-L379)
@@ -126,7 +227,7 @@ By default, both stages run sequentially [run_alphafold.py L85-L94](https://gith
 :
 
 ```
-
+python run_alphafold.py \    --json_path=/root/af_input/fold_input.json \    --output_dir=/root/af_output
 ```
 
 ### Data Pipeline Only
@@ -136,7 +237,7 @@ Run only MSA generation and template search, skipping inference [docs/performanc
 :
 
 ```
-
+python run_alphafold.py \    --json_path=/root/af_input/fold_input.json \    --output_dir=/root/af_output \    --run_inference=false
 ```
 
 **Output:** JSON file augmented with MSAs and templates in `<output_dir>/<job_name>_data.json` [run_alphafold.py L802](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L802-L802)
@@ -148,7 +249,7 @@ Run only featurization and model inference using pre-computed MSAs and templates
 :
 
 ```
-
+python run_alphafold.py \    --json_path=/root/af_input/fold_input_with_msa.json \    --output_dir=/root/af_output \    --run_data_pipeline=false
 ```
 
 **Requirement:** Input JSON must contain pre-computed MSAs and templates [docs/performance.md L66-L68](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L66-L68)
@@ -161,8 +262,40 @@ Run only featurization and model inference using pre-computed MSAs and templates
 
 ## Diagram: Staged Execution Flow
 
-```
+```mermaid
+flowchart TD
 
+start["main()"]
+load_input["Load fold inputs<br>folding_input.load_fold_inputs_from_*()"]
+check_flags["--run_data_pipeline?<br>--run_inference?"]
+create_data_config["Create DataPipelineConfig<br>pipeline.DataPipelineConfig()"]
+create_model_runner["Create ModelRunner<br>ModelRunner()"]
+process["process_fold_input()<br>for each input"]
+check_data["data_pipeline_config<br>is None?"]
+check_model["model_runner<br>is None?"]
+run_data["pipeline.DataPipeline.process()<br>MSA + templates"]
+write_json["write_fold_input_json()<br>*_data.json"]
+predict["predict_structure()<br>featurization + inference"]
+write_output["write_outputs()<br>mmCIF + confidences"]
+done["Output written"]
+error["Error: At least one<br>must be True"]
+
+start --> load_input
+load_input --> check_flags
+check_flags --> create_data_config
+check_flags --> create_model_runner
+create_data_config --> process
+create_model_runner --> process
+check_flags --> error
+process --> check_data
+check_data --> run_data
+check_data --> write_json
+run_data --> write_json
+write_json --> check_model
+check_model --> predict
+check_model --> done
+predict --> write_output
+write_output --> done
 ```
 
 **Sources:** [run_alphafold.py L724-L829](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L724-L829)
@@ -178,7 +311,7 @@ Run only featurization and model inference using pre-computed MSAs and templates
 Control the number of CPUs used for MSA tools [run_alphafold.py L227-L238](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L227-L238)
 
 ```
-
+python run_alphafold.py \    --jackhmmer_n_cpu=8 \    --nhmmer_n_cpu=8
 ```
 
 **Default:** `min(cpu_count, 8)` [run_alphafold.py L231-L237](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L231-L237)
@@ -188,7 +321,7 @@ Control the number of CPUs used for MSA tools [run_alphafold.py L227-L238](https
 For sharded databases, control parallel shard processing to take advantage of multi-core systems and fast SSDs [docs/performance.md L85-L91](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L85-L91)
 
 ```
-
+python run_alphafold.py \    --small_bfd_database_path="bfd-first_non_consensus_sequences.fasta@64" \    --small_bfd_z_value=65984053 \    --jackhmmer_max_parallel_shards=16 \    --nhmmer_max_parallel_shards=16
 ```
 
 **Note:** For sharded databases, Z-values representing the database size must be specified manually to correctly scale E-values [run_alphafold.py L136-L215](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L136-L215)
@@ -216,7 +349,7 @@ For sharded databases, control parallel shard processing to take advantage of mu
 Specify which GPU to use (zero-indexed) [run_alphafold.py L289-L293](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L289-L293)
 
 ```
-
+python run_alphafold.py \    --gpu_device=0
 ```
 
 ### Compilation Buckets
@@ -224,7 +357,7 @@ Specify which GPU to use (zero-indexed) [run_alphafold.py L289-L293](https://git
 AlphaFold 3 uses compilation buckets to avoid recompiling for each input size, which significantly improves throughput for batches of varying sizes [run_alphafold.py L302-L311](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L302-L311)
 
 ```
-
+python run_alphafold.py \    --buckets=256,512,1024,2048,4096
 ```
 
 ### Flash Attention Implementation
@@ -232,7 +365,7 @@ AlphaFold 3 uses compilation buckets to avoid recompiling for each input size, w
 Choose the flash attention implementation [run_alphafold.py L312-L321](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L312-L321)
 
 ```
-
+python run_alphafold.py \    --flash_attention_implementation=triton
 ```
 
 **Options:** `triton` (default), `cudnn`, `xla` (required for CUDA 7.x) [docs/known_issues.md L7-L8](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/known_issues.md?plain=1#L7-L8)
@@ -250,7 +383,7 @@ Choose the flash attention implementation [run_alphafold.py L312-L321](https://g
 Enable persistent compilation cache to avoid recompilation overhead in subsequent runs [run_alphafold.py L346-L350](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L346-L350)
 
 ```
-
+python run_alphafold.py \    --jax_compilation_cache_dir=/root/jax_cache
 ```
 
 **Sources:** [run_alphafold.py L289-L350](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L289-L350)
@@ -268,7 +401,7 @@ Enable persistent compilation cache to avoid recompilation overhead in subsequen
 Save optional large outputs such as token embeddings or the predicted distogram [run_alphafold.py L351-L360](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L351-L360)
 
 ```
-
+python run_alphafold.py \    --save_embeddings=true \    --save_distogram=true
 ```
 
 ### Output Directory Behavior
@@ -276,7 +409,7 @@ Save optional large outputs such as token embeddings or the predicted distogram 
 Control output directory creation [run_alphafold.py L366-L373](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L366-L373)
 
 ```
-
+python run_alphafold.py \    --force_output_dir=true
 ```
 
 **Default behavior:** If the directory exists and is non-empty, AlphaFold 3 creates a timestamped directory instead to prevent overwriting results [run_alphafold.py L780-L794](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L780-L794)
@@ -286,7 +419,7 @@ Control output directory creation [run_alphafold.py L366-L373](https://github.co
 Compress large output files (e.g., embeddings) to save disk space [run_alphafold.py L374-L378](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L374-L378)
 
 ```
-
+python run_alphafold.py \    --compress_large_output_files=true
 ```
 
 **Sources:** [run_alphafold.py L351-L378](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L351-L378)
@@ -297,8 +430,65 @@ Compress large output files (e.g., embeddings) to save disk space [run_alphafold
 
 ## Diagram: Execution Flow with Key Functions
 
-```
+```mermaid
+flowchart TD
 
+main["main(argv)<br>[run_alphafold.py:832]"]
+parse_flags["Parse command-line flags<br>absl.flags"]
+validate["Validate flags<br>[run_alphafold.py:838-847]"]
+load["Load fold inputs<br>folding_input.load_fold_inputs_from_dir()<br>or load_fold_inputs_from_path()"]
+check_gpu["--run_inference?"]
+validate_gpu["Validate GPU capability<br>[run_alphafold.py:871-895]"]
+create_config["--run_data_pipeline?"]
+data_config["Create DataPipelineConfig<br>[run_alphafold.py:913-942]"]
+create_runner["--run_inference?"]
+model_runner["Create ModelRunner<br>[run_alphafold.py:954-970]"]
+load_params["Load model params<br>model_runner.model_params<br>[run_alphafold.py:415-417]"]
+loop_inputs["For each fold_input"]
+expand_seeds["--num_seeds set?"]
+expand["fold_input.with_multiple_seeds()<br>[run_alphafold.py:978]"]
+process["process_fold_input()<br>[run_alphafold.py:724]"]
+check_data_pipe["data_pipeline_config?"]
+run_pipeline["DataPipeline.process()<br>[run_alphafold.py:800]"]
+write_json["write_fold_input_json()<br>[run_alphafold.py:802]"]
+check_inference["model_runner?"]
+predict["predict_structure()<br>[run_alphafold.py:513]"]
+featurize["featurisation.featurise_input()<br>[run_alphafold.py:526-534]"]
+inference["model_runner.run_inference()<br>[run_alphafold.py:433]"]
+extract["model_runner.extract_inference_results()<br>[run_alphafold.py:455]"]
+write_out["write_outputs()<br>[run_alphafold.py:600]"]
+done["Fold job complete"]
+
+main --> parse_flags
+parse_flags --> validate
+validate --> load
+load --> check_gpu
+check_gpu --> validate_gpu
+check_gpu --> create_config
+validate_gpu --> create_config
+create_config --> data_config
+create_config --> create_runner
+data_config --> create_runner
+create_runner --> model_runner
+create_runner --> loop_inputs
+model_runner --> load_params
+load_params --> loop_inputs
+loop_inputs --> expand_seeds
+expand_seeds --> expand
+expand_seeds --> process
+expand --> process
+process --> check_data_pipe
+check_data_pipe --> run_pipeline
+check_data_pipe --> write_json
+run_pipeline --> write_json
+write_json --> check_inference
+check_inference --> predict
+check_inference --> done
+predict --> featurize
+featurize --> inference
+inference --> extract
+extract --> write_out
+write_out --> done
 ```
 
 **Sources:** [run_alphafold.py L832-L998](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L832-L998)
@@ -335,14 +525,14 @@ All CUDA Capability 7.x GPUs produce poor quality output (clashing residues) unl
 
 **Required XLA flag:**
 
-```
-
+```javascript
+export XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
 ```
 
 **Required flash attention:**
 
 ```
-
+python run_alphafold.py --flash_attention_implementation=xla
 ```
 
 **Sources:** [run_alphafold.py L869-L895](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L869-L895)
@@ -356,7 +546,7 @@ All CUDA Capability 7.x GPUs produce poor quality output (clashing residues) unl
 Process multiple JSON files in a single execution to leverage JAX compilation caching and improve overall throughput [run_alphafold.py L68-L72](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L68-L72)
 
 ```
-
+python run_alphafold.py \    --input_dir=/root/af_input \    --output_dir=/root/af_output
 ```
 
 **Behavior:**

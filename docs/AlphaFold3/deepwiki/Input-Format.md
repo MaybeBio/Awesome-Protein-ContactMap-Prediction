@@ -28,8 +28,22 @@ The input parser is implemented in `src/alphafold3/common/folding_input.py` and 
 
 Title: Dialect Detection Logic
 
-```
+```mermaid
+flowchart TD
 
+JSONFile["JSON File"]
+Parser["json.loads()"]
+DialectCheck["Top-level structure?"]
+AFSConverter["Input.from_alphafoldserver_fold_job()"]
+AF3Converter["Input.from_json()"]
+InputObject["Input dataclass"]
+
+JSONFile --> Parser
+Parser --> DialectCheck
+DialectCheck --> AFSConverter
+DialectCheck --> AF3Converter
+AFSConverter --> InputObject
+AF3Converter --> InputObject
 ```
 
 The system automatically detects the dialect by examining the top-level JSON structure. If it is a list, the input is treated as `alphafoldserver` format; if it is a dictionary, it is treated as `alphafold3` format.
@@ -59,15 +73,43 @@ The system automatically detects the dialect by examining the top-level JSON str
 ### alphafold3 Dialect
 
 ```
-
+{  "dialect": "alphafold3",  "version": 4,  "name": "Job name",  "modelSeeds": [1, 2, 3],  "sequences": [...],  "bondedAtomPairs": [...],  "userCCD": "...",  "userCCDPath": "..."}
 ```
 
 ### Code Representation
 
 Title: Mapping JSON to Code Entities
 
-```
+```mermaid
+flowchart TD
 
+JSON["{ dialect, version, name, modelSeeds, sequences, bondedAtomPairs, userCCD }"]
+Input["Input (dataclass)<br>name: str<br>chains: Sequence[Chain]<br>rng_seeds: Sequence[int]<br>bonded_atom_pairs<br>user_ccd: str | None"]
+ProteinChain["ProteinChain"]
+RnaChain["RnaChain"]
+DnaChain["DnaChain"]
+Ligand["Ligand"]
+
+JSON --> Input
+Input --> ProteinChain
+Input --> RnaChain
+Input --> DnaChain
+Input --> Ligand
+
+subgraph subGraph2 ["Chain Entities"]
+    ProteinChain
+    RnaChain
+    DnaChain
+    Ligand
+end
+
+subgraph subGraph1 ["Input Dataclass"]
+    Input
+end
+
+subgraph subGraph0 ["JSON Structure"]
+    JSON
+end
 ```
 
 **Sources:** [src/alphafold3/common/folding_input.py L931-L960](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L931-L960)
@@ -110,8 +152,41 @@ Title: Mapping JSON to Code Entities
 
 Title: Chain Implementation Class Hierarchy
 
-```
+```mermaid
+flowchart TD
 
+Input["Input.chains<br>Sequence[Chain]"]
+ProteinChain["ProteinChain<br>sequence, ptms,<br>paired_msa, unpaired_msa,<br>templates"]
+RnaChain["RnaChain<br>sequence, modifications,<br>unpaired_msa"]
+DnaChain["DnaChain<br>sequence, modifications"]
+Ligand["Ligand<br>ccd_ids | smiles"]
+ID["id: str"]
+Desc["description: str | None"]
+
+Input --> ProteinChain
+Input --> RnaChain
+Input --> DnaChain
+Input --> Ligand
+ProteinChain --> ID
+RnaChain --> ID
+DnaChain --> ID
+Ligand --> ID
+ProteinChain --> Desc
+RnaChain --> Desc
+DnaChain --> Desc
+Ligand --> Desc
+
+subgraph subGraph1 ["Common Attributes"]
+    ID
+    Desc
+end
+
+subgraph subGraph0 ["Chain Implementations"]
+    ProteinChain
+    RnaChain
+    DnaChain
+    Ligand
+end
 ```
 
 **Sources:** [src/alphafold3/common/folding_input.py L123-L894](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L123-L894)
@@ -211,7 +286,7 @@ Templates provide structural context for protein chains. A `Template` object con
 Covalent bonds are defined in the `bondedAtomPairs` list. Each bond connects two atoms identified by `[chain_id, residue_index, atom_name]`.
 
 ```
-
+"bondedAtomPairs": [  [["A", 145, "SG"], ["L", 1, "C04"]]]
 ```
 
 Bonds are validated during input parsing to ensure atoms exist and refer to valid chain/residue indices [src/alphafold3/common/folding_input.py L1188-L1234](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L1188-L1234)

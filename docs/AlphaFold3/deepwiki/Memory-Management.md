@@ -24,7 +24,7 @@ The preallocation strategy reserves a fixed fraction of GPU memory at startup, p
 **Configuration:**
 
 ```
-
+XLA_PYTHON_CLIENT_PREALLOCATE=trueXLA_CLIENT_MEM_FRACTION=0.95
 ```
 
 The `XLA_CLIENT_MEM_FRACTION` value of `0.95` means AlphaFold 3 will preallocate 95% of available GPU memory. This configuration enables folding inputs up to 5,120 tokens on an A100 (80 GB) or H100 (80 GB) [docker/Dockerfile L84-L86](https://github.com/google-deepmind/alphafold3/blob/97639fff/docker/Dockerfile#L84-L86)
@@ -47,7 +47,7 @@ The unified memory strategy allows GPU memory to spill to host (CPU) RAM when GP
 **Configuration:**
 
 ```
-
+XLA_PYTHON_CLIENT_PREALLOCATE=falseTF_FORCE_UNIFIED_MEMORY=trueXLA_CLIENT_MEM_FRACTION=3.2
 ```
 
 The `XLA_CLIENT_MEM_FRACTION` value of `3.2` allows the system to use up to 3.2× the physical GPU memory by spilling to host RAM [docs/performance.md L332-L336](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L332-L336)
@@ -63,8 +63,33 @@ Sources: [docs/performance.md L328-L345](https://github.com/google-deepmind/alph
 
 ### Memory Strategy Selection
 
-```
+```mermaid
+flowchart TD
 
+Input["Input Token Count"]
+CheckSize["Token count <= 5,120?"]
+CheckGPU["GPU Memory >= 80 GB?"]
+UseUnified["Use Unified Memory<br>XLA_PYTHON_CLIENT_PREALLOCATE=false<br>TF_FORCE_UNIFIED_MEMORY=true<br>XLA_CLIENT_MEM_FRACTION=3.2"]
+UsePrealloc["Use Preallocation<br>XLA_PYTHON_CLIENT_PREALLOCATE=true<br>XLA_CLIENT_MEM_FRACTION=0.95"]
+CheckSmallGPU["GPU Memory >= 40 GB?"]
+UseUnifiedSmall["Use Unified Memory<br>+ Adjust pair_transition_shard_spec"]
+UseUnifiedVerySmall["Use Unified Memory<br>Limited token capacity"]
+Result["Optimal Performance"]
+Result2["Reduced Performance<br>Higher Capacity"]
+Result3["Reduced Performance<br>Up to 4,352 tokens"]
+Result4["Reduced Performance<br>Up to 1,280 tokens V100<br>Up to 1,024 tokens P100"]
+
+Input --> CheckSize
+CheckSize --> CheckGPU
+CheckSize --> UseUnified
+CheckGPU --> UsePrealloc
+CheckGPU --> CheckSmallGPU
+CheckSmallGPU --> UseUnifiedSmall
+CheckSmallGPU --> UseUnifiedVerySmall
+UsePrealloc --> Result
+UseUnified --> Result2
+UseUnifiedSmall --> Result3
+UseUnifiedVerySmall --> Result4
 ```
 
 Sources: [docs/performance.md L206-L248](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L206-L248)
@@ -95,7 +120,7 @@ Sources: [docs/performance.md L296-L345](https://github.com/google-deepmind/alph
 The following XLA flag is required to work around a known XLA compilation time issue:
 
 ```
-
+XLA_FLAGS="--xla_gpu_enable_triton_gemm=false"
 ```
 
 This flag is set by default in the provided `Dockerfile` [docker/Dockerfile L83](https://github.com/google-deepmind/alphafold3/blob/97639fff/docker/Dockerfile#L83-L83)
@@ -107,7 +132,7 @@ This flag is set by default in the provided `Dockerfile` [docker/Dockerfile L83]
 GPUs with CUDA Capability 7.x (e.g., NVIDIA V100) require an additional XLA flag to avoid numerical issues:
 
 ```
-
+XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
 ```
 
 This flag disables the custom kernel fusion rewriter, which produces incorrect results on these GPUs [docs/known_issues.md L5-L8](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/known_issues.md?plain=1#L5-L8)
@@ -124,8 +149,66 @@ Sources: [docs/performance.md L306-L315](https://github.com/google-deepmind/alph
 
 The following diagram illustrates how the system validates hardware compatibility and applies memory-related flags during initialization.
 
-```
+```mermaid
+flowchart TD
 
+Main["run_alphafold.py"]
+CheckInference["--run_inference=true"]
+GetDevices["jax.local_devices()"]
+CheckCapability["Check compute_capability"]
+ValidateCompat["Capability < 6.0?"]
+Error1["ValueError: Minimum capability 6.0"]
+CheckV100["7.0 <= Capability < 8.0?"]
+ValidateXLAFlags["Validate XLA_FLAGS"]
+CheckFlagSet["XLA_FLAGS contains<br>custom-kernel-fusion-rewriter?"]
+Error2["ValueError: XLA_FLAGS required for V100"]
+CheckFlashAttn["flash_attention_implementation<br>== 'xla'?"]
+Error3["ValueError: Must use xla attention"]
+Proceed["Proceed with ModelRunner"]
+EnvXLAPre["XLA_PYTHON_CLIENT_PREALLOCATE"]
+EnvXLAFrac["XLA_CLIENT_MEM_FRACTION"]
+EnvXLAFlags["XLA_FLAGS"]
+EnvTFUnified["TF_FORCE_UNIFIED_MEMORY"]
+ModelRunner["ModelRunner Class"]
+
+ValidateXLAFlags --> EnvXLAFlags
+Proceed --> ModelRunner
+
+subgraph Environment_Space ["Environment_Space"]
+    EnvXLAPre
+    EnvXLAFrac
+    EnvXLAFlags
+    EnvTFUnified
+end
+
+subgraph run_alphafold.py_Validation ["run_alphafold.py_Validation"]
+    Main
+    CheckInference
+    GetDevices
+    CheckCapability
+    ValidateCompat
+    Error1
+    CheckV100
+    ValidateXLAFlags
+    CheckFlagSet
+    Error2
+    CheckFlashAttn
+    Error3
+    Proceed
+    Main --> CheckInference
+    CheckInference --> GetDevices
+    GetDevices --> CheckCapability
+    CheckCapability --> ValidateCompat
+    ValidateCompat --> Error1
+    ValidateCompat --> CheckV100
+    CheckV100 --> ValidateXLAFlags
+    ValidateXLAFlags --> CheckFlagSet
+    CheckFlagSet --> Error2
+    CheckFlagSet --> CheckFlashAttn
+    CheckFlashAttn --> Error3
+    CheckFlashAttn --> Proceed
+    CheckV100 --> Proceed
+end
 ```
 
 Sources: [docs/known_issues.md L3-L8](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/known_issues.md?plain=1#L3-L8)
@@ -143,7 +226,7 @@ The default configuration is optimized for A100 (80 GB) GPUs [docs/performance.m
 **Memory Settings:**
 
 ```
-
+XLA_PYTHON_CLIENT_PREALLOCATE=trueXLA_CLIENT_MEM_FRACTION=0.95
 ```
 
 **Capacity:**
@@ -162,7 +245,7 @@ Running on A100 (40 GB) requires unified memory and model configuration adjustme
 **Memory Settings:**
 
 ```
-
+XLA_PYTHON_CLIENT_PREALLOCATE=falseTF_FORCE_UNIFIED_MEMORY=trueXLA_CLIENT_MEM_FRACTION=3.2
 ```
 
 **Model Configuration:**
@@ -195,7 +278,7 @@ V100 GPUs (CUDA Capability 7.x) require special XLA flags and have limited capac
 **XLA Flags:**
 
 ```
-
+XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
 ```
 
 **Flash Attention:**
@@ -220,8 +303,31 @@ AlphaFold 3 uses compilation buckets to avoid recompiling the model for every in
 
 **Bucket Selection Process:**
 
-```
+```mermaid
+flowchart TD
 
+Input["Input Token Count"]
+FindBucket["Find smallest bucket >= count"]
+CheckExists["Bucket exists?"]
+Pad["Pad input to bucket size"]
+CreateNew["Create new bucket<br>(recompilation)"]
+CheckCompiled["Model compiled?"]
+UseCache["Use cached compilation"]
+Compile["Compile model"]
+Inference["Run inference"]
+CacheStore["Store in JAX cache<br>--jax_compilation_cache_dir"]
+
+Input --> FindBucket
+FindBucket --> CheckExists
+CheckExists --> Pad
+CheckExists --> CreateNew
+Pad --> CheckCompiled
+CheckCompiled --> UseCache
+CheckCompiled --> Compile
+CreateNew --> Compile
+UseCache --> Inference
+Compile --> CacheStore
+CacheStore --> Inference
 ```
 
 Sources: [docs/performance.md L259-L292](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L259-L292)

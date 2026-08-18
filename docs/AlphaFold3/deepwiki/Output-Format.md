@@ -17,8 +17,33 @@ AlphaFold 3 organizes its outputs in a directory structure that makes it easy to
 
 ### Output Organization Diagram
 
-```
+```mermaid
+flowchart TD
 
+root["Output Directory<br>(Named after job)"]
+terms["TERMS_OF_USE.md"]
+topModelCif["job_name_model.cif<br>(Top-ranked structure)"]
+topConfFull["job_name_confidences.json<br>(Full confidence data)"]
+topConfSummary["job_name_summary_confidences.json<br>(Summary confidence metrics)"]
+dataJson["job_name_data.json<br>(Processed input data)"]
+rankingScores["ranking_scores.csv<br>(All samples' ranking scores)"]
+sample1["seed-X_sample-0/<br>- model.cif<br>- confidences.json<br>- summary_confidences.json"]
+sample2["seed-X_sample-1/<br>- model.cif<br>- confidences.json<br>- summary_confidences.json"]
+sampleN["seed-X_sample-N/<br>- model.cif<br>- confidences.json<br>- summary_confidences.json"]
+embeddings["seed-X_embeddings/<br>embeddings.npz<br>(Optional)"]
+distogram["seed-X_distogram/<br>distogram.npz<br>(Optional)"]
+
+root --> terms
+root --> topModelCif
+root --> topConfFull
+root --> topConfSummary
+root --> dataJson
+root --> rankingScores
+root --> sample1
+root --> sample2
+root --> sampleN
+root --> embeddings
+root --> distogram
 ```
 
 Sources:
@@ -41,8 +66,28 @@ AlphaFold 3 outputs predicted structures in the mmCIF format (`.cif`) rather tha
 
 ### Code Entity Space: mmCIF Generation
 
-```
+```mermaid
+flowchart TD
 
+Coords["_atom_site table (coordinates)"]
+Metadata["mmcif_metadata.py (AF3 version/timestamp)"]
+Confidence["B-factor (pLDDT values)"]
+InferenceResult["InferenceResult (model.py)"]
+PostProcess["post_process_inference_result() (post_processing.py)"]
+ProcessedResult["ProcessedInferenceResult (post_processing.py)"]
+WriteOutput["write_output() (post_processing.py)"]
+ModelCif["job_name_model.cif"]
+
+InferenceResult --> PostProcess
+PostProcess --> ProcessedResult
+ProcessedResult --> WriteOutput
+WriteOutput --> ModelCif
+
+subgraph subGraph0 ["mmCIF Components"]
+    Coords
+    Metadata
+    Confidence
+end
 ```
 
 Sources:
@@ -68,8 +113,37 @@ AlphaFold 3 produces two JSON files containing confidence metrics for each predi
 
 ### Confidence Data Flow
 
-```
+```mermaid
+flowchart TD
 
+PAE["pae"]
+pLDDT["atom_plddts"]
+Contact["contact_probs"]
+pTM["ptm"]
+ipTM["iptm"]
+Ranking["ranking_score"]
+InferenceResult["InferenceResult"]
+SummaryClass["StructureConfidenceSummary (confidence_types.py)"]
+FullClass["StructureConfidenceFull (confidence_types.py)"]
+SummaryJSON["summary_confidences.json"]
+FullJSON["confidences.json"]
+
+InferenceResult --> SummaryClass
+InferenceResult --> FullClass
+SummaryClass --> SummaryJSON
+FullClass --> FullJSON
+
+subgraph subGraph1 ["Full Data"]
+    PAE
+    pLDDT
+    Contact
+end
+
+subgraph subGraph0 ["Summary Data"]
+    pTM
+    ipTM
+    Ranking
+end
 ```
 
 Sources:
@@ -108,8 +182,28 @@ AlphaFold 3 includes logic to validate the chirality of predicted ligands agains
 
 ### Code Entity Space: Chirality Validation
 
-```
+```mermaid
+flowchart TD
 
+mol_from_ccd["mol_from_ccd_cif() (rdkit_utils.py)"]
+sanitize["sanitize_mol() (rdkit_utils.py)"]
+test_struc["Structure (structure.py)"]
+compare_chirality["compare_chirality() (chirality.py)"]
+ref_mol["rd_chem.Mol (RDKit)"]
+find_chiral["_find_chiral_centres()"]
+chiral_match["_chiral_match()"]
+Result["dict[chain_id, bool]"]
+
+test_struc --> compare_chirality
+ref_mol --> compare_chirality
+compare_chirality --> find_chiral
+find_chiral --> chiral_match
+chiral_match --> Result
+
+subgraph subGraph0 ["RDKit Utilities"]
+    mol_from_ccd
+    sanitize
+end
 ```
 
 Sources:

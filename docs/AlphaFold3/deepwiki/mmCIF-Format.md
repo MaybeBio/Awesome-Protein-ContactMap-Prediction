@@ -31,8 +31,21 @@ The `CifDict` class manages a shared dictionary (`Dict`) mapping string keys to 
 
 Title: CifDict Class Structure
 
-```
-
+```mermaid
+classDiagram
+    class CifDict {
+        -shared_ptr<const Dict> dict_
+        +FromString(string_view) : StatusOr<CifDict>
+        +ToString() : StatusOr<string>
+        +ExtractLoopAsList(string_view) : StatusOr<vector>
+        +ExtractLoopAsDict(string_view, string_view) : StatusOr<flat_hash_map>
+        +GetDataName() : string_view
+    }
+    class Dict {
+        «typedef»
+        node_hash_mapUnsupported markdown: del>
+    }
+    CifDict --> Dict : "wraps"
 ```
 
 **Sources:** [src/alphafold3/parsers/cpp/cif_dict_lib.h L30-L120](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/parsers/cpp/cif_dict_lib.h#L30-L120)
@@ -45,8 +58,43 @@ This diagram bridges the natural language concepts of mmCIF parsing to the speci
 
 Title: mmCIF Concept to Code Mapping
 
-```
+```mermaid
+flowchart TD
 
+Token["CIF Token"]
+Loop["Loop Structure"]
+DataBlock["Data Block"]
+TokenizeFunc["Tokenize() / TokenizeInternal()"]
+CifDictClass["class CifDict"]
+ExtractLoop["ExtractLoopAsList()"]
+PyCifDict["class CifDict (Python Wrapper)"]
+GetArray["get_array()"]
+ParseMulti["parse_multi_data_cif()"]
+
+Token --> TokenizeFunc
+Loop --> ExtractLoop
+DataBlock --> ParseMulti
+CifDictClass --> PyCifDict
+
+subgraph subGraph2 ["Code Entity Space (Python/Pybind)"]
+    PyCifDict
+    GetArray
+    ParseMulti
+    PyCifDict --> GetArray
+end
+
+subgraph subGraph1 ["Code Entity Space (C++)"]
+    TokenizeFunc
+    CifDictClass
+    ExtractLoop
+    TokenizeFunc --> CifDictClass
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    Token
+    Loop
+    DataBlock
+end
 ```
 
 **Sources:** [src/alphafold3/parsers/cpp/cif_dict_lib.h L42-L143](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/parsers/cpp/cif_dict_lib.h#L42-L143)
@@ -89,8 +137,27 @@ The parser iterates through tokens, switching between single-key and loop modes.
 
 Title: mmCIF Parsing State Machine
 
-```
+```mermaid
+flowchart TD
 
+Start["Token Stream"]
+IsData["token == 'data_'?"]
+SetName["Set Data Name"]
+Next["Next Token"]
+IsLoop["'loop_'?"]
+LoopMode["Loop Mode: Collect Keys then Values"]
+KeyMode["Key-Value Mode: Map Key to Value"]
+Validate["CheckLoopColumnSizes()"]
+
+Start --> IsData
+IsData --> SetName
+SetName --> Next
+Next --> IsLoop
+IsLoop --> LoopMode
+IsLoop --> KeyMode
+LoopMode --> Validate
+Validate --> Next
+KeyMode --> Next
 ```
 
 **Sources:** [src/alphafold3/parsers/cpp/cif_dict_lib.cc L358-L478](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/parsers/cpp/cif_dict_lib.cc#L358-L478)

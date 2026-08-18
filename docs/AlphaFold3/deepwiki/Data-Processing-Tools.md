@@ -12,8 +12,46 @@ The AlphaFold 3 data processing tools are a collection of components responsible
 
 AlphaFold 3 relies on a suite of external bioinformatic tools, primarily from the HMMER suite, wrapped in Python for seamless integration into the data pipeline.
 
-```
+```mermaid
+flowchart TD
 
+MSASearch["Multiple Sequence Alignment Search"]
+TemplateSearch["Structural Template Search"]
+DataParsing["Biological Data Parsing"]
+MsaTool["msa_tool.MsaTool (Protocol)"]
+Jackhmmer["jackhmmer.Jackhmmer"]
+Nhmmer["nhmmer.Nhmmer"]
+Hmmsearch["hmmsearch.Hmmsearch"]
+Parsers["parsers.py"]
+Subprocess["subprocess_utils.py"]
+Templates["templates.Templates"]
+Hit["templates.Hit"]
+
+MSASearch --> MsaTool
+TemplateSearch --> Templates
+DataParsing --> Parsers
+
+subgraph subGraph1 ["Code Entity Space"]
+    MsaTool
+    Jackhmmer
+    Nhmmer
+    Hmmsearch
+    Parsers
+    Subprocess
+    Templates
+    Hit
+    MsaTool --> Jackhmmer
+    MsaTool --> Nhmmer
+    Jackhmmer --> Subprocess
+    Nhmmer --> Subprocess
+    Hmmsearch --> Subprocess
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    MSASearch
+    TemplateSearch
+    DataParsing
+end
 ```
 
 Sources:
@@ -49,8 +87,36 @@ Sources:
 
 Template processing identifies structural homologs from the PDB to guide the model. This involves searching with `Hmmsearch` and processing hits through the `Templates` class.
 
-```
+```mermaid
+flowchart TD
 
+A3M["A3M MSA"]
+Build["hmmbuild"]
+HMM["Profile HMM"]
+Search["hmmsearch"]
+SearchClass["hmmsearch.Hmmsearch"]
+TemplateClass["templates.Templates"]
+HitClass["templates.Hit"]
+
+Search --> SearchClass
+
+subgraph subGraph1 ["Code Components"]
+    SearchClass
+    TemplateClass
+    HitClass
+    SearchClass --> TemplateClass
+    TemplateClass --> HitClass
+end
+
+subgraph subGraph0 ["Search Execution"]
+    A3M
+    Build
+    HMM
+    Search
+    A3M --> Build
+    Build --> HMM
+    HMM --> Search
+end
 ```
 
 The pipeline uses `Hmmsearch` to query databases like `pdb_seqres` [src/alphafold3/data/tools/hmmsearch.py L22-L40](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/tools/hmmsearch.py#L22-L40)
@@ -84,8 +150,37 @@ Sources:
 
 The integration layer manages the execution of the HMMER binary suite and handles environment-specific configurations.
 
-```
+```mermaid
+flowchart TD
 
+Subprocess["subprocess_utils.run"]
+BinaryCheck["subprocess_utils.check_binary_exists"]
+SeqLimitCheck["subprocess_utils.jackhmmer_seq_limit_supported"]
+Dockerfile["docker/Dockerfile"]
+Patch["jackhmmer_seq_limit.patch"]
+Shards["shards.get_sharded_paths"]
+Jackhmmer_C["HMMER Source (jackhmmer.c)"]
+
+Patch --> Jackhmmer_C
+Jackhmmer_C --> Subprocess
+Shards --> Subprocess
+
+subgraph subGraph2 ["Data Management"]
+    Shards
+end
+
+subgraph subGraph1 ["Build & Patching"]
+    Dockerfile
+    Patch
+    Dockerfile --> Patch
+end
+
+subgraph subGraph0 ["Execution Layer"]
+    Subprocess
+    BinaryCheck
+    SeqLimitCheck
+    SeqLimitCheck --> Subprocess
+end
 ```
 
 * **Subprocess Management**: The `subprocess_utils.run` function handles timing, logging, and error reporting for external binaries [src/alphafold3/data/tools/subprocess_utils.py L53-L120](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/tools/subprocess_utils.py#L53-L120)

@@ -21,8 +21,52 @@ AlphaFold 3 interacts with external binaries through a tiered architecture. Pyth
 
 The following diagram maps high-level tool wrappers to their underlying code entities and execution flow.
 
-```
+```mermaid
+flowchart TD
 
+A["Hmmsearch class [hmmsearch.py]"]
+B["subprocess_utils.run()"]
+C["Hmmbuild class [hmmbuild.py]"]
+D["Hmmalign class [hmmalign.py]"]
+E["subprocess.run()"]
+F["External Binary (e.g., /hmmer/bin/hmmsearch)"]
+G["CompletedProcess object"]
+H["Input String (MSA/Seq)"]
+I["tempfile.TemporaryDirectory()"]
+J["Output File (.sto/.a3m/.hmm)"]
+K["Result String (via parsers.py)"]
+
+B --> E
+I --> F
+F --> J
+
+subgraph subGraph2 ["Data Flow & File I/O"]
+    H
+    I
+    J
+    K
+    H --> I
+    J --> K
+end
+
+subgraph subGraph1 ["Subprocess Execution Space"]
+    E
+    F
+    G
+    E --> F
+    F --> E
+    E --> G
+end
+
+subgraph subGraph0 ["Python Logic Space"]
+    A
+    B
+    C
+    D
+    A --> B
+    C --> B
+    D --> B
+end
 ```
 
 Sources: [src/alphafold3/data/tools/subprocess_utils.py L53-L61](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/tools/subprocess_utils.py#L53-L61)
@@ -109,8 +153,35 @@ External tools often require specific file formats (Stockholm, A2M, FASTA). The 
 
 The following diagram illustrates how biological data is transformed between internal representations and external tool requirements.
 
-```
+```mermaid
+flowchart TD
 
+A["A3M String"]
+B["convert_a3m_to_stockholm()"]
+C["convert_stockholm_to_a3m()"]
+D["lazy_parse_fasta_string()"]
+E["msa_conversion.convert_a3m_to_stockholm"]
+F["fasta_iterator.FastaStringIterator"]
+
+A --> B
+B --> E
+C --> A
+D --> F
+
+subgraph subGraph2 ["C++ Backend [alphafold3.cpp]"]
+    E
+    F
+end
+
+subgraph subGraph1 ["Parser Logic [parsers.py]"]
+    B
+    C
+    D
+end
+
+subgraph subGraph0 ["Internal Representation"]
+    A
+end
 ```
 
 ### Stockholm and FASTA Parsing

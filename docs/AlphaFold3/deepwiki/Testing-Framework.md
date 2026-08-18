@@ -19,8 +19,47 @@ Tests compare outputs against golden reference data using RMSD calculations, has
 
 **Test Suite Architecture**
 
-```
+```mermaid
+flowchart TD
 
+RAT["run_alphafold_test.py<br>InferenceTest"]
+RADT["run_alphafold_data_test.py<br>DataPipelineTest"]
+MiniDB["miniature_databases/<br>BFD, UniRef90, PDB, etc."]
+FeatExample["featurised_example.pkl/json"]
+GoldenOutputs["alphafold_run_outputs/<br>*.pkl golden files"]
+RunAlphaFold["run_alphafold.py<br>process_fold_input()"]
+ModelRunner["ModelRunner<br>run_inference()"]
+DataPipeline["pipeline.DataPipeline"]
+Featurisation["featurisation.py"]
+
+RAT --> FeatExample
+RAT --> GoldenOutputs
+RAT --> RunAlphaFold
+RAT --> ModelRunner
+RADT --> MiniDB
+RADT --> DataPipeline
+RADT --> Featurisation
+
+subgraph SystemUnderTest ["System Under Test"]
+    RunAlphaFold
+    ModelRunner
+    DataPipeline
+    Featurisation
+    RunAlphaFold --> ModelRunner
+    RunAlphaFold --> DataPipeline
+    DataPipeline --> Featurisation
+end
+
+subgraph TestData ["test_data/"]
+    MiniDB
+    FeatExample
+    GoldenOutputs
+end
+
+subgraph TestFiles ["Test Files"]
+    RAT
+    RADT
+end
 ```
 
 Sources: [run_alphafold_test.py L66-L154](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold_test.py#L66-L154)
@@ -33,8 +72,47 @@ Test data is located in `test_data/` and includes miniature databases (subsample
 
 **Test Data Structure**
 
-```
+```mermaid
+flowchart TD
 
+DefaultPKL["run_alphafold_test_output_bucket_default.pkl"]
+Bucket1024PKL["run_alphafold_test_output_bucket_1024.pkl"]
+FeatJSON["featurised_example.json"]
+FeatPKL["featurised_example.pkl"]
+BFD["bfd-first_non_consensus_sequences__subsampled_1000.fasta"]
+MGnify["mgy_clusters__subsampled_1000.fa"]
+UniProt["uniprot_all__subsampled_1000.fasta"]
+UniRef90["uniref90__subsampled_1000.fasta"]
+NTRNA["nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq__subsampled_1000.fasta"]
+Rfam["rfam_14_4_clustered_rep_seq__subsampled_1000.fasta"]
+RNACentral["rnacentral_active_seq_id_90_cov_80_linclust__subsampled_1000.fasta"]
+PDBSeqres["pdb_seqres_2022_09_28__subsampled_1000.fasta"]
+PDBMMCIF["pdb_mmcif/"]
+
+subgraph TestDataDir ["test_data/"]
+
+subgraph GoldenOutputs ["alphafold_run_outputs/"]
+    DefaultPKL
+    Bucket1024PKL
+end
+
+subgraph PreFeaturized ["Pre-Featurized Data"]
+    FeatJSON
+    FeatPKL
+end
+
+subgraph MiniDB ["miniature_databases/"]
+    BFD
+    MGnify
+    UniProt
+    UniRef90
+    NTRNA
+    Rfam
+    RNACentral
+    PDBSeqres
+    PDBMMCIF
+end
+end
 ```
 
 Sources: [run_alphafold_test.py L71-L105](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold_test.py#L71-L105)
@@ -49,8 +127,24 @@ The `InferenceTest` class in `run_alphafold_test.py` validates the complete pipe
 
 **InferenceTest Class Structure**
 
-```
-
+```mermaid
+classDiagram
+    class InferenceTest {
+        -DataPipelineConfig _data_pipeline_config
+        -ModelConfig _model_config
+        -ModelRunner _runner
+        -str _test_input_json
+        +setUp() : void
+        +test_model_inference() : void
+        +test_process_fold_input_runs_only_inference() : void
+        +test_inference(bucket, seed) : void
+    }
+    class ModelRunner {
+        +run_inference(batch, rng_key) : dict
+        +extract_inference_results(batch, result, target_name) : list
+        +extract_embeddings(result, num_tokens) : tuple
+    }
+    InferenceTest --> ModelRunner : "uses"
 ```
 
 **Test Coverage**
@@ -69,8 +163,25 @@ The `DataPipelineTest` class validates MSA generation, template search, and feat
 
 **DataPipelineTest Class Structure**
 
-```
-
+```mermaid
+classDiagram
+    class DataPipelineTest {
+        -DataPipelineConfig _data_pipeline_config
+        -str _test_input_json
+        +setUp() : void
+        +compare_golden(result_path) : void
+        +test_config() : void
+        +test_featurisation() : void
+    }
+    class DataPipeline {
+        +process(input) : dict
+    }
+    class hash_data {
+        «singledispatch»
+        +_hash_data(x) : str
+    }
+    DataPipelineTest --> DataPipeline : "invokes"
+    DataPipelineTest --> hash_data : "uses for comparison"
 ```
 
 **Test Coverage**
@@ -94,8 +205,33 @@ The testing framework employs multiple validation strategies depending on the da
 
 **Regression Detection Workflow**
 
-```
+```mermaid
+flowchart TD
 
+TestRun["Test Execution"]
+GenerateOutput["Generate Test Output"]
+LoadGolden["Load Golden Reference"]
+CheckType["Data Type?"]
+RMSDCalc["Calculate RMSD<br>alignment.rmsd_from_coords()"]
+HashCalc["Calculate Hash<br>_hash_data()"]
+DiffCalc["Generate Diff<br>_generate_diff()"]
+RMSDThreshold["RMSD < threshold?"]
+HashMatch["Hashes match?"]
+DiffEmpty["Diff empty?"]
+Pass["Test Pass"]
+
+TestRun --> GenerateOutput
+GenerateOutput --> LoadGolden
+LoadGolden --> CheckType
+CheckType --> RMSDCalc
+CheckType --> HashCalc
+CheckType --> DiffCalc
+RMSDCalc --> RMSDThreshold
+HashCalc --> HashMatch
+DiffCalc --> DiffEmpty
+RMSDThreshold --> Pass
+HashMatch --> Pass
+DiffEmpty --> Pass
 ```
 
 Sources: [run_alphafold_test.py L54-L63](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold_test.py#L54-L63)
@@ -108,8 +244,8 @@ Sources: [run_alphafold_test.py L54-L63](https://github.com/google-deepmind/alph
 
 Tests can be run locally or via CI. Local execution requires HMMER binaries and test data:
 
-```
-
+```markdown
+# Run data pipeline tests (CPU only, CI-compatible)uv run python run_alphafold_data_test.py # Run inference tests (requires GPU and model parameters)uv run python run_alphafold_test.py
 ```
 
 The CI pipeline (`.github/workflows/ci.yaml`) automatically runs `run_alphafold_data_test.py` on push/PR to verify data pipeline functionality [.github/workflows/ci.yaml L43-L44](https://github.com/google-deepmind/alphafold3/blob/97639fff/ .github/workflows/ci.yaml#L43-L44)
@@ -134,8 +270,23 @@ Sources: [run_alphafold_test.py L38-L42](https://github.com/google-deepmind/alph
 
 The AlphaFold 3 testing framework is integrated with a CI pipeline that automatically runs the data pipeline tests on code changes:
 
-```
+```mermaid
+flowchart TD
 
+PR["Pull Request / Push"]
+CI["CI Workflow"]
+Setup["Setup Python & Dependencies"]
+InstallHMMER["Install HMMER Tools"]
+BuildData["Build Test Data"]
+RunTests["Run Data Pipeline Tests"]
+Results["Test Results"]
+
+PR --> CI
+CI --> Setup
+Setup --> InstallHMMER
+InstallHMMER --> BuildData
+BuildData --> RunTests
+RunTests --> Results
 ```
 
 The CI workflow currently runs `run_alphafold_data_test.py` to verify data pipeline functionality without requiring GPUs, making it suitable for standard CI environments [.github/workflows/ci.yaml L43-L44](https://github.com/google-deepmind/alphafold3/blob/97639fff/.github/workflows/ci.yaml#L43-L44)

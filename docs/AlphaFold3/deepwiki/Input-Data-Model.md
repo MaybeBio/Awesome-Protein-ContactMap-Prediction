@@ -17,8 +17,35 @@ The input data model provides Python dataclasses for representing molecular enti
 
 **Diagram: Input Data Model Class Hierarchy**
 
-```
+```mermaid
+flowchart TD
 
+Input["Input<br>(main container)"]
+ProteinChain["ProteinChain<br>(protein sequences)"]
+RnaChain["RnaChain<br>(RNA sequences)"]
+DnaChain["DnaChain<br>(DNA sequences)"]
+Ligand["Ligand<br>(small molecules)"]
+Template["Template<br>(structural templates)"]
+BondAtomId["BondAtomId<br>(chain_id, res_id, atom_name)"]
+UserCCD["User-defined CCD<br>(mmCIF format)"]
+MSA1["Paired MSA<br>(A3M format)"]
+MSA2["Unpaired MSA<br>(A3M format)"]
+MSA3["Unpaired MSA<br>(A3M format)"]
+MMCIF["Template mmCIF"]
+Mapping["Mapping[int, int]"]
+
+Input --> ProteinChain
+Input --> RnaChain
+Input --> DnaChain
+Input --> Ligand
+Input --> BondAtomId
+Input --> UserCCD
+ProteinChain --> Template
+ProteinChain --> MSA1
+ProteinChain --> MSA2
+RnaChain --> MSA3
+Template --> MMCIF
+Template --> Mapping
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L86-L1006](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L86-L1006)
@@ -43,8 +70,8 @@ Sources: [src/alphafold3/common/folding_input.py L931-L960](https://github.com/g
 
 The `Input` class provides convenience properties to filter chains by type:
 
-```
-
+```python
+@propertydef protein_chains(self) -> Sequence[ProteinChain]    @propertydef rna_chains(self) -> Sequence[RnaChain]    @propertydef dna_chains(self) -> Sequence[DnaChain]    @propertydef ligands(self) -> Sequence[Ligand]
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L991-L1005](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L991-L1005)
@@ -63,8 +90,35 @@ Sources: [src/alphafold3/common/folding_input.py L961-L989](https://github.com/g
 
 **Diagram: Input Validation Flow**
 
-```
+```mermaid
+flowchart TD
 
+Start["Input.post_init()"]
+CheckSeeds["Check rng_seeds not empty"]
+Error1["ValueError: must have at least one RNG seed"]
+CheckName["Check name is valid"]
+Error2["ValueError: name must contain valid characters"]
+CheckChainIDs["Check all chain IDs are uppercase letters"]
+Error3["ValueError: IDs must be upper case letters"]
+CheckUnique["Check chain IDs are unique"]
+Error4["ValueError: duplicate IDs"]
+CheckUserCCD["Check user_ccd if present"]
+Error5["ValueError: missing mandatory CCD keys"]
+ConvertToTuple["Convert to immutable tuples"]
+Success["Validation complete"]
+
+Start --> CheckSeeds
+CheckSeeds --> Error1
+CheckSeeds --> CheckName
+CheckName --> Error2
+CheckName --> CheckChainIDs
+CheckChainIDs --> Error3
+CheckChainIDs --> CheckUnique
+CheckUnique --> Error4
+CheckUnique --> CheckUserCCD
+CheckUserCCD --> Error5
+CheckUserCCD --> ConvertToTuple
+ConvertToTuple --> Success
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L961-L989](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L961-L989)
@@ -180,8 +234,25 @@ Sources: [src/alphafold3/common/folding_input.py L809-L820](https://github.com/g
 
 **Diagram: Ligand Specification Options**
 
-```
+```mermaid
+flowchart TD
 
+Ligand["Ligand"]
+CCD["ccd_ids: Sequence[str]<br>Standard or user-defined CCD"]
+SMILES["smiles: str<br>SMILES string"]
+SingleCCD["Single component<br>['ATP']"]
+MultiCCD["Multiple components<br>['NAG', 'FUC']<br>(needs bonds)"]
+UserCCD["User-defined<br>['MY-LIG']<br>(from user_ccd field)"]
+Parsed["Parsed by RDKit<br>Mol object created"]
+NoBonds["Cannot define bonds<br>(no atom names)"]
+
+Ligand --> CCD
+Ligand --> SMILES
+CCD --> SingleCCD
+CCD --> MultiCCD
+CCD --> UserCCD
+SMILES --> Parsed
+SMILES --> NoBonds
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L789-L894](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L789-L894)
@@ -216,8 +287,58 @@ The `Input.from_json()` class method constructs an `Input` object from an AlphaF
 
 **Diagram: from_json() Processing Flow**
 
-```
+```mermaid
+flowchart TD
 
+Start["Input.from_json(json_str, json_path)"]
+Parse["json.loads(json_str)"]
+ValidateKeys["_validate_keys()<br>Check for unexpected keys"]
+CheckDialect["Check dialect == 'alphafold3'"]
+CheckVersion["Check version in [1, 2, 3, 4]"]
+ValidateSeeds["Check modelSeeds not empty"]
+ParseSeqIDs["Extract sequence IDs<br>from sequences field"]
+LoopSeqs["Loop over sequences"]
+CheckType["Sequence type?"]
+ProteinFromDict["ProteinChain.from_dict()"]
+RnaFromDict["RnaChain.from_dict()"]
+DnaFromDict["DnaChain.from_dict()"]
+LigandFromDict["Ligand.from_dict()"]
+ReadMSA["Read MSA from path if needed<br>_read_file()"]
+ReadTemplate["Read template mmCIF from path<br>_read_file()"]
+AddChain["Add to chains list"]
+MoreSeqs["More sequences?"]
+ParseBonds["Parse bondedAtomPairs if present"]
+ValidateBonds["Validate bond atom IDs and residue IDs"]
+ReadUserCCD["Read userCCD from path if needed"]
+CreateInput["Input() constructor"]
+End["Return Input object"]
+
+Start --> Parse
+Parse --> ValidateKeys
+ValidateKeys --> CheckDialect
+CheckDialect --> CheckVersion
+CheckVersion --> ValidateSeeds
+ValidateSeeds --> ParseSeqIDs
+ParseSeqIDs --> LoopSeqs
+LoopSeqs --> CheckType
+CheckType --> ProteinFromDict
+CheckType --> RnaFromDict
+CheckType --> DnaFromDict
+CheckType --> LigandFromDict
+ProteinFromDict --> ReadMSA
+RnaFromDict --> ReadMSA
+ProteinFromDict --> ReadTemplate
+ReadMSA --> AddChain
+ReadTemplate --> AddChain
+DnaFromDict --> AddChain
+LigandFromDict --> AddChain
+AddChain --> MoreSeqs
+MoreSeqs --> LoopSeqs
+MoreSeqs --> ParseBonds
+ParseBonds --> ValidateBonds
+ValidateBonds --> ReadUserCCD
+ReadUserCCD --> CreateInput
+CreateInput --> End
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L1102-L1251](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L1102-L1251)
@@ -253,8 +374,23 @@ Sources: [src/alphafold3/common/folding_input.py L1013-L1100](https://github.com
 
 **Diagram: AlphaFold Server JSON to Input Conversion**
 
-```
+```mermaid
+flowchart TD
 
+AFS["AlphaFold Server JSON<br>(dialect: 'alphafoldserver')"]
+AF3["AlphaFold 3 Input<br>(internal format)"]
+ValidateDialect["Validate dialect and version"]
+ExpandCount["Expand 'count' field<br>Create multiple chain copies"]
+AssignIDs["Auto-assign chain IDs<br>(A, B, C, ...)"]
+ParseChains["Parse chain types"]
+SampleSeeds["Sample RNG seed if modelSeeds empty<br>_sample_rng_seed()"]
+
+AFS --> ValidateDialect
+ValidateDialect --> ExpandCount
+ExpandCount --> AssignIDs
+AssignIDs --> ParseChains
+ParseChains --> SampleSeeds
+SampleSeeds --> AF3
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L1013-L1100](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L1013-L1100)
@@ -277,8 +413,35 @@ Sources: [src/alphafold3/common/folding_input.py L1253-L1363](https://github.com
 
 **Diagram: from_mmcif() Chain Type Detection**
 
-```
+```mermaid
+flowchart TD
 
+Start["For each chain in Structure"]
+CheckType["chain_type?"]
+ExtractPTMs["Extract PTMs<br>Compare to standard residues"]
+ExtractRnaMods["Extract modifications<br>Compare to standard residues"]
+ExtractDnaMods["Extract modifications<br>Compare to standard residues"]
+CheckCCD["All residues<br>in CCD?"]
+CreateProtein["ProteinChain()<br>with ptms"]
+CreateRNA["RnaChain()<br>with modifications"]
+CreateDNA["DnaChain()<br>with modifications"]
+CreateLigandCCD["Ligand()<br>with ccd_ids"]
+GetSMILES["Get SMILES from<br>chemical_components_data"]
+CreateLigandSMILES["Ligand()<br>with smiles"]
+Error["ValueError: Multi-component<br>must use CCD"]
+
+Start --> CheckType
+CheckType --> ExtractPTMs
+CheckType --> ExtractRnaMods
+CheckType --> ExtractDnaMods
+CheckType --> CheckCCD
+ExtractPTMs --> CreateProtein
+ExtractRnaMods --> CreateRNA
+ExtractDnaMods --> CreateDNA
+CheckCCD --> CreateLigandCCD
+CheckCCD --> GetSMILES
+GetSMILES --> CreateLigandSMILES
+CheckCCD --> Error
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L1294-L1347](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L1294-L1347)
@@ -315,8 +478,31 @@ Sources: [src/alphafold3/common/folding_input.py L1365-L1434](https://github.com
 
 **Diagram: Input to Structure Conversion**
 
-```
+```mermaid
+flowchart TD
 
+Input["Input object"]
+ExtractChains["Extract chains"]
+ToCCD["Convert to CCD sequences<br>to_ccd_sequence()"]
+MapTypes["Map to mmcif_names<br>chain types"]
+FormatSeqs["Chain type?"]
+CCDFormat["'(CCD1)(CCD2)(CCD3)'"]
+SMILESFormat["'LIG_{id}:{smiles}'"]
+RemapBonds["Remap bonds<br>chain_id → chain_index<br>1-based → 0-based"]
+CallFromSeq["structure.from_sequences_and_bonds()"]
+Structure["Structure object"]
+
+Input --> ExtractChains
+ExtractChains --> ToCCD
+ToCCD --> MapTypes
+MapTypes --> FormatSeqs
+FormatSeqs --> CCDFormat
+FormatSeqs --> CCDFormat
+FormatSeqs --> SMILESFormat
+CCDFormat --> RemapBonds
+SMILESFormat --> RemapBonds
+RemapBonds --> CallFromSeq
+CallFromSeq --> Structure
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L1365-L1434](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L1365-L1434)
@@ -356,8 +542,40 @@ Sources: [src/alphafold3/common/folding_input.py L1007-L1011](https://github.com
 
 **Diagram: Input Data Model in the AlphaFold 3 Pipeline**
 
-```
+```mermaid
+flowchart TD
 
+UserJSON["User JSON file<br>(*.json)"]
+MMCIF["mmCIF file<br>(*.cif)"]
+FromJSON["Input.from_json()"]
+FromMMCIF["Input.from_mmcif()"]
+Input["Input dataclass<br>(validated)"]
+ToStruct["Input.to_structure()"]
+Structure["structure.Structure<br>(internal format)"]
+DataPipeline["Data Pipeline<br>(MSA, templates)"]
+FillFields["fill_missing_fields()"]
+FilledInput["Input with MSAs<br>and templates"]
+Featurization["Featurization"]
+Features["Feature tensors"]
+Model["Model inference"]
+ToJSON["Input.to_json()"]
+OutputJSON["Output JSON<br>(for reproducibility)"]
+
+UserJSON --> FromJSON
+MMCIF --> FromMMCIF
+FromJSON --> Input
+FromMMCIF --> Input
+Input --> ToStruct
+ToStruct --> Structure
+Input --> DataPipeline
+DataPipeline --> FillFields
+FillFields --> FilledInput
+FilledInput --> Featurization
+Structure --> Featurization
+Featurization --> Features
+Features --> Model
+Input --> ToJSON
+ToJSON --> OutputJSON
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L1-L1537](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L1-L1537)

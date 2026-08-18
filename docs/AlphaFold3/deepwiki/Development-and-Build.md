@@ -27,9 +27,6 @@ The build process produces both Python packages and compiled C++ extensions, inc
 
 ## Build Architecture
 
-```
-
-```
 
 **Diagram: Build System Architecture**
 
@@ -114,7 +111,7 @@ The project uses CMake to manage C++ source files found in `src/alphafold3/*.cc`
 The build process includes a specific script to prepare runtime data:
 
 ```
-
+[project.scripts]build_data = "alphafold3.build_data:build_data"
 ```
 
 This executes the `build_data` function in `alphafold3.build_data` to process the Chemical Component Dictionary (CCD) into an optimized format [pyproject.toml L63-L64](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L63-L64)
@@ -137,9 +134,6 @@ The build system explicitly supports the following environments [pyproject.toml 
 
 :
 
-```
-
-```
 
 **Sources:** [pyproject.toml L14-L40](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L14-L40)
 
@@ -164,7 +158,7 @@ The version is centrally managed in [src/alphafold3/version.py L13](https://gith
 :
 
 ```
-
+__version__ = '3.0.2'
 ```
 
 This is dynamically pulled into the build metadata via `setuptools_scm` fallback or the provider configuration in `scikit-build-core` [pyproject.toml L13-L57](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L13-L57)

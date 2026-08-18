@@ -36,8 +36,45 @@ Sources: [run_alphafold.py L11-L20](https://github.com/google-deepmind/alphafold
 
 ## User Workflow
 
-```
+```mermaid
+flowchart TD
 
+JSON["Create JSON input<br>(folding_input.Input)"]
+Validate["Validate input format<br>alphafold3 vs alphafoldserver dialect"]
+RunScript["Execute run_alphafold.py<br>--json_path or --input_dir"]
+DataPipeline["Data Pipeline (optional)<br>--run_data_pipeline=true"]
+Inference["Model Inference (optional)<br>--run_inference=true"]
+Structures["mmCIF structures<br>seed-{N}_sample-{M}"]
+Confidences["Confidence metrics<br>JSON files"]
+Rankings["Ranking scores<br>ranking_scores.csv"]
+TopResult["Best-ranked structure<br>in output root"]
+
+Validate --> RunScript
+Inference --> Structures
+
+subgraph Results ["Unsupported markdown: list"]
+    Structures
+    Confidences
+    Rankings
+    TopResult
+    Structures --> Confidences
+    Confidences --> Rankings
+    Rankings --> TopResult
+end
+
+subgraph Execution ["Unsupported markdown: list"]
+    RunScript
+    DataPipeline
+    Inference
+    RunScript --> DataPipeline
+    DataPipeline --> Inference
+end
+
+subgraph Preparation ["Unsupported markdown: list"]
+    JSON
+    Validate
+    JSON --> Validate
+end
 ```
 
 **Diagram: End-to-end user workflow from input preparation to result interpretation**
@@ -92,8 +129,58 @@ Sources: [src/alphafold3/data/pipeline.py L69-L151](https://github.com/google-de
 
 ## Pipeline Stages
 
-```
+```mermaid
+flowchart TD
 
+LoadJSON["folding_input.Input.from_json()"]
+DialectCheck["Detect dialect:<br>alphafold3 vs alphafoldserver"]
+ParseChains["Parse chains:<br>ProteinChain, RnaChain,<br>DnaChain, Ligand"]
+MSASearch["_get_protein_msa_and_templates()"]
+RNASearch["_get_rna_msa()"]
+DataOut["Enriched job_data.json"]
+Featurize["featurisation.featurise_input()"]
+ModelRun["ModelRunner.run_inference()"]
+Extract["extract_inference_results()"]
+WriteStructures["write_outputs()<br>mmCIF files"]
+WriteMetrics["Confidence metrics<br>JSON files"]
+WriteRanking["Ranking CSV<br>ranking_scores.csv"]
+
+ParseChains --> MSASearch
+ParseChains --> RNASearch
+DataOut --> Featurize
+Extract --> WriteStructures
+
+subgraph Output ["Output Writing"]
+    WriteStructures
+    WriteMetrics
+    WriteRanking
+    WriteStructures --> WriteMetrics
+    WriteMetrics --> WriteRanking
+end
+
+subgraph ModelStage ["Model Inference (GPU)"]
+    Featurize
+    ModelRun
+    Extract
+    Featurize --> ModelRun
+    ModelRun --> Extract
+end
+
+subgraph DataPipe ["Data Pipeline (CPU)"]
+    MSASearch
+    RNASearch
+    DataOut
+    MSASearch --> DataOut
+    RNASearch --> DataOut
+end
+
+subgraph Input ["Input Processing"]
+    LoadJSON
+    DialectCheck
+    ParseChains
+    LoadJSON --> DialectCheck
+    DialectCheck --> ParseChains
+end
 ```
 
 **Diagram: Pipeline stages showing code function calls and entity interactions**
@@ -113,7 +200,7 @@ Sources: [run_alphafold.py L513-L585](https://github.com/google-deepmind/alphafo
 The `run_alphafold.py` script is the primary interface for running predictions:
 
 ```
-
+python run_alphafold.py \    --json_path=/path/to/input.json \    --model_dir=/path/to/models \    --db_dir=/path/to/databases \    --output_dir=/path/to/output
 ```
 
 Sources: [run_alphafold.py L62-L82](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L62-L82)
@@ -134,8 +221,67 @@ Sources: [run_alphafold.py L62-L82](https://github.com/google-deepmind/alphafold
 
 ## Mapping User Actions to Code
 
-```
+```mermaid
+flowchart TD
 
+CreateJSON["Create input.json"]
+SetSeeds["Specify modelSeeds"]
+AddChains["Add protein/RNA/DNA/ligand"]
+ConfigMSA["Configure MSA search"]
+InputClass["folding_input.Input"]
+ChainClasses["ProteinChain, RnaChain,<br>DnaChain, Ligand"]
+MSAFields["unpaired_msa, paired_msa"]
+TemplateClass["Templates"]
+LoadFunc["Input.from_json()"]
+DialectConv["Dialect conversion logic"]
+ProcessFunc["process_fold_input()"]
+PipelineFunc["pipeline.run_msa_and_templates()"]
+ModelRunnerClass["ModelRunner"]
+ResultsForSeed["ResultsForSeed"]
+InferenceResult["model.InferenceResult"]
+WriteFunc["write_outputs()"]
+
+CreateJSON --> LoadFunc
+SetSeeds --> InputClass
+AddChains --> ChainClasses
+ConfigMSA --> MSAFields
+InputClass --> LoadFunc
+ModelRunnerClass --> ResultsForSeed
+
+subgraph OutputStructures ["Output Data"]
+    ResultsForSeed
+    InferenceResult
+    WriteFunc
+    ResultsForSeed --> InferenceResult
+    InferenceResult --> WriteFunc
+end
+
+subgraph Execution ["Execution Flow"]
+    LoadFunc
+    DialectConv
+    ProcessFunc
+    PipelineFunc
+    ModelRunnerClass
+    LoadFunc --> DialectConv
+    DialectConv --> ProcessFunc
+    ProcessFunc --> PipelineFunc
+    ProcessFunc --> ModelRunnerClass
+end
+
+subgraph CodeStructures ["Code Data Structures"]
+    InputClass
+    ChainClasses
+    MSAFields
+    TemplateClass
+    ChainClasses --> InputClass
+end
+
+subgraph UserActions ["User Actions"]
+    CreateJSON
+    SetSeeds
+    AddChains
+    ConfigMSA
+end
 ```
 
 **Diagram: Mapping between user actions, code entities, and execution flow**

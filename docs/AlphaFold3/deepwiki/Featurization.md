@@ -83,8 +83,22 @@ The featurization process consists of several steps that transform the biologica
 
 ### Featurization Sequence
 
-```
+```mermaid
+sequenceDiagram
+  participant folding_input.Input
+  participant featurise_input()
+  participant WholePdbPipeline
+  participant features.py
+  participant features.BatchDict
 
+  folding_input.Input->>featurise_input(): validate_fold_input()
+  featurise_input()->>WholePdbPipeline: process_item()
+  WholePdbPipeline->>WholePdbPipeline: clean_structure()
+  WholePdbPipeline->>WholePdbPipeline: tokenizer()
+  WholePdbPipeline->>features.py: compute_features() for each feature type
+  features.py->>WholePdbPipeline: Return feature dataclasses
+  WholePdbPipeline->>features.BatchDict: Assemble batch dictionary
+  features.BatchDict->>featurise_input(): Return BatchDict
 ```
 
 Sources:
@@ -114,8 +128,29 @@ Sources:
 
 The `tokenizer` function maps a flat atom layout to tokens for the Evoformer neural network. It creates one token per polymer residue (protein or nucleic acid) and one token per ligand atom. Optionally, non-standard residues can be "flattened" (represented as one token per atom) if `flatten_non_standard_residues` is enabled.
 
-```
+```mermaid
+flowchart TD
 
+flat["AtomLayout (flat_output_layout)"]
+tokenizer["tokenizer()"]
+ccd["chemical_components.Ccd"]
+all_tokens["all_tokens (AtomLayout)"]
+all_token_atoms["all_token_atoms_layout (AtomLayout)"]
+std_idxs["standard_token_idxs"]
+
+subgraph subGraph0 ["Tokenization Process [alphafold3.model.features.tokenizer]"]
+    flat
+    tokenizer
+    ccd
+    all_tokens
+    all_token_atoms
+    std_idxs
+    flat --> tokenizer
+    ccd --> tokenizer
+    tokenizer --> all_tokens
+    tokenizer --> all_token_atoms
+    tokenizer --> std_idxs
+end
 ```
 
 Sources:
@@ -203,8 +238,38 @@ Sources:
 
 The `tokenizer` function maps a flat atom layout to tokens for the Evoformer neural network:
 
-```
+```mermaid
+flowchart TD
 
+input["AtomLayout (flat_output_layout)"]
+process["Process Residues (itertools.groupby)"]
+decision["Residue Type?"]
+protein["One token per residue (CA atom)"]
+nucleic["One token per residue (C1' atom)"]
+nonstandard["One token per atom (if flatten_non_standard_residues=True)"]
+ligand["One token per atom"]
+output["Tokens with Atom Layout"]
+
+subgraph subGraph0 ["Tokenization Logic [alphafold3.model.features.tokenizer]"]
+    input
+    process
+    decision
+    protein
+    nucleic
+    nonstandard
+    ligand
+    output
+    input --> process
+    process --> decision
+    decision --> protein
+    decision --> nucleic
+    decision --> nonstandard
+    decision --> ligand
+    protein --> output
+    nucleic --> output
+    nonstandard --> output
+    ligand --> output
+end
 ```
 
 For standard residues (protein and nucleic acids), one token represents the entire residue, with a representative atom (CA for proteins, C1' for nucleic acids) chosen as the token's position. For ligands and optionally for non-standard residues, each atom is represented by its own token.
@@ -270,8 +335,24 @@ Sources:
 
 The `AtomLayout` system provides a consistent representation of atom arrangements:
 
-```
+```mermaid
+flowchart TD
 
+AL["AtomLayout (Dataclass)"]
+Flat["Flat Layout (1D)"]
+Dense["Dense Layout (2D)"]
+Structure["structure.Structure"]
+
+subgraph subGraph0 ["AtomLayout System [alphafold3.model.atom_layout.atom_layout]"]
+    AL
+    Flat
+    Dense
+    Structure
+    AL --> Flat
+    AL --> Dense
+    Flat --> Dense
+    AL --> Structure
+end
 ```
 
 The `AtomLayout` contains:

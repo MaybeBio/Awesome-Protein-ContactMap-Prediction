@@ -31,8 +31,78 @@ The structure parsing pipeline transforms raw mmCIF data through multiple stages
 
 Title: Structure Parsing Pipeline
 
-```
+```mermaid
+flowchart TD
 
+MmcifString["mmCIF String/Bytes"]
+CifDict["CifDict Object<br>(from cif_dict_lib.cc)"]
+MmcifUtils["mmcif_utils.filter()"]
+Layout["MmcifLayout<br>(C++ object)"]
+AtomIndices["Filtered Atom Indices<br>(NumPy array)"]
+ChainIds["Selected Chain IDs<br>(set)"]
+GetTables["parsing.get_tables()"]
+ChainTable["Chains Table"]
+ResidueTable["Residues Table"]
+AtomTable["Atoms Table"]
+ParseBonds["_parse_bonds()"]
+BondTable["Bonds Table"]
+FixResidues["Residue Fixes<br>(MSE, ARG)"]
+Structure["Structure Object<br>(structure_tables)"]
+Metadata["Metadata<br>(name, resolution, etc.)"]
+
+CifDict --> MmcifUtils
+Layout --> GetTables
+AtomIndices --> GetTables
+ChainIds --> GetTables
+CifDict --> GetTables
+CifDict --> ParseBonds
+AtomTable --> ParseBonds
+AtomTable --> FixResidues
+ResidueTable --> FixResidues
+ChainTable --> Structure
+ResidueTable --> Structure
+AtomTable --> Structure
+BondTable --> Structure
+CifDict --> Metadata
+
+subgraph Output ["Output Stage"]
+    Structure
+    Metadata
+    Metadata --> Structure
+end
+
+subgraph Optional ["Optional Processing"]
+    ParseBonds
+    BondTable
+    FixResidues
+    ParseBonds --> BondTable
+end
+
+subgraph Extraction ["Table Extraction Stage"]
+    GetTables
+    ChainTable
+    ResidueTable
+    AtomTable
+    GetTables --> ChainTable
+    GetTables --> ResidueTable
+    GetTables --> AtomTable
+end
+
+subgraph Filtering ["C++ Filtering Stage"]
+    MmcifUtils
+    Layout
+    AtomIndices
+    ChainIds
+    MmcifUtils --> Layout
+    MmcifUtils --> AtomIndices
+    MmcifUtils --> ChainIds
+end
+
+subgraph Input ["Input Stage"]
+    MmcifString
+    CifDict
+    MmcifString --> CifDict
+end
 ```
 
 **Pipeline Stages:**
@@ -98,8 +168,49 @@ Performance-critical operations are implemented in C++ and exposed via the `mmci
 
 Title: C++ Performance Layer Architecture
 
-```
+```mermaid
+flowchart TD
 
+ParsePy["parsing.py<br>get_tables()"]
+Filter["filter()<br>Alt-loc resolution"]
+ReadLayout["read_layout()<br>MmcifLayout creation"]
+FixRes["fix_residues()<br>In-place fixes"]
+PolyMask["selected_polymer_residue_mask()"]
+LigandMask["selected_ligand_residue_mask()"]
+SelectChains["SelectChains()<br>Entity filtering"]
+ResolveMmcifAltLocs["ResolveMmcifAltLocs()<br>Occupancy-based selection"]
+MmcifLayoutClass["MmcifLayout class<br>Residue/atom indexing"]
+ProcessResidue["ProcessResidue<br>FixArginine"]
+
+ParsePy --> Filter
+ParsePy --> ReadLayout
+ParsePy --> FixRes
+ParsePy --> PolyMask
+ParsePy --> LigandMask
+Filter --> SelectChains
+Filter --> ResolveMmcifAltLocs
+Filter --> MmcifLayoutClass
+ReadLayout --> MmcifLayoutClass
+FixRes --> ProcessResidue
+
+subgraph CPPInternal ["C++ Internal"]
+    SelectChains
+    ResolveMmcifAltLocs
+    MmcifLayoutClass
+    ProcessResidue
+end
+
+subgraph CPP ["C++ Layer (mmcif_utils)"]
+    Filter
+    ReadLayout
+    FixRes
+    PolyMask
+    LigandMask
+end
+
+subgraph Python ["Python Layer"]
+    ParsePy
+end
 ```
 
 **Sources:** [src/alphafold3/structure/cpp/mmcif_utils_pybind.cc L45-L787](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/cpp/mmcif_utils_pybind.cc#L45-L787)
@@ -158,8 +269,56 @@ The `get_tables()` function orchestrates conversion from filtered mmCIF data to 
 
 Title: Table Construction Data Flow
 
-```
+```mermaid
+flowchart TD
 
+CifDict["CifDict"]
+FilteredIndices["Filtered Atom Indices"]
+Layout["MmcifLayout"]
+Flags["Configuration Flags"]
+GenerateMissing["_generate_required_tables_if_missing()<br>Create _entity, _struct_asym if absent"]
+MaybeAddScheme["_maybe_add_missing_scheme_tables()<br>Create _pdbx_poly_seq_scheme if absent"]
+ExtractArrays["Extract String/Float Arrays<br>from CifDict"]
+BuildChainRes["_ChainResBuilder<br>Accumulate chain/residue data"]
+BuildAtoms["Build Atoms Table<br>Flat NumPy arrays"]
+Chains["Chains<br>(key, id, type, entity_id, ...)"]
+Residues["Residues<br>(key, chain_key, id, name, ...)"]
+Atoms["Atoms<br>(key, res_key, x, y, z, ...)"]
+
+CifDict --> GenerateMissing
+FilteredIndices --> ExtractArrays
+Layout --> BuildChainRes
+Layout --> BuildAtoms
+BuildChainRes --> Chains
+BuildChainRes --> Residues
+BuildAtoms --> Atoms
+Flags --> GenerateMissing
+Flags --> BuildChainRes
+
+subgraph Output ["Output Tables"]
+    Chains
+    Residues
+    Atoms
+end
+
+subgraph Processing ["Table Building"]
+    GenerateMissing
+    MaybeAddScheme
+    ExtractArrays
+    BuildChainRes
+    BuildAtoms
+    GenerateMissing --> MaybeAddScheme
+    MaybeAddScheme --> ExtractArrays
+    ExtractArrays --> BuildChainRes
+    ExtractArrays --> BuildAtoms
+end
+
+subgraph Input ["Input Data"]
+    CifDict
+    FilteredIndices
+    Layout
+    Flags
+end
 ```
 
 **Sources:** [src/alphafold3/structure/parsing.py L1301-L1398](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/parsing.py#L1301-L1398)
@@ -268,8 +427,46 @@ Structure Parsing integrates with other AlphaFold 3 subsystems:
 
 Title: Structure Parsing Integration
 
-```
+```mermaid
+flowchart TD
 
+CifDict["CifDict<br>(from cif_dict_lib)"]
+CCD["Chemical Components Dictionary<br>(chemical_components)"]
+MmcifLib["mmcif module<br>(mmcif.py)"]
+FromMmcif["from_mmcif()"]
+FromSeq["from_sequences_and_bonds()"]
+FromArrays["from_res_arrays()"]
+DataPipeline["Data Pipeline<br>(Templates)"]
+Featurization["Featurization<br>(atom_layout)"]
+Output["Output Writing<br>(to_mmcif)"]
+
+CifDict --> FromMmcif
+CCD --> FromMmcif
+CCD --> FromSeq
+MmcifLib --> FromMmcif
+FromMmcif --> DataPipeline
+FromSeq --> Featurization
+FromArrays --> Output
+FromMmcif --> Featurization
+FromMmcif --> Output
+
+subgraph Downstream ["Downstream Consumers"]
+    DataPipeline
+    Featurization
+    Output
+end
+
+subgraph Parsing ["Structure Parsing"]
+    FromMmcif
+    FromSeq
+    FromArrays
+end
+
+subgraph Upstream ["Upstream Dependencies"]
+    CifDict
+    CCD
+    MmcifLib
+end
 ```
 
 **Sources:** [src/alphafold3/structure/parsing.py L11-L32](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/parsing.py#L11-L32)

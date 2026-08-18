@@ -22,8 +22,34 @@ The AlphaFold 3 build system uses a modern Python packaging approach with `uv` f
 
 The following diagram maps high-level build concepts to specific files and tools in the codebase.
 
-```
+```mermaid
+flowchart TD
 
+pyproject["pyproject.toml<br>Metadata & Build System"]
+uv_lock["uv.lock<br>Deterministic Lockfile"]
+CMakeLists["CMakeLists.txt<br>C++ Build Logic"]
+build_backend["scikit_build_core.build<br>(Build Backend)"]
+build_data_func["alphafold3.build_data:build_data<br>(Data Generation Script)"]
+cpp_module["cpp.so / cpp.pyd<br>(Pybind11 Module)"]
+version_const["alphafold3.version:version<br>(Single Source of Truth)"]
+
+pyproject --> build_backend
+pyproject --> build_data_func
+CMakeLists --> cpp_module
+pyproject --> version_const
+
+subgraph Code_Entities_[Code_Space] ["Code_Entities_[Code_Space]"]
+    build_backend
+    build_data_func
+    cpp_module
+    version_const
+end
+
+subgraph Build_Configuration_[Natural_Language_Space] ["Build_Configuration_[Natural_Language_Space]"]
+    pyproject
+    uv_lock
+    CMakeLists
+end
 ```
 
 **Sources:** [pyproject.toml L1-L62](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L1-L62)
@@ -43,7 +69,7 @@ The [pyproject.toml L1-L62](https://github.com/google-deepmind/alphafold3/blob/9
 ### Build System Declaration
 
 ```
-
+[build-system]requires = [    "scikit_build_core",    "pybind11",    "cmake>=3.28",    "ninja",    "numpy",]build-backend = "scikit_build_core.build"
 ```
 
 | Requirement | Purpose |
@@ -63,7 +89,7 @@ The version string is defined in [src/alphafold3/version.py L13](https://github.
  as `__version__ = '3.0.2'`, which is pulled dynamically by the build system [pyproject.toml L13](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L13-L13)
 
 ```
-
+[project]name = "alphafold3"dynamic = ["version"]requires-python = ">=3.12"dependencies = [    "absl-py>=2.3.1",    "dm-haiku==0.0.16",    "jax==0.9.1",    "jax[cuda12]==0.9.1",    "numpy",    "rdkit==2025.9.4",    "tokamax==0.0.11",    "tqdm",    "zstandard",]
 ```
 
 **Sources:** [pyproject.toml L11-L27](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L11-L27)
@@ -90,8 +116,36 @@ The [CMakeLists.txt L1-L101](https://github.com/google-deepmind/alphafold3/blob/
 
 The following diagram illustrates how C++ logic (like DSSP) is exposed to the Python runtime.
 
-```
+```mermaid
+flowchart TD
 
+dssp_src["dssp.hpp<br>(External)"]
+pybind_wrapper["mkdssp_pybind.cc<br>(RegisterModuleMkdssp)"]
+cmake_call["pybind11_add_module(cpp)"]
+link_step["target_link_libraries(cpp PRIVATE dssp::dssp)"]
+py_import["import alphafold3.cpp"]
+dssp_func["alphafold3.cpp.get_dssp()"]
+
+pybind_wrapper --> cmake_call
+link_step --> py_import
+
+subgraph Python_Interface ["Python_Interface"]
+    py_import
+    dssp_func
+    py_import --> dssp_func
+end
+
+subgraph Build_Pipeline ["Build_Pipeline"]
+    cmake_call
+    link_step
+    cmake_call --> link_step
+end
+
+subgraph C++_Implementation ["C++_Implementation"]
+    dssp_src
+    pybind_wrapper
+    dssp_src --> pybind_wrapper
+end
 ```
 
 **Sources:** [CMakeLists.txt L77-L91](https://github.com/google-deepmind/alphafold3/blob/97639fff/CMakeLists.txt#L77-L91)
@@ -144,7 +198,7 @@ This process is registered as a command-line script in [pyproject.toml L64](http
 :
 
 ```
-
+[project.scripts]build_data = "alphafold3.build_data:build_data"
 ```
 
 **Sources:** [src/alphafold3/build_data.py L23-L50](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/build_data.py#L23-L50)

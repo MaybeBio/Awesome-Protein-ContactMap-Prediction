@@ -23,8 +23,29 @@ The bucketing strategy groups inputs into predefined size ranges. When an input 
 
 Title: Compilation Bucket Selection Process
 
-```
+```mermaid
+flowchart TD
 
+Input1["Input: 450 tokens"]
+Input2["Input: 510 tokens"]
+Input3["Input: 900 tokens"]
+Input4["Input: 5200 tokens"]
+Buckets["Bucket Sizes:<br>256, 512, 768, 1024,<br>1280, 1536, 2048,<br>2560, 3072, 3584,<br>4096, 4608, 5120"]
+Bucket512["Bucket: 512<br>(cached compilation)"]
+Bucket1024["Bucket: 1024<br>(cached compilation)"]
+NewBucket["New Bucket: 5200<br>(triggers compilation)"]
+
+Input1 --> Buckets
+Input2 --> Buckets
+Input3 --> Buckets
+Input4 --> Buckets
+Buckets --> Bucket512
+Buckets --> Bucket1024
+Buckets --> NewBucket
+Input1 --> Bucket512
+Input2 --> Bucket512
+Input3 --> Bucket1024
+Input4 --> NewBucket
 ```
 
 Sources: [docs/performance.md L259-L292](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L259-L292)
@@ -85,8 +106,22 @@ The `ModelRunner` class in `run_alphafold.py` manages model loading, compilation
 
 Title: ModelRunner Compilation Flow
 
-```
+```mermaid
+flowchart TD
 
+ModelRunner["ModelRunner<br>(run_alphafold.py:401-491)"]
+Params["model_params<br>cached_property<br>(lines 414-417)"]
+Model["_model<br>cached_property<br>(lines 419-431)"]
+HaikuTransform["hk.transform<br>(wraps Model.forward)"]
+JAXJit["jax.jit<br>(device placement)"]
+CompiledFn["Compiled Function<br>(device-specific)"]
+
+ModelRunner --> Params
+ModelRunner --> Model
+Model --> HaikuTransform
+HaikuTransform --> JAXJit
+JAXJit --> CompiledFn
+Params --> CompiledFn
 ```
 
 The compilation process:
@@ -128,7 +163,7 @@ JAX supports persistent compilation caching to avoid recompilation between runs.
 **Usage Example**:
 
 ```
-
+python run_alphafold.py \    --jax_compilation_cache_dir /mnt/cache/alphafold3_jax \    --json_path input.json \    --output_dir outputs/
 ```
 
 The cache directory is set early in the `main()` function of `run_alphafold.py` [run_alphafold.py L833-L836](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L833-L836)
@@ -161,8 +196,39 @@ XLA (Accelerated Linear Algebra) compiler flags control low-level compilation be
 
 Title: XLA Flag Requirements by GPU Type
 
-```
+```mermaid
+flowchart TD
 
+CheckGPU["Check GPU<br>compute_capability<br>(run_alphafold.py:873-875)"]
+CC60["CC >= 6.0"]
+CC70["CC 7.x<br>(e.g., V100)"]
+CC80["CC >= 8.0<br>(e.g., A100, H100)"]
+TritonGEMM["XLA_FLAGS:<br>--xla_gpu_enable_triton_gemm=false<br>(compilation speedup)"]
+KernelFusion["XLA_FLAGS:<br>--xla_disable_hlo_passes=<br>custom-kernel-fusion-rewriter<br>(CC 7.x fix)"]
+FlashAttn["--flash_attention_implementation<br>triton | cudnn | xla"]
+FlashAttnXLA["Must use 'xla'<br>(no Triton/cuDNN)"]
+
+CC60 --> TritonGEMM
+CC80 --> TritonGEMM
+CC70 --> KernelFusion
+CC70 --> FlashAttnXLA
+CC80 --> FlashAttn
+
+subgraph subGraph1 ["XLA Flag Configuration"]
+    TritonGEMM
+    KernelFusion
+    FlashAttn
+end
+
+subgraph subGraph0 ["GPU Compute Capability Check"]
+    CheckGPU
+    CC60
+    CC70
+    CC80
+    CheckGPU --> CC60
+    CheckGPU --> CC70
+    CheckGPU --> CC80
+end
 ```
 
 Sources: [run_alphafold.py L869-L895](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L869-L895)
@@ -217,8 +283,76 @@ Database sharding speeds up genetic database searches by splitting large databas
 
 Title: Sharded Database Parallel Execution Flow
 
-```
+```mermaid
+flowchart TD
 
+ShardedSpec["uniref90.fasta@128<br>(file spec)"]
+Shard0["uniref90.fasta-00000-of-00128<br>(~1.2M sequences)"]
+Shard1["uniref90.fasta-00001-of-00128<br>(~1.2M sequences)"]
+ShardDots["..."]
+Shard127["uniref90.fasta-00127-of-00128<br>(~1.2M sequences)"]
+SingleDB["uniref90.fasta<br>(153M sequences)"]
+SingleSearch["Single Jackhmmer<br>(8 CPUs)"]
+ThreadPool["ThreadPoolExecutor<br>(max_parallel_shards=16)"]
+Worker1["Jackhmmer Worker 1<br>(2 CPUs)"]
+Worker2["Jackhmmer Worker 2<br>(2 CPUs)"]
+WorkerDots["..."]
+Worker16["Jackhmmer Worker 16<br>(2 CPUs)"]
+Result1["Results + E-values"]
+Result2["Results + E-values"]
+ResultDots["..."]
+Result16["Results + E-values"]
+Merge["Merge Logic<br>(by E-value)"]
+FinalMSA["Final MSA"]
+
+Result1 --> Merge
+Result2 --> Merge
+ResultDots --> Merge
+Result16 --> Merge
+
+subgraph subGraph3 ["Result Merging"]
+    Merge
+    FinalMSA
+    Merge --> FinalMSA
+end
+
+subgraph subGraph2 ["Parallel Execution"]
+    ThreadPool
+    Worker1
+    Worker2
+    WorkerDots
+    Worker16
+    Result1
+    Result2
+    ResultDots
+    Result16
+    ThreadPool --> Worker1
+    ThreadPool --> Worker2
+    ThreadPool --> WorkerDots
+    ThreadPool --> Worker16
+    Worker1 --> Result1
+    Worker2 --> Result2
+    WorkerDots --> ResultDots
+    Worker16 --> Result16
+end
+
+subgraph subGraph1 ["Sharded Database (128 shards)"]
+    ShardedSpec
+    Shard0
+    Shard1
+    ShardDots
+    Shard127
+    ShardedSpec --> Shard0
+    ShardedSpec --> Shard1
+    ShardedSpec --> ShardDots
+    ShardedSpec --> Shard127
+end
+
+subgraph subGraph0 ["Unsharded Database"]
+    SingleDB
+    SingleSearch
+    SingleDB --> SingleSearch
+end
 ```
 
 Sources: [docs/performance.md L85-L163](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L85-L163)
@@ -253,8 +387,77 @@ The execution pipeline transitions from CPU-bound data processing to GPU-bound m
 
 Title: Complete Execution Pipeline
 
-```
+```mermaid
+flowchart TD
 
+JSON["JSON Input<br>(folding_input.Input)"]
+DataPipelineCfg["DataPipelineConfig"]
+ProcessInput["process_fold_input<br>(run_alphafold.py:724-829)"]
+DataPipeline["DataPipeline.process<br>(MSA + Templates)"]
+ShardedSearch["Sharded Genetic Search<br>(Jackhmmer/Nhmmer)"]
+EnrichedInput["Enriched Input<br>(with MSA/templates)"]
+Featurise["featurisation.featurise_input<br>(run_alphafold.py:526-534)"]
+BucketPadding["Determine Bucket Size<br>Pad to Bucket"]
+FeatureBatch["BatchDict"]
+ModelRunner["ModelRunner.run_inference<br>(run_alphafold.py:433-453)"]
+CheckCache["JAX Cache<br>Hit?"]
+Compile["JAX JIT Compile<br>(~5 min first time)"]
+LoadCache["Load from Cache<br>(~10 sec)"]
+Execute["Execute on GPU"]
+Result["ModelResult"]
+ExtractResults["extract_inference_results<br>(run_alphafold.py:455-466)"]
+WriteOutputs["write_outputs<br>(run_alphafold.py:600-668)"]
+OutputDir["Output Directory"]
+
+Result --> ExtractResults
+JSON --> ProcessInput
+EnrichedInput --> Featurise
+FeatureBatch --> ModelRunner
+WriteOutputs --> OutputDir
+
+subgraph Post-Processing ["Post-Processing"]
+    ExtractResults
+    WriteOutputs
+    ExtractResults --> WriteOutputs
+end
+
+subgraph subGraph3 ["Model Inference (GPU)"]
+    ModelRunner
+    CheckCache
+    Compile
+    LoadCache
+    Execute
+    Result
+    ModelRunner --> CheckCache
+    CheckCache --> Compile
+    CheckCache --> LoadCache
+    Compile --> Execute
+    LoadCache --> Execute
+    Execute --> Result
+end
+
+subgraph subGraph2 ["Featurization (CPU)"]
+    Featurise
+    BucketPadding
+    FeatureBatch
+    Featurise --> BucketPadding
+    BucketPadding --> FeatureBatch
+end
+
+subgraph subGraph1 ["Data Pipeline (CPU)"]
+    ProcessInput
+    DataPipeline
+    ShardedSearch
+    EnrichedInput
+    DataPipeline --> ShardedSearch
+    ShardedSearch --> EnrichedInput
+    ProcessInput --> DataPipeline
+end
+
+subgraph subGraph0 ["Input Stage"]
+    JSON
+    DataPipelineCfg
+end
 ```
 
 Sources: [run_alphafold.py L513-L829](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L513-L829)

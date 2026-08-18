@@ -113,9 +113,6 @@ The project uses `scikit-build-core` as the build backend [pyproject.toml L9](ht
 
  Key dependencies include `jax` for high-performance numerical computing and `dm-haiku` for neural network modules [pyproject.toml L17-L27](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L17-L27)
 
-```
-
-```
 
 Sources: [pyproject.toml L1-L27](https://github.com/google-deepmind/alphafold3/blob/97639fff/pyproject.toml#L1-L27)
 

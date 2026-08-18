@@ -29,8 +29,55 @@ These configurations represent the primary deployment targets for the codebase. 
 
 Title: Inference Performance by Input Size
 
-```
+```mermaid
+flowchart TD
 
+Small["Small<br>1024 tokens"]
+Medium["Medium<br>2048-3072 tokens"]
+Large["Large<br>4096-5120 tokens"]
+A100_1024["62 seconds"]
+A100_2048["275 seconds"]
+A100_3072["703 seconds"]
+A100_4096["1434 seconds"]
+A100_5120["2547 seconds"]
+H100_1024["34 seconds<br>1.8x faster"]
+H100_2048["144 seconds<br>1.9x faster"]
+H100_3072["367 seconds<br>1.9x faster"]
+H100_4096["774 seconds<br>1.9x faster"]
+H100_5120["1416 seconds<br>1.8x faster"]
+
+Small --> A100_1024
+Small --> H100_1024
+Medium --> A100_2048
+Medium --> H100_2048
+Medium --> A100_3072
+Medium --> H100_3072
+Large --> A100_4096
+Large --> H100_4096
+Large --> A100_5120
+Large --> H100_5120
+
+subgraph H100 ["NVIDIA H100 80GBCompile-free inference time"]
+    H100_1024
+    H100_2048
+    H100_3072
+    H100_4096
+    H100_5120
+end
+
+subgraph A100 ["NVIDIA A100 80GBCompile-free inference time"]
+    A100_1024
+    A100_2048
+    A100_3072
+    A100_4096
+    A100_5120
+end
+
+subgraph Input ["Input Size Categories"]
+    Small
+    Medium
+    Large
+end
 ```
 
 Sources: [docs/performance.md L166-L203](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L166-L203)
@@ -56,8 +103,36 @@ Sources: [docs/performance.md L236-L257](https://github.com/google-deepmind/alph
 
 Title: Resource Allocation for run_alphafold.py
 
-```
+```mermaid
+flowchart TD
 
+GPU["GPU<br>NVIDIA A100/H100 80GB<br>XLA_PYTHON_CLIENT_PREALLOCATE<br>XLA_CLIENT_MEM_FRACTION"]
+CPU["CPU<br>12+ cores<br>jackhmmer_n_cpu<br>nhmmer_n_cpu"]
+RAM["RAM<br>64+ GB<br>170 GB for GCP a2-ultragpu-1g"]
+Disk["Disk Storage<br>1 TB total<br>SSD recommended"]
+DataPipeline["Data Pipeline<br>run_alphafold.py --run_inference=false<br>CPU + RAM intensive"]
+Featurization["Featurization<br>features.py<br>CPU bound"]
+Inference["Model Inference<br>ModelRunner<br>GPU intensive"]
+
+CPU --> DataPipeline
+RAM --> DataPipeline
+Disk --> DataPipeline
+CPU --> Featurization
+RAM --> Featurization
+GPU --> Inference
+
+subgraph Pipeline ["Pipeline Stages"]
+    DataPipeline
+    Featurization
+    Inference
+end
+
+subgraph Hardware ["Hardware Resources"]
+    GPU
+    CPU
+    RAM
+    Disk
+end
 ```
 
 Sources: [docs/performance.md L19-L25](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L19-L25)
@@ -120,8 +195,28 @@ Sources: [docs/performance.md L76-L78](https://github.com/google-deepmind/alphaf
 
 Title: Hardware Selection Logic
 
-```
+```mermaid
+flowchart TD
 
+Start["Input Requirements"]
+TokenSize["Maximum<br>Token Size?"]
+GPUAvail["Available<br>GPU?"]
+A100_80["Configuration: A100 80GB<br>XLA_PYTHON_CLIENT_PREALLOCATE=true<br>XLA_CLIENT_MEM_FRACTION=0.95<br>Max: 5120 tokens"]
+H100_80["Configuration: H100 80GB<br>XLA_PYTHON_CLIENT_PREALLOCATE=true<br>XLA_CLIENT_MEM_FRACTION=0.95<br>Max: 5120 tokens<br>~1.8x faster than A100"]
+A100_40["Configuration: A100 40GB<br>XLA_PYTHON_CLIENT_PREALLOCATE=false<br>TF_FORCE_UNIFIED_MEMORY=true<br>XLA_CLIENT_MEM_FRACTION=3.2<br>Max: 4352 tokens"]
+V100["Configuration: V100<br>XLA_FLAGS with custom-kernel-fusion-rewriter disabled<br>TF_FORCE_UNIFIED_MEMORY=true<br>Max: 1280 tokens"]
+P100["Configuration: P100<br>No special configuration<br>Max: 1024 tokens"]
+Unsupported["Unsupported<br>Consider cloud GPU rental<br>or reduce input size"]
+
+Start --> TokenSize
+TokenSize --> GPUAvail
+TokenSize --> Unsupported
+GPUAvail --> A100_80
+GPUAvail --> H100_80
+GPUAvail --> A100_40
+GPUAvail --> V100
+GPUAvail --> P100
+GPUAvail --> Unsupported
 ```
 
 Sources: [docs/performance.md L186-L257](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L186-L257)
@@ -136,7 +231,7 @@ Sources: [docs/performance.md L186-L257](https://github.com/google-deepmind/alph
 
 **Required configuration changes:**
 
-1. **Enable unified memory**: ``` ```
+1. **Enable unified memory**: ``` XLA_PYTHON_CLIENT_PREALLOCATE=falseTF_FORCE_UNIFIED_MEMORY=trueXLA_CLIENT_MEM_FRACTION=3.2 ```
 2. **Adjust `pair_transition_shard_spec`** in model configuration to control memory sharding for the pair transition module [docs/performance.md L225-L234](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L225-L234)
 
 Sources: [docs/performance.md L207-L234](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L207-L234)
@@ -150,7 +245,7 @@ Sources: [docs/performance.md L207-L234](https://github.com/google-deepmind/alph
 **Required workaround:**
 
 ```
-
+XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
 ```
 
 Sources: [docs/performance.md L236-L243](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L236-L243)

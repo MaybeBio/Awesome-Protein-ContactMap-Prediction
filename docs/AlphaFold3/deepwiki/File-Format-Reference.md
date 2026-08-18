@@ -23,8 +23,40 @@ The mmCIF format is the primary structural representation used throughout the sy
 
 AlphaFold 3 uses a two-layer architecture for file format processing:
 
-```
+```mermaid
+flowchart TD
 
+CifString["mmCIF String"]
+CifDict["CifDict<br>(cif_dict_lib.cc)"]
+Tokenizer["Tokenization<br>SplitLineInline, TokenizeInternal"]
+Layout["MmcifLayout<br>(mmcif_layout.h)"]
+Filter["Filtering & Alt-locs<br>(mmcif_utils_pybind.cc)"]
+Mmcif["Mmcif Object<br>(mmcif.py)"]
+Parsing["Parsing Functions<br>(parsing.py)"]
+Structure["Structure Object<br>(structure.py)"]
+
+CifDict --> Mmcif
+Filter --> Parsing
+
+subgraph subGraph1 ["Python Layer - Convenience & Logic"]
+    Mmcif
+    Parsing
+    Structure
+    Mmcif --> Parsing
+    Parsing --> Structure
+end
+
+subgraph subGraph0 ["C++ Layer - Performance Critical"]
+    CifString
+    CifDict
+    Tokenizer
+    Layout
+    Filter
+    CifString --> Tokenizer
+    Tokenizer --> CifDict
+    CifDict --> Layout
+    Layout --> Filter
+end
 ```
 
 **Diagram: mmCIF Parsing Architecture**
@@ -54,8 +86,23 @@ The Python layer handles:
 
 The `CifDict` class is the foundational data structure for mmCIF parsing, implemented in C++ for performance.
 
-```
+```mermaid
+flowchart TD
 
+Dict["CifDict::Dict<br>Map[string, vector[string]]"]
+DataBlock["data_ block name"]
+Categories["Categories<br>_atom_site, _entity, etc."]
+Columns["Columns<br>key -> values[]"]
+
+subgraph subGraph0 ["CifDict Structure"]
+    Dict
+    DataBlock
+    Categories
+    Columns
+    Dict --> DataBlock
+    Dict --> Categories
+    Categories --> Columns
+end
 ```
 
 **Diagram: CifDict Internal Structure**
@@ -80,8 +127,19 @@ Key characteristics:
 
 The `MmcifLayout` class provides efficient indexing structures for accessing mmCIF atom site data.
 
-```
+```mermaid
+flowchart TD
 
+AtomSite["_atom_site table<br>(flat, many rows)"]
+Layout["MmcifLayout"]
+Models["Model Boundaries<br>num_models, atoms per model"]
+Chains["Chain Boundaries<br>chain_index -> atom_range"]
+Residues["Residue Boundaries<br>res_index -> atom_range"]
+
+AtomSite --> Layout
+Layout --> Models
+Layout --> Chains
+Layout --> Residues
 ```
 
 **Diagram: MmcifLayout Indexing Structure**
@@ -100,8 +158,66 @@ The layout pre-computes boundaries and indices to enable:
 
 The following diagram illustrates the complete data flow from raw mmCIF text to `Structure` objects:
 
-```
+```mermaid
+flowchart TD
 
+Input["mmCIF String/File"]
+SplitLine["SplitLineInline<br>Handle quotes, whitespace"]
+TokenizeInternal["TokenizeInternal<br>Handle multiline, comments"]
+Tokens["Vector of string_view tokens"]
+ParseLoop["Parse loop_ structures"]
+ParseKeyValue["Parse key-value pairs"]
+Dict["CifDict object"]
+ReadLayout["read_layout()<br>Create MmcifLayout"]
+FilterFunc["filter()<br>Select chains, resolve alt-locs"]
+FixResidues["fix_residues()<br>Fix ARG, MSE, etc."]
+Indices["Atom indices array"]
+GetTables["get_tables()<br>Extract chains, residues, atoms"]
+ParseBonds["_parse_bonds()<br>Extract bond information"]
+BuildStructure["Structure()<br>Create final object"]
+Output["Structure Object"]
+
+Input --> SplitLine
+Tokens --> ParseLoop
+Tokens --> ParseKeyValue
+Dict --> ReadLayout
+Dict --> GetTables
+Indices --> GetTables
+BuildStructure --> Output
+
+subgraph Python ["Structure Construction (Python)"]
+    GetTables
+    ParseBonds
+    BuildStructure
+    GetTables --> ParseBonds
+    ParseBonds --> BuildStructure
+end
+
+subgraph Filtering ["Filtering (C++)"]
+    ReadLayout
+    FilterFunc
+    FixResidues
+    Indices
+    ReadLayout --> FilterFunc
+    FilterFunc --> FixResidues
+    FixResidues --> Indices
+end
+
+subgraph DictConstruction ["CifDict Construction (C++)"]
+    ParseLoop
+    ParseKeyValue
+    Dict
+    ParseLoop --> Dict
+    ParseKeyValue --> Dict
+end
+
+subgraph Tokenization ["Tokenization (C++)"]
+    SplitLine
+    TokenizeInternal
+    Tokens
+    SplitLine --> TokenizeInternal
+    TokenizeInternal --> Tokens
+end
 ```
 
 **Diagram: mmCIF to Structure Data Flow**

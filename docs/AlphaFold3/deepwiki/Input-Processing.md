@@ -32,8 +32,61 @@ The Input Processing system is built around a set of specialized classes that re
 
 **Input Model Class Diagram**
 
-```
-
+```mermaid
+classDiagram
+    class Input {
+        +name: str
+        +chains: Sequence[Chain]
+        +rng_seeds: Sequence[int]
+        +bonded_atom_pairs: Sequence[tuple]
+        +user_ccd: str
+        +protein_chains()
+        +rna_chains()
+        +dna_chains()
+        +ligands()
+        +from_json()
+        +from_mmcif()
+        +to_json()
+    }
+    class Chain {
+        «interface»
+        +id: str
+        +sequence: str
+        +hash_without_id()
+    }
+    class ProteinChain {
+        +sequence: str
+        +ptms: Sequence[tuple]
+        +paired_msa: str
+        +unpaired_msa: str
+        +templates: Sequence[Template]
+        +to_ccd_sequence()
+    }
+    class RnaChain {
+        +sequence: str
+        +modifications: Sequence[tuple]
+        +unpaired_msa: str
+        +to_ccd_sequence()
+    }
+    class DnaChain {
+        +sequence: str
+        +modifications: Sequence[tuple]
+        +to_ccd_sequence()
+    }
+    class Ligand {
+        +ccd_ids: Sequence[str]
+        +smiles: str
+    }
+    class Template {
+        +mmcif: str
+        +query_to_template_map: Mapping[int,int]
+    }
+    Input *-- Chain : contains
+    Chain <|-- ProteinChain : implements
+    Chain <|-- RnaChain : implements
+    Chain <|-- DnaChain : implements
+    Chain <|-- Ligand : implements
+    ProteinChain *-- Template : may have
 ```
 
 The diagram above shows the core classes in the input data model:
@@ -58,8 +111,63 @@ Sources: [src/alphafold3/common/folding_input.py L86-L103](https://github.com/go
 
 **Input Processing Flow Diagram**
 
-```
+```mermaid
+flowchart TD
 
+JSON["JSON File(s)"]
+MMCIF["mmCIF String/File"]
+load_fold_inputs["load_fold_inputs_from_path()"]
+from_json["Input.from_json()"]
+detect_format["Format Detection:<br>alphafold3 vs alphafoldserver"]
+from_afs["Input.from_alphafoldserver_fold_job()"]
+validate_keys["_validate_keys()"]
+read_file["_read_file()<br>(handles gzip/xz/zstd)"]
+chain_constructors["ProteinChain.from_dict()<br>RnaChain.from_dict()<br>DnaChain.from_dict()<br>Ligand.from_dict()"]
+input_obj["Input dataclass"]
+cif_parse["cif_dict.CifDict.from_string()"]
+mmcif_obj["Mmcif object"]
+from_parsed["from_parsed_mmcif()"]
+get_tables["get_tables()"]
+structure_obj["Structure object"]
+
+JSON --> load_fold_inputs
+MMCIF --> cif_parse
+
+subgraph MMCIFPath ["mmCIF Pathway"]
+    cif_parse
+    mmcif_obj
+    from_parsed
+    get_tables
+    structure_obj
+    cif_parse --> mmcif_obj
+    mmcif_obj --> from_parsed
+    from_parsed --> get_tables
+    get_tables --> structure_obj
+end
+
+subgraph JSONPath ["JSON Pathway"]
+    load_fold_inputs
+    from_json
+    detect_format
+    from_afs
+    validate_keys
+    read_file
+    chain_constructors
+    input_obj
+    load_fold_inputs --> from_json
+    from_json --> detect_format
+    detect_format --> validate_keys
+    detect_format --> from_afs
+    validate_keys --> read_file
+    read_file --> chain_constructors
+    chain_constructors --> input_obj
+    from_afs --> input_obj
+end
+
+subgraph InputSources ["Input Sources"]
+    JSON
+    MMCIF
+end
 ```
 
 The flow has two distinct pathways:
@@ -116,8 +224,51 @@ The `_validate_keys()` function checks JSON structure against expected fields. [
 
 **JSON Validation Flow**
 
-```
+```mermaid
+flowchart TD
 
+check_dialect["Check dialect field<br>(alphafold3 or alphafoldserver)"]
+check_version["Check version field<br>(1 to 4)"]
+validate_name["Validate name is non-empty"]
+validate_seeds["Validate rng_seeds length >= 1"]
+validate_chain_ids["Check chain IDs are uppercase"]
+check_duplicates["Check for duplicate IDs"]
+validate_sequences["Validate sequence characters:<br>isalpha()"]
+validate_mods["Validate modification indices:<br>0 < idx <= len(sequence)"]
+check_ccd_prefix["Check modifications don't<br>have 'CCD_' prefix"]
+check_ccd_smiles["Check exactly one of<br>ccd_ids or smiles is set"]
+validate_smiles["RDKit validation:<br>rd_chem.MolFromSmiles()"]
+
+validate_seeds --> validate_chain_ids
+check_ccd_prefix --> check_ccd_smiles
+
+subgraph LigandValidation ["Ligand Validation"]
+    check_ccd_smiles
+    validate_smiles
+    check_ccd_smiles --> validate_smiles
+end
+
+subgraph ChainValidation ["Chain Validation"]
+    validate_chain_ids
+    check_duplicates
+    validate_sequences
+    validate_mods
+    check_ccd_prefix
+    validate_chain_ids --> check_duplicates
+    check_duplicates --> validate_sequences
+    validate_sequences --> validate_mods
+    validate_mods --> check_ccd_prefix
+end
+
+subgraph TopLevel ["Top Level Validation"]
+    check_dialect
+    check_version
+    validate_name
+    validate_seeds
+    check_dialect --> check_version
+    check_version --> validate_name
+    validate_name --> validate_seeds
+end
 ```
 
 ### Key Validation Rules

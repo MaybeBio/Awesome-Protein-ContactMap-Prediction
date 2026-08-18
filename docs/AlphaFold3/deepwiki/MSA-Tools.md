@@ -32,8 +32,49 @@ Both tools support **sharded databases** using a specific syntax (`path@N`) whic
 
 The following diagram maps high-level system components to the specific code entities that implement them.
 
-```
+```mermaid
+flowchart TD
 
+InputSeq["Input Sequence"]
+SearchConfig["Search Configuration"]
+DB["Genetic Database"]
+ParallelExec["Parallel Execution"]
+MergeLogic["Result Merging"]
+MsaTool["MsaTool (Protocol)"]
+JackhmmerClass["Jackhmmer (Class)"]
+NhmmerClass["Nhmmer (Class)"]
+ShardSpec["ShardSpec (Dataclass)"]
+ThreadPool["ThreadPoolExecutor"]
+MergeFn["_merge_jackhmmer_results<br>_merge_nhmmer_results"]
+
+InputSeq --> MsaTool
+SearchConfig --> JackhmmerClass
+SearchConfig --> NhmmerClass
+DB --> ShardSpec
+ParallelExec --> ThreadPool
+MergeLogic --> MergeFn
+
+subgraph subGraph1 ["Code Entity Space"]
+    MsaTool
+    JackhmmerClass
+    NhmmerClass
+    ShardSpec
+    ThreadPool
+    MergeFn
+    JackhmmerClass --> MsaTool
+    NhmmerClass --> MsaTool
+    ShardSpec --> JackhmmerClass
+    ThreadPool --> JackhmmerClass
+    MergeFn --> JackhmmerClass
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    InputSeq
+    SearchConfig
+    DB
+    ParallelExec
+    MergeLogic
+end
 ```
 
 **Sources:** [src/alphafold3/data/tools/msa_tool.py L35-L40](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/tools/msa_tool.py#L35-L40)
@@ -92,8 +133,24 @@ AlphaFold 3 implements a robust sharding system in `shards.py`. A path like `/db
 
 ### Parallel Data Flow
 
-```
+```mermaid
+sequenceDiagram
+  participant Jackhmmer/Nhmmer
+  participant ThreadPoolExecutor
+  participant Shard Worker
+  participant HMMER Binary
+  participant Merge Logic
 
+  Jackhmmer/Nhmmer->>ThreadPoolExecutor: map(_query_shard_fn, shard_paths)
+  loop [For each Shard]
+    ThreadPoolExecutor->>Shard Worker: Execute
+    Shard Worker->>HMMER Binary: subprocess.run()
+    HMMER Binary-->>Shard Worker: Stockholm + tblout
+    Shard Worker-->>ThreadPoolExecutor: MsaToolResult
+  end
+  ThreadPoolExecutor-->>Jackhmmer/Nhmmer: List[MsaToolResult]
+  Jackhmmer/Nhmmer->>Merge Logic: _merge_results(tool_outputs)
+  Merge Logic-->>Jackhmmer/Nhmmer: Unified MsaToolResult
 ```
 
 ### Result Merging Logic

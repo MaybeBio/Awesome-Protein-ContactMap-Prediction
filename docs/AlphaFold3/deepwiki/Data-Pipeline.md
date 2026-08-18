@@ -17,8 +17,91 @@ The Data Pipeline is responsible for generating Multiple Sequence Alignments (MS
 
 The Data Pipeline processes each chain in the input structure separately based on its polymer type (protein, RNA, or DNA). It utilizes parallel execution of external genetic search tools to optimize throughput.
 
-```
+```mermaid
+flowchart TD
 
+Input["folding_input.Input"]
+DataPipeline["DataPipeline.process()"]
+ProteinMSA["Protein MSA Generation"]
+RNAMSA["RNA MSA Generation"]
+JackhmmerUniRef["Jackhmmer (UniRef90)"]
+JackhmmerMgnify["Jackhmmer (MgNify)"]
+JackhmmerBFD["Jackhmmer (Small BFD)"]
+JackhmmerUniProt["Jackhmmer (UniProt)"]
+NhmmerNTRNA["Nhmmer (NT-RNA)"]
+NhmmerRfam["Nhmmer (Rfam)"]
+NhmmerRNA["Nhmmer (RNACentral)"]
+TemplateSearch["Templates.from_seq_and_a3m()"]
+Hmmsearch["Hmmsearch.query_with_a3m()"]
+SeqresDB["PDB Seqres Database"]
+TemplateFilter["Hit Filtering"]
+StructureStore["StructureStore"]
+PDBDB["PDB Database (mmCIF files)"]
+ProteinProcess["_get_protein_msa_and_templates()"]
+RNAProcess["_get_rna_msa()"]
+UnpairedMSA["Msa.from_multiple_msas(deduplicate=True)"]
+PairedMSA["Msa.from_multiple_msas(deduplicate=False)"]
+RNAMSA_Out["Msa.from_multiple_msas()"]
+Templates["Templates object"]
+ProcessedProteinChain["Processed Protein Chain"]
+ProcessedRNAChain["Processed RNA Chain"]
+OutputChains["Processed Chains"]
+Output["folding_input.Input with MSAs and Templates"]
+
+Input --> DataPipeline
+DataPipeline --> ProteinProcess
+DataPipeline --> RNAProcess
+ProteinProcess --> ProteinMSA
+ProteinProcess --> TemplateSearch
+RNAProcess --> RNAMSA
+JackhmmerUniRef --> UnpairedMSA
+JackhmmerMgnify --> UnpairedMSA
+JackhmmerBFD --> UnpairedMSA
+JackhmmerUniProt --> PairedMSA
+NhmmerNTRNA --> RNAMSA_Out
+NhmmerRfam --> RNAMSA_Out
+NhmmerRNA --> RNAMSA_Out
+TemplateSearch --> Templates
+UnpairedMSA --> ProcessedProteinChain
+PairedMSA --> ProcessedProteinChain
+Templates --> ProcessedProteinChain
+RNAMSA_Out --> ProcessedRNAChain
+ProcessedProteinChain --> OutputChains
+ProcessedRNAChain --> OutputChains
+OutputChains --> Output
+
+subgraph subGraph1 ["Template Search (templates.py)"]
+    TemplateSearch
+    Hmmsearch
+    SeqresDB
+    TemplateFilter
+    StructureStore
+    PDBDB
+    TemplateSearch --> Hmmsearch
+    Hmmsearch --> SeqresDB
+    TemplateSearch --> TemplateFilter
+    TemplateFilter --> StructureStore
+    StructureStore --> PDBDB
+end
+
+subgraph subGraph0 ["MSA Generation (msa_tool.py)"]
+    ProteinMSA
+    RNAMSA
+    JackhmmerUniRef
+    JackhmmerMgnify
+    JackhmmerBFD
+    JackhmmerUniProt
+    NhmmerNTRNA
+    NhmmerRfam
+    NhmmerRNA
+    ProteinMSA --> JackhmmerUniRef
+    ProteinMSA --> JackhmmerMgnify
+    ProteinMSA --> JackhmmerBFD
+    ProteinMSA --> JackhmmerUniProt
+    RNAMSA --> NhmmerNTRNA
+    RNAMSA --> NhmmerRfam
+    RNAMSA --> NhmmerRNA
+end
 ```
 
 Sources: [src/alphafold3/data/pipeline.py L70-L151](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/pipeline.py#L70-L151)
@@ -81,8 +164,20 @@ Sources: [src/alphafold3/data/pipeline.py L156-L191](https://github.com/google-d
 
 The template search identifies structural homologs for protein chains to provide the model with known structural motifs.
 
-```
+```mermaid
+sequenceDiagram
+  participant pipeline.py
+  participant templates.Templates
+  participant hmmsearch.Hmmsearch
+  participant structure_stores.StructureStore
 
+  pipeline.py->>templates.Templates: from_seq_and_a3m(sequence, unpaired_msa)
+  templates.Templates->>hmmsearch.Hmmsearch: query_with_a3m(msa_a3m)
+  hmmsearch.Hmmsearch-->>templates.Templates: list[Hit]
+  templates.Templates->>templates.Templates: filter_config (date, identity, length)
+  templates.Templates->>structure_stores.StructureStore: StructureStore(pdb_path).get(pdb_id)
+  structure_stores.StructureStore-->>templates.Templates: mmCIF data
+  templates.Templates-->>pipeline.py: Templates object (hits + structures)
 ```
 
 1. **Query Generation**: The `unpaired_protein_msa` (in A3M format) is used as the basis for the template search [src/alphafold3/data/pipeline.py L145](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/pipeline.py#L145-L145)

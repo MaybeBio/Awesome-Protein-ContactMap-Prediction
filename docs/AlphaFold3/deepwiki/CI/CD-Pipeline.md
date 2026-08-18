@@ -24,8 +24,72 @@ The AlphaFold 3 CI pipeline is implemented using GitHub Actions and provides aut
 
 ## Workflow Architecture
 
-```
+```mermaid
+flowchart TD
 
+PushMain["push to main branch"]
+PR["pull_request to main"]
+Manual["workflow_dispatch"]
+Checkout["actions/checkout@v6"]
+SetupUV["astral-sh/setup-uv@v7"]
+InstallPython["uv python install 3.12"]
+SystemDeps["apt-get install hmmer"]
+UVSync["uv sync --frozen --all-groups"]
+LockFile["uv.lock"]
+PyProject["pyproject.toml"]
+BuildData["uv run build_data"]
+CompileCPP["Compile C++ extensions"]
+MMCIFUtils["mmcif_utils module"]
+RunTests["uv run python<br>run_alphafold_data_test.py"]
+DataPipelineTest["DataPipelineTest class"]
+CompareGolden["compare_golden()"]
+
+PushMain --> Checkout
+PR --> Checkout
+Manual --> Checkout
+SystemDeps --> UVSync
+UVSync --> BuildData
+MMCIFUtils --> RunTests
+
+subgraph Test ["Test Execution"]
+    RunTests
+    DataPipelineTest
+    CompareGolden
+    RunTests --> DataPipelineTest
+    DataPipelineTest --> CompareGolden
+end
+
+subgraph Build ["Build Stage"]
+    BuildData
+    CompileCPP
+    MMCIFUtils
+    BuildData --> CompileCPP
+    CompileCPP --> MMCIFUtils
+end
+
+subgraph Dependencies ["Dependency Installation"]
+    UVSync
+    LockFile
+    PyProject
+    LockFile --> UVSync
+    PyProject --> UVSync
+end
+
+subgraph Setup ["Environment Setup"]
+    Checkout
+    SetupUV
+    InstallPython
+    SystemDeps
+    Checkout --> SetupUV
+    SetupUV --> InstallPython
+    InstallPython --> SystemDeps
+end
+
+subgraph Triggers ["Workflow Triggers"]
+    PushMain
+    PR
+    Manual
+end
 ```
 
 **Workflow Execution Flow**
@@ -78,8 +142,23 @@ The workflow executes the following steps in order:
 
 The CI pipeline runs `run_alphafold_data_test.py`, which performs integration testing of the data pipeline without requiring a GPU.
 
-```
+```mermaid
+sequenceDiagram
+  participant GitHub Actions
+  participant DataPipelineTest (run_alphafold_data_test.py)
+  participant DataPipeline (alphafold3.data.pipeline)
+  participant Golden Data (test_data/)
 
+  GitHub Actions->>DataPipelineTest (run_alphafold_data_test.py): Run run_alphafold_data_test.py
+  DataPipelineTest (run_alphafold_data_test.py)->>DataPipelineTest (run_alphafold_data_test.py): setUp() (Init miniature databases)
+  DataPipelineTest (run_alphafold_data_test.py)->>DataPipeline (alphafold3.data.pipeline): process(fold_input)
+  DataPipeline (alphafold3.data.pipeline)->>DataPipeline (alphafold3.data.pipeline): Run MSA tools (jackhmmer/nhmmer)
+  DataPipeline (alphafold3.data.pipeline)->>DataPipeline (alphafold3.data.pipeline): Featurize sequences
+  DataPipeline (alphafold3.data.pipeline)-->>DataPipelineTest (run_alphafold_data_test.py): Return featurized tensors
+  DataPipelineTest (run_alphafold_data_test.py)->>DataPipelineTest (run_alphafold_data_test.py): compare_golden(result_path)
+  DataPipelineTest (run_alphafold_data_test.py)->>Golden Data (test_data/): Load expected JSON
+  Golden Data (test_data/)-->>DataPipelineTest (run_alphafold_data_test.py): Return hash-based expectations
+  DataPipelineTest (run_alphafold_data_test.py)->>DataPipelineTest (run_alphafold_data_test.py): assertEqual(diff, "")
 ```
 
 **Test Coverage and Validation**

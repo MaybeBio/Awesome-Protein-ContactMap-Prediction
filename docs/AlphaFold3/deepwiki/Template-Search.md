@@ -14,8 +14,27 @@ Template search is a critical component of the AlphaFold 3 data pipeline that id
 
 The template search process uses `hmmsearch` to identify similar sequences from a structure database, retrieves their 3D coordinates, and transforms them into template features used by the model during inference. Templates significantly improve prediction accuracy by providing real structural examples for the model to learn from.
 
-```
+```mermaid
+flowchart TD
 
+Query["Query Sequence"]
+MSA["Multiple Sequence Alignment"]
+HMM["Profile HMM Generation (Hmmbuild)"]
+HMMSearch["HMMSearch Against Structure Database"]
+TemplateHits["Template Hits (A3M)"]
+FilteredHits["Filtered Hits"]
+Structures["Template Structures (mmCIF)"]
+TemplateFeatures["Template Features"]
+Model["AlphaFold 3 Model"]
+
+Query --> MSA
+MSA --> HMM
+HMM --> HMMSearch
+HMMSearch --> TemplateHits
+TemplateHits --> FilteredHits
+FilteredHits --> Structures
+Structures --> TemplateFeatures
+TemplateFeatures --> Model
 ```
 
 Sources: [src/alphafold3/data/templates.py L11-L35](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/templates.py#L11-L35)
@@ -78,8 +97,25 @@ The template search workflow involves several steps from initial query to final 
 4. **Filtering**: Removes templates based on release dates and sequence identity to prevent leakage. [src/alphafold3/data/templates.py L599-L642](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/templates.py#L599-L642)
 5. **Featurization**: Transforms templates into `TemplateFeatures` mapping. [src/alphafold3/data/templates.py L50-L52](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/templates.py#L50-L52)  [src/alphafold3/data/templates.py L665-L718](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/templates.py#L665-L718)
 
-```
+```mermaid
+sequenceDiagram
+  participant Templates (templates.py)
+  participant Hmmsearch (hmmsearch.py)
+  participant Hmmbuild (hmmbuild.py)
+  participant StructureStore (structure_stores.py)
 
+  Templates (templates.py)->>Hmmsearch (hmmsearch.py): query_with_a3m(msa_a3m)
+  Hmmsearch (hmmsearch.py)->>Hmmbuild (hmmbuild.py): build_profile_from_a3m(msa_a3m)
+  Hmmbuild (hmmbuild.py)-->>Hmmsearch (hmmsearch.py): query.hmm
+  Hmmsearch (hmmsearch.py)->>Hmmsearch (hmmsearch.py): run hmmsearch binary via subprocess_utils
+  Hmmsearch (hmmsearch.py)-->>Templates (templates.py): result.a3m
+  loop [For each hit in result.a3m]
+    Templates (templates.py)->>StructureStore (structure_stores.py): get_metadata(pdb_id)
+    Templates (templates.py)->>Templates (templates.py): _filter_hits()
+    Templates (templates.py)->>Templates (templates.py): featurize()
+    Templates (templates.py)->>StructureStore (structure_stores.py): get_structure(pdb_id)
+    Templates (templates.py)->>Templates (templates.py): _get_polymer_features()
+  end
 ```
 
 Sources: [src/alphafold3/data/templates.py L430-L484](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/data/templates.py#L430-L484)

@@ -37,8 +37,35 @@ The `AtomLayout` system provides a unified way to represent atoms in various coo
 
 `AtomLayout` is an immutable dataclass that represents atoms in a fixed shape (typically 1D or 2D). All fields are NumPy arrays with identical shapes [src/alphafold3/model/atom_layout/atom_layout.py L37-L90](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/atom_layout/atom_layout.py#L37-L90)
 
-```
+```mermaid
+flowchart TD
 
+AN["atom_name<br>(dtype=object)<br>e.g. 'CA', 'NE2'"]
+RI["res_id<br>(dtype=int)<br>residue index"]
+CI["chain_id<br>(dtype=object)<br>e.g. 'A', 'B'"]
+AE["atom_element<br>(dtype=object)<br>e.g. 'C', 'N', 'O'"]
+RN["res_name<br>(dtype=object)<br>e.g. 'ARG', 'TRP'"]
+CT["chain_type<br>(dtype=object)<br>e.g. 'polypeptide(L)'"]
+Flat["Flat Layout<br>[num_atoms]<br>All atoms in sequence"]
+Dense["Dense Layout<br>[num_residues, max_atoms]<br>Atoms per residue"]
+Tokens["Token Layout<br>[num_tokens]<br>Representative atoms"]
+TokenAtoms["Token Atoms Layout<br>[num_tokens, max_atoms_per_token]<br>All atoms per token"]
+
+subgraph Examples ["Layout Shape Examples"]
+    Flat
+    Dense
+    Tokens
+    TokenAtoms
+end
+
+subgraph AtomLayoutFields ["AtomLayout Fields"]
+    AN
+    RI
+    CI
+    AE
+    RN
+    CT
+end
 ```
 
 **Key Properties:**
@@ -68,8 +95,22 @@ Sources: [src/alphafold3/model/atom_layout/atom_layout.py L36-L233](https://gith
 3. Gather mask zeros out missing elements.
 4. Result is reshaped to target layout shape.
 
-```
+```mermaid
+flowchart TD
 
+Source["Source Layout<br>[num_residues, max_atoms]"]
+Flatten["Flatten<br>[num_residues * max_atoms]"]
+Gather["Gather with indices<br>[num_tokens]"]
+Mask["Apply mask<br>Zero missing atoms"]
+Target["Target Layout<br>[num_tokens]"]
+GI["GatherInfo<br>gather_idxs<br>gather_mask<br>input_shape"]
+
+Source --> Flatten
+Flatten --> Gather
+Gather --> Mask
+Mask --> Target
+GI --> Gather
+GI --> Mask
 ```
 
 **Usage Example:**
@@ -102,8 +143,59 @@ Sources: [src/alphafold3/model/atom_layout/atom_layout.py L235-L303](https://git
 
 ### Layout Construction and Conversion
 
-```
+```mermaid
+flowchart TD
 
+Struct["Structure object"]
+Res["Residues object"]
+ALFS["atom_layout_from_structure()"]
+RFS["residues_from_structure()"]
+MFAL["make_flat_atom_layout()"]
+FlatAll["Flat Layout (All)"]
+FlatOutput["Flat Output Layout"]
+Tokens["Tokens Layout"]
+TokenAtoms["Token Atoms Layout"]
+CGI["compute_gather_idxs()"]
+FEOF["fill_in_optional_fields()"]
+Conv["convert()"]
+
+Struct --> ALFS
+ALFS --> FlatAll
+Struct --> RFS
+RFS --> Res
+Res --> MFAL
+MFAL --> FlatOutput
+FlatAll --> CGI
+Tokens --> CGI
+FlatAll --> FEOF
+Tokens --> FEOF
+
+subgraph Conversion ["Layout Conversions"]
+    CGI
+    FEOF
+    Conv
+    CGI --> Conv
+end
+
+subgraph Layouts ["AtomLayout Variants"]
+    FlatAll
+    FlatOutput
+    Tokens
+    TokenAtoms
+    FlatOutput --> Tokens
+    FlatOutput --> TokenAtoms
+end
+
+subgraph Extraction ["Layout Extraction"]
+    ALFS
+    RFS
+    MFAL
+end
+
+subgraph Input ["Input Data"]
+    Struct
+    Res
+end
 ```
 
 **Key Functions:**
@@ -121,8 +213,43 @@ Sources: [src/alphafold3/model/atom_layout/atom_layout.py L379-L974](https://git
 
 Tokenization converts a flat atom layout into tokens suitable for the model [src/alphafold3/model/features.py L164-L196](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/features.py#L164-L196)
 
-```
+```mermaid
+flowchart TD
 
+NSR["Flatten: One token per atom"]
+SR1["Protein: CA / First Atom"]
+SR2["Nucleic: C1' / First Atom"]
+FlatLayout["Flat Output Layout"]
+IterRes["Iterate over residues"]
+AllTokens["all_tokens (AtomLayout)"]
+TokenAtoms["all_token_atoms_layout (AtomLayout)"]
+StandardIdx["standard_token_idxs (ndarray)"]
+
+FlatLayout --> IterRes
+IterRes --> StandardIdx
+
+subgraph Output ["Output Entities"]
+    AllTokens
+    TokenAtoms
+    StandardIdx
+end
+
+subgraph Tokenization ["tokenizer() Function"]
+    IterRes
+
+subgraph NonStandardRes ["Non-Standard / Ligands"]
+    NSR
+end
+
+subgraph StandardRes ["Standard Residues"]
+    SR1
+    SR2
+end
+end
+
+subgraph Input ["Input"]
+    FlatLayout
+end
 ```
 
 **Token Atoms Layout Construction:**
@@ -202,8 +329,24 @@ The complete featurization pipeline transforms biological data into the `Batch` 
 
 The `Batch` class provides a unified interface for all feature tensors [src/alphafold3/model/feat_batch.py L20-L34](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/feat_batch.py#L20-L34)
 
-```
+```mermaid
+flowchart TD
 
+MSA_OBJ["msa: MSA"]
+TMP_OBJ["templates: Templates"]
+TOK_OBJ["token_features: TokenFeatures"]
+BND_OBJ["polymer_ligand_bond_info"]
+DataDict["BatchDict (Raw Dict)"]
+FromDict["Batch.from_data_dict()"]
+
+DataDict --> FromDict
+
+subgraph BatchObject ["Batch Dataclass"]
+    MSA_OBJ
+    TMP_OBJ
+    TOK_OBJ
+    BND_OBJ
+end
 ```
 
 Sources: [src/alphafold3/model/feat_batch.py L39-L60](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/feat_batch.py#L39-L60)

@@ -16,8 +16,42 @@ The AlphaFold 3 test suite is organized around integration tests that validate b
 
 ### Test Class Structure
 
-```
+```mermaid
+flowchart TD
 
+absltest["absl.testing.absltest<br>Base test framework"]
+parameterized["absl.testing.parameterized<br>Parameterized test support"]
+DataPipelineTest["DataPipelineTest<br>Validates data pipeline"]
+testing_data["testing_data.Data<br>Test data loader"]
+miniature_dbs["Miniature Databases<br>Subsampled sequences"]
+featurised_example["featurised_example.json<br>Hashed feature golden"]
+golden_outputs["Golden Files<br>model_config.json, etc."]
+DataPipelineConfig["pipeline.DataPipelineConfig<br>Database paths, tool binaries"]
+
+parameterized --> DataPipelineTest
+DataPipelineTest --> DataPipelineConfig
+DataPipelineTest --> testing_data
+
+subgraph TestConfig ["Test Configuration"]
+    DataPipelineConfig
+end
+
+subgraph TestResources ["Test Resources"]
+    testing_data
+    miniature_dbs
+    featurised_example
+    golden_outputs
+end
+
+subgraph TestClasses ["Test Classes"]
+    DataPipelineTest
+end
+
+subgraph TestFramework ["Test Framework"]
+    absltest
+    parameterized
+    absltest --> parameterized
+end
 ```
 
 **Test Class Hierarchy**
@@ -46,8 +80,51 @@ Sources: [run_alphafold_data_test.py L15-L16](https://github.com/google-deepmind
 
 The continuous integration pipeline is defined in GitHub Actions and orchestrates automated testing on every push and pull request to the `main` branch.
 
-```
+```mermaid
+flowchart TD
 
+push["Push to main"]
+pr["Pull request"]
+manual["workflow_dispatch"]
+checkout["actions/checkout@v6<br>Clone repository"]
+setup_uv["astral-sh/setup-uv@v7<br>Install uv package manager"]
+setup_python["uv python install 3.12<br>Install Python"]
+install_hmmer["apt-get install hmmer<br>Install HMMER binaries"]
+install_deps["uv sync --frozen --all-groups<br>Install Python dependencies"]
+build_data["uv run build_data<br>Compile C++ extensions"]
+run_data_tests["uv run python<br>run_alphafold_data_test.py"]
+
+push --> checkout
+pr --> checkout
+manual --> checkout
+install_deps --> build_data
+build_data --> run_data_tests
+
+subgraph Test ["Test Execution"]
+    run_data_tests
+end
+
+subgraph Build ["Build Phase"]
+    build_data
+end
+
+subgraph Setup ["Environment Setup"]
+    checkout
+    setup_uv
+    setup_python
+    install_hmmer
+    install_deps
+    checkout --> setup_uv
+    setup_uv --> setup_python
+    setup_python --> install_hmmer
+    install_hmmer --> install_deps
+end
+
+subgraph Triggers ["Workflow Triggers"]
+    push
+    pr
+    manual
+end
 ```
 
 **Pipeline Configuration**
@@ -72,8 +149,33 @@ The testing infrastructure employs a hashing strategy to validate complex featur
 
 Because the output of the data pipeline contains large JAX and NumPy arrays, `run_alphafold_data_test.py` uses a single-dispatch hashing function `_hash_data` [run_alphafold_data_test.py L54-L86](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold_data_test.py#L54-L86)
 
-```
+```mermaid
+flowchart TD
 
+dispatch["Type of x?"]
+bytes_h["hashlib.sha256(x)"]
+jax_h["jax.device_get(x) -> numpy"]
+numpy_h["x.tobytes() -> sha256"]
+none_h["'<>'"]
+struct_h["'<>'"]
+atom_h["'<>'"]
+
+subgraph Hashing ["_hash_data(x)"]
+    dispatch
+    bytes_h
+    jax_h
+    numpy_h
+    none_h
+    struct_h
+    atom_h
+    dispatch --> bytes_h
+    dispatch --> jax_h
+    dispatch --> numpy_h
+    dispatch --> none_h
+    dispatch --> struct_h
+    dispatch --> atom_h
+    jax_h --> numpy_h
+end
 ```
 
 This mechanism allows the system to verify that the `pipeline.DataPipeline.process` [run_alphafold_data_test.py L207](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold_data_test.py#L207-L207)

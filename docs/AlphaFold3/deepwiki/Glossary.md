@@ -115,8 +115,41 @@ This diagram maps high-level data acquisition concepts to the specific classes a
 
 **Data Search Flow**
 
-```
+```mermaid
+flowchart TD
 
+A["Search Genetic Databases"]
+B["Find Structural Templates"]
+A1["pipeline.run_data_pipeline"]
+A2["jackhmmer_binary_path"]
+A3["nhmmer_binary_path"]
+A4["msa.Msa.from_a3m"]
+B1["templates.Templates"]
+B2["hmmsearch_binary_path"]
+B3["folding_input.Template"]
+
+A --> A1
+B --> B1
+
+subgraph subGraph1 ["Code Entity Space"]
+    A1
+    A2
+    A3
+    A4
+    B1
+    B2
+    B3
+    A1 --> A2
+    A1 --> A3
+    A1 --> A4
+    B1 --> B2
+    B1 --> B3
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    A
+    B
+end
 ```
 
 **Sources**: [run_alphafold.py L97-L121](https://github.com/google-deepmind/alphafold3/blob/97639fff/run_alphafold.py#L97-L121)
@@ -131,8 +164,40 @@ This diagram maps the conceptual "Data Prep" phase to the internal JAX/Numpy fea
 
 **Featurization Mapping**
 
-```
+```mermaid
+flowchart TD
 
+Input["JSON Input File"]
+Feat["Model Features"]
+Tokens["Tokens"]
+F_In["folding_input.Input"]
+Feat_Mod["features.tokenizer"]
+AL["atom_layout.AtomLayout"]
+Batch["features.BatchDict"]
+Inf["model.InferenceResult"]
+Struct["structure.Structure"]
+
+Input --> F_In
+
+subgraph subGraph1 ["Code Entity Space"]
+    F_In
+    Feat_Mod
+    AL
+    Batch
+    Inf
+    Struct
+    F_In --> Feat_Mod
+    Feat_Mod --> AL
+    AL --> Batch
+    Batch --> Inf
+    Inf --> Struct
+end
+
+subgraph subGraph0 ["Natural Language Space"]
+    Input
+    Feat
+    Tokens
+end
 ```
 
 **Sources**: [src/alphafold3/common/folding_input.py L123-L203](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L123-L203)

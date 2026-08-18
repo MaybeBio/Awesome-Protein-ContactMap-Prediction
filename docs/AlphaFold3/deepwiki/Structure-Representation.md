@@ -24,8 +24,37 @@ The `Structure` class implements a table-based design inspired by relational dat
 
 **Table-Based Structure Architecture**
 
-```
+```mermaid
+flowchart TD
 
+Structure["Structure<br>(Database Container)"]
+Chains["Chains Table<br>key, id, type, auth_asym_id,<br>entity_id, entity_desc"]
+Residues["Residues Table<br>key, chain_key (FK),<br>id, name, auth_seq_id,<br>insertion_code"]
+Atoms["Atoms Table<br>key, chain_key (FK), res_key (FK),<br>name, element, x, y, z,<br>b_factor, occupancy"]
+Bonds["Bonds Table<br>key, type, role,<br>from_atom_key (FK),<br>dest_atom_key (FK)"]
+Meta["name, release_date,<br>resolution, structure_method,<br>bioassembly_data,<br>chemical_components_data"]
+
+Structure --> Chains
+Structure --> Residues
+Structure --> Atoms
+Structure --> Bonds
+Structure --> Meta
+
+subgraph Metadata ["Global Metadata"]
+    Meta
+end
+
+subgraph Tables ["Core Tables"]
+    Chains
+    Residues
+    Atoms
+    Bonds
+    Residues --> Chains
+    Atoms --> Chains
+    Atoms --> Residues
+    Bonds --> Atoms
+    Bonds --> Atoms
+end
 ```
 
 Sources: [src/alphafold3/structure/structure.py L296-L344](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/structure.py#L296-L344)
@@ -45,7 +74,7 @@ The `Structure` class enforces referential integrity through foreign keys define
  These relationships are validated during construction to ensure all referenced keys exist in their target tables [src/alphafold3/structure/structure.py L345-L381](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/structure.py#L345-L381)
 
 ```
-
+foreign_keys: ClassVar[Mapping[str, Collection[tuple[str, str]]]] = {    'residues': (('chain_key', 'chains'),),    'atoms': (('chain_key', 'chains'), ('res_key', 'residues')),    'bonds': (('from_atom_key', 'atoms'), ('dest_atom_key', 'atoms')),}
 ```
 
 Sources: [src/alphafold3/structure/structure.py L301-L305](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/structure.py#L301-L305)
@@ -135,8 +164,52 @@ Sources: [src/alphafold3/structure/bonds.py L23-L42](https://github.com/google-d
 
 **Structure Construction Pathways**
 
-```
+```mermaid
+flowchart TD
 
+mmCIF["mmCIF String<br>or Parsed Object"]
+ResArrays["Residue Arrays<br>(num_res, num_atom)"]
+Sequences["Sequences + Bonds<br>(FASTA/CCD/SMILES)"]
+FromMmcif["from_mmcif()<br>from_parsed_mmcif()"]
+FromResArrays["from_res_arrays()"]
+FromSeqBonds["from_sequences_and_bonds()"]
+GetTables["get_tables()<br>Extract chains, residues,<br>atoms from mmCIF"]
+ParseBonds["_parse_bonds()<br>Extract bond info"]
+ExpandSeq["_expand_sequence()<br>Convert to CCD codes"]
+StructObj["Structure<br>(chains, residues,<br>atoms, bonds)"]
+
+mmCIF --> FromMmcif
+ResArrays --> FromResArrays
+Sequences --> FromSeqBonds
+FromMmcif --> GetTables
+FromMmcif --> ParseBonds
+GetTables --> StructObj
+ParseBonds --> StructObj
+FromResArrays --> StructObj
+FromSeqBonds --> ExpandSeq
+ExpandSeq --> StructObj
+
+subgraph Output ["Structure Object"]
+    StructObj
+end
+
+subgraph Processing ["Internal Logic"]
+    GetTables
+    ParseBonds
+    ExpandSeq
+end
+
+subgraph Parsing ["Parsing Functions (parsing.py)"]
+    FromMmcif
+    FromResArrays
+    FromSeqBonds
+end
+
+subgraph Input ["Input Sources"]
+    mmCIF
+    ResArrays
+    Sequences
+end
 ```
 
 Sources: [src/alphafold3/structure/parsing.py L399-L453](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/parsing.py#L399-L453)
@@ -174,8 +247,8 @@ The `Structure` class provides properties that broadcast table data to the atom 
 
 The `filter()` method creates a new `Structure` by applying predicates to columns [src/alphafold3/structure/structure.py L1076-L1165](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/structure.py#L1076-L1165)
 
-```
-
+```markdown
+# Example: Filter to a specific chainchain_a = struc.filter(chain_id='A')
 ```
 
 Filtering is "cascade-aware". When atoms are removed, the `Structure` class can optionally delete residues or chains that no longer contain any atoms via the `CascadeDelete` enum [src/alphafold3/structure/structure.py L42-L46](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/structure.py#L42-L46)
@@ -226,8 +299,19 @@ The `Structure` class maintains a `ChemicalComponentsData` object [src/alphafold
 
 **Chemical Data Mapping**
 
-```
+```mermaid
+flowchart TD
 
+Structure["Structure"]
+CCD["ChemicalComponentsData"]
+Entry["ChemCompEntry"]
+SMILES["SMILES String"]
+RDKit["RDKit Mol Object"]
+
+Structure --> CCD
+CCD --> Entry
+Entry --> SMILES
+Entry --> RDKit
 ```
 
 Sources: [src/alphafold3/structure/chemical_components.py L25-L61](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/chemical_components.py#L25-L61)

@@ -12,8 +12,45 @@ This document provides a technical overview of the key data structures used thro
 
 The AlphaFold 3 pipeline transforms data through several distinct representations, starting from a user-defined JSON input and ending with a 3D structure and associated confidence metrics.
 
-```
+```mermaid
+flowchart TD
 
+JSON["JSON Input"]
+FoldingInput["folding_input.Input"]
+Structure["structure.Structure"]
+TableBase["Table-based Storage (Atoms, Residues, Chains)"]
+Featurization["Feature Tensors (AtomLayout, MSA, Templates)"]
+Model["Model Inference"]
+Confidence["Confidence Metrics (pTM, ipTM, pLDDT)"]
+FinalCIF["Final mmCIF Structure"]
+
+FoldingInput --> Structure
+TableBase --> Featurization
+Model --> Confidence
+Model --> FinalCIF
+
+subgraph subGraph3 ["Output Layer"]
+    Confidence
+    FinalCIF
+end
+
+subgraph subGraph2 ["Model Space"]
+    Featurization
+    Model
+    Featurization --> Model
+end
+
+subgraph subGraph1 ["Intermediate Representation"]
+    Structure
+    TableBase
+    Structure --> TableBase
+end
+
+subgraph subGraph0 ["Input Layer"]
+    JSON
+    FoldingInput
+    JSON --> FoldingInput
+end
 ```
 
 Sources: [src/alphafold3/common/folding_input.py L488-L535](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/common/folding_input.py#L488-L535)
@@ -48,8 +85,33 @@ AlphaFold 3 uses a table-based `Structure` class to manage 3D coordinates and ch
 
 The following diagram shows how high-level structural concepts map to specific Python classes and their underlying NumPy storage.
 
-```
-
+```mermaid
+classDiagram
+    class Structure {
+        +Atoms atoms
+        +Residues residues
+        +Chains chains
+        +Bonds bonds
+    }
+    class Atoms {
+        +ndarray x
+        +ndarray y
+        +ndarray z
+        +ndarray element
+    }
+    class Residues {
+        +ndarray id
+        +ndarray name
+        +ndarray auth_seq_id
+    }
+    class Bonds {
+        +ndarray from_atom_key
+        +ndarray dest_atom_key
+        +ndarray type
+    }
+    Structure *-- Atoms
+    Structure *-- Residues
+    Structure *-- Bonds
 ```
 
 Sources: [src/alphafold3/structure/structure.py L341-L450](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/structure/structure.py#L341-L450)
@@ -65,8 +127,23 @@ Before being processed by the neural network, biological data is converted into 
 * **`AtomLayout`**: Manages the mapping between atoms in the structure and their positions in the flattened model tensors.
 * **Dataclasses**: The system uses specific dataclasses to hold features for the model, including `MSA`, `Templates`, and `TokenFeatures`.
 
-```
+```mermaid
+flowchart TD
 
+Structure["structure.Structure"]
+Tensors["Numerical Tensors"]
+MSA["MSA Sequences"]
+Templates["Template mmCIFs"]
+
+subgraph subGraph0 ["Featurization Mapping"]
+    Structure
+    Tensors
+    MSA
+    Templates
+    Structure --> Tensors
+    MSA --> Tensors
+    Templates --> Tensors
+end
 ```
 
 For details, see [Feature Tensors](/google-deepmind/alphafold3/5.3-feature-tensors).

@@ -19,8 +19,49 @@ AlphaFold 3 has distinct performance profiles for its two main computational pha
 
 Title: Performance Bottlenecks and Optimizations
 
-```
+```mermaid
+flowchart TD
 
+DataPipeline["Data Pipeline Stage"]
+MSA["MSA Generation"]
+Templates["Template Search"]
+ModelInference["Model Inference Stage"]
+Evoformer["Evoformer Processing"]
+Diffusion["Diffusion Model"]
+ParallelCPU["Increase CPU Cores"]
+DiskSpeed["Improve Disk Speed"]
+Sharding["Database Sharding"]
+GPUMem["GPU Memory Management"]
+Compilation["Compilation Strategies"]
+GPUType["High-end GPU (A100/H100)"]
+TokenBuckets["Token Bucket Optimization"]
+
+subgraph Performance_Bottlenecks ["Performance_Bottlenecks"]
+    DataPipeline
+    MSA
+    Templates
+    ModelInference
+    Evoformer
+    Diffusion
+    ParallelCPU
+    DiskSpeed
+    Sharding
+    GPUMem
+    Compilation
+    GPUType
+    TokenBuckets
+    DataPipeline --> MSA
+    DataPipeline --> Templates
+    ModelInference --> Evoformer
+    ModelInference --> Diffusion
+    MSA --> ParallelCPU
+    MSA --> DiskSpeed
+    MSA --> Sharding
+    Evoformer --> GPUMem
+    Evoformer --> Compilation
+    Diffusion --> GPUType
+    Diffusion --> TokenBuckets
+end
 ```
 
 Sources: [docs/performance.md L5-L17](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L5-L17)
@@ -45,7 +86,7 @@ For details, see [Hardware Configuration](/google-deepmind/alphafold3/8.1-hardwa
 For CUDA Capability 7.x GPUs (such as NVIDIA V100), you must add specific XLA flags to prevent numerical issues:
 
 ```
-
+XLA_FLAGS="--xla_disable_hlo_passes=custom-kernel-fusion-rewriter"
 ```
 
 This flag is essential as these GPUs produce incorrect outputs without it, characterized by clashing residues and very low ranking scores (often -99 or lower). [docs/known_issues.md L3-L8](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/known_issues.md?plain=1#L3-L8)
@@ -64,8 +105,8 @@ For details, see [Memory Management](/google-deepmind/alphafold3/8.2-memory-mana
 
 To run structures exceeding 5,120 tokens or to use GPUs with less memory (e.g., A100 40GB), you can enable unified memory to spill from GPU VRAM to host RAM:
 
-```
-
+```markdown
+XLA_PYTHON_CLIENT_PREALLOCATE=falseTF_FORCE_UNIFIED_MEMORY=trueXLA_CLIENT_MEM_FRACTION=4.0  # Adjust based on system RAM
 ```
 
 Sources: [docs/performance.md L1120-L1138](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L1120-L1138)
@@ -82,8 +123,34 @@ The runtime of genetic sequence searches (`Jackhmmer`/`Nhmmer`) can be reduced b
 
 Title: Sharded Search Logic
 
-```
+```mermaid
+flowchart TD
 
+InputSeq["Input Sequence"]
+Jackhmmer["Jackhmmer/Nhmmer"]
+Shard1["Shard 00000"]
+Shard2["Shard 00001"]
+ShardN["Shard N"]
+Merge["Merge Results"]
+MSA["Final MSA"]
+
+subgraph Sharded_Search_Logic ["Sharded_Search_Logic"]
+    InputSeq
+    Jackhmmer
+    Shard1
+    Shard2
+    ShardN
+    Merge
+    MSA
+    InputSeq --> Jackhmmer
+    Jackhmmer --> Shard1
+    Jackhmmer --> Shard2
+    Jackhmmer --> ShardN
+    Shard1 --> Merge
+    Shard2 --> Merge
+    ShardN --> Merge
+    Merge --> MSA
+end
 ```
 
 To use sharded databases, provide the file spec (e.g., `uniprot.fasta@3`) and the corresponding Z-values to scale E-values correctly. [docs/performance.md L103-L125](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L103-L125)
@@ -96,8 +163,8 @@ Sources: [docs/performance.md L85-L125](https://github.com/google-deepmind/alpha
 
 AlphaFold 3 uses compilation buckets to minimize JAX recompilation. The system pads inputs to the nearest bucket size. Default buckets range from 256 to 5120 tokens. [docs/performance.md L1053-L1065](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L1053-L1065)
 
-```
-
+```markdown
+# Bucket logic in run_alphafold.pybuckets = [256, 512, 768, 1024, 1280, 1536, 2048, 2560, 3072, 3584, 4096, 4608, 5120]
 ```
 
 Sources: [docs/performance.md L1053-L1083](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L1053-L1083)
@@ -114,8 +181,26 @@ The `run_alphafold.py` script can be executed in stages to optimize resource uti
 
 Title: Code Entity Mapping for Staged Execution
 
-```
+```mermaid
+flowchart TD
 
+Runner["run_alphafold.py"]
+DataFlag["--run_data_pipeline"]
+InfFlag["--run_inference"]
+InferenceOnly["Inference Only"]
+DataOnly["Data Pipeline Only"]
+
+subgraph Code_Entity_Mapping ["Code_Entity_Mapping"]
+    Runner
+    DataFlag
+    InfFlag
+    InferenceOnly
+    DataOnly
+    Runner --> DataFlag
+    Runner --> InfFlag
+    DataFlag --> InferenceOnly
+    InfFlag --> DataOnly
+end
 ```
 
 Sources: [docs/performance.md L5-L25](https://github.com/google-deepmind/alphafold3/blob/97639fff/docs/performance.md?plain=1#L5-L25)

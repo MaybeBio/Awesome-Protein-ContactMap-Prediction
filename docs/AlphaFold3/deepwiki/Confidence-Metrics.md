@@ -28,8 +28,56 @@ AlphaFold 3 computes confidence metrics at multiple structural levels to assess 
 
 **Confidence Metrics Hierarchy**
 
-```
+```mermaid
+flowchart TD
 
+pLDDT["pLDDT scores<br>[num_atoms]"]
+PAE["PAE matrix<br>[num_tokens, num_tokens]"]
+PDE["PDE matrix<br>[num_samples, num_tokens, num_tokens]"]
+ContactProbs["contact_probs<br>[num_tokens, num_tokens]"]
+ChainPairIPTM["chain_pair_iptm<br>[num_chains, num_chains]"]
+ChainPairPAE["chain_pair_pae_mean/min<br>[num_chains, num_chains]"]
+PDESingle["pde_single:<br>ichain, xchain, full_chain"]
+PTM["pTM score"]
+IPTM["ipTM score"]
+FracDisordered["fraction_disordered"]
+HasClash["has_clash"]
+RankingScore["ranking_score"]
+
+PAE --> ChainPairPAE
+PDE --> PDESingle
+ContactProbs --> ChainPairPAE
+PAE --> PTM
+PAE --> IPTM
+ChainPairIPTM --> IPTM
+
+subgraph StructureLevel ["Structure-level Metrics"]
+    PTM
+    IPTM
+    FracDisordered
+    HasClash
+    RankingScore
+    PTM --> RankingScore
+    IPTM --> RankingScore
+    FracDisordered --> RankingScore
+    HasClash --> RankingScore
+end
+
+subgraph ChainLevel ["Chain-level Metrics"]
+    ChainPairIPTM
+    ChainPairPAE
+    PDESingle
+end
+
+subgraph TokenLevel ["Token-level Metrics"]
+    PAE
+    PDE
+    ContactProbs
+end
+
+subgraph AtomLevel ["Atom-level Metrics"]
+    pLDDT
+end
 ```
 
 Sources: [src/alphafold3/model/confidences.py L11-L212](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/confidences.py#L11-L212)
@@ -67,8 +115,23 @@ Aggregate PAE metrics are computed for each chain pair, including `chain_pair_pa
 
 **Chain-Pair PAE Computation Flow**
 
-```
+```mermaid
+flowchart TD
 
+FullPAE["full_pae<br>[num_samples, num_tokens, num_tokens]"]
+Subset["Subset by asym_id"]
+AsymIDs["asym_id<br>[num_tokens]"]
+ContactProbs["contact_probs<br>[num_tokens, num_tokens]"]
+Weight["Weighted Aggregation"]
+ChainPairMean["chain_pair_pae_mean<br>[num_chains, num_chains]"]
+ChainPairMin["chain_pair_pae_min<br>[num_chains, num_chains]"]
+
+FullPAE --> Subset
+AsymIDs --> Subset
+ContactProbs --> Weight
+Subset --> Weight
+Weight --> ChainPairMean
+Weight --> ChainPairMin
 ```
 
 Sources: [src/alphafold3/model/confidence_types.py L186-L210](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/confidence_types.py#L186-L210)
@@ -83,8 +146,8 @@ PDE represents the expected error in the distance between token pairs. This is a
 
 The `rank_metric()` function computes a scalar ranking score used during the diffusion sampling process to select the best structure among samples. It calculates a contact-weighted average of the PDE (negated, so higher is better).
 
-```
-
+```python
+def rank_metric(full_pde, contact_probs):  # Higher is better  return -jnp.sum(full_pde * contact_probs) / (jnp.sum(contact_probs) + 1e-6)
 ```
 
 Sources: [src/alphafold3/model/confidences.py L200-L212](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/confidences.py#L200-L212)
@@ -137,8 +200,8 @@ The score is a weighted combination of structural confidence, disorder, and a he
 | `fraction_disordered` | 0.5 | `_FRACTION_DISORDERED_WEIGHT` [src/alphafold3/model/confidences.py L49](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/confidences.py#L49-L49) |
 | `has_clash` | -100.0 | `_CLASH_PENALIZATION_WEIGHT` [src/alphafold3/model/confidences.py L50](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/confidences.py#L50-L50) |
 
-```
-
+```markdown
+# Composite Score Logicscore = ptm_iptm_average + (0.5 * fraction_disordered) - (100.0 * has_clash)
 ```
 
 Sources: [src/alphafold3/model/confidences.py L48-L50](https://github.com/google-deepmind/alphafold3/blob/97639fff/src/alphafold3/model/confidences.py#L48-L50)
