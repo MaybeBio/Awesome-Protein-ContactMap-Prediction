@@ -1,0 +1,43 @@
+# ChrisHayduk/minAlphaFold2
+
+Source: https://zread.ai/ChrisHayduk/minAlphaFold2
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速上手](2-quick-start.md)
+- [入门/训练阶梯](3-training-ladder.md)
+
+## 深入解析
+
+- [深入解析/架构概览](4-architecture-overview.md)
+- [深入解析/补充算法映射](19-supplement-algorithm-mapping.md)
+### 核心流水线
+
+- [深入解析/核心流水线/输入嵌入器与相对位置](5-input-embedder-and-relpos.md)
+- [深入解析/核心流水线/Evoformer 堆叠](6-evoformer-stack.md)
+- [深入解析/核心流水线/结构模块与 IPA](7-structure-module-and-ipa.md)
+
+### 表征与几何
+
+- [深入解析/表征与几何/MSA 与配对表征](8-msa-and-pair-representations.md)
+- [深入解析/表征与几何/刚体帧与扭转角](9-rigid-frames-and-torsions.md)
+- [深入解析/表征与几何/不变点注意力](10-invariant-point-attention.md)
+
+### 训练与损失
+
+- [深入解析/训练与损失/损失函数与 FAPE](11-loss-functions-and-fape.md)
+- [深入解析/训练与损失/两阶段训练协议](12-two-stage-training-protocol.md)
+- [深入解析/训练与损失/零初始化与参数 EMA](13-zero-init-and-parameter-ema.md)
+
+### 数据与预处理
+
+- [深入解析/数据与预处理/数据流水线与裁剪](14-data-pipeline-and-cropping.md)
+- [深入解析/数据与预处理/MSA 处理与掩码](15-msa-processing-and-masking.md)
+
+### 配置与推理
+
+- [深入解析/配置与推理/模型配置档案](16-model-config-profiles.md)
+- [深入解析/配置与推理/循环与集成](17-recycling-and-ensembling.md)
+- [深入解析/配置与推理/结构弛豫](18-structure-relaxation.md)
+

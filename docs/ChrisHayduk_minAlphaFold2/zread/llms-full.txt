@@ -1,0 +1,4323 @@
+# ChrisHayduk/minAlphaFold2
+
+Source: https://zread.ai/ChrisHayduk/minAlphaFold2
+
+# 入门
+
+- [入门/概述](https://zread.ai/ChrisHayduk/minAlphaFold2/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**minAlphaFold2** 是 AlphaFold2 的一个极简、教学用途的 PyTorch 复现版本 —— 模型架构仅用约 3,000 行纯 PyTorch 代码实现，整个包约 9,000 行。每个模块与 DeepMind 补充论文中的编号算法一一对应（1:1 映射）。受 Andrej Karpathy 的 minGPT 启发，本仓库牺牲了生产就绪性，只为换取一个特质：你可以在一个下午坐下来，从头到尾读完 AlphaFold2。
+
+![minAlphaFold2](https://github.com/ChrisHayduk/minAlphaFold2/blob/main/assets/minAlphaFold2.png?raw=true)
+
+来源：[README.md](/README.md#L1-L18)
+
+## minAlphaFold2 是什么（又不是什么）
+
+本项目之所以存在，是因为阅读 AlphaFold2 通常意味着要在 62 页的补充材料、为 Google 规模推理优化的 JAX 代码库，以及添加了自身脚手架的生产级 PyTorch 移植版之间来回跳转。minAlphaFold2 消除了这一瓶颈。它**不是**套在 DeepMind 权重外的推理框架，**不是**速度基准测试，也**不是** AF2 multimer / AF3 的实现。它是一个紧凑、可训练、每个算法单文件的参考实现，你可以派生、调整并在单块 GPU 上端到端地运行。
+
+| 属性 | minAlphaFold2 | DeepMind AF2 (JAX) | OpenFold (PyTorch) |
+|---|---|---|---|
+| **目的** | 教学与研究 | 生产推理 | 生产推理 |
+| **框架** | 纯 PyTorch | JAX / Haiku | PyTorch + 自定义算子 |
+| **依赖** | `torch`, `numpy` | JAX, Haiku, dm-tree | torch, einops, 自定义 CUDA |
+| **补充材料映射** | 1:1，显式 | 隐式 | 部分 |
+| **单 GPU 可训练** | ✅ (梯度累加 + 梯度检查点) | ❌ (TPU Pod) | ⚠️ (多 GPU) |
+| **代码行数 (核心)** | ~3,000 | ~15,000+ | ~20,000+ |
+
+来源：[README.md](/README.md#L12-L17), [pyproject.toml](/pyproject.toml#L31-L36)
+
+## 架构一览
+
+完整的 AlphaFold2 流经五个阶段：**输入嵌入 → 额外 MSA 堆叠 → Evoformer 主干 → 结构模块 → 辅助头部**，包裹在一个循环回收环路中，该环路将上一轮的预测重新作为输入。每个阶段都是一个独立的 `nn.Module`，以其实现的补充材料章节命名。
+
+```mermaid
+flowchart TB
+    subgraph Input["1. Input Embedding"]
+        IE[InputEmbedder<br/>Algorithm 3]
+        RP[RelPos<br/>Algorithm 4]
+    end
+
+    subgraph TemplateExtra["2. Template & Extra MSA"]
+        TP[TemplatePair<br/>Algorithm 16]
+        TPA[TemplatePointwiseAtt<br/>Algorithm 17]
+        EMS[ExtraMsaStack<br/>Algorithm 18]
+    end
+
+    subgraph Evo["3. Evoformer Trunk"]
+        EVO[Evoformer × 48 blocks<br/>Algorithm 6]
+    end
+
+    subgraph Struct["4. Structure Module"]
+        SM[StructureModule<br/>Algorithm 20]
+        IPA[InvariantPointAttention<br/>Algorithm 22]
+        BU[BackboneUpdate<br/>Algorithm 23]
+    end
+
+    subgraph Heads["5. Auxiliary Heads"]
+        DH[DistogramHead]
+        PH[PLDDTHead]
+        MMH[MaskedMSAHead]
+        TH[TMScoreHead]
+        EH[ExperimentallyResolvedHead]
+    end
+
+    RE[Recycling<br/>Algorithms 30-32]
+
+    Input --> TemplateExtra --> Evo --> Struct --> Heads
+    Struct -.->|prev cycle<br/>m_1i, z_ij, x_Cβ| RE
+    RE -.->|re-embed| Input
+```
+
+来源：[minalphafold/model.py](/minalphafold/model.py#L15-L51), [minalphafold/model.py](/minalphafold/model.py#L231-L399)
+
+## 核心流水线：表示与数据流
+
+两种表示贯穿整个 Evoformer 主干，并构成结构模块的接口：
+
+- **MSA 表示** `m_si ∈ ℝ^(N_seq × N_res × c_m)` —— 编码同源序列和查询序列本身的进化信息。每一行是一条 MSA 序列；列是残基位置。
+- **对表示** `z_ij ∈ ℝ^(N_res × N_res × c_z)` —— 编码残基对关系。通过外积均值、三角操作和模板特征进行更新。模型不强制对称性；它自行学习此性质。
+
+在 Evoformer 之后，第一行 MSA（`m_1i`）被投影为**单一表示** `s_i ∈ ℝ^(N_res × c_s)`，该表示驱动结构模块和所有辅助头部。
+
+| 阶段 | 输入 | 输出 | 算法 | 源文件 |
+|---|---|---|---|---|
+| 输入嵌入 | `target_feat`, `msa_feat`, `residue_index` | `m_si`, `z_ij` | 3, 4 | `embedders.py` |
+| 模板对 | `template_pair_feat` | `z_ij` 更新 | 16, 17 | `embedders.py` |
+| 额外 MSA 堆叠 | `extra_msa_feat`, `z_ij` | `z_ij` 更新 | 18, 19 | `embedders.py` |
+| Evoformer | `m_si`, `z_ij` | `m_si`, `z_ij` | 6–15 | `evoformer.py`, `embedders.py` |
+| 结构模块 | `s_i`, `z_ij` | atom14 坐标，帧，扭转角 | 20–25 | `structure_module.py` |
+| 辅助头部 | `s_i`, `z_ij`, `m_si` | distogram, pLDDT, masked MSA, PAE | 29 + §1.9 | `heads.py` |
+
+来源：[minalphafold/embedders.py](/minalphafold/embedders.py#L1-L23), [minalphafold/evoformer.py](/minalphafold/evoformer.py#L1-L50), [minalphafold/structure_module.py](/minalphafold/structure_module.py#L1-L20), [minalphafold/heads.py](/minalphafold/heads.py#L1-L16)
+
+## 项目结构
+
+```
+minAlphaFold2/
+├── minalphafold/              # 核心包 (~9,000 行代码)
+│   ├── model.py               # AlphaFold2 顶层模块 (算法 2)
+│   ├── embedders.py           # 输入嵌入 + 所有共享子块 (算法 3-5, 8-19)
+│   ├── evoformer.py           # Evoformer 块 + MSA 行注意力 (算法 6-7)
+│   ├── structure_module.py    # 结构模块，IPA，骨架更新 (算法 20-25)
+│   ├── geometry.py            # 真实刚体帧，扭转角，伪-β (算法 21)
+│   ├── losses.py              # 所有损失项 + FAPE + 冲突损失 (算法 26-28, §1.9)
+│   ├── heads.py               # 辅助预测头部 (算法 29, §1.9&amp;#57344;9)
+│   ├── data.py                # 数据集，特征构建器，裁剪，MSA 处理
+│   ├── model_config.py        # 所有超参数的类型化 dataclass 架构
+│   ├── initialization.py      # 线性层初始化器 (补充材料 §1.11.4)
+│   ├── trainer.py             # 训练循环，学习率调度，梯度累加
+│   ├── a3m.py                 # MSA/a3m 文件解析 + 氨基酸字母表
+│   ├── mmcif.py               # mmCIF 结构解析器
+│   ├── pdbio.py               # PDB 写入器 (B因子 → pLDDT 映射)
+│   ├── residue_constants.py   # 原子命名，刚体组帧，立体化学属性
+│   └── utils.py               # 共享辅助工具：距离区间，dropout，独热区间分箱
+├── configs/                   # 模型配置 + 训练协议 (TOML)
+│   ├── alphafold2.toml        # 完整论文规格架构
+│   ├── medium.toml            # 用于本地实验的中等规模配置
+│   ├── tiny.toml              # 缩减至 CPU 的测试配置
+│   └── training_alphafold2.toml  # 两阶段训练超参数
+├── scripts/                   # 独立运行脚本 (过拟合，训练，预处理，弛豫)
+├── tests/                     # pytest 测试套件 (形状，几何，损失，数据流水线)
+├── data/                      # 处理后的特征/标签 (不在仓库中)
+└── assets/                    # 图表和演示视频
+```
+
+来源：[README.md](/README.md#L19-L26), [pyproject.toml](/pyproject.toml#L59-L63)
+
+## 设计原则
+
+**纯 PyTorch。** 每一层都由 `nn.Linear`、`nn.LayerNorm`、`torch.einsum` 和标准激活函数构建。没有 `einops`，没有自定义 CUDA 内核，没有外部 ML 库。唯一的运行时依赖是 `torch` 和 `numpy`。这意味着你无需交叉参考第二种框架的约定即可阅读任何文件。
+
+**与补充材料 1:1 映射。** 每个模块=对应一个编号算法或章节；该映射是权威索引。每个文件以其实现的补充材料章节命名，每个不寻常的设计选择都引用了论文的具体行。当你在文档字符串中看到 `Algorithm 7` 时，你可以直接翻到补充材料的对应算法，对照阅读。
+
+**零初始化残差起始。** 每个残差块的最终输出投影均进行零初始化，因此每一层最初都是恒等操作（补充材料 §1.11.4）。门控线性层)使用零权重 + 偏置 1，因此 `sigmoid(1) ≈ 0.73` —— 门控初始阶段大部分为直通。这意味着在第 0 步，只有 FAPE 将梯度信号传入主干；所有辅助头部输出均匀分布。
+
+**单 GPU 可训练。** 梯度累加弥补了 128 核 TPU 的算力差距。梯度检查点（§1.11.8）使得在全链裁剪尺寸下也能容纳 48 块 Evoformer。`tiny` 配置可在 CPU 上几秒钟内运行形状测试。
+
+来源：[README.md](/README.md#L21-L26), [minalphafold/initialization.py](/minalphafold/initialization.py#L1-L24), [minalphafold/model.py](/minalphafold/model.py#L106-L153)
+
+## 配置方案
+
+三种模型配置方案可让你用规模换取速度。`alphafold2.toml` 中的每个值均符合论文规格，并附带内联补充材料引用；`tiny` 和 `medium` 缩减了通道维度、头数和块数，以便进行本地迭代。
+
+| 参数 | `tiny` | `medium` | `alphafold2` (论文) |
+|---|---|---|---|
+| **c_m** (MSA 通道数) | 32 | 128 | 256 |
+| **c_z** (对通道数) | 16 | 64 | 128 |
+| **c_s** (单一通道数) | 32 | 192 | 384 |
+| **Evoformer 块数** | 1 | 4 | 48 |
+| **额外 MSA 块数** | 1 | 2 | 4 |
+| **SM 层数** | 2 | 4 | 8 |
+| **IPA 头数** | 4 | 8 | 12 |
+| **适用场景** | 测试 / CPU 冒烟测试 | 本地过拟合 | 完整复现 |
+
+来源：[configs/alphafold2.toml](/configs/alphafold2.toml#L1-L80), [configs/tiny.toml](/configs/tiny.toml#L1-L78), [configs/medium.toml](/configs/medium.toml#L1-L78)
+
+## 训练协议
+
+AlphaFold2 采用**两阶段训练协议**（补充材料表 4）：初始训练阶段从随机初始化开始，训练约 10M 样本，并禁用结构冲突损失；随后是微调阶段，从初始检查点加载，学习率减半，增大裁剪尺寸，并启用冲突损失以修正肽键几何和空间位阻。
+
+| | **阶段 1：初始训练** | **阶段 2：微调** |
+|---|---|---|
+| **裁剪尺寸** | 256 残基 | 384 残基 |
+| **MSA 深度** | 128 | 512 |
+| **额外 MSA 深度** | 1,024 | 5,120 |
+| **学习率** | 1e-3 (含 128k 样本预热) | 5e-4 (无预热) |
+| **冲突损失** | 关闭 | 开启 (权重 = 1.0) |
+| **总样本数** | ~10M | ~1.5M |
+| **优化器** | Adam (β₁=0.9, β₂=0.999, ε=1e-6) | 同上 |
+
+来源：[configs/training_alphafold2.toml](/configs/training_alphafold2.toml#L1-L54), [minalphafold/trainer.py](/minalphafold/trainer.py#L1-L26)
+
+## 补充材料算法映射
+
+所实现的每个算法的权威索引，包含其位置与功能。这是 DeepMind 补充材料与代码库之间的权威映射。
+
+| 算法 | 描述 | 位置 |
+|---|---|---|
+| 1 | MSA 块删除 | `data.py: block_delete_msa` |
+| 2 | 推理 (顶层) | `model.py: AlphaFold2.forward` |
+| 3 | 输入嵌入器 | `embedders.py: InputEmbedder` |
+| 4 | 相对位置编码 | `embedders.py: RelPos` |
+| 6 | Evoformer 堆叠 | `evoformer.py: Evoformer` |
+| 7 | 带对偏置的 MSA 行注意力 | `evoformer.py: MSARowAttentionWithPairBias` |
+| 8–9 | MSA 列注意力 / 转换 | `embedders.py` |
+| 10 | 外积均值 | `embedders.py: OuterProductMean` |
+| 11–12 | 三角乘法 (出/入) | `embedders.py` |
+| 13–14 | 三角注意力 (起始/终止) | `embedders.py` |
+| 15 | 对转换 | `embedders.py: PairTransition` |
+| 16–17 | 模板对 / 逐点注意力 | `embedders.py` |
+| 18–19 | 额外 MSA 堆叠 / 全局列注意力 | `embedders.py` |
+| 20 | 结构模块 | `structure_module.py: StructureModule` |
+| 22 | 不变点注意力 | `structure_module.py: InvariantPointAttention` |
+| 26 | 重命名对称真实原子 | `losses.py: select_best_atom14_ground_truth` |
+| 27–28 | 扭转角损失 / FAPE | `losses.py` |
+| 29 | pLDDT 头部 | `heads.py: PLDDTHead` |
+| 30–32 | 循环回收 (推理 + 训练 + 嵌入器) | `model.py: AlphaFold2.forward` |
+
+<CgxTip>文档字符串或内联注释中的每个算法编号均指代 AlphaFold2 补充信息（"Supplementary Methods" PDF）中的编号算法表。打开补充材料至该算法编号，即可将伪代码与 Python 实现对照阅读。</CgxTip>
+
+来源：[README.md](/README.md#L162-L198), [minalphafold/model.py](/minalphafold/model.py#L15-L51)
+
+## 接下来去哪
+
+文档的组织遵循模型自身的数据流。从实际设置开始，然后沿着流水线从输入追踪到输出：
+
+1. **[快速开始](2-quick-start)** —— 运行本仓库：安装、对单个 PDB 过拟合、在 5 分钟内确认端到端正确性。
+2. **[训练阶梯](3-training-ladder)** —— 从单蛋白过拟合到完整 AF2 复现的三个阶梯，每个都是前者的严格超集。
+3. **[架构概览](4-architecture-overview)** —— 完整的流水线图，包含张量形状、模块边界与循环回收环路的解释。
+4. **[输入嵌入器与相对位置编码](5-input-embedder-and-relpos)** —— `target_feat`、`msa_feat` 和 `residue_index` 如何转换为初始的 `m_si` 和 `z_ij`。
+5. **[Evoformer 堆叠](6-evoformer-stack)** —— 48 块主干：MSA 注意力、三角更新、外积均值，以及 `m_si` 和 `z_ij` 如何协同演化。
+6. **[结构模块与 IPA](7-structure-module-and-ipa)** —— `s_i` 和 `z_ij` 如何通过迭代 IPA 和骨架更新转化为 3D 原子坐标。
+
+<CgxTip>如果你是 AlphaFold2 新手，请从[快速开始](2-quick-start)运行模型开始，然后阅读[架构概览](4-architecture-overview)了解全局图景，再深入各个模块。上面的补充材料算法映射是你在整个文档中的交叉参考关键。</CgxTip>
+
+---
+
+- [入门/快速上手](https://zread.ai/ChrisHayduk/minAlphaFold2/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+minAlphaFold2 是 AlphaFold2 的一个极简、教学向的 PyTorch 重实现——完整模型架构仅约 3,000 行纯 PyTorch 代码，整个包约 9,000 行。每个模块与 AlphaFold2 补充材料中的编号算法一一对应，且整个训练流程可在单 GPU 上端到端运行。本页将引导你在五分钟内，从克隆仓库到完成首个结构预测。
+
+![minAlphaFold2](https://github.com/ChrisHayduk/minAlphaFold2/blob/main/assets/minAlphaFold2.png?raw=true)
+
+来源: [README.md](/README.md#L1-L9)
+
+## 前提条件
+
+minAlphaFold2 要求 **Python ≥ 3.11**，且仅有 **两个运行时依赖** —— `torch` 和 `numpy` ——这与项目坚持的纯 PyTorch 理念一致。其他所有内容（结构弛豫、云端 GPU 运行器、测试）均为可选。
+
+| 依赖组 | 安装标志 | 包 | 用途 |
+|---|---|---|---|
+| **核心** | *(默认)* | `torch>=2.3`, `numpy>=1.24` | 模型、训练、推理 |
+| **开发** | `[dev]` | `pytest>=7.0` | 测试套件 |
+| **弛豫** | `[relax]` | `openmm>=8.0`, `pdbfixer>=1.9` | Amber 结构弛豫 (§1.8.6) |
+| **云端** | `[modal]` | `modal>=0.60` | 在 H200/A100 上进行云端 GPU 训练 |
+| **全部** | `[all]` | *(上述所有)* | 一键安装 |
+
+来源: [pyproject.toml](/pyproject.toml#L1-L57)
+
+## 安装
+
+```bash
+git clone https://github.com/ChrisHayduk/minAlphaFold2
+cd minAlphaFold2
+pip install -e '.[dev]'
+```
+
+可编辑安装 (`-e`) 使得 `minalphafold` 包可被导入，同时允许你编辑源码并立即查看变更。`[dev]` 附加项会引入测试套件所需的 `pytest`；若你只需模型，可省略该附加项。可安装的包**仅**包含 **`minalphafold/`** —— `scripts/`、`configs/`、`tests/` 和 `data/` 均为独立的顶层目录，不属于该包。
+
+来源: [pyproject.toml](/pyproject.toml#L59-L63), [README.md](/README.md#L29-L33)
+
+## 五分钟健全性检查：过拟合单个 PDB
+
+确认整个流程可运行的最快方法是对单个真实 PDB 进行过拟合。此过程演练了前向传播、所有损失函数及优化器管线，且**无需**任何 MSA/模板机制——MSA 被设为仅含查询（单行），模板为空。
+
+```bash
+python scripts/overfit_single_pdb.py \
+  --pdb artifacts/overfit_single_pdb/1a0m_A/ground_truth_1a0m_A.pdb \
+  --steps 1000
+```
+
+此脚本在 CPU 上运行约 1 分钟，在笔记本 GPU 上约 20 秒，并收敛至亚埃级 Cα RMSD。该脚本会在每个日志记录步报告每步损失、Kabsch 对齐后的骨干/Cα/全原子 RMSD 以及肽键统计数据。
+
+来源: [README.md](/README.md#L34-L40), [scripts/overfit_single_pdb.py](/scripts/overfit_single_pdb.py#L1-L24)
+
+### 过拟合脚本的工作原理
+
+该脚本遵循一个紧凑循环，将几何学习与数据复杂度隔离开来：
+
+```mermaid
+flowchart TD
+    A["解析真实 PDB<br/>→ atom14 位置 + 掩码"] --> B["构建最小示例<br/>MSA = 仅含查询, 无模板"]
+    B --> C["通过 collate_batch()<br/>整理批次"]
+    C --> D["使用选定的模型配置<br/>实例化 AlphaFold2"]
+    D --> E["训练循环:<br/>forward → loss → backward → clip → step"]
+    E --> F{"步数 % log_every == 0?"}
+    F -->|Yes| G["评估: Kabsch 对齐<br/>→ RMSD 指标"]
+    G --> H{"Cα RMSD 更优?"}
+    H -->|Yes| I["保存最佳状态字典"]
+    H -->|No| F
+    F -->|No| E
+    I --> J["输出产物:<br/>预测 PDB, 真实 PDB,<br/>PyMOL 脚本, 指标 JSON"]
+```
+
+来源: [scripts/overfit_single_pdb.py](/scripts/overfit_single_pdb.py#L294-L491)
+
+### 过拟合产物
+
+所有输出均存放于 `artifacts/overfit_single_pdb/<chain_id>/`：
+
+| 产物 | 描述 |
+|---|---|
+| `predicted_<chain_id>.pdb` | 按 Cα RMSD 最优的预测结构 (Kabsch 对齐) |
+| `ground_truth_<chain_id>.pdb` | 输入真实值的副本 |
+| `view_in_pymol.pml` | PyMOL 脚本：加载两者、着色、对齐 |
+| `metrics.json` | 最终 + 最佳指标摘要 |
+| `losses.json` | 每步损失 + RMSD 日志 |
+
+在 PyMOL 中查看结果：
+
+```bash
+pymol artifacts/overfit_single_pdb/1a0m_A/view_in_pymol.pml
+```
+
+来源: [scripts/overfit_single_pdb.py](/scripts/overfit_single_pdb.py#L451-L487)
+
+### 过拟合 CLI 选项
+
+| 标志 | 默认值 | 描述 |
+|---|---|---|
+| `--pdb` | *(必填)* | 真实 PDB 文件的路径 |
+| `--steps` | 1000 | 优化器步数 |
+| `--model-profile` | `medium` | 配置文件：`tiny`、`medium` 或 `alphafold2` |
+| `--learning-rate` | 1e-3 | 基础学习率 |
+| `--n-cycles` | 1 | 循环回收次数 (§1.10) |
+| `--device` | auto | 若可用则为 `cuda`，否则为 `cpu` |
+| `--violations-after-step` | *(关闭)* | 在此步之后启用违例损失 (§1.9.11) |
+
+来源: [scripts/overfit_single_pdb.py](/scripts/overfit_single_pdb.py#L294-L333)
+
+## 模型配置文件
+
+minAlphaFold2 提供三种模型配置，每个都是 `configs/` 下的一个 TOML 文件。`alphafold2` 配置中的每个值均注明了其补充材料来源；较小的配置通过缩减通道维度、头数和块数来实现更快的迭代。
+
+| 参数 | `tiny` | `medium` | `alphafold2` (论文规格) |
+|---|---|---|---|
+| MSA 维度 `c_m` | 32 | 128 | 256 |
+| 单表征维度 `c_s` | 32 | 192 | 384 |
+| 对表征维度 `c_z` | 16 | 64 | 128 |
+| Evoformer 块 | 1 | 4 | 48 |
+| 结构模块层 | 2 | 4 | 8 |
+| IPA 头 | 4 | 8 | 12 |
+| Dropout | 0.0 (全部) | 0.0 (全部) | 论文值 |
+| **适用场景** | 形状测试, CI | CPU 过拟合, <50 残基 | 完整复现 |
+
+<CgxTip>使用 `tiny` 进行快速形状测试和 CI，使用 `medium` 在 CPU 上进行单蛋白过拟合，仅在复现论文或使用梯度检查点在 GPU 上训练时使用 `alphafold2`。`--model-profile` 标志接受配置名称，或具有相同 schema 的任意 TOML 文件的直接路径。</CgxTip>
+
+来源: [configs/tiny.toml](/configs/tiny.toml#L1-L78), [configs/medium.toml](/configs/medium.toml#L1-L78), [configs/alphafold2.toml](/configs/alphafold2.toml#L1-L80)
+
+## 多链训练
+
+一旦过拟合健全性检查通过，下一阶段是对少量预处理链进行小规模训练。此过程演练了完整流程——MSA 聚类、模板处理、块删除、裁剪、损失及检查点保存。
+
+```bash
+python scripts/train_af2.py \
+  --stage initial \
+  --model-config tiny \
+  --training-protocol alphafold2 \
+  --checkpoint-dir checkpoints/smoke \
+  --processed-features-dir data/processed_features \
+  --processed-labels-dir data/processed_labels \
+  --batch-size 1 --grad-accum-steps 1 \
+  --epochs 2
+```
+
+当设置 `--grad-accum-steps 1` 时，每条链运行一次优化器步——即使只有一个预处理 NPZ 文件也能正常运行。训练协议超参数（裁剪尺寸、学习率、预热、违例损失调度）来自 `configs/training_alphafold2.toml`，该文件与补充表 4 逐行对应。
+
+来源: [README.md](/README.md#L52-L67), [scripts/train_af2.py](/scripts/train_af2.py#L1-L37)
+
+### 训练脚本关键参数
+
+| 标志 | 默认值 | 描述 |
+|---|---|---|
+| `--stage` | *(必填)* | `initial` 或 `finetune` |
+| `--checkpoint-dir` | *(必填)* | `<stage>_latest.pt` / `<stage>_best.pt` 的目录 |
+| `--model-config` | `alphafold2` | 模型配置名称或 TOML 路径 |
+| `--training-protocol` | `alphafold2` | 训练协议名称 |
+| `--batch-size` | 1 | 每步的微批次大小 |
+| `--grad-accum-steps` | auto | 推导得出，使 `batch_size × grad_accum = 128` (论文规格) |
+| `--n-cycles` | 4 | 循环回收次数 (§1.10) |
+| `--init-from` | *(无)* | 微调：用于初始化权重的检查点 |
+| `--resume` | *(无)* | 阶段内从检查点恢复 |
+| `--epochs` | auto | 由 `total_samples / dataset_size` 推导得出 |
+
+来源: [scripts/train_af2.py](/scripts/train_af2.py#L169-L215)
+
+## 准备训练数据
+
+训练使用 [OpenProteinSet](https://registry.opendata.aws/openfold/)——AlphaFold2 训练集的社区复现版本。三个脚本负责处理该流程：
+
+```mermaid
+flowchart LR
+    A["1. download_openproteinset.py<br/>原始 MSA + 模板 + mmCIF"] --> B["2. preprocess_openproteinset.py<br/>逐链 NPZ 对:<br/>特征 + 标签"]
+    B --> C["3. filter_openproteinset.py<br/>§1.2.5 确定性过滤器<br/>→ filter_manifest.json"]
+    C --> D["train_af2.py<br/>--chains-manifest data/filter_manifest.json"]
+```
+
+**步骤 1 —— 下载** 少量链用于冒烟测试：
+
+```bash
+echo -e "1a0m_A\n6m0j_E" > data/chains.txt
+python scripts/download_openproteinset.py \
+  --data-root data/openproteinset \
+  --chain-id-file data/chains.txt
+```
+
+**步骤 2 —— 预处理** 为逐链 NPZ 对（atom14 位置、聚类 MSA、模板原子）：
+
+```bash
+python scripts/preprocess_openproteinset.py \
+  --raw-root data/openproteinset \
+  --processed-features-dir data/processed_features \
+  --processed-labels-dir data/processed_labels
+```
+
+**步骤 3 —— 过滤** 使用补充材料 §1.2.5 标准（分辨率 < 9 Å，无单一氨基酸占比 > 序列的 80%，最小长度）：
+
+```bash
+python scripts/filter_openproteinset.py \
+  --processed-features-dir data/processed_features \
+  --processed-labels-dir data/processed_labels \
+  --manifest-out data/filter_manifest.json
+```
+
+将清单传递给 `train_af2.py`，使用 `--chains-manifest data/filter_manifest.json` 将训练限制在过滤后的数据集。
+
+来源: [README.md](/README.md#L110-L145), [scripts/download_openproteinset.py](/scripts/download_openproteinset.py#L12-L23)
+
+## 弛豫预测结构
+
+原始预测具有正确的折叠，但具有理想化的骨干键长——FAPE 是帧不变的，且从不直接约束肽键几何结构。补充材料 §1.8.6 通过迭代受约束的 Amber 最小化解决了此问题：
+
+```bash
+pip install -e '.[relax]'     # OpenMM + pdbfixer
+python scripts/relax_pdb.py artifacts/overfit_single_pdb/1a0m_A/predicted_1a0m_A.pdb
+```
+
+这将在输入文件旁写入 `predicted_1a0m_A_relaxed.pdb`。每轮最小化均在所有重原子上施加谐和约束（k = 10 kcal/mol/Å²）的 AMBER99SB + GBSA 隐式溶剂下进行，然后释放仍违反 §1.9.11 标准的残基的约束（复用 `losses.StructuralViolationLoss` 以实现位级一致规则），并重复此过程直到所有违例消除。
+
+来源: [README.md](/README.md#L148-L159), [scripts/relax_pdb.py](/scripts/relax_pdb.py#L1-L30)
+
+## 编程式用法
+
+你也可以将 minAlphaFold2 作为 Python 库使用。核心模型类为 `AlphaFold2`，通过 `ModelConfig` 进行配置：
+
+```python
+from minalphafold.model import AlphaFold2
+from minalphafold.trainer import load_model_config
+
+# 加载模型配置 (tiny, medium, 或 alphafold2)
+config = load_model_config("medium")
+model = AlphaFold2(config)
+
+# 前向传播需要来自整理流程的批次字典
+outputs = model(**model_inputs)  # 参见 trainer.model_inputs_from_batch
+```
+
+`load_model_config` 函数可从 `configs/` 解析配置名称，或接受直接的 TOML 路径。`ModelConfig` 数据类实现了端到端类型检查——TOML 文件或 schema 中的拼写错误会在加载时立即抛出 `TypeError`，而非在前向传播期间才暴露为 `AttributeError`。
+
+来源: [minalphafold/model.py](/minalphafold/model.py#L15-L51), [minalphafold/model_config.py](/minalphafold/model_config.py#L25-L106), [minalphafold/trainer.py](/minalphafold/trainer.py#L60-L89)
+
+## 验证安装
+
+运行测试套件以确认一切配置正确：
+
+```bash
+pip install -e '.[dev]'
+pytest tests/
+```
+
+测试套件涵盖 MSA 处理、几何操作、数据管线整理、PDB I/O、损失函数及训练器配置——全部使用 `tiny` 配置以确保速度。
+
+来源: [pyproject.toml](/pyproject.toml#L38-L53)
+
+## 接下来去哪
+
+你现在已拥有可运行的 minAlphaFold2 安装，并已端到端验证了流程。逻辑上的下一步取决于你的目标：
+
+- **理解架构** → [架构概览](4-architecture-overview)，获取从输入嵌入到结构模块的完整流程图
+- **运行完整训练阶梯** → [训练阶梯](3-training-ladder)，了解从单蛋白过拟合到论文规模复现的三阶段渐进过程
+- **深入特定模块** → [Evoformer 堆栈](6-evoformer-stack) 或 [结构模块与 IPA](7-structure-module-and-ipa)，探索核心计算块
+- **配置自定义运行** → [模型配置文件](16-model-config-profiles)，进行配置创建与参数调优
+
+---
+
+- [入门/训练阶梯](https://zread.ai/ChrisHayduk/minAlphaFold2/3-training-ladder)
+
+---
+slug:3-training-ladder
+blog_type:normal
+---
+
+
+minAlphaFold2 提供了一套**循序渐进的方案**，从五秒钟的冒烟测试，到在 TPU 规模硬件上符合论文规范的训练。我们将其称为*训练阶梯* (Training Ladder)：每一级阶梯都会增加模型容量、数据保真度和计算成本，并在你进入下一阶段之前，为你提供一个已验证的检查点。本页将引导你了解每一级阶梯——从在单个 PDB 上的零依赖过拟合，到完整的两阶段 AlphaFold2 协议——让你始终清楚下一步该运行什么，以及预期会得到什么结果。
+
+## 阶梯概述
+
+该阶梯有三个同步缩放的维度：**模型配置** (架构大小)、**数据保真度** (合成数据 → 真实 MSA/模板) 和**训练协议** (过拟合 → 初始训练 → 微调)。下表列出了你实际会使用的四个阶梯层级。
+
+| 阶梯层级 | 模型配置 | 数据来源 | 协议 | 典型硬件 | 首次出结果时间 |
+|------|---------------|-------------|----------|------------------|---------------------|
+| 1 — 冒烟测试 | `tiny` | 单个 PDB (仅查询序列的 MSA) | 过拟合 (dropout 为零) | CPU | 秒级 |
+| 2 — 单链过拟合 | `medium` 或 `alphafold2` | 单条预处理链 (真实 MSA，真实模板) | 过拟合 (dropout 为零) | GPU (A100-80GB) | 分钟级 |
+| 3 — 初始训练 | `alphafold2` | OpenProteinSet (裁剪至 256，N_seq 128) | 10M 样本，违规损失**关闭** | 多 GPU / TPU | 天级 |
+| 4 — 微调 | `alphafold2` | OpenProteinSet (裁剪至 384，N_seq 512) | 1.5M 样本，违规损失**开启**，学习率减半 | 多 GPU / TPU | 天级 |
+
+下方的 Mermaid 流程图展示了各层级之间的依赖关系——每一层级都会产生一个检查点或健全性检查，供下一层级使用。
+
+```mermaid
+flowchart TD
+    A["Rung 1: Smoke Test<br/>tiny profile, single PDB<br/>zero dropout overfit"] -->|pipeline learns geometry?| B["Rung 2: Single-Chain Overfit<br/>medium/alphafold2, real MSA+templates<br/>zero dropout overfit"]
+    B -->|"loss + Cα RMSD ≈ 0?"| C["Rung 3: Initial Training<br/>alphafold2, OpenProteinSet<br/>10M samples, no violation loss"]
+    C -->|initial_latest.pt checkpoint| D["Rung 4: Fine-Tuning<br/>alphafold2, larger crop<br/>1.5M samples, violation loss ON"]
+    D -->|best checkpoint| E["Inference<br/>recycling + optional ensembling"]
+```
+
+来源: [tiny.toml](/configs/tiny.toml#L1-L78), [medium.toml](/configs/medium.toml#L1-L78), [alphafold2.toml](/configs/alphafold2.toml#L1-L80), [training_alphafold2.toml](/configs/training_alphafold2.toml#L1-L54)
+
+## 第 1 级 — 冒烟测试 (tiny 配置，单个 PDB)
+
+**tiny** 配置将每个通道维度、注意力头数和块数缩减到最低限度，同时依然能运行完整的算法流水线。它的存在使得 `test_shapes` 和快速的冒烟测试能在笔记本 CPU 上几秒钟内完成。与论文相比的关键维度如下：
+
+| 参数 | 论文 (alphafold2) | tiny | 缩减倍数 |
+|-----------|-------------------|------|-----------|
+| `c_m` (MSA 通道) | 256 | 32 | 8× |
+| `c_z` (配对通道) | 128 | 16 | 8× |
+| `num_evoformer` | 48 | 1 | 48× |
+| `structure_module_layers` | 8 | 2 | 4× |
+| `ipa_num_heads` | 12 | 4 | 3× |
+
+使用 tiny 配置对单个 PDB 进行过拟合（将所有 dropout 置零，以便模型能够记忆）：
+
+```bash
+python scripts/overfit_single_pdb.py \
+    --pdb artifacts/overfit_1a0m_A/ground_truth_1a0m_A.pdb \
+    --steps 1000 \
+    --model-profile tiny
+```
+
+该脚本解析一个真实标注的 PDB，构建最小化特征（MSA = 仅查询序列，无模板），并运行普通的训练循环直到损失趋于平稳。它会报告训练损失、Kabsch 对齐后的骨架/Cα/全原子 RMSD，并写入预测的 PDB 文件以便与真实标注进行可视化对比。无需下载 OpenProteinSet，无需 JackHMMER，无需预处理——仅需一个文件和模型。
+
+<CgxTip>`overfit_single_pdb.py` 脚本内部调用了 `zero_dropout_model_config`，该函数会克隆你所选的配置，并将所有 dropout 率设置为 0.0。这对于记忆实验至关重要——否则，补充材料 §1.11.6 中的随机正则化会阻止模型拟合单个样本。你永远无需手动编辑 TOML 来禁用 dropout。</CgxTip>
+
+来源: [overfit_single_pdb.py](/scripts/overfit_single_pdb.py#L1-L48), [trainer.py](/minalphafold/trainer.py#L283-L296), [model_config.py](/minalphafold/model_config.py#L34-L107)
+
+## 第 2 级 — 单链过拟合 (真实 MSA，真实模板)
+
+一旦冒烟测试确认流水线能够学习几何结构，下一级阶梯将在单条链上对**完整数据流水线**进行压力测试。脚本 `overfit_processed_chain.py` 消耗预处理脚本生成的 NPZ 缓存——因此每个训练步骤看到的特征与完整 AlphaFold2 训练循环中看到的特征完全相同：
+
+- **真实 UniRef90 MSA** —— 每步采样，块删除 (算法 1)，聚类 (§1.2.7)，BERT 掩码 (§1.2.7)。
+- **来自 pdb70 的真实模板** —— 每步最多 `--max-templates` 个。
+- **真实监督信号** —— 来自 mmCIF 真实标注的刚体组帧、扭转角、atom37 掩码。
+- **随机残基裁剪** (§1.2.8) —— 当链长于 `--crop-size` 时触发。
+
+```bash
+python scripts/overfit_processed_chain.py \
+    --chain-id 6m0j_E \
+    --steps 5000 \
+    --model-profile medium
+```
+
+**medium** 配置是本地单 GPU 实验的最佳平衡点：通道维度比论文规范小 4–8 倍，4 个 Evoformer 块，4 个结构模块层——其容量足以在几分钟而非几天内真正学会小蛋白质，且无需 H100 的内存。
+
+| 参数 | 论文 (alphafold2) | medium | 缩减倍数 |
+|-----------|-------------------|--------|-----------|
+| `c_m` | 256 | 128 | 2× |
+| `c_z` | 128 | 64 | 2× |
+| `num_evoformer` | 48 | 4 | 12× |
+| `structure_module_layers` | 8 | 4 | 2× |
+
+如果你可以使用内存 ≥80 GB 的 GPU (A100-80GB)，你也可以使用完整的 `alphafold2` 配置进行过拟合——这是论文使用的配置，Modal 封装使其变得非常简单：
+
+```bash
+# 使用完整配置进行本地运行
+python scripts/overfit_processed_chain.py \
+    --chain-id 6m0j_E --steps 10000 --model-profile alphafold2
+
+# 或在 Modal 上运行 (自动分配 GPU，优先使用 H200)
+modal run scripts/modal_overfit.py --chain-id 6m0j_E --model-profile alphafold2
+```
+
+模型应该能使损失和 Cα RMSD 趋近于零：每次增强都是随机的，但底层只有一个目标。如果不是这样，说明上游某些部分（特征提取、损失加权、初始化）存在问题——在扩大规模之前，请在此处修复它。
+
+来源: [overfit_processed_chain.py](/scripts/overfit_processed_chain.py#L1-L30), [medium.toml](/configs/medium.toml#L1-L78), [modal_overfit.py](/scripts/modal_overfit.py#L1-L48)
+
+## 第 3 级 — 初始训练 (10M 样本，违规损失关闭)
+
+在单链上验证了流水线后，你将进入论文的两阶段训练协议。阶段 1 —— **初始训练** —— 从随机初始化开始，在 256 残基的裁剪尺寸上训练约 1000 万个样本。结构违规损失 (§1.9.11) 被故意**禁用**：补充材料指出它“仅在微调阶段才添加”。
+
+`train_af2.py` 脚本负责驱动此过程。它从 `configs/training_alphafold2.toml` 加载 `TrainingProtocol`，该文件将表 4 的两个阶段捕获为数据：
+
+```bash
+python scripts/train_af2.py \
+    --stage initial \
+    --checkpoint-dir checkpoints/af2 \
+    --model-config alphafold2 \
+    --training-protocol alphafold2
+```
+
+协议文件逐字记录了表 4 中的每个值。以下是 **initial** 阶段的配置：
+
+| 设置 | 值 | 补充材料参考 |
+|---------|-------|---------------------|
+| `crop_size` | 256 残基 | 表 4，"Initial training" |
+| `msa_depth` | 128 序列 | 表 4 |
+| `extra_msa_depth` | 1024 | 表 4 |
+| `learning_rate` | 1×10⁻³ | §1.11.3 |
+| `warmup_samples` | 128,000 | §1.11.3 线性预热 |
+| `violation_loss_weight` | 0.0 | §1.9.11 在阶段 1 中禁用 |
+| `total_samples` | 10,000,000 | 表 4 (在 TPUv3 上约 7 天) |
+
+学习率调度完全遵循论文：前 128k 个样本从 0 开始**线性预热**，然后保持基础学习率**不变**，接着在 6.4M 样本时进行**一次性 ×0.95 衰减** (§1.11.3)。在单 GPU 硬件上，梯度累积弥补了论文中 128 的迷你批次大小与你硬件所能承受的批次大小之间的差距——脚本会自动推导 `--grad-accum-steps`，使得 `batch_size × grad_accum_steps = 128`。
+
+脚本通过 `ceil(target_samples / dataset_size)` 将样本预算转换为轮数。OpenProteinSet 中约有 10⁵ 条链，目标为 10⁷ 个样本，计算得出初始训练大约为 100 个轮次。
+
+来源: [train_af2.py](/scripts/train_af2.py#L1-L50), [training_alphafold2.toml](/configs/training_alphafold2.toml#L1-L54), [trainer.py](/minalphafold/trainer.py#L230-L280)
+
+## 第 4 级 — 微调 (1.5M 样本，违规损失开启，学习率减半)
+
+微调从初始阶段的检查点（而非随机初始化）加载，切换到**更大的 384 残基裁剪**，将**基础学习率减半**，并**启用结构违规损失**，以修正肽键几何结构和空间位阻冲突。根据 §1.11.3，此阶段没有预热。
+
+```bash
+python scripts/train_af2.py \
+    --stage finetune \
+    --checkpoint-dir checkpoints/af2 \
+    --init-from checkpoints/af2/initial_latest.pt
+```
+
+`--init-from` 标志实现了 §1.11.1 中描述的跨阶段权重交接：它将初始阶段的模型权重加载到一个带有零计数器和全新 EMA 的新优化器中。相比之下，`--resume` 标志恢复模型 + 优化器 + EMA + 步数计数器，用于**阶段内**的续训——如果同时设置了两者，`--resume` 将覆盖 `--init-from`。
+
+| 设置 | 初始训练 | 微调 | 变化 |
+|---------|---------|-----------|--------|
+| `crop_size` | 256 | 384 | +50% |
+| `msa_depth` | 128 | 512 | 4× |
+| `extra_msa_depth` | 1024 | 5120 | 5× |
+| `learning_rate` | 1×10⁻³ | 5×10⁻⁴ | ÷2 |
+| `warmup_samples` | 128,000 | 0 | 禁用 |
+| `violation_loss_weight` | 0.0 | 1.0 | 开启 |
+| `total_samples` | 10,000,000 | 1,500,000 | 在 TPUv3 上约 4 天 |
+
+<CgxTip>两阶段的划分不仅是为了方便——它在架构上具有重要意义。违规损失会惩罚键长、键角和空间位阻偏差 (§1.9.11，公式 44–47)。如果从第 0 步就添加它，将会在 Evoformer 学到有意义的配对表示之前与之产生冲突。论文的设计让模型首先学习粗粒度的结构模式，然后在阶段 2 中精修几何结构。如果你跳过阶段 1，并在开启违规损失的情况下从随机初始化开始微调，训练将会发散或收敛到较差的局部极小值。</CgxTip>
+
+来源: [train_af2.py](/scripts/train_af2.py#L200-L316), [training_alphafold2.toml](/configs/training_alphafold2.toml#L39-L54), [trainer.py](/minalphafold/trainer.py#L830-L860)
+
+## 将训练协议作为数据
+
+一个关键的设计决策：训练协议是**数据，而非代码**。`TrainingProtocol`、`StageConfig` 和 `OptimizerConfig` 是纯数据类，不包含 torch，也不涉及 IO。TOML 文件 `configs/training_alphafold2.toml` 是唯一的真实来源：
+
+```mermaid
+classDiagram
+    class TrainingProtocol {
+        +protocol: str
+        +optimizer: OptimizerConfig
+        +initial: StageConfig
+        +finetune: StageConfig
+        +stage(name: str) StageConfig
+    }
+    class OptimizerConfig {
+        +adam_beta1: float = 0.9
+        +adam_beta2: float = 0.999
+        +adam_eps: float = 1e-6
+        +grad_clip_norm: float = 0.1
+        +ema_decay: float = 0.999
+        +mini_batch_size: int = 128
+        +lr_decay_samples: int = 6_400_000
+        +lr_decay_factor: float = 0.95
+    }
+    class StageConfig {
+        +crop_size: int
+        +msa_depth: int
+        +extra_msa_depth: int
+        +max_templates: int
+        +learning_rate: float
+        +warmup_samples: int
+        +violation_loss_weight: float
+        +total_samples: int
+    }
+    TrainingProtocol --> OptimizerConfig
+    TrainingProtocol --> StageConfig : initial
+    TrainingProtocol --> StageConfig : finetune
+```
+
+加载通过 `load_training_protocol("alphafold2")` 完成，该函数使用 `tomllib` 解析 TOML，并将顶层表直接传递给数据类构造函数。文件或模式中拼写错误的键会立即以 `TypeError` 的形式暴露出来——而不会在训练中途以静默的 `AttributeError` 出现。同样的模式也适用于通过 `load_model_config("tiny")` / `load_model_config("alphafold2")` 加载的模型配置。
+
+来源: [trainer.py](/minalphafold/trainer.py#L230-L340), [training_alphafold2.toml](/configs/training_alphafold2.toml#L1-L54)
+
+## 梯度累积与有效迷你批次
+
+论文中的迷你批次大小为 128——每个 TPU 核心一个样本，分布在 TPU Pod 上。在单个 GPU 上，你无法将 128 个样本装入内存。minAlphaFold2 通过**梯度累积**弥补了这一差距：有效迷你批次等于 `batch_size × grad_accum_steps`。
+
+当你未显式设置时，`train_af2.py` 脚本会从协议的 `mini_batch_size` 自动推导 `grad_accum_steps`：
+
+```python
+grad_accum_steps = max(protocol.optimizer.mini_batch_size // batch_size, 1)
+```
+
+因此，在 `--batch-size 1` (默认值) 的情况下，`grad_accum_steps` 变为 128，并且每次优化器步骤看到的梯度幅度与论文中每个核心的更新相同。训练器在 `.backward()` 之前将微批次损失除以 `grad_accum_steps`，根据全局范数裁剪微批次梯度 (§1.11.3，值为 0.1)，并累积到专用缓冲区中。在每个累积窗口结束时，它将求和后的梯度复制到 `.grad`，通过基于样本的调度设置学习率，并调用 `optimizer.step`。
+
+来源: [trainer.py](/minalphafold/trainer.py#L860-L960), [train_af2.py](/scripts/train_af2.py#L210-L230)
+
+## 用于检查点选择的参数 EMA
+
+两个训练阶段都使用衰减为 0.999 的**参数 EMA** (指数移动平均，§1.11.7) 来进行检查点选择。EMA 影子模型是模型的一个独立副本，在每次优化器步骤后跟踪 `ema ← 0.999·ema + 0.001·current`。训练器在 EMA 模型上评估验证损失，而非实时模型，并在验证损失改善时保存 `best_checkpoint_path`。实时的 `model.state_dict()` 继续保存训练参数——EMA 纯粹是一种评估侧机制。
+
+当微调通过 `--init-from` 从初始阶段检查点初始化时，EMA 会从刚加载的权重**重新播种**（而非从阶段 1 继承）。这与补充材料的描述一致：微调以初始阶段的参数开始，但带有全新的优化器状态。
+
+来源: [trainer.py](/minalphafold/trainer.py#L567-L590), [training_alphafold2.toml](/configs/training_alphafold2.toml#L25-L27)
+
+## 零初始化与门控初始化
+
+训练阶梯依赖于 §1.11.4 中的一种关键初始化方案，该方案使得早期的阶梯层级保持稳定。残差块的每个**输出投影**都进行零初始化，因此每一层最初都作为恒等操作。每个**门控线性层** (输入到 sigmoid) 使用零权重和偏置 = 1 进行初始化，因此门控在 `sigmoid(1) ≈ 0.73` 处打开——大部分处于直通状态。每个配置 TOML 中的 `zero_init = true` 标志通过 `AlphaFold2._initialize_alphafold_parameters` 激活整个网络中的这种初始化扫描。
+
+这就是为什么第 1 级 (tiny) 可以在几秒内学习的原因：网络从接近恒等映射的状态开始，梯度从第一步就能流畅传播。如果没有零初始化，Evoformer 的 48 个块 (甚至 1 个块) 在随机初始化时会产生梯度爆炸或消失，冒烟测试在开始前就会失败。
+
+来源: [initialization.py](/minalphafold/initialization.py#L1-L81), [model.py](/minalphafold/model.py#L133-L170)
+
+## 接下来阅读什么
+
+训练阶梯涉及了每个主要子系统。要深入了解你刚刚实践的组件：
+
+- **各项损失如何组合** → [Loss Functions and FAPE](11-loss-functions-and-fape) 解释了 FAPE、扭转角损失、距离图以及区分两个阶段的违规损失。
+- **为什么零初始化有效以及 EMA 如何稳定检查点** → [Zero-Init and Parameter EMA](13-zero-init-and-parameter-ema) 详细介绍了初始化扫描和 EMA 更新规则。
+- **数据流水线如何为每个层级提供数据** → [Data Pipeline and Cropping](14-data-pipeline-and-cropping) 涵盖了 OpenProteinSet 预处理、随机裁剪和 MSA 块删除。
+- **两阶段协议在架构上的合理性** → [Two-Stage Training Protocol](12-two-stage-training-protocol) 将违规损失调度与 Evoformer 的表示学习联系起来。
+- **每个配置的内容** → [Model Config Profiles](16-model-config-profiles) 是三个 TOML 文件中每个参数的参考。
+
+---
+
+# 深入解析
+
+- [深入解析/架构概览](https://zread.ai/ChrisHayduk/minAlphaFold2/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+minAlphaFold2 是 AlphaFold2 的一个最小化、面向教学的 PyTorch 重实现版本，它将每个模块 1:1 地映射到补充信息中编号的算法。整个模型架构仅用单个包内约 3,000 行纯 PyTorch 代码实现，除 `torch` 本身外无任何外部 ML 依赖。本页提供了结构蓝图——主要的流水线阶段、在阶段之间流动的表示空间，以及控制参数初始化、循环和损失组合的设计不变量。随后的每个深入解析（Deep Dive）页面将展开特定的子系统；此处的目标是在研究任何单个齿轮之前，先纵览整台机器。
+
+来源: [model.py](minalphafold/model.py#L15-L51), [README.md](README.md#L1-L17)
+
+![minAlphaFold2](https://github.com/ChrisHayduk/minAlphaFold2/blob/main/assets/minAlphaFold2.png?raw=true)
+
+## 七阶段流水线
+
+`AlphaFold2.forward` 方法将七个不同的处理阶段连接在一起，每个阶段对应补充资料中的一个编号小节。数据流经两个核心表示张量——形状为 `(batch, N_seq, N_res, c_m)` 的 **MSA 表示** `m_si` 和形状为 `(batch, N_res, N_res, c_z)` 的 **对表示** `z_ij`——然后提取单一表示 `s_i` 并传入 3D 坐标生成模块。
+
+```mermaid
+flowchart TD
+    subgraph Input["① 输入嵌入 (Alg 3–4)"]
+        A["target_feat<br/>residue_index"] --> C[InputEmbedder]
+        B["msa_feat"] --> C
+        C --> D["m_si (MSA rep)<br/>z_ij (Pair rep)"]
+    end
+
+    subgraph Recycle["② 循环嵌入 (Alg 32)"]
+        D --> E["LayerNorm + DistanceBins"]
+        E --> F["m_si ← m_si + LN(m_prev)<br/>z_ij ← z_ij + LN(z_prev) + Lin(d_prev)"]
+    end
+
+    subgraph Template["③ 模板嵌入 (§1.7.1, Alg 16–17)"]
+        F --> G["TemplatePair → TemplatePointwiseAtt"]
+        G --> H["z_ij updated<br/>template angles → m_si rows"]
+    end
+
+    subgraph ExtraMSA["④ 额外 MSA 堆栈 (§1.7.2, Alg 18–19)"]
+        H --> I["4 shallow Evoformer-like<br/>blocks on extra MSA"]
+        I --> J["z_ij refined"]
+    end
+
+    subgraph Evoformer["⑤ Evoformer 主干 (Alg 6, ×48)"]
+        J --> K["48 Evoformer blocks<br/>MSA ↔ Pair bidirectional"]
+        K --> L["s_i = Linear(m_1i)<br/>z_ij final"]
+    end
+
+    subgraph StructMod["⑥ 结构模块 (Alg 20, ×8)"]
+        L --> M["8 IPA iterations<br/>BackboneUpdate → AllAtomCoords"]
+        M --> N["atom14 coords<br/>per-layer frames"]
+    end
+
+    subgraph Heads["⑦ 辅助头 (§1.9)"]
+        N --> O["Distogram · MaskedMSA<br/>pLDDT · ExpResolved · TMScore"]
+    end
+
+    Input --> Recycle --> Template --> ExtraMSA --> Evoformer --> StructMod --> Heads
+```
+
+该流水线在一个**循环**（补充资料 1.10）内部执行：整个序列 ①–⑦ 最多运行 `n_cycles` 次，并将前一次循环的输出反馈到阶段 ②。在训练期间，会随机采样循环次数（Algorithm 31），并且只有最后一次循环携带梯度——之前的迭代均被 `detach()`。在推理时，所有循环均以完整梯度展开。
+
+来源: [model.py](minalphafold/model.py#L178-L439), [model.py](minalphafold/model.py#L231-L278)
+
+## 表示空间
+
+三个张量空间作为流水线阶段之间的通信骨干。它们的维度是主要的架构旋钮，在三个配置文件中进行缩放：
+
+| 表示 | 符号 | 形状 | 作用 |
+|---|---|---|---|
+| **MSA** | `m_si` | `(B, N_seq, N_res, c_m)` | 每序列每残基特征；Evoformer 的主工作空间 |
+| **对** | `z_ij` | `(B, N_res, N_res, c_z)` | 残基对的几何与进化信号；驱动注意力偏置和距离分布图 |
+| **单一** | `s_i` | `(B, N_res, c_s)` | 从 MSA 第一行提取的每残基摘要；馈入结构模块 |
+
+**MSA 表示**最为丰富——它将整个多序列比对编码为残基特征向量的堆栈。**对表示**捕获残基间关系，并且是唯一在所有阶段中持续存在的张量（它以加法方式累积模板、额外 MSA 和 Evoformer 的更新）。**单一表示**是一种后期提取：`s_i = Linear(m_{1i})` 仅将 MSA 表示的查询序列行投影到结构模块的通道维度 `c_s` 中。
+
+来源: [model.py](minalphafold/model.py#L53-L68), [embedders.py](minalphafold/embedders.py#L36-L94)
+
+## 跨配置文件的通道维度
+
+`configs/` 中提供了三个 TOML 配置文件，每个文件在保持架构拓扑的同时，缩放每个通道维度和块计数：
+
+| 参数 | `tiny` | `medium` | `alphafold2` | 补充资料 § |
+|---|---|---|---|---|
+| `c_m` (MSA 通道) | 32 | 128 | **256** | §1.5 |
+| `c_s` (单一通道) | 32 | 192 | **384** | §1.6 |
+| `c_z` (对通道) | 16 | 64 | **128** | §1.5 |
+| `c_t` (模板对) | 16 | 64 | **64** | §1.7.1 |
+| `c_e` (额外 MSA) | 24 | 64 | **64** | §1.7.2 |
+| `num_evoformer` (块) | 1 | 4 | **48** | §1.6 |
+| `structure_module_layers` | 2 | 4 | **8** | §1.8 |
+| 注意力头 (MSA 行) | 4 | 8 | **8** | Alg 7 |
+| IPA 头 | 4 | 8 | **12** | Alg 22 |
+
+**`tiny`** 配置将所有维度降低到可在 CPU 上运行的水平，用于冒烟测试。**`medium`** 面向单 GPU 过拟合实验。**`alphafold2`** 完全匹配论文——48 个 Evoformer 块，256 个 MSA 通道，8 次 IPA 迭代。
+
+来源: [alphafold2.toml](configs/alphafold2.toml#L1-L80), [tiny.toml](configs/tiny.toml#L1-L78), [medium.toml](configs/medium.toml#L1-L78)
+
+## 模块到文件映射
+
+`minalphafold/` 中的每个文件都实现了补充资料中不相交的子集。此表是代码导航的权威索引：
+
+| 模块文件 | 实现的算法 | 流水线阶段 |
+|---|---|---|
+| `embedders.py` | 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 | ① 输入, ③ 模板, ④ 额外 MSA, Evoformer 子块 |
+| `evoformer.py` | 6, 7 | ⑤ Evoformer 主干 |
+| `structure_module.py` | 20, 22, 23, 24, 25 | ⑥ 结构模块 |
+| `model.py` | 2, 30, 31, 32 | 顶层编排, 循环 |
+| `heads.py` | 29 | ⑦ 辅助头 |
+| `losses.py` | 26, 27, 28 | 训练监督 |
+| `geometry.py` | 21 | 真值帧构造 |
+| `data.py` | 1 | 数据流水线, MSA 增强 |
+| `initialization.py` | §1.11.4 | 参数初始化方案 |
+| `model_config.py` | — | 带类型的配置模式 |
+
+来源: [evoformer.py](minalphafold/evoformer.py#L1-L9), [structure_module.py](minalphafold/structure_module.py#L1-L20), [heads.py](minalphafold/heads.py#L1-L16), [initialization.py](minalphafold/initialization.py#L1-L24)
+
+## Evoformer 块剖析
+
+Evoformer 是计算核心——48 个相同的块在 MSA 和对表示之间双向交换信息。每个块遵循固定的七步协议：
+
+```mermaid
+flowchart LR
+    subgraph MSA_Path["MSA 更新路径"]
+        R[Row Att w/ Pair Bias<br/>Alg 7] --> C[Column Att<br/>Alg 8]
+        C --> T[MSA Transition<br/>Alg 9]
+    end
+
+    subgraph Pair_Path["对更新路径"]
+        O[Outer Product Mean<br/>Alg 10] --> MO[TriMult Outgoing<br/>Alg 11]
+        MO --> MI[TriMult Incoming<br/>Alg 12]
+        MI --> SA[TriAtt Start<br/>Alg 13]
+        SA --> EA[TriAtt End<br/>Alg 14]
+        EA --> PT[Pair Transition<br/>Alg 15]
+    end
+
+    MSA_Path -->|"OPM: m → z"| Pair_Path
+    Pair_Path -->|"pair bias: z → m"| MSA_Path
+```
+
+Algorithm 7 中的**对偏置**是关键的信息流机制：对表示 `z_ij` 被投影为逐头的标量偏置，用于调节 MSA 行注意力，让几何/进化的对上下文引导每残基的注意力模式。反向路径——**外积均值**（Algorithm 10）——将 MSA 压缩为对 `z_ij` 的秩为 1 的外积贡献，完成双向循环。根据补充资料 §1.11.6，丢弃沿 MSA 路径按行应用，沿对路径按行/列应用。
+
+来源: [evoformer.py](minalphafold/evoformer.py#L28-L95), [evoformer.py](minalphafold/evoformer.py#L97-L194)
+
+## 结构模块与不变点注意力
+
+结构模块通过**不变点注意力**（Invariant Point Attention, IPA）和 **BackboneUpdate** 的迭代循环，将抽象的单一/对表示转换为 3D 原子坐标。关键设计不变量：
+
+- **SE(3)-等变性**：IPA 在由逐残基刚体帧变换的 3D 查询/值点上操作，使注意力权重对全局旋转/平移保持不变。这是让模型无需依赖特权坐标系即可推理结构的几何基础。
+- **黑洞初始化**：所有刚体帧均以恒等变换 `(I, 0)` 开始，这意味着每个残基初始时均位于原点。8 次 IPA 迭代逐步将残基分离至其最终的 3D 位置。
+- **分离旋转**：在迭代之间，帧旋转被 `detach()`（停止梯度），而平移保留梯度——这让辅助的逐层 FAPE 损失在 Cα 位置上的信号能传播到 Evoformer，而不破坏帧递归的稳定性。
+- **纳米级内部计算**：所有坐标均以 nm 计算（Å ÷ `position_scale`，其中 `position_scale = 10`），符合补充资料的约定。输出重新缩放回埃（Ångström）。
+
+来源: [structure_module.py](minalphafold/structure_module.py#L117-L196)
+
+## 零初始化与门控策略
+
+AlphaFold2 的一大标志性架构模式——在此被忠实地复现——是**零初始化扫掠**（补充资料 §1.11.4）。每个残差块的最终线性层均以零权重和零偏置开始，这带来两个结果：
+
+1. **每个块初始为恒等映射**——网络起始于直通状态，仅随训练推进才学习偏离。这在极深的 48 块 Evoformer 中稳定了早期训练。
+2. **所有预测头在第 0 步输出均匀分布**——起初仅有 FAPE（依赖于预测坐标而非头的逻辑值）向主干传递梯度信号。
+
+门控模式强化了这一点：每个门控注意力输出使用 `sigmoid(Linear(x)) ⊙ attention_output`，其中门控的线性层以**零权重、偏置 = 1** 初始化，因此 `sigmoid(1) ≈ 0.73`——门初始时基本打开，允许信息流过的同时保持可控性。
+
+`AlphaFold2._initialize_alphafold_parameters` 方法在构造后扫掠整个模块树，按类将这些规则应用于特定的命名层：
+
+| 层类 | 零初始化目标 | 效果 |
+|---|---|---|
+| 所有注意力块 | `linear_output` | 残差恒等起始 |
+| `MSATransition`, `PairTransition` | `linear_down` | 瓶颈恒等起始 |
+| `OuterProductMean` | `linear_out` | 对更新恒等起始 |
+| `TriangleMultiplication*` | `out_linear` (+ 门控初始化) | 乘性恒等起始 |
+| `StructureModule` | `transition_linear_3` | SM 过渡恒等起始 |
+| `BackboneUpdate` | `linear` | 无初始骨架运动 |
+| `AngleResnetBlock` | `linear_2` | 扭角恒等起始 |
+
+来源: [model.py](minalphafold/model.py#L106-L153), [initialization.py](minalphafold/initialization.py#L38-L80), [heads.py](minalphafold/heads.py#L21-L25)
+
+## 损失组合与两阶段训练
+
+组合损失遵循补充资料 §1.9 公式 7，对**初始训练**和**微调**阶段采用不同的权重调度：
+
+| 损失项 | 权重 | 来源 | 阶段 |
+|---|---|---|---|
+| 骨架 FAPE (逐层) | 0.5 | Alg 20 行 17 | 两者 |
+| 全原子 FAPE (最终) | 0.5 | Alg 20 行 28 | 两者 |
+| 扭角 | 0.5 | Alg 27 | 两者 |
+| 距离分布图 | 0.3 | §1.9.8 公式 41 | 两者 |
+| 掩码 MSA | 2.0 | §1.9.9 公式 42 | 两者 |
+| pLDDT 置信度 | 0.01 | Alg 29 | 两者 |
+| 实验已解析 | 0.01 | §1.9.10 公式 43 | 仅微调 |
+| 结构违规 | 1.0 | §1.9.11 公式 47 | 仅微调 |
+| TM-score / PAE | 0.1 | §1.9.7 公式 38–40 | 仅微调 |
+
+骨架 FAPE 实现了 §1.11.5 中的 90/10 截断-未截断混合：90% 的小批量将误差距离截断至 10 Å，10% 保持未截断。侧链 FAPE 始终截断。这种双机制策略防止了大距离误差主导梯度，同时偶尔允许模型观测无界信号。
+
+来源: [losses.py](minalphafold/losses.py#L129-L199)
+
+## 循环与集成
+
+循环机制（补充资料 §1.10）将整个流水线重新运行最多 `n_cycles` 次，将前一次循环的输出注入回阶段 ②：
+
+- **循环嵌入**（Algorithm 32）：`m_{1i} += LayerNorm(m_{1i}^{prev})`，`z_{ij} += LayerNorm(z_{ij}^{prev}) + Linear(one_hot(d_{ij}^{prev}))`，其中 `d_{ij}^{prev}` 是由前一次循环的预测坐标计算得出的分桶成对伪 β 距离。
+- **训练**（Algorithm 31）：`n' ~ Uniform(1, N_cycle)`；仅最后一次迭代携带梯度——之前的循环均被 `detach()`。
+- **推理**（Algorithm 30）：所有 `n_cycles` 次迭代均以完整梯度运行。
+
+**集成**（§1.11.2）在每个循环中运行 `n_ensemble` 次结构模块前的流水线，并对随机特征进行重采样，仅对各集成成员的 `m_{1i}` 和 `z_{ij}` 求平均。训练时，`n_ensemble = 1`；推理时，论文同样使用 `n_ensemble = 1`（DeepMind 发布的模型）。
+
+来源: [model.py](minalphafold/model.py#L231-L278), [model.py](minalphafold/model.py#L365-L38@), [model.py](minalphafold/model.py#L419-L437)
+
+## 梯度检查点
+
+48 块 Evoformer 主导了内存消耗。补充资料 §1.11.8 规定仅存储块之间传递的激活，并在反向传播期间重新计算块内激活——这正是 `torch.utils.checkpoint` 的功能。当 `self.training` 为 `True` 时，minAlphaFold2 对每个 Evoformer 块和每个额外 MSA 块应用检查点，在评估期间则跳过（此时期它只会增加开销而无内存收益）。这使得完整论文规格的模型在论文的裁剪尺寸下能够装入单块 GPU。
+
+来源: [model.py](minalphafold/model.py#L326-L363)
+
+## 可视化项目结构
+
+```
+minalphafold/
+├── model.py              ← AlphaFold2 (Alg 2) — 顶层编排
+├── embedders.py          ← InputEmbedder (3), RelPos (4), 所有 Evoformer 子块
+├── evoformer.py          ← Evoformer 块 (6), MSARowAttPairBias (7)
+├── structure_module.py   ← StructureModule (20), IPA (22), BackboneUpdate (23)
+├── heads.py              ← Distogram, pLDDT, MaskedMSA, TMScore, ExpResolved
+├── losses.py             ← FAPE (28), Torsion (27), 所有 §1.9 损失
+├── geometry.py           ← 真值帧 (21), 扭角, 替代真值 (26)
+├── data.py               ← 数据集, MSA 增强 (1), 特征构建器 (表 1)
+├── model_config.py       ← 带类型的 ModelConfig 数据类
+├── initialization.py     ← §1.11.4 初始化方案 (zero, gate, final, relu, glorot)
+├── trainer.py            ← 训练循环, LR 调度, EMA, 两阶段协议
+├── utils.py              ← 距离分桶, 丢弃辅助函数
+├── residue_constants.py  ← 氨基酸查找表, atom14 几何
+├── a3m.py                ← MSA 解析, 字母表定义
+└── mmcif.py              ← mmCIF 结构解析
+```
+
+<CgxTip>最实用的导航模式：每个类的文档字符串都引用了其算法编号。在任何文件中搜索 `Algorithm XX` 即可直达特定补充步骤的实现。</CgxTip>
+
+<CgxTip>在正向传播中追踪数据流时，请跟随"两"个张量：`msa_repr`（MSA 表示）和 `pair_repr`（对表示）。每个阶段均以加法方式更新二者之一或全部——不存在原位覆盖。单一表示 `s&ub;i` 仅在 Evoformer@nbsp;之后通过 `single_rep_proj` 提取一次。</CgxTip>
+
+---
+
+### 接下来去哪
+
+上面的架构概述在高层级+勾勒了每个阶段。深入解析部分的每个后续页面将一个阶段展开为完整的实现细节：
+
+- **核心流水线**：从 [输入嵌入器与相对位置](5-input-embedder-and-relpos) 开始，了解原始 MSA 和残基索引如何变为初始的 `m_si` 和 `z_ij`；然后通过 [Evoformer 堆栈](6-evoformer-stack) 了解 48 块注意力机制；最后'通过 [结构模块与 IPA](7-structure-module-and-ipa) 了解 3D 坐标生成。
+- **表示与几何**：[MSA 与对表示](8-msa-and-pair-representations) 解释了8这些张量在语义上编码了什么；[刚体帧与扭角](9-rigid-frames-and-torsions) 涵盖了 SE(3) 帧约定；[不变点注意力](10-invariant-point-attention) 推导了几何注意力机制。
+- **训练与损失**：[损失函数与 FAPE](11-loss-functions-and-fape) 详述了公式 7 中的每一项；[两阶段训练协议](12-two-stage)training-protocol) 解释了初始@nbsp;初始→微调'的过渡；[零初始化与参数 E2EMA](13-zero-init-and-parameter-ema) 涵盖了稳定化机制。
+- **数据与预处理**：[数据流水线与裁剪](14-data-pipeline-and-cropping) 和 [MSA 处理与掩码](15-msa-processing-and-masking) 涵盖了模型上游的所有内容。
+- **配置与推理**：[模型配置文件](16-model-config-profiles)、[循环与集成](17-recycling-and-ensembling) 和 [结构弛豫](18-structure-relaxation) 涵盖了模型下游的所有内容。
+- **参考**：[补充算法映射](19-supplement-algorithm-mapping) 是从算法编号到源码位置的权威索引。
+
+---
+
+- [深入解析/补充算法映射](https://zread.ai/ChrisHayduk/minAlphaFold2/19-supplement-algorithm-mapping)
+
+---
+slug:19-supplement-algorithm-mapping
+blog_type:normal
+---
+
+
+本0E,<41A.<1+DG92!78E$2 supplementary6<!A),!FG!., 本页面提供了 AlphaFold2 补充论文中的E编号算法（算法 1–32）与 minAlphaFold2 代码库中具体实现之间的**权威交叉引用**。补充材料中的每个算法都映射到特定的类、函数或代码路径——此表是你将论文追溯至可运行代码的罗塞塔石碑。
+
+## 算法与代码交叉引用表
+
+此映射的核心是下表。算法编号对应于补充信息中编号的伪代码块；补充材料章节引用（例如 §1.7.1）涵盖仅有文字描述的规范，这些规范虽缺少独立的算法框，但仍然定义了具体的计算。
+
+| 算法 | 补充 § | 名称 | 实现类 / 函数 | 源文件 |
+|-----------|-------------|------|--------------------------------|-------------|
+| 1 | §1.2.6 | MSA 块删除 | `block_delete*msa()` | [data.py](minalphafold/data.py) |
+| 2 | §1.4 | 完整模型（循环 + 集成循环） | `AlphaFold2` | [model.py](minalphafold/model.py) |
+| 3 | §1.4 | 输入嵌入（MSA + 对） | `InputEmbedder` | [embedders.py](minalphafold/embedders.py) |
+| 4 | §1.4 | 相对位置编码 | `RelPos` | [embedders.py](minalphafold/embedders.py) |
+| 6 | §1.4 | Evoformer 块 | `Evoformer` | [evoformer.py](minalphafold/evoformer.py) |
+| 7 | §1.4 | 带对偏置的 MSA 行注意力 | `MSARowAttentionWithPairBias` | [evoformer.py](minalphafold/evoformer.py) |
+| 8 | §1.4 | MSA 列注意力 | `MSAColumnAttention` | [embedders.py](minalphafold/embedders.py) |
+| 9 | §1.4 | MSA 转换 | `MSATransition` | [embedders.py](minalphafold/embedders.py) |
+| 10 | §1.4 | 外积均值 | `OuterProductMean` | [embedders.py](minalphafold/embedders.py) |
+| 11 | §1.4 | 三角乘法（出向） | `TriangleMultiplicationOutgoing` | [embedders.py](minalphafold/embedders.py) |
+| 12 | §1.4 | 三角乘法（入向） | `TriangleMultiplicationIncoming` | [embedders.py](minalphafold/embedders.py) |
+| 13 | §1.4 | 三角注意力（起始节点） | `TriangleAttentionStartingNode` | [embedders.py](minalphafold/embedders.py) |
+| 14 | §1.4 | 三角注意力（终止节点） | `TriangleAttentionEndingNode` | [embedders.py](minalphafold/embedders.py) |
+| 15 | §1.4 | 对转换 | `PairTransition` | [embedders.py](minalphafold/embedders.py) |
+| 16 | §1.7.1 | 模板对堆栈 | `TemplatePair` | [embedders.py](minalphafold/embedders.py) |
+| 17 | §1.7.1 | 模板逐点注意力 | `TemplatePointwiseAttention` | [embedders.py](minalphafold/embedders.py) |
+| 18 | §1.7.2 | 额外 MSA 堆栈 | `ExtraMsaStack` | [embedders.py](minalphafold/embedders.py) |
+| 19 | §1.7.2 | MSA 列全局注意力 | `MSAColumnGlobalAttention` | [embedders.py](minalphafold/embedders.py) |
+| 20 | §1.8 | 结构模块（迭代循环） | `StructureModule` | [structure_module.py](minalphafold/structure_module.py) |
+| 21 | §1.8.1 | 真实值的刚体组帧 | `atom14_to_rigid_group_frames()` | [geometry.py](minalphafold/geometry.py) |
+| 22 | §1.8.2 | 不变点注意力 | `InvariantPointAttention` | [structure_module.py](minalphafold/structure_module.py) |
+| 23 | §1.8.3 | 骨架更新 | `BackboneUpdate` | [structure_module.py](minalphafold/structure_module.py) |
+| 24 | §1.8.4 | 全原子坐标装配 | `compute_all_atom_coordinates()` | [structure_module.py](minalphafold/structure_module.py) |
+| 25 | §1.8.4 | 绕 x 轴旋转 | `make_rot_x()` | [structure_module.py](minalphafold/structure_module.py) |
+| 26 | §1.8.5 | 180°歧义交替真值选择 | `select_best_atom14_ground_truth()` | [losses.py](minalphafold/losses.py) |
+| 27 | §1.9.1 | 扭转角损失 | `TorsionAngleLoss` | [losses.py](minalphafold/losses.py) |
+| 28 | §1.9.2 | 帧对齐点误差（FAPE） | `frame_aligned_point_error()` | [losses.py](minalphafold/losses.py) |
+| 29 | §1.9.6 | pLDDT 置信度头 | `PLDDTHead` | [heads.py](minalphafold/heads.py) |
+| 31 | §1.10 | 循环（随机循环计数） | `AlphaFold2.forward()`（循环） | [model.py](minalphafold/model.py) |
+| 32 | §1.10 | 循环嵌入 | `AlphaFold2.__init__()`（循环范数 + 线性层） | [model.py](minalphafold/model.py) |
+
+来源：[model.py](minalphafold/model.py#L1-L440), [evoformer.py](minalphafold/evoformer.py#L1-L195), [embedders.py](minalphafold/embedders.py#L1-L200), [structure_module.py](minalphafold/structure_module.py#L1-L20), [losses.py](minalphafold/losses.py#L1-L35), [heads.py](minalphafold/heads.py#L1-L16), [geometry.py](minalphafold/geometry.py#L1-L43), [data.py](minalphafold/data.py#L1-L33)
+
+## 流水线架构 —— 算法执行位置
+
+补充材料中的算法编号并不遵循执行顺序。下图展示了通过 `AlphaFold2.forward()` 的**实际数据流**，在每个阶段均标注了算法编号，以便你能在同一视图中同时查看论文的逻辑分解和运行时序列。
+
+```mermaid
+flowchart TD
+    subgraph Input["输入处理 (§1.2)"]
+        A1["算法 1<br/>MSA 块删除"]
+        A1b["§1.2.7<br/>聚类/额外拆分<br/>+ 掩码 MSA"]
+    end
+
+    subgraph Embed["嵌入 (§1.4)"]
+        A3["算法 3<br/>InputEmbedder"]
+        A4["算法 4<br/>RelPos"]
+        A32["算法 32<br/>循环嵌入器"]
+    end
+
+    subgraph Template["模板处理 (§1.7.1)"]
+        A16["算法 16<br/>TemplatePair 堆栈"]
+        A17["算法 17<br/>TemplatePointwiseAttention"]
+    end
+
+    subgraph Extra["额外 MSA (§1.7.2)"]
+        A18["算法 18<br/>ExtraMsaStack"]
+        A19["算法 19<br/>MSAColumnGlobalAttention"]
+    end
+
+    subgraph Evo["Evoformer 主体 (§1.4)"]
+        A6["算法 6<br/>Evoformer 块 ×48"]
+        A7["算法 7: 行注意力+对偏置"]
+        A8["算法 8: 列注意力"]
+        A9["算法 9: MSA 转换"]
+        A10["算法 10: 外积均值"]
+        A11["算法 11/12: 三角乘法"]
+        A13["算法 13/14: 三角注意力"]
+        A15["算法 15: 对转换"]
+    end
+
+    subgraph SM["结构模块 (§1.8)"]
+        A20["算法 20<br/>StructureModule 循环 ×8"]
+        A22["算法 22: IPA"]
+        A23["算法 23: BackboneUpdate"]
+        A24["算法 24: 全原子坐标"]
+        A25["算法 25: makeRotX"]
+    end
+
+    subgraph Heads["辅助头 (§1.9)"]
+        HD["§1.9.8 Distogram"]
+        HP["算法 29: pLDDT"]
+        HM["§1.9.9 掩码 MSA"]
+        HT["§1.9.7 pTM/PAE"]
+        HE["§1.9.10 Exp. Resolved"]
+    end
+
+    subgraph Losses["损失函数 (§1.9)"]
+        L28["算法 28: FAPE"]
+        L27["算法 27: 扭转损失"]
+        L26["算法 26: 交替真值选择"]
+    end
+
+    A1 --> A3
+    A1b --> A3
+    A3 --> A32
+    A32 --> A16
+    A16 --> A17
+    A17 --> A18
+    A18 --> A6
+    A6 --> A20
+    A20 --> A22
+    A22 --> A23
+    A23 --> A24
+    A24 --> A25
+    A20 --> HD
+    A20 --> HP
+    A6 --> HM
+    A6 --> HE
+    A20 --> HT
+    A20 --> L28
+    L28 --> L26
+    A20 --> L27
+```
+
+来源：[model.py](minalphafold/model.py#L178-L440), [evoformer.py](minalphafold/evoformer.py#L28-L95), [structure_module.py](minalphafold/structure_module.py#L117-L313)
+
+## 算法 2 —— 顶层编排器
+
+算法 2 是控制整个前向传播的主循环。它完全在 `AlphaFold2.forward()` 中实现，将循环周期、集成平均以及每个下游算法的顺序调用串联在一起。有三个机制值得特别关注：
+
+**循环（算法 31）** —— 外层循环运行 `n_cycles` 次迭代（默认为 3）。在训练期间，会采样一个随机数 `n' ~ Uniform(1, n_cycles)`，并且只有最后一次迭代携带梯度；更早的迭代通过 `torch.set_grad_enabled(is_last and outer_grad)` 进行分离。上一周期表示 `m_1i^prev`、`z_ij^prev` 和伪 β 位置会在下一个周期中通过算法 32 反馈回来。
+
+**集成（§1.11.2）** —— 在每个周期内，结构模块前的流水线运行 `n_ensemble` 次。只有第一行 MSA `m_1i` 和对表示 `z_ij` 会被累积并取平均（`/= n_ensemble`）。完整的 MSA 表示*不*进行平均——掩码 MSA 头直接使用最后一次集成样本的完整表示。训练时始终使用 `n_ensemble = 1`。
+
+**梯度检查点（§1.11.8）** —— 在训练期间，Evoformer 块和额外 MSA 块均使用 `torch.utils.checkpoint`，这与补充材料中“存储块之间传递的激活，并在反向传播期间在块内重新计算”的规定一致。
+
+来源：[model.py](minalphafold/model.py#L178-L399)
+
+## Evoformer 子算法分解
+
+算法 6（Evoformer 块）是模型的计算核心，在完整配置中堆叠了 48 次。每个块以固定顺序执行七个子算法，并应用特定的丢弃规则。下表记录了精确的序列、残差连接模式以及每一步应用的丢弃变体。
+
+| 步骤 | 子算法 | 类 | 残差 | 丢弃 |
+|------|--------------|-------|----------|---------|
+| 1 | 算法 7 — 带对偏置的 MSA 行注意力 | `MSARowAttentionWithPairBias` | `m += dropout_rowwise(z)` | MSA 逐行丢弃 |
+| 2 | 算法 8 — MSA 列注意力 | `MSAColumnAttention` | `m += col_att(m)` | **无** |
+| 3 | 算法 9 — MSA 转换 | `MSATransition` | `m += transition(m)` | **无** |
+| 4 | 算法 10 — 外积均值 | `OuterProductMean` | `z += opm(m)` | — |
+| 5 | 算法 11 — 出向三角乘法 | `TriangleMultiplicationOutgoing` | `z += dropout_rowwise(...)` | 对表示逐行丢弃 |
+| 6 | 算法 12 — 入向三角乘法 | `TriangleMultiplicationIncoming` | `z += dropout_rowwise(...)` | 对表示逐行丢弃 |
+| 7 | 算法 13 — 起始节点三角注意力 | `TriangleAttentionStartingNode` | `z += dropout_rowwise(...)` | 对表示逐行丢弃 |
+| 8 | 算法 14 — 终止节点三角注意力 | `TriangleAttentionEndingNode` | `z += dropout_columnwise(...)` | 对表示**逐列**丢弃 |
+| 9 | 算法 15 — 对转换 | `PairTransition` | `z += transition(z)` | **无** |
+
+丢弃的不对称性是刻意为之的：补充材料（§1.11.6）规定起始节点注意力采用逐行丢弃，而终止节点注意力采用逐列丢弃。这种方向掩码确保了丢弃模式能够遵循对表示的非对称结构。
+
+来源：[evoformer.py](minalphafold/evoformer.py#L28-L95), [evoformer.py](minalphafold/evoformer.py#L97-L194)
+
+## 结构模块子算法分解
+
+算法 20 迭代固定数量的层（默认为 8），每层执行 IPA、一个转换 MLP 以及骨架帧更新。为了辅助监督，在每一层都会计算侧链扭转角和全原子坐标。
+
+| 步骤 | 子算法 | 类 / 函数 | 操作 |
+|------|--------------|------------------|-----------|
+| 1 | — | `LayerNorm` + `Linear` | 将 `s_i` 投影到内部维度；规范化对表示 |
+| 2 | — | 恒等初始化 | 初始化刚体帧 `T_i = (I, 0)`（黑洞初始化） |
+| 3 | 算法 22 | `InvariantPointAttention` | `s += IPA(s, z, R, t)` |
+| 4 | — | `LayerNorm` + `Dropout` | `s = LN(Dropout(s))` |
+| 5 | — | 3层 ReLU MLP | `s += Transition(s)`（最后一次零初始化的转换） |
+| 6 | — | `LayerNorm` + `Dropout` | `s = LN(Dropout(s))` |
+| 7 | 算法 23 | `BackboneUpdate` | `T_i ← T_i ∘ BackboneUpdate(s_i)` 经由四元数旋转 |
+| 8 | §1.8.4 | `MultiRigidSidechain` → `AngleResnet` | 预测 7 个扭转角 `(ω, φ, ψ, χ1-χ4)`，表示为 `(sin, cos)` |
+| 9 | 算法 24 | `compute_all_atom_coordinates` | 展开 8 个刚体组帧 → atom14 位置 |
+| 10 | 算法 25 | `make_rot_x` | 绕 x 轴的扭转旋转（在算法 24 内部使用） |
+| 11 | — | 对旋转执行 `detach()` | 在迭代间对旋转停止梯度（最终迭代后不执行） |
+
+一个关键细节：对旋转的**停止梯度**（步骤 11）应用在骨架更新*之后*、下一次迭代的 IPA *之前*。这意味着当前迭代的侧链 FAPE 和扭转损失仍然可以通过未分离的旋转接收梯度，而下一次迭代的 IPA 看到的是一个没有旋转梯度路径的帧——防止了通过链式帧复合产生杠杆效应。最终迭代完全跳过分离操作。
+
+来源：[structure_module.py](minalphafold/structure_module.py#L117-L313), [structure_module.py](minalphafold/structure_module.py#L316-L541), [structure_module.py](minalphafold/structure_module.py#L543-L610), [structure_module.py](minalphafold/structure_module.py#L675-L779)
+
+## 预测头 —— 补充材料公式
+
+五个辅助预测头从 Evoformer 或结构模块的输出进行投影。根据 §1.11.4，每个头的输出投影均**零初始化**，因此在第 0 步，每个头都会输出均匀分布，只有 FAPE 将梯度信号传入主体。
+
+| 头 | 补充材料 | 输入 | 输出 | 损失类 |
+|------|-----------|-------|--------|------------|
+| Distogram | §1.9.8, 公式 41 | 平均后的 `z_ij` | `(N_res, N_res, n_dist_bins)` logits（已对称化） | `DistogramLoss` |
+| pLDDT | 算法 29, §1.9.6 | IPA 后的单一表示 `s_i` | `(N_res, n_plddt_bins)` logits | `PLDDTLoss` |
+| 掩码 MSA | §1.9.9, 公式 42 | 完整 MSA 表示 `m_si`（最后一次集成） | `(N_seq, N_res, 23)` logits | `MSALoss` |
+| TM-score / PAE | §1.9.7, 公式 38–40 | 平均后的 `z_ij` | `(N_res, N_res, n_pae_bins)` logits（非对称） | `TMScoreLoss` |
+| Exp. Resolved | §1.9.10, 公式 43 | Evoformer 单一表示 `s_i`（结构模块前） | `(N_res, 37)` 二元 logits | `ExperimentallyResolvedLoss` |
+
+**输入路由**非常重要：pLDDT 消费结构模块 IPA 后的单一表示，而实验分辨头消费 Evoformer 结构模块前的单一表示（`s_i = Linear(m_1i)`，来自算法 6 第 12 行）。掩码 MSA 头使用最后一次集成样本的完整 MSA 表示，而非集成平均后的表示。
+
+来源：[heads.py](minalphafold/heads.py#L1-L142), [model.py](minalphafold/model.py#L389-L399)
+
+## 损失全景 —— 公式 7 分解
+
+组合训练损失遵循补充材料公式 7。`AlphaFoldLoss` 类精确实现了此权重分配，为训练和微调阶段设置了独立的项。
+
+| 损失项 | 补充材料 | 权重 | 类 | 输入 |
+|-----------|-----------|--------|-------|-------|
+| 骨架 FAPE（逐层） | 算法 20 第 17 行 | 0.5（经由 `sidechain_weight_frac`） | `BackboneTrajectoryLoss` | 逐层 Cα 帧 |
+| 侧链 FAPE（最终） | 算法 20 第 28 行 | 0.5（经由 `sidechain_weight_frac`） | `AllAtomFAPE` | 最终全原子帧 + 位置 |
+| 扭转角 | 算法 27, §1.9.1 | 0.5（包含 0.02 的角度规范化） | `TorsionAngleLoss` | 规范化及未规范化的 `(sin, cos)` |
+| Distogram | §1.9.8, 公式 41 | 0.3 | `DistogramLoss` | Distogram logits 对比分桶 Cβ 距离 |
+| 掩码 MSA | §1.9.9, 公式 42 | 2.0 | `MSALoss` | MSA logits 对比掩码目标 |
+| 置信度 (pLDDT) | 算法 29, §1.9.6 | 0.01 | `PLDDTLoss` | pLDDT logits 对比 LDDT-Cα |
+| Exp. Resolved | §1.9.10, 公式 43 | 0.01（仅微调） | `ExperimentallyResolvedLoss` | 37 路 logits 对比原子存在性 |
+| 结构违例 | §1.9.11, 公式 44–47 | 1.0（仅微调） | `StructuralViolationLoss` | 键长、键角、冲突 |
+| PAE / pTM | §1.9.7, 公式 38–40 | 0.1（仅微调） | `TMScoreLoss` | PAE logits 对比对齐误差 |
+
+**截断 FAPE** 机制（§1.11.5）仅适用于骨架 FAPE：在 90% 的训练小批量中，骨架 FAPE 距离被截断至 10 Å，在剩余的 10% 中不截断。侧链 FAPE 无论何种情况始终截断至 10 Å。
+
+来源：[losses.py](minalphafold/losses.py#L1-L200), [losses.py](minalphafold/losses.py#L49-L127)
+
+## 数据流水线 —— 表 1 特征维度
+
+数据流水线构造了 `AlphaFold2.forward()` 消费的特征张量。它们的维度固定为补充材料表 1 的规定。
+
+| 特征 | 维度 | 构建函数 | 消费者 |
+|---------|-----------|-----------------|-------------|
+| `target_feat` | 22 (21 aatype + 1 between_segment) | `build_target_feat()` | 算法 3 |
+| `msa_feat` | 49 (22 profile + 1 deletion_mean + 22 has_deletion + 4 cluster) | `build_msa_feat()` | 算法 3 |
+| `extra_msa_feat` | 25 (22 aatype + 1 deletion_mean + 1 has_deletion + 1 cluster) | `build_extra_msa_feat()` | §1.7.2 |
+| `template_pair_feat` | 88 (39 distogram + 1 mask + 22+22 aatype + 3 unit_vec + 1 mask) | `build_template_pair_feat()` | 算法 16 |
+| `template_angle_feat` | 57 (22 aatype + 14 torsion + 14 alt_torsion + 7 mask) | `build_template_angle_feat()` | §1.7.1 |
+
+MSA 预处理在构建特征之前应用了四种随机增强：**块删除**（算法 1, §1.2.6）、**聚类/额外拆分**（§1.2.7）、**掩码 MSA**（BERT 风格的 10/10/10/70 替换混合，依据 §1.2.7）以及**裁剪**（§1.2.8）。
+
+来源：[data.py](minalphafold/data.py#L1-L100), [embedders.py](minalphafold/embedders.py#L36-L94)
+
+## 真实值几何 —— 算法 21, 25, 26
+
+`geometry.py` 模块构建了结构模块的监督端。它从不位于预测路径上——预测通过 `structure_module.compute_all_atom_coordinates`（算法 24）进行，而真实值通过 `geometry.atom14_to_rigid_group_frames`（算法 21）进行。两条路径均从扭转角和文献常数参数化构建出相同的 8 个刚体组帧，从而确保当预测与真实值匹配时 FAPE 损失基线为零。
+
+**180°歧义**（算法 26, §1.8.5）影响四种残基类型，在这些类型中扭转旋转会产生无法区分的结构：ASP χ2、GLU χ3、PHE χ2、TYR χ2。`alternative_torsion_angles()` 翻转 π 周期 χ 角的正弦分量，而 `alternative_atom14_ground_truth()` 旋转受影响的原子。在损失计算时，`select_best_atom14_ground_truth()` 会选择两种真值中 FAPE 较小的那一个。
+
+来源：[geometry.py](minalphafold/geometry.py#L1-L200), [losses.py](minalphafold/losses.py#L26-L28)
+
+## 零初始化注册表 —— §1.11.4
+
+补充材料要求“每个残差块的最终权重层初始化为零”。这通过 `AlphaFold2._initialize_alphafold_parameters()` 实现，该函数遍历所有子模块，并基于类名对特定的线性层应用零初始化。下方的注册表记录了哪些层接受何种初始化策略。
+
+| 模块类 | 零初始化层 | 初始化类型 |
+|-------------|----------------|-----------|
+| `MSARowAttentionWithPairBias` | `linear_output` | 零（最终层） |
+| `MSAColumnAttention` | `linear_output` | 零（最终层） |
+| `MSAColumnGlobalAttention` | `linear_output` | 零（最终层） |
+| `TemplatePointwiseAttention` | `linear_output` | 零（最终层） |
+| `ExtraMsaStack` | `linear_output` | 零（最终层） |
+| `TriangleAttentionStartingNode` | `linear_output` | 零（最终层） |
+| `TriangleAttentionEndingNode` | `linear_output` | 零（最终层） |
+| `InvariantPointAttention` | `linear_output` | 零（最终层） |
+| `InvariantPointAttention` | `head_weights` | `log(e-1)` 使得 `softplus(w)=1` |
+| `MSATransition` | `linear_down` | 零（最终层） |
+| `PairTransition` | `linear_down` | 零（最终层） |
+| `OuterProductMean` | `linear_out` | 零（最终层） |
+| `TriangleMultiplicationOutgoing` | `out_linear` | 零（最终层）；`gate1`, `gate2`, `gate` → 门控初始化 |
+| `TriangleMultiplicationIncoming` | `out_linear` | 零（最终层）；`gate1`, `gate2`, `gate` → 门控初始化 |
+| `StructureModule` | `transition_linear_3` | 零（最终层） |
+| `BackboneUpdate` | `linear` | 零（最终层） |
+| `AngleResnetBlock` | `linear_2` | 零（最终层） |
+| 所有头（`DistogramHead` 等） | 最终的 `Linear` | 零（最终层） |
+
+<CgxTip>零初始化模式是理解早期训练动态的关键：在第 0 步，每个残差块表现为恒等变换，每个头输出均匀的 logits。只有 FAPE 损失（在初始恒等帧上操作）提供梯度信号来打破对称性。这意味着模型最早期的有效预测是纯粹由 FAPE 驱动的骨架平移。</CgxTip>
+
+来源：[model.py](minalphafold/model.py#L106-L153), [initialization.py](minalphafold/initialization.py), [heads.py](minalphafold/heads.py#L21-L25)
+
+## 无算法编号的补充章节
+
+若干补充材料章节定义了重要逻辑，它们虽缺少独立的算法框，但依然映射到特定的代码路径。
+
+| 补充 § | 主题 | 实现 | 源文件 |
+|-------------|-------|---------------|-------------|
+| §1.2.5 | 数据过滤（分辨率、长度、聚类大小） | `filter_openproteinset.py` | [scripts/](scripts/filter_openproteinset.py) |
+| §1.2.7 | 聚类/额外 MSA 拆分 + 掩码 MSA | `sample_cluster_and_extra()`, `masked_msa_inputs()` | [data.py](minalphafold/data.py) |
+| §1.2.8 | 裁剪（连续 + 随机） | `crop_example()` | [data.py](minalphafold/data.py) |
+| §1.7.1 | 模板角嵌入（拼接至 MSA） | `AlphaFold2.forward()` 中的 `template_angle_linear_1/2` | [model.py](minalphafold/model.py#L284-L295) |
+| §1.8.4 | AngleResnet（扭转角 MLP） | `AngleResnet` / `AngleResnetBlock` | [structure_module.py](minalphafold/structure_module.py#L55-L115) |
+| §1.8.5 | 180°旋转对称性 / π 周期 χ | `CHI_PI_PERIODIC`, `alternative_torsion_angles()` | [geometry.py](minalphafold/geometry.py#L75-L78) |
+| §1.9.11 | 结构违例损失（键、键角、冲突） | `StructuralViolationLoss` | [losses.py](minalphafold/losses.py#L24-L25) |
+| §1.10 | 循环随机周期采样 | `AlphaFold2.forward()` 中的 `n_cycles ~ Uniform(1, N_cycle)` | [model.py](minalphafold/model.py#L207-L211) |
+| §1.11.2 | 集成平均（仅推理） | `AlphaFold2.forward()` 中的累加与除法循环 | [model.py](minalphafold/model.py#L254-L375) |
+| §1.11.5 | 90/10 截断/未截断 FAPE | `AlphaFoldLoss` 中的 `use_clamped_fape` | [losses.py](minalphafold/losses.py#L158-L162) |
+| §1.11.6 | 丢弃方向（逐行与逐列） | `dropout_rowwise()`, `dropout_columnwise()` | [utils.py](minalphafold/utils.py) |
+| §1.11.8 | 梯度检查点 | Evoformer + 额外 MSA 块上的 `torch.utils.checkpoint` | [model.py](minalphafold/model.py#L329-L363) |
+
+来源：[model.py](minalphafold/model.py#L284-L363), [data.py](minalphafold/data.py#L1-L100), [geometry.py](minalphafold/geometry.py#L75-L95), [losses.py](minalphafold/losses.py#L158-L200)
+
+## 交叉引用快速入门
+
+在阅读补充材料并遇到算法编号时，使用此简明查找表可直接跳转至实现代码：
+
+- **算法 3–4** → `minalphafold/embedders.py`（类 `InputEmbedder`, `RelPos`）
+- **算法 6–7** → `minalphafold/evoformer.py`（类 `Evoformer`, `MSARowAttentionWithPairBias`）
+- **算法 8–15** → `minalphafold/embedders.py`（所有剩余的 Evoformer 子块）
+- **算法 16–19** → `minalphafold/embedders.py`（模板 + 额外 MSA 堆栈）
+- **算法 20, 22–25** → `minalphafold/structure_module.py`（结构模块 + IPA + 骨架）
+- **算法 21** → `minalphafold/geometry.py`（真实值帧构建）
+- **算法 26–28** → `minalphafold/losses.py`（FAPE 核心 + 交替真值选择）
+- **算法 29** → `minalphafold/heads.py`（pLDDT 头）
+- **算法 31–32** → `minalphafold/model.py`（循环循环 + 嵌入）
+
+<CgxTip>代码库的文档字符串提供了最精确的算法映射——每个类和函数均以其算法编号和补充材料章节开头。存疑时，请首先阅读文档字符串；它会引用所实现伪代码的精确行号。</CgxTip>
+
+---
+
+## 核心流水线
+
+- [深入解析/核心流水线/输入嵌入器与相对位置](https://zread.ai/ChrisHayduk/minAlphaFold2/5-input-embedder-and-relpos)
+
+---
+slug:5-input-embedder-and-relpos
+blog_type:normal
+---
+
+
+输入嵌入器（算法 3）和相对位置编码（算法 4）是 AlphaFold2 流水线中的**首批可学习操作**——它们将原始输入特征转换为初始 MSA 表示 **m** 和对表示 **z**，作为整个 Evoformer 主干的种子。网络中的每个后续块都会消耗并精炼这两个张量，这使得嵌入器成为模型的可学习参数首次接触生物信号的唯一起点。本页将详细剖析每个输入张量的具体内容、这两种表示的构建方式，以及为什么相对位置编码对于空间推理不可或缺。
+
+来源：[embedders.py](/minalphafold/embedders.py#L36-L118), [model.py](/minalphafold/model.py#L15-L51)
+
+## 架构一览
+
+下图展示了从原始特征经嵌入器到 Evoformer 的数据流，包括 RelPos 子系统以及在主干运行前将上一轮表示合并回来的下游循环注入。
+
+```mermaid
+flowchart TD
+    subgraph Inputs
+        TF["target_feat<br/>(batch, N_res, 22)"]
+        RI["residue_index<br/>(batch, N_res)"]
+        MF["msa_feat<br/>(batch, N_cluster, N_res, 49)"]
+    end
+
+    subgraph "InputEmbedder (Alg 3)"
+        L1["Linear₁: 22 → c_z"]
+        L2["Linear₂: 22 → c_z"]
+        L3["Linear₃: 22 → c_m"]
+        LM["Linear_msa: 49 → c_m"]
+        OS["Outer Sum<br/>aᵢ + bⱼ → zᵢⱼ"]
+
+        L1 --> OS
+        L2 --> OS
+    end
+
+    subgraph "RelPos (Alg 4)"
+        DIFF["d = rᵢ − rⱼ"]
+        CLAMP["clamp(d, ±32) + 32"]
+        OH["One-hot → 65 bins"]
+        LR["Linear: 65 → c_z"]
+        RI --> DIFF --> CLAMP --> OH --> LR
+    end
+
+    OS --> ZADD["z = aᵢ + bⱼ + RelPos"]
+    LR --> ZADD
+
+    L3 --> MADD["m = L₃(target_feat)⊕ + L_msa(msa_feat)"]
+    LM --> MADD
+
+    subgraph "Recycling (Alg 32)"
+        RCM["LayerNorm(m₁ᵢᵖʳᵉᵛ)"]
+        RCZ["LayerNorm(zᵢⱼᵖʳᵉᵛ) + Linear(dist_bins)"]
+    end
+
+    ZADD --> ZFINAL["zᵢⱼ (pair repr)"]
+    MADD --> MFINAL["mₛᵢ (MSA repr)"]
+    RCM --> MFINAL
+    RCZ --> ZFINAL
+
+    ZFINAL --> EVO["Evoformer Stack (Alg 6)"]
+    MFINAL --> EVO
+```
+
+嵌入器在**算法 2 第 5 行**被调用——这是每个循环周期内的首个操作——这意味着其输出在每个周期都会被全新覆写，随后才会重新加上循环残差。
+
+来源：[model.py](/minalphafold/model.py#L261-L266), [embedders.py](/minalphafold/embedders.py#L70-L94)
+
+## 输入张量：嵌入器接收了什么
+
+有三个张量会进入 `InputEmbedder.forward` 方法。它们的维度被固定为源自 AF2 补充材料表 1 的常量。
+
+| 张量 | 形状 | 维度 | 来源构建器 | 内容 |
+|--------|-------|------|---------------|----------|
+| `target_feat` | `(B, N_res, 22)` | `SEQ_ALPHABET_SIZE + 1` | `build_target_feat` | 1 维 `between_segment_residues` 标志 + 21 维氨基酸类型独热编码 |
+| `residue_index` | `(B, N_res)` | 标量 | 原始特征缓存 | 从 1 开始的残基位置（多链时可能包含间隔） |
+| `msa_feat` | `(B, N_cluster, N_res, 49)` | `MSA_FEAT_DIM` | `build_msa_feat` | 23 维独热 MSA + 1 维缺失标志 + 1 维缺失值 + 23 维簇频率 + 1 维簇缺失均值 |
+
+**`target_feat`** 编码了查询序列的标识。21 维氨基酸独热编码涵盖了 20 种标准残基外加一个“未知”类别（`UNK_ID = 20`）。前导的 `between_segment_residues` 标志仅在多链输入的链断裂处非零；对于单链训练，它处处为零，这使得第一列成为一个死维度，线性层必须学会忽略它。
+
+**`msa_feat`** 是信息最丰富的输入——每个簇行、每个残基对应 49 个通道的特征。它由五个组成子特征构成：
+
+| 子特征 | 维度 | 描述 |
+|------------|------|-------------|
+| `cluster_msa` 独热编码 | 23 | 20 种氨基酸 + 未知 + 间隔 + 掩码词元 |
+| `cluster_has_deletion` | 1 | 二值：此列前是否有插入？ |
+| `cluster_deletion_value` | 1 | `atan(d/3) · 2/π` — 原始缺失计数的有界变换 |
+| `cluster_profile` | 23 | 簇内的软氨基酸频率（包括额外 MSA 成员） |
+| `cluster_deletion_mean` | 1 | 簇内变换后缺失的均值 |
+
+缺失变换 `atan(d/3) · 2/π` 在间隔非常大时会饱和至 1.0，防止极端值破坏线性投影的稳定性。这就是补充材料 §1.2.9 表 1 中指定的“变换缺失”函数。
+
+来源：[embedders.py](/minalphafold/embedders.py#L70-L79), [data.py](/minalphafold/data.py#L68-L70), [data.py](/minalphafold/data.py#L623-L653), [data.py](/minalphafold/data.py#L683-L704), [a3m.py](/minalphafold/a3m.py#L52-L54)
+
+## 对表示构建 (z_ij)
+
+对表示 **z** 由两个独立的信号相加构建：
+
+### 信号 1 — 目标特征的外部和
+
+两个独立的线性投影在 **c_z** 维空间中生成逐残基嵌入：
+
+```
+a_i = Linear₁(target_feat_i)    → (B, N_res, c_z)
+b_j = Linear₂(target_feat_j)    → (B, N_res, c_z)
+z_ij = a_i.unsqueeze(-2) + b_j.unsqueeze(-3)
+```
+
+`unsqueeze` + 广播技巧创建了一个 `(B, N_res, N_res, c_z)` 张量，其中位置 `(i, j)` 接收 `a_i + b_j`。这种**外和**分解至关重要：它意味着对表示可以表达那些能分解为逐残基函数之和的残基对属性——例如“残基 i 是疏水的 **且** 残基 j 是疏水的”（在学习的嵌入下可分解为 `f(i) + g(j)`）。这两个线性层是**独立的**（权重分离），因此它们可以学习查询序列的不同方面，分别放置在 i 轴和 j 轴上。
+
+### 信号 2 — 相对位置编码
+
+`RelPos` 模块添加了一个学习到的空间先验，告知网络两个残基在序列空间中相距多远。这将在下一节详述。
+
+最终的对初始化为：
+
+> **z_ij = Linear₁(target_feat_i) + Linear₂(target_feat_j) + RelPos(r_i − r_j)**
+
+来源：[embedders.py](/minalphafold/embedders.py#L81-L89)
+
+## MSA 表示构建 (m_si)
+
+MSA 表示 **m** 类似地由两项之和构成：
+
+```
+m_si = Linear₃(target_feat_i).unsqueeze(1) + Linear_msa(msa_feat_si)
+```
+
+`Linear₃` 将 `target_feat` 投影到 **c_m** 维，然后 `unsqueeze(1)` 沿 MSA 序列轴进行广播（所有簇行共享相同的查询序列信号）。`Linear_msa` 则独立地将每个 `(s, i)` 位置的 49 维 `msa_feat` 投影到 **c_m** 维。求和意味着查询的氨基酸标识提供了一个跨所有 MSA 行共享的残基特定偏置，而每行自身的序列与缺失特征则携带了行特定的变异。
+
+输出形状为 `(B, N_cluster, N_res, c_m)`——每个簇序列、每个残基对应一个向量。
+
+来源：[embedders.py](/minalphafold/embedders.py#L91-L94)
+
+## RelPos：相对位置编码（算法 4）
+
+`RelPos` 模块将残基对之间的**序列距离**编码为学习到的嵌入，并添加到 **z** 中。若没有它，Evoformer 将不具备任何内建的邻接概念——对表示将纯粹从氨基酸标识出发，无法得知残基 5 紧挨着残基 6，却远离残基 200。
+
+### 工作原理
+
+```python
+d = residue_index[:, :, None] - residue_index[:, None, :]   # (B, N_res, N_res)
+d = d.clamp(-max_rel, max_rel) + max_rel                     # 平移至 [0, 2·max_rel]
+oh = F.one_hot(d.long(), 2 * max_rel + 1).float()           # (B, N_res, N_res, 65)
+return self.linear(oh)                                       # (B, N_res, N_res, c_z)
+```
+
+计算过程分四步进行：
+
+1. **差值矩阵** — 计算所有残基对的 `r_i − r_j`。对于连续单链，这简化为 `i − j`，但 `residue_index` 在多链输入或插入码的情况下可能包含间隔，因此使用原始索引而非假设连续性。
+
+2. **截断** — 值被截断至 `[-max_rel, max_rel]`，其中 `max_rel = 32`（论文默认值）。这意味着序列中相距超过 32 个位置的残基对，将获得与恰好相距 32 时相同的编码。通过 `+max_rel` 的平移，将范围映射到非负整数 `[0, 64]`。
+
+3. **独热编码** — 65 个整数区间（0 到 64）转化为每对残基一个 65 维的独热向量。这是截断后距离的无损表示——后续的线性层可以学习这 65 个区间上的任意函数。
+
+4. **线性投影** — 学习到的 `Linear(65 → c_z)` 将独热编码映射到对表示的通道空间，生成最终的位置嵌入。
+
+### 为什么在 ±32 处截断？
+
+截断半径 32 是补充材料中的设计选择，反映了一种**局部性偏置**：序列邻接对于邻近残基（那些可能相互接触或共享二级结构的残基）信息量最大。超过约 32 个位置后，确切的序列距离不如 Evoformer 将在后续块中学习到的进化与结构信号重要。独热 + 线性的公式允许网络为 65 个区间中的每一个学习不同的嵌入（包括为“相同位置”、“相距 ±1”、“相距 ±2”等提供独立的嵌入），同时将距离 > 32 的所有残基对折叠为两个共享区间（一个代表“+远”，一个代表“−远”）。
+
+### 对称性属性
+
+差值矩阵 `d_ij = r_i − r_j` 是**反对称的**：`d_ij = −d_ji`。经过独热编码后，偏移 `+k` 的区间和偏移 `−k` 的区间是线性层的**独立**输入维度，因此学习到的 `+k` 和 `−k` 的嵌入不必对称。这是刻意为之——Evoformer 的三角注意力模式在 `i` 和 `j` 上并不对称，因此对表示能从具有方向感知的位置信号中受益。
+
+来源：[embedders.py](/minalphafold/embedders.py#L96-L118)
+
+## 线性层初始化
+
+`InputEmbedder` 和 `RelPos` 中的所有五个线性层均使用 **LeCun 扇入截断正态**方案（`init="default"`），该方案以 `std = √(1/fan_in)` 初始化权重并将偏置设为零，分布截断至 ±2σ。这是补充材料 §1.11.4 中为普通（非门控、非输出）线性层指定的标准初始化方式。
+
+| 层 | fan_in | fan_out | 初始化 |
+|-------|--------|---------|------|
+| `linear_target_feat_1` | 22 | c_z (128) | LeCun 扇入 |
+| `linear_target_feat_2` | 22 | c_z (128) | LeCun 扇入 |
+| `linear_target_feat_3` | 22 | c_m (256) | LeCun 扇入 |
+| `linear_msa` | 49 | c_m (256) | LeCun 扇入 |
+| `RelPos.linear` | 65 | c_z (128) | LeCun 扇入 |
+
+`fan_in` 值（22、49 和 65）相对于输出维度较小，因此初始权重的幅度相对较大（对于 22 输入的线性层 `std ≈ 0.21`，49 输入的 `≈ 0.14`，65 输入的 `≈ 0.12`）。这是合适的，因为它们是网络中**首批**可学习操作——它们必须在 Evoformer 的残差块（使用零初始化输出投影）开始贡献之前，向表示中注入足够的信号方差。
+
+<CgxTip>InputEmbedder 是 `target_feat` 进入网络的唯一位置。其 22 维输入是查询氨基酸序列的唯一载体——所有关于“我们在预测哪种蛋白质”的下游知识都流经这三个线性投影。类似地，`msa_feat` 仅在此处和额外 MSA 线性投影中被消耗。这种瓶颈架构意味着嵌入器的线性权重对模型质量具有超乎寻常的重要性。</CgxTip>
+
+来源：[embedders.py](/minalphafold/embedders.py#L57-L68), [embedders.py](/minalphafold/embedders.py#L110-L111), [initialization.py](/minalphafold/initialization.py#L38-L59)
+
+## 配置文件：通道维度
+
+嵌入器的输出维度 `c_m` 和 `c_z` 由模型配置文件设定。本仓库附带三个配置文件：
+
+| 配置 | c_m | c_z | RelPos 区间 | 嵌入器参数量 |
+|---------|-----|-----|-------------|----------------------|
+| `alphafold2` | 256 | 128 | 65 | 22×128 + 22×128 + 22×256 + 49×256 + 65×128 = **28,416** |
+| `medium` | 64 | 64 | 65 | 22×64 + 22×64 + 22×64 + 49×64 + 65×64 = **11,520** |
+| `tiny` | 32 | 16 | 65 | 22×16 + 22×16 + 22×32 + 49×32 + 65×16 = **3,808** |
+
+完整的 AlphaFold2 配置使用 `c_m = 256` 和 `c_z = 128`（参见补充材料 §1.5）。MSA 表示的宽度是对表示的两倍，这反映了非对称的计算预算：MSA 行/列注意力在 `N_cluster × N_res` 个位置上操作，而对三角模块在 `N_res × N_res` 个位置上操作，且通常 `N_cluster ≫ N_res`。
+
+来源：[alphafold2.toml](/configs/alphafold2.toml#L7-L12), [tiny.toml](/configs/tiny.toml#L7-L12)
+
+## 集成至完整流水线
+
+`InputEmbedder` 在 `AlphaFold2.__init__` 中实例化一次，并在 `AlphaFold2.forward` 内每个循环周期的开始时调用。单个周期的调用顺序为：
+
+1. **InputEmbedder** 从原始特征生成初始 `m` 和 `z`
+2. **循环嵌入器**（算法 32）将 `LayerNorm(m₁ᵢᵖʳᵉᵛ)` 加到第一 MSA 行，并将 `LayerNorm(zᵢⱼᵖʳᵉᵛ) + Linear(dist_bins)` 加到对表示
+3. **模板嵌入** 将模板角度行追加到 `m`，并将模板对特征加到 `z`
+4. **额外 MSA 堆栈** 通过浅层类 Evoformer 块更新 `z`
+5. **Evoformer 主干** 迭代 48 个块处理 `(m, z)`
+6. **结构模块** 消耗最终的 `(s_i, z_ij)`
+
+在**首个循环周期**，“上一轮”的表示为零张量，因此循环加项消失，嵌入器的输出原样通过。在后续周期中，嵌入器依然从头运行（生成相同的初始 `m` 和 `z`），而循环嵌入器将归一化后的上一周期表示**加**在上方。这种设计意味着嵌入器的权重在所有周期中共享——它们学习从特征到表示的固定映射，而循环机制提供依赖于周期的精修，作为加性修正。
+
+<CgxTip>`model.py` 第 262 行的 `InputEmbedder.forward` 调用使用了**当前周期**的 `msa_feat_current`（若数据流水线按算法 2 第 4 行对 MSA 重采样，它可能跨周期不同），但每个周期的 `target_feat` 和 `residue_index` 保持不变。这意味着对初始化 `z_ij` 在各周期完全相同（相同 target_feat、相同 residue_index → 相同 RelPos），仅 MSA 初始化 `m_si` 因 MSA 重采样而变化。对表示跨周期的变化仅源于循环加性修正。</CgxTip>
+
+来源：[model.py](/minalphafold/model.py#L58-L68), [model.py](/minalphafold/model.py#L261-L278)
+
+## 接下来去哪
+
+由 InputEmbedder 生成的初始 `m` 和 `z` 直接流入 Evoformer 主干，后者通过 48 个堆叠块迭代精炼这两种表示。若要理解这些表示是如何演化的：
+
+- **[Evoformer 堆栈](6-evoformer-stack)** — 对 `m` 和 `z` 进行 48 块迭代精修
+- **[MSA 与对表示](8-msa-and-pair-representations)** — `m` 和 `z` 在语义上编码了什么，以及它们的形状如何约束架构
+- **[循环与集成](17-recycling-and-ensembling)** — 循环加性修正如何在第 2 轮及之后的周期中修改嵌入器的输出
+
+---
+
+- [深入解析/核心流水线/Evoformer 堆叠](https://zread.ai/ChrisHayduk/minAlphaFold2/6-evoformer-stack)
+
+---
+slug:6-evoformer-stack
+blog_type:normal
+---
+
+
+Evoformer 是 AlphaFold2 的计算核心——一个 48 块的残差堆栈，通过双向信息流联合演进 MSA 表示 **m** ∈ ℝ^(N_seq × N_res × c_m) 和成对表示 **z** ∈ ℝ^(N_res × N_res × c_z)。每个块按照算法 6 规定的固定顺序执行七个子操作，在消耗成对信息的 MSA 行更新（通过成对偏置注意力）与消耗 MSA 信息的成对更新（通过外积均值）之间交替进行。其结果是一个深度交织的表示，在提取单一表示并传递给结构模块之前，进化耦合和几何约束在所有 48 次迭代中相互精炼。
+
+来源: [evoformer.py](minalphafold/evoformer.py#L28-L95), [model.py](minalphafold/model.py#L53-L55)
+
+## 架构概述
+
+Evoformer 块实现了一个双更新残差图，其中 MSA 和成对表示通过一系列精心排序的操作进行更新。这种排序并非任意——它确保在单个块内，成对表示能够影响 MSA（步骤 1：成对偏置行注意力），而更新后的 MSA 也能影响成对表示（步骤 4：外积均值），从而在每个块中创建一轮完整的双向交换。
+
+```mermaid
+flowchart TB
+    subgraph EvoformerBlock["Evoformer 块 (算法 6)"]
+        direction TB
+        M_in["m_si (MSA 表示)"] --> RowAtt
+        Z_in["z_ij (成对表示)"] --> PairBias["成对偏置 b_ij^h"]
+        
+        subgraph MSA_Updates["MSA 表示更新"]
+            RowAtt["① 行注意力<br/>+ 成对偏置 (算法 7)<br/>+ 逐行 dropout"]
+            ColAtt["② 列注意力<br/>(算法 8)<br/>无 dropout"]
+            MSATrans["③ MSA 转换<br/>(算法 9)<br/>无 dropout"]
+            RowAtt --> ColAtt --> MSATrans
+        end
+        
+        subgraph Pair_Updates["成对表示更新"]
+            OPM["④ 外积均值<br/>(算法 10)"]
+            TriMult["⑤ 三角乘法<br/>出边 (算法 11)<br/>入边 (算法 12)<br/>+ 逐行 dropout"]
+            TriAtt["⑥ 三角注意力<br/>起始节点 (算法 13) 逐行<br/>结束节点 (算法 14) 逐列"]
+            PairTrans["⑦ 成对转换<br/>(算法 15)<br/>无 dropout"]
+            OPM --> TriMult --> TriAtt --> PairTrans
+        end
+        
+        PairBias --> RowAtt
+        MSATrans --> OPM
+    end
+    
+    M_out["m_si (已更新)"]
+    Z_out["z_ij (已更新)"]
+    MSATrans --> M_out
+    PairTrans --> Z_out
+```
+
+完整的 Evoformer 堆栈将此块实例化 `num_evoformer` 次（默认 48 次），作为一个 `torch.nn.ModuleList`。在训练期间，梯度检查点 (`torch.utils.checkpoint`) 包装每个块，以计算换内存——块之间的激活被丢弃，并在反向传播时重新计算，这遵循了补充材料中声明的策略 (§1.11.8)：“我们存储在 N_block = 48 个 Evoformer 块之间传递的激活。在反向传播期间，我们重新计算块内的所有激活。”
+
+来源: [evoformer.py](minalphafold/evoformer.py#L28-L50), [model.py](minalphafold/model.py#L347-L363)
+
+## 块组合与数据流
+
+每次 `Evoformer.forward` 调用接受 `(msa_representation, pair_representation, msa_mask, pair_mask)` 并在一次完整更新后返回相同的一对张量。该实现严格遵循残差连接——每个子模块的输出都加到输入表示上，而不是替换它。这保留了使得 48 块深度变得可处理的梯度高速通路。
+
+前向传播按此确切顺序执行：
+
+| 步骤 | 算法 | 操作 | 输入 → 输出 | Dropout |
+|------|-----------|-----------|----------------|---------|
+| 1 | 算法 7 | `MSARowAttentionWithPairBias` | (m, z) → Δm | 逐行 (p=0.15) |
+| 2 | 算法 8 | `MSAColumnAttention` | m → Δm | 无 |
+| 3 | 算法 9 | `MSATransition` | m → Δm | 无 |
+| 4 | 算法 10 | `OuterProductMean` | m → Δz | 无 |
+| 5 | 算法 11 | `TriangleMultiplicationOutgoing` | z → Δz | 逐行 (p=0.25) |
+| 5 | 算法 12 | `TriangleMultiplicationIncoming` | z → Δz | 逐行 (p=0.25) |
+| 6 | 算法 13 | `TriangleAttentionStartingNode` | z → Δz | 逐行 (p=0.25) |
+| 6 | 算法 14 | `TriangleAttentionEndingNode` | z → Δz | 逐列 (p=0.25) |
+| 7 | 算法 15 | `$PairTransition` | z → Δz | 无 |
+
+dropout 调度在设计上是不对称的。MSA 更新使用仅应用于行注意力的单一比率 (`evoformer_msa_dropout = 0.15`)。成对更新使用应用于三角乘法和三角注意力输出的 `evoformer_pair_dropout = 0.25`——但具有关键的结构区别：起始节点三角注意力和两个三角乘法使用**逐行** dropout，而结束节点三角注意力使用**逐列** dropout。这遵循了补充材料 §1.11.6 的规定，即共享掩码模式应与注意力的空间轴保持一致。
+
+来源: [evoformer.py](minalphafold/evoformer.py#L70-L95), [alphafold2.toml](configs/alphafold2.toml#L53-L56)
+
+## 带有成对偏置的 MSA 行注意力 (算法 7)
+
+这是成对表示将几何和结构信息注入 MSA 的机制。对于每个 MSA 序列行 *s*，在残基位置 *i, j* 上计算标准的多头自注意力，但注意力 logits 接收一个源自成对表示的逐头附加偏置：
+
+**a_{sij}^h = softmax_j(q · k / √d + b_{ij}^h)**
+
+其中偏置 **b_{ij}^h = LinearNoBias(LayerNorm(z_{ij}))** 将成对表示从 c_z 维投影到 `num_heads` 个标量——每个注意力头一个偏置，在所有 MSA 行之间共享。这种共享是刻意为之的：成对表示编码了残基对关系（距离、方向、接触），这些关系与我们在哪个进化序列内进行注意力计算*无关*，因此沿序列维度广播既正确又高效。
+
+输出是门控的：**sigmoid(Linear(m)) ⊙ attention_output**，然后投影回 c_m。门控机制允许网络选择性地抑制没有信息量的注意力输出，这在初始化时尤其重要——零初始化方案确保门控起始值接近零，使得每个块在训练开始时近似为恒等映射。
+
+```python
+# 核心注意力计算（简化自实际代码）
+Q = self.linear_q(LayerNorm(m))   # (B, N_seq, N_res, num_heads * head_dim)
+K = self.linear_k(LayerNorm(m))
+V = self.linear_v(LayerNorm(m))
+B = self.linear_pair(LayerNorm(z))  # (B, N_res, N_res, num_heads) — 成对偏置
+scores = einsum('bsihd, bsjhd -> bshij', Q, K) / sqrt(d) + B  # 沿序列维度广播
+attention = softmax(scores, dim=-1)
+values = einsum('bshij, bsjhd -> bsihd', attention, V)
+output = Linear(sigmoid(Linear(m)) * values)  # 门控输出
+```
+
+<CgxTip>成对偏置 `b_{ij}^h` 的形状为 `(batch, num_heads, N_res, N_res)`——它由 z 计算一次，并为每个 MSA 行重用。沿序列维度的 `unsqueeze(1)` 广播意味着所有 N_seq 行都以相同的结构先验进行注意力计算，这既是预期的语义，也显著节省了内存。</CgxTip>
+
+来源: [evoformer.py](minalphafold/evoformer.py#L97-L194)
+
+## MSA 列注意力 (算法 8)
+
+对于每个残基位置 *i*，注意力**在 MSA 序列** *s = 1, ..., N_seq* **之间**计算。这是行注意力的转置视角：列注意力不再询问“在一个进化序列中哪些残基位置是相关的？”，而是询问“哪些进化序列在此残基位置上达成一致？” 列注意力没有成对偏置——成对信息仅通过行注意力路径进入 MSA。
+
+该实现使用 einsum 模式 `'bsihd, btihd -> bihst'`，其中 *s* 索引查询序列，*t* 索引键序列，softmax 作用于 *t* 维度。与行注意力一样，输出是门控和掩码化的：填充的序列位置通过 -1e9 的偏置获得零注意力 logits。
+
+来源: [embedders.py](minalphafold/embedders.py#L575-L652)
+
+## MSA 转换 (算法 9)
+
+一个独立应用于 MSA 表示每个单元格的位置式双层前馈网络：`LayerNorm → Linear(c_m → 4·c_m) → ReLU → Linear(4·c_m → c_m)`。扩展因子 4 是补充材料的默认值。不应用 dropout——残差连接是纯加性的。这是块中最简单的子模块，在两个注意力步骤之间提供逐位置的非线性特征精炼。
+
+来源: [embedders.py](minalphafold/embedders.py#L655-L684)
+
+## 外积均值 (算法 10)
+
+这是在单个 Evoformer 块内 MSA 表示写入成对表示的**唯一通道**。它计算 MSA 的对称摘要，以捕获残基位置之间的协变：
+
+1. 将每个 MSA 单元格投影到两个隐藏向量：**a_{si} = Linear_left(LayerNorm(m_{si}))**，**b_{sj} = Linear_right(LayerNorm(m_{sj}))**，两者均在 ℝ^c_hidden 中
+2. 取它们外积的序列均值：**mean_s(a_{si} ⊗ b_{sj})** ∈ ℝ^(c_hidden × c_hidden)
+3. 展平并投影：**Linear_out(flatten(outer))** → ℝ^c_z
+
+掩码感知的归一化除以有效 (s,i)×(s,j) 对的数量而不是 N_seq，确保填充位置不会破坏均值。此操作是互信息估计器的神经网络类比——它发现哪些残基位置在进化过程中共同变化，这正是决定接触结构的信号。
+
+<CgxTip>当 N_seq 很大时，外积均值是 Evoformer 块中计算量 (FLOP) 最大的子模块，因为 einsum `'bsic, bsjd -> bijcd'` 沿序列维度收缩的计算复杂度为 O(N_seq × N_res² × c_hidden²)。隐藏维度 c=32（对比 c_m=256）使其保持可控。</CgxTip>
+
+来源: [embedders.py](minalphafold/embedders.py#L686-L743)
+
+## 三角乘法更新 (算法 11 & 12)
+
+这两个模块在成对表示中强制执行**三角不等式结构**。成对表示 z_{ij} 在概念上编码了残基 i 和 j 之间的关系；三角更新确保如果 z_{ik} 和 z_{jk} 都有信息量，那么 z_{ij} 应该由它们的一致性（或矛盾性）提供信息。
+
+**出边 (算法 11)：** 通过从 *i* 和 *j* 发出的*出边*在中间节点 *k* 上进行池化：
+
+**z_{ij} ← g_{ij} ⊙ Linear(LayerNorm(Σ_k a_{ik} ⊙ b_{jk}))**
+
+其中 `a = sigmoid(gate_a(z)) * Linear_a(z)`，`b` 同理。einsum `'bikc, bjkc -> bijc'` 在 *k* 上收缩 A[i,k] 与 B[j,k]，要求两条边都从其源节点*指向*共享的中间节点。
+
+**入边 (算法 12)：** 使用*入边*的镜像操作：
+
+**z_{ij} ← g_{ij} ⊙ Linear(LayerNorm(Σ_k a_{ki} ⊙ b_{kj}))**
+
+einsum `'bkic, bkjc -> bijc'` 收缩 A[k,i] 与 B[k,j]，其中两条边都从共享源节点 *k* *指向*其目标节点。
+
+两种变体都使用三个门控层（投影上的 gate1、gate2；输出上的 gate）和收缩后的 LayerNorm。输出投影 (`out_linear`) 是零初始化的，因此在训练开始时，三角更新不产生任何贡献，Evoformer 块以近似恒等映射开始。
+
+| 属性 | 出边 (算法 11) | 入边 (算法 12) |
+|----------|-------------------|-------------------|
+| 收缩 | `Σ_k a_{ik} · b_{jk}` | `Σ_k a_{ki} · b_{kj}` |
+| 边语义 | i→k 和 j→k (出边) | k→i 和 k→j (入边) |
+| einsum | `'bikc, bjkc -> bijc'` | `'bkic, bkjc -> bijc'` |
+| Dropout | 逐行 | 逐行 |
+| 隐藏维度 | 128 | 128 |
+
+来源: [embedders.py](minalphafold/embedders.py#L745-L866)
+
+## 三角自注意力 (算法 13 & 14)
+
+这些是**沿着成对表示的行或列**操作的注意力机制，将一个残基索引视为“批次”维度，而在另一个上进行注意力计算。
+
+**起始节点 (算法 13)：** 对于每个起始节点 *i*，使用来自 z_{ij} 的查询/键和三角偏置 b_{jk} = LinearNoBias(LayerNorm(z_{jk}))，对结束节点 *j* 进行注意力计算。einsum `'bijhd, bikhd -> bijkh'` 计算注意力分数，其中 *j* 是查询位置，*k* 是键位置，两者共享相同的起始节点 *i*。偏置 z_{jk} 直接连接两个结束节点，提供三角一致性信号。应用**逐行 dropout**。
+
+**结束节点 (算法 14)：** 转置操作——对于每个结束节点 *j*，使用偏置 b_{ki} 对起始节点 *i* 进行注意力计算。根据补充材料 §1.11.6，应用**逐列 dropout**。
+
+| 属性 | 起始 (算法 13) | 结束 (算法 14) |
+|----------|-------------------|-----------------|
+| 固定轴 | i (起始节点) | j (结束节点) |
+| 注意力计算范围 | j → k | i → k |
+| 偏置来源 | z_{jk} | z_{ki} |
+| 分数 einsum | `'bijhd, bikhd -> bijkh'` | `'bkjd, bkhd -> bkjh'` (转置) |
+| Dropout | 逐行 | 逐列 |
+| 头维度 | 32 | 32 |
+| 头数 | 4 | 4 |
+
+来源: [embedders.py](minalphafold/embedders.py#L868-L1053)
+
+## 成对转换 (算法 15)
+
+成对表示上的位置式双层前馈网络，结构与 MSA 转换相同，但在 c_z 通道上操作：`LayerNorm → Linear(c_z → 4·c_z) → ReLU → Linear(4·c_z → c_z)`。无 dropout。这在具有几何结构的三角更新之后提供逐对的非线性精炼，类似于 MSA 转换在注意力步骤之后进行精炼。
+
+来源: [embedders.py](minalphafold/embedders.py#L1055-L1081)
+
+## 共享掩码 Dropout (补充材料 §1.11.6)
+
+Evoformer 使用一种非标准的 dropout 变体，其中二值掩码**沿一个空间维度共享**。这对于成对表示至关重要，因为单个被丢弃的行或列会影响引用该残基的每个成对元素，从而保持几何一致性：
+
+- **`dropout_rowwise(x, p)`**：生成形状为 `(B, 1, N_res, D)` 的掩码——跨行共享 (维度 1)，跨列变化 (维度 2)。每行看到相同的列丢弃模式。
+- **`dropout_columnwise(x, p)`**：生成形状为 `(B, N_res, 1, D)` 的掩码——跨列共享 (维度 2)，跨行变化 (维度 1)。每列看到相同的行丢弃模式。
+
+这不是标准的 PyTorch dropout，后者按元素独立采样。共享掩码方法确保如果残基 *k* 从一个三角更新中被丢弃，它就会从所有更新中被丢弃，防止网络在单次前向传播中看到残基图的不一致子集。
+
+来源: [utils.py](minalphafold/utils.py#L25-L52)
+
+## 梯度堆叠与内存策略
+
+48 块的 Evoformer 堆栈是 AlphaFold2 网络中最深的部分，朴素地物化所有块间激活将耗尽 GPU 内存。该实现在训练期间对每个块使用 `torch.utils.checkpoint`：
+
+```python
+for block in self.evoformer_blocks:
+    if self.training:
+        msa_repr, pair_repr = torch_checkpoint.checkpoint(
+            block, msa_repr, pair_repr,
+            msa_mask=evo_msa_mask, pair_mask=pair_mask,
+            use_reentrant=False,
+        )
+    else:
+        msa_repr, pair_repr = block(msa_repr, pair_repr, ...)
+```
+
+在前向传播期间，只存储每个块的输入；块的内部激活被丢弃。在反向传播期间，重新执行每个块以重建所需的激活。这将内存从 O(48 × block_activations) 减少到 O(48 × block_input + 1 × block_activations)，代价是每个块多一次额外的前向传播。`use_reentrant=False` 标志使用 PyTorch 的现代检查点 API，该 API 与 autograd 钩子和自定义梯度兼容。
+
+来源: [model.py](minalphafold/model.py#L347-L363)
+
+## 配置参数
+
+完整的 AlphaFold2 配置定义了以下与 Evoformer 相关参数：
+
+| 参数 | 值 | 参考 | 描述 |
+|-----------|-------|-----------|-------------|
+| `num_evoformer` | 48 | §1.6 | Evoformer 块的数量 |
+| `c_m` | 256 | §1.5 | MSA 表示通道维度 |
+| `c_z` | 128 | §1.5 | 成对表示通道维度 |
+| `dim` | 32 | 算法 7/8 | MSA 行/列注意力的头维度 |
+| `num_heads` | 8 | 算法 7/8 | MSA 行/列注意力的头数 |
+| `msa_transition_n` | 4 | 算法 9 | MSA 转换扩展因子 |
+| `outer_product_dim` | 32 | 算法 10 | OPM 隐藏维度 |
+| `triangle_mult_c` | 128 | 算法 11/12 | 三角乘法隐藏维度 |
+| `triangle_dim` | 32 | 算法 13/14 | 三角注意力头维度 |
+| `triangle_num_heads` | 4 | 算法 13/14 | 三角注意力头数 |
+| `pair_transition_n` | 4 | 算法 15 | 成对转换扩展因子 |
+| `evoformer_msa_dropout` | 0.15 | §1.11.6 | MSA 行注意力 dropout 率 |
+| `evoformer_pair_dropout` | 0.25 | §1.11.6 | 三角更新 dropout 率 |
+
+来源: [alphafold2.toml](configs/alphafold2.toml#L1-L56)
+
+## 零初始化与门控策略
+
+Evoformer 在 48 个块中的可训练性关键取决于其初始化方案，该方案在 `AlphaFold2._initialize_alphafold_parameters` 中实现。使用了两种互补的策略：
+
+**零初始化的输出投影：** `MSARowAttentionWithPairBias`、`MSAColumnAttention`、`TriangleAttentionStartingNode` 和 `TriangleAttentionEndingNode` 的 `linear_output` 被零初始化。这意味着每个注意力子模块在训练开始时产生零输出，使得每个 Evoformer 块成为近似恒等映射。梯度随后可以从一开始就干净地流过 48 个残差连接，并且网络随着学习逐渐“开启”每个子模块。
+
+**门控输出：** 每个注意力和三角乘法模块计算 `sigmoid(gate) * output`，其中门控通过 `init_gate_linear` 初始化（小的随机权重，零偏置 → 起始时 sigmoid ≈ 0.5）。这为每个模块提供了一个可学习的开关，与零初始化协同工作——即使在输出投影发展出非零权重之后，门控也可以抑制无益的贡献。
+
+来源: [model.py](minalphafold/model.py#L106-L153), [initialization.py](minalphafold/initialization.py#L1-L1)
+
+## 信息流摘要
+
+```mermaid
+flowchart LR
+    subgraph Block_k["块 k"]
+        direction LR
+        M["m_si"] -->|"① 行注意力<br/>+ 成对偏置"| M1["m_si"]
+        Z["z_ij"] -->|"成对偏置"| M
+        M1 -->|"② 列注意力"| M2["m_si"]
+        M2 -->|"③ 转换"| M3["m_si"]
+        M3 -->|"④ OPM"| Z1["z_ij"]
+        Z1 -->|"⑤ 三角乘法"| Z2["z_ij8ij"]
+        Z2 -->|"⑥ 三角注意力"| Z3["z_ij"]
+        Z3 -->|"⑦ 转换"| Z4["z_ij"]
+    end
+    
+    M3 --> M_next["m_si (至块 k+1)"]
+    Z4 --> Z_next["z_ij (至块 k+1)"]
+    
+    style M fill:#e1f5fe
+    style Z fill:#fff3e0
+    style M3 fill:#e1f5fe
+    style Z4 fill:#fff3e0
+```
+
+m 和 z 之间的**双向耦合**是 Evoformer 的决定性特征。在单个块内：z → m 发生在步骤 1（行注意力中的成对偏置），m → z 发生在步骤 4（外积均值）。跨 48 个块，这创建了 48 轮相互精炼，其中在 MSA 中发现的进化耦合为成对表示中的几何约束提供信息，进而锐化 MSA 中的注意力模式。这种迭代协同进化使得 AlphaFold2 能够从稀疏的 MSA 信号中解析出模糊的接触。
+
+在所有 48 个块之后，通过第一行 MSA 的线性投影提取单一表示：**s_i = Linear(m_{1i})**，其中第一行对应于目标序列。此 s_i 连同最终的 z_ij 一起输入到[结构模块与 IPA](7-structure-module-and-ipa)。
+
+---
+
+- [深入解析/核心流水线/结构模块与 IPA](https://zread.ai/ChrisHayduk/minAlphaFold2/7-structure-module-and-ipa)
+
+---
+slug:7-structure-module-and-ipa
+blog_type:normal
+---
+
+
+结构模块是 AlphaFold2 流水线的最后阶段——这个架构组件将 Evoformer 的抽象表示转换为具体的 3D 原子坐标。它通过**不变点注意力**（Invariant Point Attention, IPA）的迭代循环来实现这一点，这是一种保持刚体运动等变性的几何感知注意力机制，随后进行逐残基的主链帧更新和侧链扭转角预测。本页涵盖了完整的迭代循环（算法 20）、它的三个子模块（IPA / 算法 22、BackboneUpdate / 算法 23 以及扭转角头 / 算法 24），以及使训练稳定的关键设计决策——零初始化、旋转分离和单位缩放。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L1-L20)
+
+## 架构概述
+
+结构模块位于 AlphaFold2 前向传播的末端。在 48 个 Evoformer 块生成单一表示 `s_i ∈ ℝ^{c_s}` 和成对表示 `z_ij ∈ ℝ^{c_z}` 之后，结构模块消耗这两者并生成：每次迭代中每个残基的刚体帧 `(R_i, t_i)`（用于辅助 FAPE 损失），每个残基的七个扭转角（以 (sin, cos) 对的形式），以及最终的 atom14 坐标。下图展示了内部的数据流：
+
+```mermaid
+flowchart TB
+    subgraph Input["Evoformer 的输入"]
+        s["s_i (batch, N_res, 384)"]
+        z["z_ij (batch, N_res, N_res, 128)"]
+        aatype["aatype (batch, N_res)"]
+    end
+
+    subgraph Init["初始化 (算法 20 第 1-3 行)"]
+        LN1["LayerNorm → 线性投影"]
+        LN2["LayerNorm (成对)"]
+        T0["T_i = 恒等帧\n(黑洞初始化)"]
+    end
+
+    subgraph Loop["迭代循环 ×8 层"]
+        IPA["InvariantPointAttention\n(算法 22)"]
+        LN_D1["LayerNorm → Dropout"]
+        Trans["过渡 MLP\n(3层 ReLU)"]
+        LN_D2["LayerNorm → Dropout"]
+        BB["BackboneUpdate\n(算法 23)"]
+        Compose["T_i ← T_i ∘ (R, t)"]
+        SC["MultiRigidSidechain\n(AngleResnet → 算法 24)"]
+        Detach["分离旋转\n(stopgrad, 非最终层)"]
+    end
+
+    subgraph Output["输出"]
+        Traj["逐层帧与扭转角\n(辅助 FAPE / 扭转角损失)"]
+        Atoms["atom14_coords, frames, masks\n(最终全原子输出)"]
+    end
+
+    s --> LN1
+    z --> LN2
+    LN1 --> T0
+    T0 --> IPA
+    LN2 --> IPA
+    IPA --> LN_D1 --> Trans --> LN_D2 --> BB --> Compose --> SC
+    Compose --> Detach --> IPA
+    SC --> Traj
+    SC --> Atoms
+    Compose --> Traj
+```
+
+该循环默认运行 8 次迭代（`structure_module_layers = 8`）。每次迭代利用来自 IPA 的几何上下文来优化单一表示，应用过渡 MLP，更新主链帧，并预测侧链扭转角。关键的是，每个帧的旋转分量在迭代之间（最后一次除外）被分离，防止梯度通过链式帧组合产生“杠杆效应”，同时仍然允许平移梯度在每一层流向辅助 Cα FAPE 损失。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L117-L141), [structure_module.py](/minalphafold/structure_module.py#L198-L313)
+
+## 迭代循环 — StructureModule.forward
+
+`StructureModule.forward` 方法逐步实现了算法 20。以下是每个阶段的详细解析，附带了补充材料中对应的算法行号。
+
+**阶段 1 — 输入归一化（第 1-2 行）。** `s_i` 和 `z_ij` 都经过 LayerNorm。然后单一表示通过 `single_rep_proj`（一个带有默认初始化的 `Linear(c_s → c_s)`）进行投影。IPA 前的单一表示被保存为 `initial_single_representation`——扭转角头随后会同时消耗当前和初始表示，这使得侧链路径能够访问未变形的 Evoformer 信号。
+
+**阶段 2 — 黑洞初始化（第 3 行）。** 所有逐残基帧初始化为恒等变换：`R_i = I₃`，`t_i = 0`。这种“黑洞”初始化将每个残基置于原点且无旋转——IPA 迭代必须从零开始发现正确的几何结构。
+
+**阶段 3 — IPA 循环（第 6-21 行）。** 对于 8 层中的每一层：
+1. `s ← s + IPA(s, z, R, t)` — IPA 添加几何上下文（算法 22）。
+2. `s* ← LayerNorm(Dropout(s))` — 稳定化和正则化。
+3. `s ← s + Transition(s)` — 扩展因子为 1 的 3 层 ReLU MLP（即 `c_s → c_s → c_s → c_s`），最后一个线性层是零初始化的，因此该块初始为恒等映射。
+4. `s ← LayerNorm(Dropout(s))` — 第二轮归一化。
+5. `(R_update, t_update) ← BackboneUpdate(s)` — 预测局部旋转 + 平移。
+6. `T_i ← T_i ∘ (R_update, t_update)` — 将更新组合到世界帧中。
+7. 侧链扭转角和 atom14 坐标通过 `MultiRigidSidechain` 从更新后的帧中计算得出。
+8. **旋转分离：** 如果这不是最后一层，则 `R_i ← R_i.detach()`。平移保留梯度。
+
+**阶段 4 — 输出组装。** 所有逐层的帧、平移和扭转角都被堆叠成轨迹。内部纳米坐标通过将平移和原子位置乘以 `position_scale = 10.0` 转换回埃。输出字典包含键 `traj_rotations`、`traj_translations`、`traj_torsion_angles`、`final_rotations`、`final_translations`、`all_frames_R`、`all_frames_t`、`atom14_coords`、`atom14_mask` 和 `single`。
+
+| 输出键 | 形状 | 用途 |
+|---|---|---|
+| `traj_rotations` | `(8, B, N, 3, 3)` | 用于辅助 FAPE 的逐层主链帧 |
+| `traj_translations` | `(8, B, N, 3)` | 逐层主链位置 (Å) |
+| `traj_torsion_angles` | `(8, B, N, 7, 2)` | 逐层归一化的 (sin, cos) 对 |
+| `atom14_coords` | `(B, N, 14, 3)` | 最终的全原子坐标 (Å) |
+| `atom14_mask` | `(B, N, 14)` | 逐原子有效性掩码 |
+| `single` | `(B, N, c_s)` | IPA 后的单一表示（用于 pLDDT, distogram） |
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L198-L313), [alphafold2.toml](/configs/alphafold2.toml#L58-L72)
+
+## 不变点注意力 — 算法 22
+
+IPA 是结构模块的几何核心。它是一种改进的多头注意力机制，从**三个**独立的来源——标量、成对偏置和点——计算注意力分数，并从**三个**对应的通道汇聚值。其关键特性是 **SE(3) 不变性**：如果每个帧 `T_i` 和每个点都经历相同的刚体运动，输出只会将该相同运动应用于点值输出而发生变化。这意味着 IPA 的标量输出是不变的（不受刚体运动影响），而其点输出是等变的（能正确变换）。
+
+### 三种注意力分数贡献
+
+对于每个头 `h` 和残基对 `(i, j)`，注意力 logit 为：
+
+$$\text{logit}_{ij}^h = \frac{1}{\sqrt{3}} \left( \underbrace{\frac{q_i^h \cdot k_j^h}{\sqrt{c}}}_{\text{标量}} + \underbrace{b_{ij}^h}_{\text{成对偏置}} + \underbrace{-\frac{\gamma_h}{2} \sum_p \|T_i(q_{ip}^h) - T_j(k_{jp}^h)\|^2}_{\text{点}} \right)$$
+
+| 组件 | 投影 | 每头形状 | 作用 |
+|---|---|---|---|
+| **标量** | 来自 `Linear(c_s → N_head·c)` 的 `q_i^h, k_j^h, v_j^h` | `(c=16)` | 序列特征上的标准注意力 |
+| **成对偏置** | `b_{ij} = Linear(z_{ij})` | 每头 `(1)` | 成对表示作为加性分数偏置 |
+| **点** | 来自点投影的 `q_ip^h, k_jp^h, v_jp^h`，通过 `T_i` 转换到全局帧 | `(N_q=4, N_v=8, 3D)` | 几何感知：在 3D 空间中距离更近的残基具有更大的注意力 |
+
+`1/√3` 前置因子和 `1/√(3·c)` 标量缩放确保了当维度平衡时各项的贡献相等。点注意力使用一个**可学习的逐头权重** `γ_h = softplus(head_weights_h) · √(1 / (3 · N_q · 9/2))`，其中 `9/2` 因子对 3D 点维度进行了归一化。
+
+### 点投影与帧变换
+
+`_project_points` 辅助函数通过将输出切分为 x/y/z 分量并将它们堆叠为最后一个轴，将原始线性输出重塑为 `(batch, N_res, N_head, N_points, 3)` 格式。这些局部帧点随后被转换为全局坐标：
+
+```python
+query_points_global = R_i @ q_points + t_i
+key_points_global   = R_j @ k_points + t_j
+value_points_global = R_j @ v_points + t_j
+```
+
+这种帧变换使得 IPA 具备几何感知能力。平方距离 `||T_i(q_i) - T_j(k_j)||²` 对同时应用于所有帧的任何全局刚体运动是不变的，因为帧和点是共同运动的。
+
+### 输出特征组装
+
+在 `j` 维度上进行 softmax 后，三个值流被组装并拼接：
+
+1. **标量值**：`output_scalar = softmax · v` → 形状 `(B, N, N_head · c)`
+2. **点值**：经过注意力加权的全局点被转换回每个查询残基的局部帧，然后被切分为 x/y/z 分量**以及**它们的 L2 范数——为每个点值提供 `4 + 1 = 5` 个通道。最终形状：切分分量为 `(B, N, N_head · N_v · 4)`，范数为 `(B, N, N_head · N_v)`。
+3. **成对值**：`output_pair = softmax · z_ij` → 形状 `(B, N, N_head · c_z)`
+
+拼接后的特征通过 `linear_output`（零初始化 / "final" 初始化），因此 IPA 初始为恒等映射——结构模块最初原封不动地传递 `s_i`。
+
+<CgxTip>IPA 的 `linear_output` 使用 `init="final"`（零权重/偏置）。这意味着在初始化时，IPA **没有任何**贡献——结构模块的第一次迭代是纯粹的恒等映射。结合 `BackboneUpdate` 的零初始化，整个结构模块最初作为一个空操作启动，必须通过训练来发现几何更新。这就是补充材料 1.11.4 中的“零初始化最终权重层”规则。</CgxTip>
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L316-L541)
+
+## 主链帧更新 — 算法 23
+
+在 IPA 和过渡 MLP 更新了单一表示之后，`BackboneUpdate` 从 `s_i` 中提取逐残基的刚体变换。该机制刻意保持简单：
+
+1. **投影为 6 个标量**：`vals = Linear(c_s → 6)`，其中线性层是零初始化的。
+2. **通过四元数旋转**：前 3 个值 `(b, c, d)` 定义了一个未归一化的四元数 `(1, b, c, d)`，它被归一化为单位长度。相应的旋转矩阵由标准的四元数到旋转公式构建。这种参数化总是产生一个正规旋转（det = +1），且恒等变换对应于 `(b, c, d) = (0, 0, 0)`——这与零初始化相匹配。
+3. **平移**：剩余的 3 个值 `(t_x, t_y, t_z)` 是局部帧的平移更新。
+
+帧组合 `T_i ← T_i ∘ (R, t)` 意味着更新是在残基自身的局部帧中应用的——旋转围绕残基的局部轴进行，平移沿着它们移动。在世界坐标系中：
+
+```python
+translations = R_i @ t_update + t_i    # 将局部平移旋转到世界帧中，并相加
+rotations    = R_i @ R_update           # 组合旋转
+```
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L543-L610)
+
+## 侧链扭转角与原子放置 — 算法 24-25
+
+主链帧更新后，`MultiRigidSidechain` 预测每个残基的七个扭转角，并将其展开为完整的 atom14 坐标。这是一个两阶段过程：通过 AngleResnet 进行**扭转角预测**，然后通过 `compute_all_atom_coordinates` 进行**原子放置**。
+
+### AngleResnet — 扭转角预测
+
+`AngleResnet` 接收当前的单一表示 `s_i` 和初始（IPA 前）单一表示，将它们分别线性投影到隐藏空间，将它们求和，并将结果通过 `num_blocks` 个残差块。每个 `AngleResnetBlock` 实现 `a → a + Linear₂(ReLU(Linear₁(ReLU(a))))`，其中 `Linear₂` 是零初始化的——因此该块初始为恒等映射。最后的线性层输出 `7 × 2` 个值（七个角，每个作为未归一化的 (sin, cos) 对）。这些值被 L2 归一化为单位 (sin, cos) 向量，用于旋转矩阵的构建，而未归一化的版本则被保留用于角度范数损失项。
+
+| 参数 | 值 | 来源 |
+|---|---|---|
+| `c_in2` | 384 (= c_s) | Evoformer 单一表示维度 |
+| `c_hiddenBhidden` | 128 (= structure_module_c) | 第 1.8 节 |
+| `num_blocks` | 2 | 算法 20 第 12-13 行 |
+| `num_angles` | 7 | ωC φ6 ψ, χG1, χ2, χ3, χ4 |
+
+### 刚体组帧G构造 —7— 算法 24
+
+`rigid_group_frames_from_torsions` 根据主链帧和扭转角构建每个残基的八个帧。七个扭转角为 `[ω, φ, ψ, χ1, χ2, χ3, χ4]`。帧构建遵循特定的拓扑结构：
+
+- **帧 0** — 直接使用主链帧 `(R_i, t_i)`。
+- **帧 1-4** (ω, φ, ψ, χ1) — 每个帧从主链帧分支出来：`T_i ∘ T^lit_{r,f→bb} ∘ makeRotX(α_f)`。文献变换 `T^lit` 是一个特定于残基类型的常数，它将扭转旋转轴相对于主链进行定位。
+- **帧 5-7** (χ2, χ3, χ4) — 这些帧从前一个帧**链式**分支出来：χ2 从 χ1 分支，χ3 从 χ2 分支，χ4 从 χ3 分支。这种链式拓扑反映了侧链的物理结构——每个连续的 χ 旋转都是相对于前一个定义的。
+
+### makeRotX — 扭转旋转 — 算法 25
+
+每个扭转角 α 产生一个绕局部 x 轴的旋转：
+
+```
+| 1      0        0    |
+| 0   cos(α)   -sin(α) |
+| 0   sin(α)    cos(α) |
+```
+
+来自 AngleResnet 的 (sin, cos) 对被直接使用——不需要反正切。这在数值上既稳定又处处可微（不像 arctan 在 ±π 处那样）。
+
+### 从帧进行原子放置
+
+一旦构建了 8 个刚体组帧，每个原子的位置由以下步骤确定：(1) 通过 `atom_frame_idx_table` 查找它属于哪个刚体组，(2) 通过 `lit_positions` 查找它在该组内的文献位置，(3) 应用该组的帧：`x_global = R_frame @ x_lit + t_frame`。这是一个在帧索引表上使用 `torch.gather` 的批量收集并应用操作。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L55-L115), [structure_module.py](/minalphafold/structure_module.py#L613-L839)
+
+## 单位制与坐标缩放
+
+补充材料内部使用**纳米**——文献中的键长单位为 nm，平移缩放因子 `s = 10` 用于在 nm（内部）和 Å（外部）之间转换。边界转换发生在两点：
+
+1. **`__init__`** — `default_frames[..., :3, 3]` 和 `lit_positions` 除以 `position_scale` (10.0) 以将 Å 转换为 nm。这些是注册缓冲区，因此转换在构造时只发生一次。
+2. **`forward`** — 输出平移和原子位置乘以 `position_scale` 以将 nm 转换为 Å。旋转是无量纲的，不需要转换。
+
+这种设计将所有内部算术保持在补充材料的 nm 单位中，同时以更传统的埃尺度呈现面向用户的输出。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L192-L196), [structure_module.py](/minalphafold/structure_module.py#L288-L311)
+
+## 旋转分离与梯度流
+
+结构模块中最微妙的设计决策之一是迭代之间的**选择性旋转分离**。在每次非最终迭代之后，旋转矩阵 `R_i` 会从计算图中分离（`rotations = rotations.detach()`），而平移则保留完整的梯度流。这实现了算法 20 第 19-21 行规定的旋转“stop_gradient”。
+
+其动机是防止**杠杆效应**——如果旋转梯度流经所有 8 次迭代，早期迭代中单一表示的微小变化将通过一串组合旋转传播，产生巨大且嘈杂的梯度信号。通过分离旋转，每次迭代只能看到当前旋转的*值*，但无法通过其计算过程进行反向传播。平移保持附着，以便在每一层计算的**辅助 Cα FAPE 损失**仍然可以通过平移分量获得通往 Evoformer 的梯度路径。
+
+最后一次迭代的旋转**不**被分离，因此最终的全原子 FAPE 损失可以端到端地优化最后一次主链更新。
+
+<CgxTip>`detach_rotations` 标志默认为 `True`（AF2 标准），但可以设置为 `False` 以用于记忆或调试，从而允许梯度流经所有的旋转组合。这作为 `StructureModule.forward` 中的一个参数暴露出来。</CgxTip>
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L269-L274), [structure_module.py](/minalphafold/structure_module.py#L200-L208)
+
+## 零初始化设计模式
+
+根据补充材料 1.11.4，零初始化在结构模块中被广泛使用。这确保了该模块作为恒等函数启动，并且必须**学习**其几何更新：
+
+| 组件 | 零初始化目标 | 初始化时的效果 |
+|---|---|---|
+| `IPA.linear_output` | 权重和偏置 → 0 | IPA 输出为零（无注意力信号） |
+| `BackboneUpdate.linear` | 权重和偏置 → 0 | 帧更新为恒等变换（无旋转/平移） |
+| `AngleResnetBlock.linear_2` | 权重和偏置 → 0 | 残差块为恒等映射（无角度校正） |
+| `Transition linear_3` | 权重和偏置 → 0 | 过渡 MLP 为恒等映射（无通道混合） |
+
+综合效果是，在初始化时，结构模块将所有残基生成在原点，具有恒等旋转和零扭转角。训练逐渐发现正确的几何结构，零初始化提供了一个稳定的起点，避免了随机的大帧更新。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L34-L52), [structure_module.py](/minalphafold/structure_module.py#L180-L183)
+
+## 配置参考
+
+下表总结了所有结构模块和 IPA 的配置参数及其 AlphaFold2 论文中的默认值：
+
+| 参数 | 默认值 | 补充材料引用 | 描述 |
+|---|---|---|---|
+| `structure_module_c` | 128 | §1.8 | 内部通道维度 |
+| `structure_module_layers` | 8 | 算法 20 | IPA 迭代次数 |
+| `structure_module_dropout_ipa` | 0.1 | 算法 20 第 7 行 | IPA 后的 Dropout |
+| `structure_module_dropout_transition` | 0.1 | 算法 20 第 9 行 | 过渡后的 Dropout |
+| `position_scale` | 10.0 | §1.8.3 | Å↔nm 转换因子 (s = 10) |
+| `ipa_num_heads` | 12 | 算法 22 | IPA 注意力头数 |
+| `ipa_c` | 16 | 算法 22 | 每头通道维度 |
+| `ipa_n_query_points` | 4 | 算法 22 | 每头查询点数 |
+| `ipa_n_value_points` | 8 | 算法 22 | 每头值点数 |
+| `sidechain_num_channel` | 128 | §1.8.4 | AngleResnet 隐藏层宽度 |
+| `sidechain_num_residual_block` | 2 | 算法 20 | AngleResnet 残差块数 |
+
+来源: [alphafold2.toml](/configs/alphafold2.toml#L58-L72)
+
+## 算法映射摘要
+
+| minAlphaFold2 类/函数 | 补充材料算法 | 章节 |
+|---|---|---|
+| `StructureModule` | 算法 20 | §1.8 (完整迭代循环) |
+| `InvariantPointAttention` | 算法 22 | §1.8.2 |
+| `BackboneUpdate` | 算法 23 | §1.8.3 |
+| `compute_all_atom_coordinates` | 算法 24 | §1.8.4 |
+| `make_rot_x` | 算法 25 | §1.8.4 第 1 行 |
+| `MultiRigidSidechain` | §1.8.4 文本 | 扭转角头 |
+| `AngleResnet` / `AngleResnetBlock` | §1.8.4 文本 | ReLU-MLP 主干 |
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L1-L20)
+
+## 相关页面
+
+结构模块依赖于几个在专门页面中涵盖的架构概念：IPA 操作所基于的**刚体帧和扭转角约定**详见[刚体帧与扭转角](9-rigid-frames-and-torsions)；**IPA 不变性的完整数学推导**详见[不变点注意力](10-invariant-point-attention)；消耗结构模块逐层输出的**FAPE 和扭转角损失**详见[损失函数与 FAPE](11-loss-functions-and-fape)；以及使结构模块稳定的**零初始化和 EMA**训练基础设施详见[零初始化与参数 EMA](13-zero-init-and-parameter-ema)。
+
+---
+
+## 表征与几何
+
+- [深入解析/表征与几何/MSA 与配对表征](https://zread.ai/ChrisHayduk/minAlphaFold2/8-msa-and-pair-representations)
+
+---
+slug:8-msa-and-pair-representations
+blog_type:normal
+---
+
+
+MSA 和 pair 表示是贯穿 Evoformer 主干（即 AlphaFold2 的计算核心）的两个核心数据结构。**MSA 表示** `m` 编码了跨序列和残基的进化信息，而 **pair 表示** `z` 捕获了残基与残基之间的关系。每个 Evoformer 块通过精心编排的信息交换来迭代微调这两个张量：pair 表示为 MSA 行注意力提供偏置，而 MSA 表示通过外积均值写回 pair 表示。理解这两个张量的形状、构建和更新规则，是理解整个 Evoformer 的关键。
+
+## 表示的形状与语义
+
+这两个表示占据不同的张量空间，整个代码库严格执行精确的维度约束：
+
+| 表示 | 符号 | 形状 | 通道维度 | 论文默认值 | 含义 |
+|---|---|---|---|---|---|
+| MSA | `m` | `(B, N_seq, N_res, c_m)` | `c_m` | 256 | 逐序列、逐残基特征 |
+| Pair | `z` | `(B, N_res, N_res, c_z)` | `c_z` | 128 | 逐残基对特征 |
+
+MSA 表示堆叠了 `N_seq` 行——即查询序列加上来自聚类 MSA 的 `N_cluster − 1` 条同源序列。每一行是一个长度为 `N_res`、由 `c_m` 维特征向量组成的序列。pair 表示是一个对称的 `N_res × N_res` 矩阵，其中元素 `z_ij` 描述了残基 `i` 和 `j` 之间的关系。这两个张量均由 `InputEmbedder`（算法 3）从原始输入特征构建，然后通过 48 个 Evoformer 块逐步微调。
+
+来源：[embedders.py](/minalphafold/embedders.py#L36-L94), [model_config.py](/minalphafold/model_config.py#L34-L38)
+
+## 构建初始表示
+
+`InputEmbedder` 从三个输入源构建初始的 `m` 和 `z`：**目标特征**（查询残基类型的独热编码，22 个通道）、**相对位置编码**（来自残基索引），以及 **MSA 特征**（49 通道的聚类轮廓 + 删除特征）。构建遵循精确的配方：
+
+**Pair 初始化**使用 `target_feat` 的两个独立线性投影的外和，然后加上相对位置编码：
+
+```
+a = Linear_1(target_feat)          # (B, N_res, c_z)
+b = Linear_2(target_feat)          # (B, N_res, c_z)
+z = a.unsqueeze(-2) + b.unsqueeze(-3) + RelPos(residue_index)
+```
+
+外和 `a_i + b_j` 将每个残基的投影广播至所有对，在任何成对交互发生之前，为 pair 表示提供了一个初始的逐残基分解。随后 `RelPos` 模块注入空间邻接信息：它将截断后的残基索引差值 `clamp(r_i − r_j, −32, +32)` 进行独热编码，分入 65 个区间并投影至 `c_z`，确保 Evoformer 从第一个块就能知道哪些残基是序列上的邻居。
+
+**MSA 初始化**结合了广播的目标特征投影与逐行的 MSA 特征投影：
+
+```
+m = Linear_3(target_feat).unsqueeze(1) + Linear_msa(msa_feat)
+```
+
+`unsqueeze` 将查询序列的嵌入广播至所有 MSA 行，`Linear_msa` 则添加逐行的进化特征。结果为 `(B, N_cluster, N_res, c_m)`。
+
+来源：[embedders.py](/minalphafold/embedders.py#L70-L94), [embedders.py](/minalphafold/embedders.py#L96-L118)
+
+## 信息交换架构
+
+Evoformer 的决定性特征是 `m` 和 `z` 之间的**双向信息流**。这并非简单的前馈流水线——它是一个紧密耦合的循环，在每一个块中，两种表示都会相互影响：
+
+```mermaid
+graph TD
+    subgraph "一个 Evoformer 块 (算法 6)"
+        direction TB
+        M_IN["m_si<br/>(MSA 表示)"] --> ROW_ATT["MSA 行注意力<br/>+ Pair 偏置 (算法 7)"]
+        Z_IN["z_ij<br/>(Pair 表示)"] -->|"偏置 b_ij^h"| ROW_ATT
+        ROW_ATT --> COL_ATT["MSA 列注意力<br/>(算法 8)"]
+        COL_ATT --> MSA_TRANS["MSA 过渡层<br/>(算法 9)"]
+        MSA_TRANS --> OPM["外积均值<br/>(算法 10)"]
+        OPM -->|"Δz"| Z_OUT
+        Z_IN --> TRI_MULT["三角形乘法<br/>出+入 (算法 11/12)"]
+        Z_IN --> TRI_ATT["三角形注意力<br/>起始+终止 (算法 13/14)"]
+        Z_IN --> PAIR_TRANS["Pair 过渡层<br/>(算法 15)"]
+        TRI_MULT --> Z_OUT["z_ij (已更新)"]
+        TRI_ATT --> Z_OUT
+        PAIR_TRANS --> Z_OUT
+        MSA_TRANS --> M_OUT["m_si (已更新)"]
+    end
+```
+
+**pair → MSA** 路径通过带有 pair 偏置的 MSA 行注意力（算法 7）运行，其中 pair 表示被投影为逐头的加性偏置 `b_ij^h = LinearNoBias(LayerNorm(z_ij))`，用于调节注意力分数。**MSA → pair** 路径通过外积均值（算法 10）运行，将 MSA 表示收缩为 pair 形状的更新。这两条路径在每个块内反向触发，创造了迭代的协同演化。
+
+来源：[evoformer.py](/minalphafold/evoformer.py#L70-L95), [evoformer.py](/minalphafold/evoformer.py#L97-L194)
+
+## MSA 表示更新路径
+
+每个 Evoformer 块通过三个连续的残差加法更新 `m`：
+
+1. **带有 Pair 偏置的 MSA 行注意力**（算法 7）：对于每个序列 `s`，在残基 `i, j` 上执行标准的多头自注意力，并将 pair 表示作为可学习的偏置注入。注意力分数为 `a_{sij}^h = softmax_j(q · k / √c + b_{ij}^h)`。输出由 `sigmoid(Linear(m)) ⊙ attention_output` **门控**，并通过零初始化的输出线性层投影回 `c_m`，确保该块初始为恒等映射。应用比率为 `evoformer_msa_dropout` (0.15) 的逐行 dropout。
+
+2. **MSA 列注意力**（算法 8）：对于每个残基列 `i`，在序列 `s = 1, …, N_seq` 上进行注意力计算。不使用 pair 偏置——此步骤让每个残基位置能够沿 MSA 的进化深度聚合信息。同样采用门控与零初始化输出。根据算法 6，**无 dropout**。
+
+3. **MSA 过渡层**（算法 9）：每个单元一个简单的双层前馈网络：`LayerNorm → Linear(c_m → 4·c_m) → ReLU → Linear(4·c_m → c_m)`。扩展因子默认为 4。**无 dropout**。下投影使用 `final`（零）初始化。
+
+经过这三个步骤后，更新后的 `m` 将输入到外积均值中产生 pair 更新。
+
+来源：[evoformer.py](/minalphafold/evoformer.py#L78-L84), [embedders.py](/minalphafold/embedders.py#L575-L652), [embedders.py](/minalphafold/embedders.py#L655-L684)
+
+## Pair 表示更新路径
+
+Pair 表示 `z` 在每个块中通过五个残差加法进行更新。第一个来自 MSA；其余四个完全在 pair 空间内操作：
+
+### 外积均值 —— MSA → Pair 的桥梁
+
+这是**唯一**将 `m` 写入 `z` 的模块。它将每个 MSA 单元投影为两个隐藏向量 `a_{si}, b_{si} ∈ R^{c_hidden}`（默认 `c_hidden = 32`），然后计算跨序列的掩码归一化外积均值：
+
+```
+output = Linear_out(mean_s(a_{si} ⊗ b_{sj}))    # 形状 (B, N_res, N_res, c_z)
+```
+
+爱因斯坦求和 `bsic, bsjd → bijcd` 收缩了序列维度，产生一个 `(c_hidden × c_hidden)` 通道的 pair 形状张量，随后被投影至 `c_z`。掩码感知的归一化会除以有效 `(s,i)·(s,j)` 对的数量，从而避免填充行削弱信号。输出线性层使用 `final`（零）初始化，因此在初始化时该模块不产生任何贡献——pair 表示只有在学习开始后才会演化。
+
+来源：[embedders.py](/minalphafold/embedders.py#L686-L743)
+
+### 三角乘法更新 —— 强制几何一致性
+
+pair 表示描述了成对关系，**三角形更新**则强制残基三角形的一致性。两种方向背对背触发：
+
+| 模块 | 算法 | 收缩 | 几何意义 |
+|---|---|---|---|
+| `TriangleMultiplicationOutgoing` | 11 | `Σ_k a_{ik} ⊙ b_{jk}` | 沿着从 `i` 和 `j` 出发的边进行池化 |
+| `TriangleMultiplicationIncoming` | 12 | `Σ_k a_{ki} ⊙ b_{kj}` | 沿着进入 `i` 和 `j` 的边进行池化 |
+
+每种均使用三个门控投影。对于 outgoing 变体：`A = sigmoid(gate1(z)) ⊙ linear1(z)` 和 `B = sigmoid(gate2(z)) ⊙ linear2(z)` 通过爱因斯坦求和进行收缩，然后输出再次被门控：`out = sigmoid(gate(z))# ⊙ out_linear(LayerNorm(vals))`3`。隐藏维度 `triangle_mult_c = 128` 提供了<mark>丰富的瓶颈</mark>。三个门控均使用门控初始化（weight=0, bias=1，在 sigmoid(1) ≈ 0.73 处开启），输出线性层使用零初始化。逐行 dropout 比率为 `evoformer_pair_dropout = 0.25`。
+
+来源：[embedders.py](/minalphafold/embedders.py#L745-L805), [embedders.py](/minalphafold/embedders.py#L808-L866)
+
+### 三角自注意力 —— 带有三角形偏置的成对注意力
+
+两个注意力模块在 pair 表示上操作，每个模块固定三角形的一个节点，并对另一个节点进行注意力计算：
+
+**起始节点**（算法 13）：固定起始节点 `i`，使用来自 `z_{ij}` 的键和来自 `z_{ik}` 的值对终止节点 `j` 进行注意力计算，并附加偏置 `b_{jk} = LinearNoBias(LayerNorm(z_{jk}))`。注意力分数为 `a_{ijk}^h = softmax_k(q_{ij}^h · k_{ik}^h / √c + b_{jk}^h)`。逐行 dropout。
+
+**终止节点**（算法 14）：镜像操作——固定终止节点 `j`，使用索引为 `(k, j)` 的键/值和偏置 `b_{ki}` 对起始节点 `i` 进行注意力计算。**逐列** dropout（这是该块中唯一使用逐列而非逐行 dropout 的模块，依据补充材料 1.11.6）。
+
+两者均使用每头 `triangle_dim = 32`、共 `triangle_num_heads = 4` 个头，门控输出以及零初始化输出投影。
+
+来源：[embedders.py](/minalphafold/embedders.py#L868-L953), [embedders.py](/minalphafold/embedders.py#L955-L1053)
+
+### Pair 过渡层
+
+一个作用于 `z` 的逐对前馈网络，结构与 `MSATransition` 相同：`LayerNorm → Linear(c_z → 4·c_z) → ReLU → Linear(4·c_z → c_z)`。无 dropout。下投影的零初始化确保该过渡层初始为恒等映射。
+
+来源：[embedders.py](/minalphafold/embedders.py#L1055-L1081)
+
+## 完整的块数据流
+
+结合形状和 dropout 总结完整的 Evoformer 块：
+
+| 步骤 | 操作 | 输入 → 输出 | Dropout |
+|---|---|---|---|
+| 1 | 行注意力 + Pair 偏置 (算法 7) | `(m, z) → Δm` | 逐行, p=0.15 |
+| 2 | 列注意力 (算法 8) | `m → Δm` | 无 |
+| 3 | MSA 过渡层 (算法 9) | `m → Δm` | 无 |
+| 4 | 外积均值 (算法 10) | `m → Δz` | 无 |
+| 5 | 三角乘法 Outgoing (算法 11) | `z → Δz` | 逐行, p=0.25 |
+| 6 | 三角乘法 Incoming (算法 12) | `z → Δz` | 逐行, p=0.25 |
+| 7 | 三角注意力 Starting (算法 13) | `z → Δz` | 逐行, p=0.25 |
+| 8 | 三角注意力 Ending (算法 14) | `z → Δz` | 逐列, p=0.25 |
+| 9 | Pair 过渡层 (算法 15) | `z → Δz` | 无 |
+
+每一步都是**残差加法**——每个子模块的输出都会加到其输入表示上。结合零初始化的输出投影和门控初始化（在 ≈0.73 处开启），这确保了整个 Evoformer 堆叠初始时接近于恒等变换，并在训练过程中逐步学习调节表示。
+
+来源：[evoformer.py](/minalphafold/evoformer.py#L70-L95)
+
+## 额外 MSA 和模板对 Pair 表示的贡献
+
+在主 Evoformer 运行之前，还有两条额外的路径写入 pair 表示：
+
+**额外 MSA 堆叠**（算法 18）：一个浅层的类 Evoformer 堆叠处理未聚类的“额外”MSA（`N_extra_seq = 1024`，通道维度 `c_e = 64`）。它使用相同的 pair 更新子模块（三角形乘法、三角形注意力、pair 过渡层），但 dropout 率不同（`extra_msa_dropout = 0.15`，`extra_pair_dropout = 0.25`）。列注意力被替换为 `MSAColumnGlobalAttention`（算法 19），该模块在头之间共享 K/V，以保持列步骤在数千条序列上的计算可行性。额外 MSA 表示通过外积均值更新 `z`，用来自更广进化采样的信息丰富了 pair 表示。
+
+**模板 Pair 堆叠**（算法 16）：每个模板的特征通过一个浅层的纯 pair Evoformer（2 个块，缩减维度：`template_triangle_mult_c = 64`，`template_triangle_attn_c = 64`，`template_pair_transition_n = 2`），然后通过 `TemplatePointwiseAttention`（算法 17）跨模板进行池化，该模块对每个 `(i, j)` 独立地在模板维度上执行注意力计算。池化输出被加到 `z` 中。
+
+来源：[embedders.py](/minalphafold/embedders.py#L315-L485), [embedders.py](/minalphafold/embedders.py#L120-L228), [model.py](/minalphafold/model.py#L280-L314)
+
+## 循环回收：跨迭代的表示
+
+表示在循环回收周期（算法 31/32）中持久存在。在每个周期开始时（第一次之后），前一个周期的输出被重新注入：
+
+- **MSA**：`m[0, i, :] += LayerNorm(m_1i^prev)`——仅用先前的单一表示更新第一行（查询行）。
+- **Pair**：`z += LayerNorm(z_ij^prev) + Linear(one_hot(d_ij^prev))`——先前的 pair 表示和来自先前结构伪 β 位置的装箱距离编码均被加入。
+
+在第一个周期中，prev 张量为零，因此这些加法无效。在训练期间，只有最后一个采样周期携带梯度；早期周期的梯度被截断。
+
+来源：[model.py](/minalphafold/model.py#L268-L278), [model.py](/minalphafold/model.py#L231-L234)
+
+## 从 MSA 到单一表示
+
+在最后一个 Evoformer 块之后，**单一表示** `s_i` 从第一行 MSA 通过线性投影提取：`s_i = Linear(m_1i)`（算法 6 第 12 行）。这个 `(B, N_res, c_s)` 张量——在完整配置中 `c_s = 384`——是结构模块与平均后的 pair 表示一同使用的输入。当集成处于活跃状态时，`m_1i` 和 `z_ij` 在投影前会跨集成样本进行平均；根据线性性质，投影前后平均是等价的。
+
+来源：[model.py](/minalphafold/model.py#L369-L381)
+
+## 不同配置的通道维度
+
+表示通道维度是缩放模型的主要杠杆：
+
+| 参数 | 完整 (AF2) | 中等 | 微小 | 角色 |
+|---|---|---|---|---|
+| `c_m` | 256 | 128 | 64 | MSA 表示宽度 |
+| `c_z` | 128 | 64 | 48 | Pair 表示宽度 |
+| `c_e` | 64 | 32 | 16 | 额外 MSA 表示宽度 |
+| `c_s` | 384 | 192 | 96 | 单一表示（投影后）宽度 |
+| `c_t` | 64 | 32 | 16 | 模板 pair 特征宽度 |
+
+比率 `c_m : c_z = 2 : 1` 在所有配置中保持不变，反映了论文中的设计：MSA 表示在每个单元中比 pair 表示（几何特征）承载更多信息（进化特征）。
+
+<CgxTip>MSA 和 pair 表示在每个 Evoformer 块中仅通过两条通道耦合：行注意力中的 pair 偏置（pair → MSA）和外积均值（MSA → pair）。其他所有子模块均在单一的表示空间内操作。这种双向耦合使得 Evoformer 不仅仅是两个独立的注意力堆叠——它是一个协同演化系统。</CgxTip>
+
+<CgxTip>Evoformer 中所有输出投影均使用零初始化（`final` 方案），所有门控线性层均使用门控初始化（weight=0, bias=1）。这意味着在初始化时，每个块都是恒等操作——表示将原样传递，直到训练开始。这对于 48 层堆叠的稳定训练至关重要，并由顶层模型中的 `_initialize_alphafold_parameters` 强制执行。</CgxTip>
+
+来源：[configs/alphafold2.toml](/configs/alphafold2.toml#L7-L12), [model.py](/minalphafold/model.py#L106-L153), [initialization.py](/minalphafold/initialization.py#L38-L59)
+
+## 下一步
+
+MSA 和 pair 表示为随后的几何推理奠定了基础。pair 表示 `z_ij` 直接输入到结构模块的[等变点注意力](10-invariant-point-attention)中，而单一表示 `s_i` 则通过[刚体帧与扭角](9-rigid-frames-and-torsions)驱动迭代的主链更新。要了解这些表示最初是如何从原始 MSA 数据构建的，请参阅[输入嵌入器与 RelPos](5-input-embedder-and-relpos)；要了解微调它们的完整 Evoformer 堆叠，请参阅[Evoformer 堆叠](6-evoformer-stack)。
+
+---
+
+- [深入解析/表征与几何/刚体帧与扭转角](https://zread.ai/ChrisHayduk/minAlphaFold2/9-rigid-frames-and-torsions)
+
+---
+slug:9-rigid-frames-and-torsions
+blog_type:normal
+---
+
+
+AlphaFold2 通过双路径几何系统重建三维蛋白质结构：**刚体坐标系**定义了每个残基原子群在空间中的位置和方向，而**扭转角**则参数化了这些原子群之间的旋转。minAlphaFold2 通过两个互补的模块实现了该系统——`geometry.py` 从真实的原子坐标构建真值监督目标，`structure_module.py` 则从网络输出以参数化方式构建预测坐标系。理解这两条路径如何保持一致性，是掌握结构模块损失景观在训练期间表现良好这一关键问题的关键。
+
+来源: [geometry.py](/minalphafold/geometry.py#L1-L43), [structure_module.py](/minalphafold/structure_module.py#L1-L20)
+
+## 刚体坐标系：将 SE(3) 表示为 (R, t)
+
+**刚体坐标系**是特殊欧几里得群 SE(3) 的一个元素，表示为旋转矩阵 **R** ∈ SO(3) 和平移向量 **t** ∈ ℝ³。给定一个用局部坐标表示的点 **x**（例如，原子相对于其残基主干的位置），其全局位置可通过 **x**_global = **R**·**x** + **t** 恢复。两个坐标系的复合为 T₁ ∘ T₂ = (R₁·R₂, R₁·t₂ + t₁)，该复合操作在 `compose_transforms` 中实现。AlphaFold2 中的每个残基携带**八个**这样的坐标系——一个用于主干，七个用于由扭转角驱动的侧链群——从而形成一条运动链，放置每个残基的全部 14 个原子槽位。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L707-L711)
+
+```mermaid
+graph TD
+    subgraph "8 Rigid Groups per Residue"
+        BB["Group 0: Backbone<br/>(N, Cα, C)"]
+        OM["Group 1: ω<br/>(pre-omega)"]
+        PH["Group 2: φ<br/>(phi)"]
+        PS["Group 3: ψ<br/>(psi)"]
+        C1["Group 4: χ₁"]
+        C2["Group 5: χ₂"]
+        C3["Group 6: χ₃"]
+        C4["Group 7: χ₄"]
+    end
+
+    BB --> OM
+    BB --> PH
+    BB --> PS
+    BB --> C1
+    C1 --> C2
+    C2 --> C3
+    C3 --> C4
+
+    style BB fill:#4a90d9,color:#fff
+    style OM fill:#6b7280,color:#fff
+    style PH fill:#6b7280,color:#fff
+    style PS fill:#6b7280,color:#fff
+    style C1 fill:#e67e22,color:#fff
+    style C2 fill:#e67e22,color:#fff
+    style C3 fill:#e67e22,color:#fff
+    style C4 fill:#e67e22,color:#fff
+```
+
+上图展示了算法 24 中的**链式结构**。群 1–4 (ω, φ, ψ, χ₁) 各自独立地从主坐标系 (群 0) 分支出来。群 5–7 (χ₂–χ₄) 则顺序链接——χ₂ 基于 χ₁ 的坐标系构建，χ₃ 基于 χ₂，χ₄ 基于 χ₃。这反映了蛋白质主干的物理现实：主干扭转是独立的，但每个后续的侧链扭转都是相对于其前一个扭转进行旋转的。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L714-L779)
+
+## 真值坐标系：从原子坐标进行 Gram–Schmidt 正交化
+
+`geometry.py` 中的真值路径使用 **Gram–Schmidt 正交化**（算法 21）从实际的三维原子位置构建坐标系。函数 `rigid_frame_from_three_points` 接收三个原子——`point_on_neg_x_axis`、`origin` 和 `point_on_xy_plane`——并构建一个正交的右手坐标系：x 轴从负 x 原子指向原点，z 轴是 x 与指向 xy 平面原子的向量的叉积，y 轴补全右手系统。对于 8 个刚体群中的每一个，从预计算表 (`RIGID_GROUP_BASE_ATOM14_INDICES`) 中查找其三个定义原子，并将其输入此构造函数。
+
+来源: [geometry.py](/minalphafold/geometry.py#L219-L251), [geometry.py](/minalphafold/geometry.py#L254-L325)
+
+### 主坐标系约定的细微差别
+
+补充材料 1.8.1 使用 (x₁, x₂, x₃) = (N, Cα, C) 定义主坐标系，得到 **e₁** = (C − Cα)/‖C − Cα‖——即 +x 轴从 Cα 指向 C。然而，`rigid_frame_from_three_points` 在被调用时传入的原子顺序为 (C, Cα, N)，这产生的 x 轴从 C 指向 Cα——方向**相反**。常量 `BACKBONE_FRAME_ADAPTATION = diag(−1, 1, −1)` 调和了这一差异：它是绕 y 轴的 180° 旋转（行列式 = +1，因此是正当旋转），在保持手性的同时翻转了 x 和 z。这种适应**仅**应用于主坐标系 (群 0)；非主群使用按照该包装函数产生的相同约定推导出的文献常量，因此无需校正。
+
+来源: [geometry.py](/minalphafold/geometry.py#L21-L42), [geometry.py](/minalphafold/geometry.py#L92-L95), [geometry.py](/minalphafold/geometry.py#L305-L308)
+
+## 七个扭转角
+
+每个残基由**七个扭转角**参数化，表示为 (sin, cos) 对：**α = [ω, φ, ψ, χ₁, χ₂, χ₃, χ₄]**。使用 sin/cos 对代替原始弧度可以避免在 ±π 处的不连续性，并能自然地向损失函数同时提供角度及其归一化状态。
+
+| 索引 | 角度 | 定义原子 | 定义域 | 备注 |
+|-------|-------|---------------|--------|-------|
+| 0 | ω (omega) | Cα_{i-1}–C_{i-1}–N_i–Cα_i | 残基间 | 对于残基 0 未定义 |
+| 1 | φ (phi) | C_{i-1}–N_i–Cα_i–C_i | 残基间 | 对于残基 0 未定义 |
+| 2 | ψ (psi) | N_i–Cα_i–C_i–O_i | 残基内 | 使用羰基 O，而非下一个 N |
+| 3 | χ₁ | N–Cα–CB–CG (多变) | 侧链 | 取决于残基类型 |
+| 4 | χ₂ | Cα–CB–CG–CD (多变) | 侧链 | 例如 ASP: Cα–CB–CG–OD1 |
+| 5 | χ₃ | CB–CG–CD–NE (多变) | 侧链 | 仅 ARG, GLN, GLU, LYS, MET |
+| 6 | χ₄ | CG–CD–NE–CZ (多变) | 侧链 | 仅 ARG, LYS |
+
+来源: [geometry.py](/minalphafold/geometry.py#L370-L478), [residue_constants.py](/minalphafold/residue_constants.py#L27-L54)
+
+### 测量扭转角：四点法
+
+函数 `torsion_sin_cos_from_four_points` 通过从定义二面角的四个原子 (p₁–p₂–p₃–p₄) 中构建局部坐标系来测量二面角：首先通过 `rigid_frame_from_three_points` 从 (p₁, p₂, p₃) 构建坐标系，然后在该坐标系中表示 p₄。p₄ 的 x 分量沿旋转轴，因此无关紧要；其 分量直接给出旋转角 (sin, cos) = (z, y)/‖(y, z)‖——sin 取自 z 是因为关于 +x 的右手定则会在 +90° 时将点从 +y 旋转至 +z。
+
+一个关键的约定细节：**ψ** 是从 (N, Cα, C, O) 测量的，而不是 (N, Cα, C, N_{next})，这导致相对于算法 24 的 ψ 坐标系引入了 180° 的偏移。`flip_sin=True, flip_cos=True` 标志通过取反这两个分量来进行补偿，这等效于绕扭转轴旋转 180°。这确保了扭转损失能在相同的坐标系下观测预测角和真值角。
+
+来源: [geometry.py](/minalphafold/geometry.py#L173-L216), [geometry.py](/minalphafold/geometry.py#L426-L439)
+
+## 预测坐标系：参数化路径 (算法 24)
+
+`structure_module.py` 中的预测路径从预测的扭转角**参数化**地构建坐标系，而不是从原子坐标构建。这是 `rigid_group_frames_from_torsions` 的核心，它实现了算法 24 的第 1–10 行：
+
+1. 将扭转角**归一化**为单位 向量。
+2. 从 `restype_rigid_group_default_frame` 中**查找**各残基类型的文献变换 T^lit——这些编码了理想化的键几何（来自参数化模型的键长和键角）。
+3. 通过 `make_rot_x`（算法 25）**构建扭转旋转**——即使用 对关于局部 x 轴的旋转。
+4. **复合坐标系**：对于群 1–4 (ω, φ, ψ, χ₁)，每个坐标系为 `T_backbone ∘ T^lit ∘ makeRotX(α)`。对于群 5–7 (χ₂–χ₄)，每个坐标系链式依赖于其前驱：`T_χₖ₋₁ ∘ T^lit ∘ makeRotX(α)`。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L714-L779)
+
+### make_rot_x：扭转作为 X 轴旋转
+
+`make_rot_x` 构建算法 25 的旋转矩阵。给定一个 对，它构建：
+
+```
+| 1      0        0    |
+| 0   cos α   -sin α   |
+| 0   sin α    cos α   |
+```
+
+这是一个零平移的纯绕 x 轴旋转——平移分量来自于 `compute_all_atom_coordinates` 将此旋转与之复合的文献坐标系 T^lit。根据构造，x 轴即为扭转轴：在每个刚体群的局部坐标系中，定义扭转的化学键沿 x 轴放置，因此绕 x 旋转恰好就是二面角旋转。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L675-L705)
+
+### 从坐标系放置原子
+
+一旦构建了 8 个坐标系，`compute_all_atom_coordinates` 便会通过查找每个原子所属的刚体群 (`atom_frame_idx_table`) 及其在该群中的理想化局部位置 (`lit_positions`)，来放置 14 个原子槽位中的每一个。其全局位置为 **x**_global = R_frame · **x**_lit + t_frame。这两个步骤的过程——先由扭转角构建坐标系，再由坐标系放置原子——干净利落地将旋转自由度与固定的键长/键角几何分离开来。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L782-L839)
+
+## 双路径一致性：为何两条路径均采用参数化构建
+
+一个微妙但至关重要的设计决策：真值监督坐标系也是参数化构建的（通过 `data.build_supervision` 中的 `rigid_group_frames_from_torsions`），即使原始的 atom14 坐标可用于 Gram–Schmidt 构建也是如此。如果真值路径对真实原子使用 Gram–Schmidt，而预测路径使用参数化构建，那么侧链 FAPE 损失将获得一个**非零下限**，该下限等于文献几何与真实 PDB 原子之间的键长理想化失配——即使预测与真值完全匹配时也是如此。两条路径均采用参数化构建可使此下限消失（仅降至原子级别的理想化误差，该误差可忽略不计）。
+
+Gram–Schmidt 路径 (`atom14_to_rigid_group_frames`) 依然存在，并用于**主干 FAPE** 损失（通过 `backbone_frames`），在此处参数化/真实原子的区分影响较小，因为主干几何受到的约束严格得多。
+
+来源: [geometry.py](/minalphafold/geometry.py#L328-L347), [structure_module.py](/minalphafold/structure_module.py#L721-L731)
+
+```mermaid
+flowchart LR
+    subgraph "Ground-Truth Path (data.build_supervision)"
+        A1["atom14 positions"] --> A2["torsion_angles()"]
+        A2 --> A3["7 × (sin,cos) pairs"]
+        A3 --> A4["rigid_group_frames_from_torsions()"]
+        A4 --> A5["8 GT frames"]
+    end
+
+    subgraph "Prediction Path (StructureModule.forward)"
+        B1["s_i (single rep)"] --> B2["MultiRigidSidechain / AngleResnet"]
+        B2 --> B3["7 × (sin,cos) pairs"]
+        B3 --> B4["rigid_group_frames_from_torsions()"]
+        B4 --> B5["8 predicted frames"]
+    end
+
+    A5 --> C["Sidechain FAPE Loss<br/>(zero floor — same parametric path)"]
+    B5 --> C
+
+    A1 --> D["backbone_frames()<br/>(Gram-Schmidt, Algorithm 21)"]
+    D --> E["Backbone FAPE Loss"]
+    B5 --> E
+
+    style A4 fill:#e67e22,color:#fff
+    style B4 fill:#e67e22,color:#fff
+    style C fill:#27ae60,color:#fff
+    style E fill:#27ae60,color:#fff
+```
+
+## 主干更新：四元数参数化 (算法 23)
+
+每次 IPA 迭代都会通过 `BackboneUpdate` 更新主坐标系，该过程将单一表示 s_i 投影为每个残基的**六个标量**：三个旋转参数 和三个平移参数。旋转构造为单位四元数 (1, b, c, d) / ‖(1, b, c, d)‖，然后转换为 3×3 旋转矩阵。这种参数化保证了正当旋转（行列式 = +1），而无需显式正交化。平移在残基自身的局部坐标系中应用。坐标系更新为 T_i ← T_i ∘ (R, t)，其中 ∘ 表示 SE(3) 复合。关键的是，输出投影使用了**最终**（零）初始化——每次迭代最初作为恒等操作，由训练去发现更新幅度。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L543-L610)
+
+## 180° 对称性：替代真值 (补充材料 1.8.5)
+
+某些侧链群在绕其扭转轴旋转 180° 时是**不可区分的**——例如，ASP 的 Oδ1 和 Oδ2 在化学上是等价的，因此交换它们（绕 χ₂ 旋转 π）会产生相同的物理结构。这在真值扭转标签中产生了歧义：测量到的角度和角度 + π 都是正确的。
+
+| 残基 | 对称 χ | 原因 |
+|---------|-------------|--------|
+| ASP | χ₂ | Oδ1/Oδ2 交换 |
+| GLU | χ₃ | Oε1/Oε2 交换 |
+| PHE | χ₂ | CD1/CD2 交换 (环翻转) |
+| TYR | χ₂ | CD1/CD2 交换 (环翻转) |
+
+minAlphaFold2 通过两种互补的方式处理此问题。**在扭转层面**，`alternative_torsion_angles` 对 π 周期的 χ 角取反 对——等效于给角度加上 π。扭转角损失（算法 27）取两个标签中的最小值。**在坐标系层面**，`atom14_to_rigid_group_frames` 通过将每个歧义群的旋转与预计算的 180° 局部旋转 (`RIGID_GROUP_ALT_ROTATIONS`) 进行右复合，来计算“替代真值”坐标系。**在原子层面**，`alternative_atom14_ground_truth` 应用各残基类型的重命名矩阵，这些矩阵对 atom14 槽位进行置换（例如，交换 ASP 的 Oδ1 和 Oδ2 坐标）。算法 26 选择最匹配预测的命名方式。
+
+来源: [geometry.py](/minalphafold/geometry.py#L510-L530), [geometry.py](/minalphafold/geometry.py#L315-L323), [geometry.py](/minalphafold/geometry.py#L533-L565)
+
+<CgxTip>`BACKBONE_FRAME_ADAPTATION = diag(−1, 1, −1)` 是一次 180° 的 y 轴旋转，它调和了 Gram–Schmidt 坐标系约定（x 从 C→Cα）与论文约定（x 从 Cα→C）。它**仅**应用于群 0 (主干)；所有其他群使用的文献常量已处于正确的约定中。缺少此适应会导致主干 FAPE 损失在每个残基上观测到系统性的 180° 偏移。</CgxTip>
+
+<CgxTip>`StructureModule.forward` 中的 `detach_rotations` 标志实现了算法 20 中迭代间的“旋转停止梯度”——但**不**在最终迭代之后应用，且**不**应用于平移。这种非对称的梯度阻断防止了通过链式坐标系复合产生的杠杆效应不稳定，同时仍允许辅助的逐层 Cα FAPE 损失通过平移路径将信号反向传播至 Evoformer。</CgxTip>
+
+## 扭转角预测：AngleResnet
+
+`MultiRigidSidechain` 模块通过 `AngleResnet` 预测每个残基的 7 个扭转角——这是一个小型残差 MLP，同时接收**当前**的单一表示 s_i（IPA 更新后）和**初始**单一表示（IPA 前，来自 Evoformer）作为输入。这种双输入设计确保了扭转头即使在多次 IPA 迭代变换了 s_i 之后，仍能保留对未变形 Evoformer 信号的访问。AngleResnet 输出未归一化的 对，这些对被 L2 归一化为单位向量；未归一化的版本被单独暴露出来，用于扭转角范数损失项。
+
+来源: [structure_module.py](/minalphafold/structure_module.py#L613-L673), [structure_module.py](/minalphafold/structure_module.py#L55-L115)
+
+## 总结：坐标系与扭转角的数据流
+
+| 组件 | 路径 | 输入 | 输出 | 算法 |
+|-----------|------|-------|--------|-----------|
+| `rigid_frame_from_three_points` | GT | 3 个原子位置 | (R, t) | 21 |
+| `atom14_to_rigid_group_frames` | GT | atom14 坐标 | 8 个坐标系 + 替代坐标系 | 21 + 26 |
+| `torsion_angles` | GT | atom14 坐标 | 7 × (sin,cos) + 掩码 | — |
+| `BackboneUpdate` | Pred | s_i | 经四元数的 (R, t) | 23 |
+| `make_rot_x` | Pred | (sin α, cos α) | x 轴旋转 | 25 |
+| `rigid_group_frames_from_torsions` | Both | 主坐标系 + 7 个角度 | 8 个坐标系 | 24 (第 1-10 行) |
+| `compute_all_atom_coordinates` | Pred | 8 个坐标系 + lit 位置 | atom14 坐标 | 24 (完整) |
+| `alternative_torsion_angles` | GT | 扭转角 + 氨基酸类型 | 替代 (sin,cos) | 27 |
+
+该架构确保了刚体坐标系和扭转角形成一个**闭环**：真值原子位置产生扭转角，扭转角产生参数化坐标系，参数化坐标系又产生重建的原子位置。预测路径完全映射了这一过程——网络预测扭转角，以相同方式构建坐标系，并以相同方式放置原子。正是这种对称性使得 FAPE 损失条件良好且训练稳定。
+
+来源: [geometry.py](/minalphafold/geometry.py#L1-L566), [structure_module.py](/minalphafold/structure_module.py#L1-L840)
+
+对于*在这些坐标系上*操作的注意力机制，请参阅 [Invariant Point Attention](10-invariant-point-attention)。关于坐标系预测如何被监督，请参阅 [Loss Functions and FAPE](11-loss-functions-and-fape)。
+
+---
+
+- [深入解析/表征与几何/不变点注意力](https://zread.ai/ChrisHayduk/minAlphaFold2/10-invariant-point-attention)
+
+---
+slug:10-invariant-point-attention
+blog_type:normal
+---
+
+
+不变量点注意力（Invariant Point Attention, IPA）是 AlphaFold2 结构模块核心的几何感知注意力机制。与纯粹基于标量嵌入运算的标准多头注意力不同，IPA 融合了三股信息流——标量查询、成对偏置以及**转换至每个残基局部刚性帧的 3-D 点特征**——形成单一的注意力分布，且该分布**可证明对整个蛋白质的全局刚性运动保持不变**。这种不变性并非事后归一化的结果；它是结构性的，源于这样一个事实：旋转或平移每个帧会通过相同的刚性运动同时旋转/平移每个查询点和关键点，从而保持它们的相对距离不变。minAlphaFold2 的实现严格遵循补充材料中的算法 22，并完全位于 [structure_module.py](/minalphafold/structure_module.py) 中。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L1-L20)，[structure_module.py](/minalphafold/structure_module.py#L316-L337)
+
+## 三流注意力分数
+
+IPA 的核心洞见在于：没有任何单一的信息通道足以进行结构预测。标量通道捕获序列层面的模式；成对通道捕获 Evoformer 学习到的残基间关系；点通道捕获**几何上下文**——即残基在 3-D 空间中如何相对定位。对于头 *h*，残基 *i* 和 *j* 之间的注意力 logit 为：
+
+$$\text{logit}_{ij}^h = \frac{1}{\sqrt{3}} \left( \frac{q_i^h \cdot k_j^h}{\sqrt{d_h}} + b_{ij}^h - \frac{\gamma_h}{2} \sum_p \|T_i(q_{ip}^h) - T_j(k_{jp}^h)\|^2 \right)$$
+
+其中 *T_i* 和 *T_j* 分别是残基 *i* 和 *j* 的当前刚性帧（旋转 + 平移），*γ_h* 是可学习的逐头权重（通过 softplus 参数化以保持正值），*d_h* 是头维度。**1/√3** 因子是论文中针对三个分数贡献的归一化（算法 22 第 7 行）。点项的负号使其成为**高斯核**——邻近残基具有更强的注意力，而可学习的 *γ_h* 控制每个头的空间敏感度。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L316-L337)，[structure_module.py](/minalphafold/structure_module.py#L487-L499)
+
+## 点投影与帧变换
+
+从标量表示到 3-D 几何的桥梁是**点投影**流程。对于每个残基 *i*，单一表示 *s_i* 通过学习到的线性映射进行投影，生成查询点 **q** ∈ ℝ^(N_heads × N_query_pts × 3)、关键点 **k** ∈ ℝ^(N_heads × N_query_pts × 3) 和值点 **v** ∈ ℝ^(N_heads × N_value_pts × 3)。`_project_points` 辅助函数将扁平的线性输出重塑为独立的 x/y/z 通道，并将它们堆叠成 `(..., heads, points, 3)` 张量。随后，这些局部帧点通过每个残基的当前刚性帧被**提升至全局坐标**：
+
+```python
+query_points_global = einsum("biop,bihqp->bihqo", rotations, q_points) + translation
+key_points_global   = einsum("biop,bihqp->bihqo", rotations, k_points) + translation
+value_points_global = einsum("biop,bihqp->bihqo", rotations, v_points) + translation
+```
+
+这是实现不变性的关键步骤：全局刚性运动 *(R_g, t_g)* 将每个帧变换为 *T_i → T_i' = (R_g, t_g) ∘ T_i*，进而将每个全局点变换为 *T_i'(p) = R_g · T_i(p) + t_g*。平方距离 *‖T_i'(q_i) − T_j'(k_j)‖² = ‖R_g(T_i(q_i) − T_j(k_j))‖² = ‖T_i(q_i) − T_j(k_j)‖²* 保持不变，因为旋转保持范数不变。标准的 AF2 单体配置每个头使用 `n_query_points=4` 和 `n_value_points=8`，分别产生 12 和 24 个 3-D 点供每个头进行推理。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L383-L398)，[structure_module.py](/minalphafold/structure_module.py#L469-L483)
+
+## 分数组装与头权重缩放
+
+三个分数流在 `_forward_output_features` 中进行组装。标量注意力 logits 计算为标准的 Q·K^T 乘积，然后按 **1/√(3 · d_h)** 缩放（即标准注意力的逐头 √d_h 归一化，再除以跨流的 √3 因子）。成对偏置由成对表示 *z_ij* 通过 `linear_bias` 投影而来（输出维度 = num_heads），并以 **1/√3** 的权重相加。点注意力计算全局坐标下查询点与关键点之间的欧氏距离平方，应用经Fsoftplus 参数化并按 **√(17 / (3 · N_query_pts · 9/2))** 缩放的头权重（这是补充材料中对点贡献的归一化——9/2 因子考虑了三个空间维度乘以 3-D 高斯分布的期望卡方方差），并以 **−0.5** 的因子对查询点求和（从而构成完整的高斯核）。完整计算如下：
+
+```python
+point_attention = query_points_global[:, :, None, :, :, :] - key_points_global[:, None, :, :, :, :]
+point_attention = torch.sum(point_attention ** 2, dim=-1)           # sum over xyz
+head_weights = softplus(self.head_weights) * sqrt(1 / (3 * N_q * 9/2))
+point_attention = torch.sum(point_attention * head_weights, dim=-1) * (-0.5)
+attention_logits += point_attention.permute(0, 3, 1, 2)
+```
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L487-L505)，[structure_module.py](/minalphafold/structure_module.py#L494-L499)
+
+## 多流值聚合
+
+经过 softmax 后，IPA 并非简单地对标量值进行加权。它并行聚合**三个值流**，反映了与分数相同的三个通道哲学：
+
+| 流 | 来源 | 聚合方式 | 后处理 |
+|--------|--------|-------------|-----------------|
+| **标量** | `linear_kv` → V | α · V（标准加权和） | 重塑为 `(batch, N_res, heads·head_dim)` |
+| **点** | `linear_kv_points` → 全局帧中的 V_pts | α · V_pts_global | 变换回局部帧：R_i^T(α·V_global − t_i)，然后拆分为 x/y/z 通道**并**计算逐点范数 |
+| **成对** | 成对表示 z_ij | α · z_ij（注意力加权的成对混合） | 重塑为 `(batch, N_res, heads·c_z)` |
+
+点流向局部帧的反向变换使得**输出**具备等变性（注意力权重是不变的；点值随帧移动）。拆分为独立的 x、y、z 通道加上范数通道，为**每个头的每个值点提供了 4 个特征**，总计 `heads × n_value_points × 4` 个点衍生特征。这是一个刻意的设计选择：拆分分量允许下游的 `linear_output` 为每个空间方向和幅度学习不同的权重，而不是将 3-D 向量视为不透明的整体。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L400-L452)，[structure_module.py](/minalphafold/structure_module.py#L412-L452)
+
+## 输出特征拼接与投影
+
+三个聚合流被拼接为每个残基的单个特征向量：
+
+```
+output_features = [output_scalar, point_x, point_y, point_z, point_norms, output_pair]
+```
+
+根据论文的标准维度（c_s=384, heads=12, head_dim=16, n_value_pts=8, c_z=128），此拼接的总维度为 **384 + 12×8×4 + 12×128 = 384 + 384 + 1536 = 2304**，随后由 `linear_output` 投影回 c_s=384。此输出投影被**零初始化**（`init="final"`），这意味着在训练初期，整个 IPA 块相当于恒等映射——在网络学习到有意义的几何更新之前，结构模块的单一表示不会因 IPA 而改变。这是补充材料中 **零初始化** 协议（§1.11.4）的基石：每个残差分支初始时均为空操作，防止未经训练的几何噪声在训练早期破坏 Evoformer 的表示。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L367-L379)，[structure_module.py](/minalphafold/structure_module.py#L442-L452)
+
+## 可学习的头权重与 Softplus 参数化
+
+`head_weights` 参数是一个长度为 `num_heads` 的向量，初始化为**零**，并在使用前通过 `softplus` 变换：`γ_h = softplus(w_h)`。Softplus(x) = log(1 + e^x) 是 ReLU 的平滑且严格为正的近似，因此每个头以 `γ_h = softplus(0) = log(2) ≈ 0.693` 起步。这确保了点注意力贡献非负（它是一个宽度由 1/γ_h 控制的高斯核），并在初始化时表现良好。逐头参数化允许网络学习到：某些头应具备高度的空间选择性（大 γ_h，窄高斯分布），而其他头则应广泛地施加注意力（小 γ_h），从而提供局部与全局几何推理的学习性混合。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L381-L381)，[structure_module.py](/minalphafold/structure_module.py#L496-L497)
+
+## 序列掩码与填充安全性
+
+填充残基（来自批次中变长蛋白质序列）既不应发起查询，也不应被查询。该实现在 softmax 之前对注意力 logits 应用**乘性掩码**：对于每个 (i, j) 对，如果任一残基被掩码，其 logit 将接收一个较大的负偏移量（−10⁵），使其在 softmax 后的注意力权重接近于零。在输出投影之后，被掩码的查询位置将被显式置零：`output = output * seq_mask[:, :, None]`。这种两阶段掩码（logits + 输出）确保了不会有信息从填充位置泄漏或泄漏至填充位置，且被掩码的位置在输出中严格产生零——这对于变长批次中正确的梯度累积至关重要。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L501-L503)，[structure_module.py](/minalphafold/structure_module.py#L538-L539)
+
+## 配置文件
+
+IPA 的架构由四个超参数控制，它们在表达能力与计算量之间进行权衡：
+
+| 参数 | AF2 配置 | Tiny 配置 | 描述 |
+|-----------|-------------|--------------|-------------|
+| `ipa_num_heads` | 12 | 4 | 注意力头数量 |
+| `ipa_c` | 16 | 8 | 每个头的维度（标量 Q/K/V） |
+| `ipa_n_query_points` | 4 | 4 | 86每个头的 3-D 查询/关键4关键点数 |
+| `ipa_n_value_points` | 8 | 4 | 每个头的 3-D 值点数 |
+
+AF2 配置与补充材料完全一致。Tiny 配置减少了头数和每头维度，以便在 CPU 上运行测试，同时保持 `n_query_points=4` 以保留几何机制。IPA 线性层的总参数量主要由 `linear_output`（将拼接后的输出维度投影回 c_s）和 `linear_kv_points`（投影至 3 × heads × (n_query + n_value) 个空间坐标）主导。
+
+来源：[alphafold2.toml](/configs/alphafold2.toml#L68-L72)，[tiny.toml](/configs/tiny.toml#L67-L70)
+
+## 结构模块内的架构上下文
+
+IPA 并非孤立运行——它是结构模块循环（算法 20，第 6–9 行）每次迭代中应用于单一表示的三个操作之首：
+
+```mermaid
+flowchart TD
+    S["s_i (单一表示)"] --> IPA["IPA(s, z, R, t)"]
+    IPA --> ADD1["s ← s + IPA(s)"]
+    ADD1 --> LN1["LayerNorm → Dropout"]
+    LN1 --> T1["Transition MLP (3层 ReLU)"]
+    T1 --> ADD2["s ← s + Transition(s)"]
+    ADD2 --> LN2["LayerNorm → Dropout"]
+    LN2 --> BB["BackboneUpdate(s_i) → (R_i, t_i)"]
+    BB --> COMP["T_i ← T_i ∘ (R_i, t_i)"]
+    COMP --> SC["MultiRigidSidechain → 扭转角 → atom14"]
+    
+    Z["z_ij (成对表示)"] --> IPA
+    R["R_i (旋转)"] --> IPA
+    T["t_i (平移)"] --> IPA
+```
+
+IPA 消耗**四个**输入——单一表示、成对表示以及当前的刚性帧（旋转 + 平移）——这使其成为 AlphaFold2 中唯一以不断演进的 3-D 几何为条件的注意力机制。成对表示 *z_ij* 既作为注意力偏置（投影为逐头标量）输入，又作为成对值流（经注意力加权并混合回输出）输入。这形成了一个反馈循环：更优的帧 → 更具信息量的 IPA 分数 → 更优的单一表示 → 更优的骨架更新 → 更优的帧。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L236-L253)，[structure_module.py](/minalphafold/structure_module.py#L117-L141)
+
+## 不变性证明草图
+
+关于 IPA 对输入帧的全局刚性运动保持不变的主张，可通过检查全局变换 *(R_g, t_g)* 下每个分数分量来证明：
+
+1. **标量分数**：Q·K 仅依赖于单一表示 *s_i*，与帧无关。✓ 不变。
+2. **成对偏置**：Linear(z_ij) 仅依赖于成对表示，与帧无关。✓ 不变。
+3. **点分数**：‖T_i'(q_i) − T_j'(k_j)‖² = ‖R_g(R_i q_i + t_i + t_g) − R_g(R_j k_j + t_j + t_g)‖² = ‖R_g(R_i q_i + t_i − R_j k_j − t_j)‖² = ‖R_i q_i + t_i − R_j k_j − t_j‖² = ‖T_i(q_i) − T_j(k_j)‖²。✓ 不变（旋转保持范数不变）。
+
+由于注意力权重（logits 的 softmax）是不变的，且输出点值被变换**回**每个残基的局部帧，因此完整的 IPA 输出随帧协变——这正是馈入帧更新的模块所应具备的行为。
+
+来源：[structure_module.py](/minalphafold/structure_module.py#L316-L337)，[structure_module.py](/minalphafold/structure_module.py#L481-L499)
+
+<CgxTip>`linear_output` 的零初始化是 IPA 中最重要的初始化选择。若没有它，来自未经训练的点投影的随机几何噪声将在任何学习发生之前，于第一次前向传播中立即破坏单一表示。如果你正在修改 IPA（例如添加额外的点流），请确保将它们混合回 *s_i* 的输出投影也进行零初始化。</CgxTip>
+
+<CgxTip>`head_weights` 的 `softplus` 参数化保证了非负性，但请注意所有头均以相同的 γ ≈ 0.693 起步。如果你观察到某些头在整个训练过程中始终接近该值，而其他头增长到很大，这表明网络已学会不均匀地分配空间选择性——这是正常的，反映了局部与全局几何注意力之间的一种学习性分工。</CgxTip>
+
+## 下一步
+
+- 了解 IPA 的帧输出如何馈入 BackboneUpdate 和侧链扭转角预测：[结构模块与 IPA](7-structure-module-and-ipa)
+- 理解刚性帧约定及 `BACKBONE_FRAME_ADAPTATION` 校正：[刚性帧与扭转角](9-rigid-frames-and-torsions)
+- 了解 FAPE 如何监督 IPA 迭代精化的逐层帧：[损失函数与 FAPE](11-loss-functions-and-fape)
+- 理解使 IPA 的输出投影在启动时保持安全的零初始化协议：[零初始化与参数 EMA](13-zero-init-and-parameter-ema)
+
+---
+
+## 训练与损失
+
+- [深入解析/训练与损失/损失函数与 FAPE](https://zread.ai/ChrisHayduk/minAlphaFold2/11-loss-functions-and-fape)
+
+---
+slug:11-loss-functions-and-fape
+blog_type:normal
+---
+
+
+AlphaFold2 的训练目标是十个不同损失项的加权和，但 **帧对齐点误差** 主导了结构监督——它是唯一以帧不变方式直接测量预测与真实三维坐标之间几何偏差的损失。本页剖析了 FAPE 的数学公式、它在损失全景图中的双重角色（主干轨迹与全原子最终结果），以及共享 `AlphaFoldLoss` 编排器的每一个伴随损失项。
+
+来源：[losses.py](/minalphafold/losses.py#L1-L35)
+
+## FAPE：帧对齐点误差（算法 28）
+
+### 核心思想
+
+FAPE 回答了结构预测中的一个基本问题：*当距离必须对全局刚体运动保持不变时，两个结构相距多远？* FAPE 并非在固定的全局坐标系中比较原子，而是**将预测结构和真实结构都对齐到每个残基的局部帧**，然后在该规范化空间中测量差异。
+
+对于每个帧索引 *i* 和原子索引 *j*，FAPE 计算：
+
+> d_ij = √( ‖ T_i⁻¹ ∘ x_j − T_i^{true⁻¹} ∘ x_j^{true} ‖² + ε )
+
+其中 T_i = (R_i, t_i) 是刚体变换（旋转 + 平移），T⁻¹ ∘ x = Rᵀ(x − t) 应用逆变换将原子位置转换至帧 *i* 的局部坐标系。最终的 FAPE 为：
+
+> L_FAPE = (1/Z) · mean_{i,j} min(d_clamp, d_ij)
+
+**长度尺度** Z = 10 Å 将结果归一化为无量纲量。可选的**截断** d_clamp = 10 Å 限制了每对原子的误差，以防少数严重错位的原子主导梯度。
+
+来源：[losses.py](/minalphafold/losses.py#L49-L126)
+
+### 实现演练
+
+`frame_aligned_point_error` 函数逐行遵循算法 28：
+
+```mermaid
+flowchart TD
+    A["输入：预测/真实旋转 R，平移 t，<br/>预测/真实位置 x，掩码"] --> B["计算逆变换：<br/>R⁻¹ = Rᵀ,  t⁻¹ = −Rᵀt"]
+    B --> C["将原子转换至局部帧：<br/>x_local = R⁻¹x + t⁻¹  对 pred 和 true 均执行"]
+    C --> D["计算每对原子的误差距离：<br/>d_ij = √(‖x_pred_local − x_true_local‖² + ε)"]
+    D --> E{"提供了<br/>l1_clamp_distance？"}
+    E -->|是| F["d_ij = min(d_clamp, d_ij)"]
+    E -->|否| G["保持 d_ij 不截断"]
+    F --> H["应用联合掩码：<br/>mask = frames_mask × positions_mask × pair_mask"]
+    G --> H
+    H --> I["返回 Σ(d_ij × mask) / (Σmask × Z)"]
+```
+
+**步骤 1 — 逆变换**（第 84–95 行）：每个刚体变换 (R, t) 通过 `transpose(-1, -2)` 处理旋转、`einsum` 缩并处理平移，解析地求逆为 (Rᵀ, −Rᵀt)。
+
+**步骤 2 — 局部帧位置**（第 97–104 行）：预测和真实的原子位置均通过 `einsum("...fij,...aj->...fai", R_inv, x) + t_inv` 转换至每个帧的局部坐标系，生成形状为 `(batch, N_frames, N_atoms, 3)` 的局部坐标张量。
+
+**步骤 3 — 误差距离**（第 107–108 行）：局部帧位置间的 L2 距离，在平方根下加入了平滑常数 ε 以保证数值稳定性。
+
+**步骤 4 — 截断**（第 113–114 行）：当提供 `l1_clamp_distance` 时，`clamp(max=d_clamp)` 会限制距离——由于构造上保证 d_ij ≥ 0，这等价于论文中的 `min(d_clamp, d_ij)`。
+
+**步骤 5 — 掩码平均**（第 120–126 行）：联合掩码将无效的（帧，原子）对置零；分母计算存留的对数，当没有任何掩码时恢复为论文中的 1/N_res²。
+
+来源：[losses.py](/minalphafold/losses.py#L82-L126)
+
+### 两个 ε 值
+
+AlphaFold2 在两次 FAPE 调用中使用了**不同的平滑常数**，实现如实再现了这一点：
+
+| FAPE 变体 | ε | 原理 |
+|---|---|---|
+| **主干 FAPE**（逐层辅助） | 10⁻¹² | 近零平滑；Cα 距离条件良好 |
+| **全原子 FAPE**（最终侧链） | 10⁻⁴ | 对初始化时可能简并的原子使用更大的平滑 |
+
+论文指出，只要 ε 足够小，其精确值并不重要；此差异纯属惯例。
+
+来源：[losses.py](/minalphafold/losses.py#L69-L74), [losses.py](/minalphafold/losses.py#L707-L711), [losses.py](/minalphafold/losses.py#L753-L757)
+
+## 主干 FAPE 与轨迹损失
+
+### BackboneFAPE — 算法 20 第 17 行
+
+`BackboneFAPE` 使用帧平移（Cα 位置）同时作为帧*和*原子，对预测的主干帧与真实主干帧进行评分。这是一个关键洞见：**主干帧的平移即为 Cα 位置**（算法 20 第 15–16 行），因此“帧”和“点”是同一对象。
+
+该类直接委托给 `frame_aligned_point_error`，将 `predicted_translations` 同时作为帧平移*和*原子位置传入：
+
+```python
+return frame_aligned_point_error(
+    predicted_rotations, predicted_translations,     # 预测帧
+    true_rotations, true_translations,                # 真实帧
+    predicted_translations, true_translations,        # Cα 作为原子
+    ...)
+```
+
+来源：[losses.py](/minalphafold/losses.py#L695-L738)
+
+### BackboneTrajectoryLoss — 跨迭代平均
+
+结构模块运行 *N_layer* 次迭代（默认为 8），每次产生一组主干帧。`BackboneTrajectoryLoss` 在**每次迭代**计算 `BackboneFAPE` 并取平均：
+
+> L_aux^{FAPE} = (1/N_layer) · Σ_l FAPE_l
+
+这在整个迭代精修过程中提供了密集的监督，防止中间迭代在没有梯度信号的情况下“随波逐流”。该平均遵循算法 20 第 23 行。
+
+来源：[losses.py](/minalphafold/losses.py#L491-L559)
+
+### 90/10 截断/未截断混合
+
+补充材料 1.11.5 规定 **90% 的训练小批量** 使用截断为 10 Å 的主干 FAPE，而剩余 10% 不截断。`use_clamped_fape` 参数将其实现为软混合：
+
+```python
+total_loss += clamped_fape * use_clamped_fape + unclamped_fape * (1.0 - use_clamped_fape)
+```
+
+设置 `use_clamped_fape=0.9` 在单次前向传播中复现了论文预期的批次级加权，而非逐批随机选择是否截断。侧链 FAPE **始终截断**——此旋钮仅影响主干轨迹。
+
+来源：[losses.py](/minalphafold/losses.py#L498-L502), [losses.py](/minalphafold/losses.py#L530-L554)
+
+## 全原子 FAPE — 算法 20 第 28 行
+
+### 对每个刚体组与每个原子进行评分
+
+`AllAtomFAPE` 是最终且最全面的结构损失。它对每个残基中所有 **8 个刚体组帧**（3 个主干 + ω + φ + ψ + χ1..χ4，见表 2）与每个残基中所有 **14 个原子位置** 进行评分，生成一个 8N_res × 14N_res 的帧对齐误差矩阵。
+
+实现在调用 `frame_aligned_point_error` 之前，将逐残基结构**展平**为单一的帧与原子列表：
+
+| 展平前 | 展平后 |
+|---|---|
+| 帧：`(b, N_res, 8, 3, 3)` | 帧：`(b, N_res×8, 3, 3)` |
+| 原子：`(b, N_res, 14, 3)` | 原子：`(b, N_res×14, 3)` |
+
+掩码同样被展平并组合：位置使用 `atom_mask × true_atom_mask × seq_mask`，帧使用 `rigid_group_exists × seq_mask`。这确保了填充残基和缺失原子不产生任何贡献。
+
+全原子 FAPE **始终截断**于 d_clamp = 10 Å（补充材料 1.11.5），使用 ε = 10⁻⁴，并由 Z = 10 Å 归一化。
+
+来源：[losses.py](/minalphafold/losses.py#L741-L816)
+
+## 解决真实值歧义（算法 26）
+
+某些残基围绕侧链扭转轴具有 **180° 旋转对称性**，使其末端原子命名产生歧义。具体而言，ASP (χ2)、GLU (χ3)、PHE (χ2) 和 TYR (χ2) 各有两种有效标记（“真实”和“备选真实”），其区别在于交换两个原子。
+
+`select_best_atom14_ground_truth` 通过将预测-真实的两两距离与两种标记进行比较来解决此问题。对于每个残基 *i*，它选择能在所有配对（残基 *i* 中的歧义原子与别处的非歧义原子）上最小化 |d_pred − d_true| 总和的命名——这正是算法 26 第 5 行。
+
+该函数返回所选的原子位置、原子掩码以及一个布尔标志 `alt_naming_is_better`，调用者利用该标志为全原子 FAPE 选择匹配的刚体组帧。
+
+来源：[losses.py](/minalphafold/losses.py#L562-L624)
+
+## 完整损失全景图
+
+### AlphaFoldLoss — 方程 7 编排器
+
+`AlphaFoldLoss` 使用论文指定的权重将所有项连接在一起。训练与微调的组成有所不同：
+
+```mermaid
+graph TD
+    subgraph Training["训练损失（方程 7，初始行）"]
+        BB["0.5 · L_aux<sup>FAPE</sup><br/>（主干轨迹）"]
+        SC["0.5 · L_FAPE<br/>（全原子，最终层）"]
+        TOR["0.5 · L_aux<sup>torsion</sup> + 0.01 · L_anglenorm<br/>（算法 27，预打包）"]
+        DIST["0.3 · L_dist<br/>（distogram 交叉熵）"]
+        MSA["2.0 · L_msa<br/>（掩码 MSA 交叉熵）"]
+        CONF["0.01 · L_conf<br/>（pLDDT 交叉熵）"]
+    end
+    subgraph Finetune["微调新增项（方程 7，微调行）"]
+        VIOL["1.0 · L_viol<br/>（结构违规）"]
+        EXP["0.01 · L_exp_resolved<br/>（实验已解析）"]
+        PAE["0.1 · L_pae<br/>（预测对齐误差）"]
+"   end
+    Training --> TOTAL["L<sub>total</sub>"]
+    Finetune --> TOTAL
+```
+
+### 权重表
+
+| 项 | 符号 | 权重 | 补充材料 | 激活阶段 |
+|---|---|---|---|---|
+| 主干 FAPE 轨迹 | L_aux^{FAPE} | 0.5 | 1.9.2 / 算法 20 第 17 行 | 两阶段均激活 |
+| 全原子 FAPE | L_FAPE | 0.5 | 1.9.2 / #法 20 第# 28 行 | 两阶段均激活 |
+| 扭转角 | L_aux^{torsion} | 0.5（预打包） | 1.9.1 / 算法 27 | 两阶段均激活 |
+| 角度归一化 | L_anglenorm | 0.01（预打包） | 1.9.1 / 算法 27 | 两阶段均&=(D均激活 |
+| Distogram | L_dist | 0.3 | 1.9.8+8 / 方( 方程 41 | 两阶段均激活 |
+| 掩码@ MSA | L_msa | 2.0 | 1.9.9 / 方程 !8(42 | 两阶(段均激活 |
+| p> pLDDT 置信度 | L_conf | 0.01 | 8(1.9.6 / 算法C法-法8(29 | 两阶94段/段均(激活 |
+| 结构违反 | L_viol)iol | 1.0 | 1.9.11 /$ 方程)程 44–47 | 仅微调 |
+| 实验已解析 | L_exp(8p_resolved | 0.01 | 1.9.10 / 方程 43 | 仅微#调 |
+| 预测对齐(8误8(差 | L_pCae | 0.1 | 1.9.7 / 方程 38–40 | 仅$微调 |
+
+*注：**side5idechain_weight_frac = 0.5** 同时D身兼D L_FAPE1"FAPE 的(的权重(与8 L_aux( 的 FAPE 分量。实现将 `0.5 · L_aux`;s = `0.531 0.5 · L_aux^{FAPE} + 0.5 · L&/aux^{/torsion}` 拆分，并-直接将 FAPE 部分(求和。
+
+0.5 ·9.11 / / / 方程 44–47来源：[losses>0.5 · L_(aux=]1/ / / / 方程4.9.,/ / 方程 [losses.py](/minalphafold/losses.py#L129-L199), [losses.py](/minalphafold/losses.py#L415-L427)
+
+## 辅助损失项
+
+### TorsionAngleLoss — 算法 27
+
+将所有 7 个扭转角（ω, φ, ψ, χ1, χ2, χ3, χ4）作为归一化的 (sin, cos) 对与真实值进行评分，使用真实距离与备选真实距离的最小值来处理 180° 对称性：
+
+> L_torsion = mean_{i,f} min( ‖α̂ − α_true‖², ‖α̂ − α_alt‖² )
+
+**角度范数正则化器**将归一化前的长度拉向 1：
+
+> L_anglenorm = mean_{i,f} | ‖α̃_i^f‖ − 1 |
+
+权重 0.5 和 0.01 已包含方程 7 中的外部 0.5 因子，因此 `AlphaFoldLoss` 直接将返回值相加而不再进一步加权。
+
+来源：[losses.py](/minalphafold/losses.py#L626-L693)
+
+### PLDDTLoss — 算法 29
+
+预测的 pLDDT 分布（50 个宽度为 2 的分箱）与离散的真实 lDDT-Cα 分数之间的交叉熵。真实的 lDDT-Cα 在 `AlphaFoldLoss.compute_loss_terms` 内部计算，过程如下：
+
+1. 计算预测结构与真实结构中所有的 Cα 两两距离
+2. 识别 d_true < 15 Å 的“包含”配对（排除自配对）
+3. 对于 4 个阈值 {0.5, 1.0, 2.0, 4.0 Å} 中的每一个，计算距离在容差内保持不变的包含配对比例
+4. 跨阈值取平均并离散化至 50 个分箱
+
+**分辨率滤波器**将 [0.1, 3.0] Å 范围以外的样本损失置零，与补充材料 1.9.6 保持一致。
+
+来源：[losses.py](/minalphafold/losses.py#L376-L413), [losses.py](/minalphafold/losses.py#L818-L875)
+
+### DistogramLoss — 方程 41
+
+预测的 Cβ–Cβ 距离分箱（甘氨酸为 Cα）与真实独热编码分箱距离之间的交叉熵。目标在 `compute_loss_terms` 中内联构建，通过选择 atom14 槽位 4（Cβ）或槽位 1（GLY 的 Cα）、计算两两距离并经由 `distance_bin` 分箱。默认为覆盖 2–22 Å 的 64 个分箱。
+
+来源：[losses.py](/minalphafold/losses.py#L358-L373), [losses.py](/minalphafold/losses.py#L878-L907)
+
+### MSALoss — 方程 42
+
+掩码 MSA 位置上的 BERT 风格交叉熵。仅由 15% 掩码过程选中的位置（补充材料 1.2.7）产生贡献。23 个输出类别涵盖 20 种氨基酸 + 未知 + 间隔 + 掩码标记。
+
+来源：[losses.py](/minalphafold/losses.py#L910-L938)
+
+### TMScoreLoss — 预测对齐误差（补充材料 1.9.7）
+
+通过交叉熵针对离散的逐对齐误差矩阵 e_ij 训练 PAE/pTM 头，该矩阵**在 `torch.no_grad` 下计算**（它是该头的固定目标，而非第二条结构监督路径）。对齐误差使用与 FAPE 相同的帧求逆逻辑，但目标是覆盖 [0, 31.5 Å] 的 64 个宽度为 0.5 Å 分箱上的分类分布。仅在微调期间激活，权重为 0.1。
+
+来源：[losses.py](/minalphafold/losses.py#L1002-L1114)
+
+### ExperimentallyResolvedLoss — 方程 43
+
+预测每个 (残基, atom37) 槽位中各原子是否被实验解析的逐槽二元交叉熵。仅在微调期间基于高分辨率目标（< A）进行训练。
+
+来源：[losses.py](/m#nalp#hafold/losses.py#L941-4L998)
+
+#tructuralViolationLoss — 方程 44–47
+
+一种**仅在微调期间**施加的物理启发惩罚，以强制立体化学合理性：
+
+| 组件 | 惩罚对象 | 容差 |
+|---|---|---|
+| L_bondlength | 残&基间( C–N 肽键( 长度与文献值的偏差 | 12σ_lit 平(底 |
+| L_bondangle | coC(4s(CA–C–N) 和 co)A,s(C–N–CAs)0, 与文献C(4文献(值的偏(8差 | 12σ_li4t 平底( |
+| L_clas0h | 非键合重(4原子间(8的( 范德华( 重叠 | 1.5 Å 重叠容差( |
+
+(4碰撞项为节省内存被拆分为残基间和残基内两半，并按原子归一化，使其在共享权重 1.0 下与键长和键角项的尺度可比。
+
+来源：[losses.py](/minalphafold/losses.py#L1117-L1195)
+
+## 损失计算流程
+
+以下图表追踪了 `AlphaFoldLoss.compute_loss_terms` 中的完整数据流：
+
+```mermaid
+sequenceDiagram
+    participant SM as 结构模块输出
+    participant GT as 真实值
+    participant A26 as 算法 26
+    participant BB as BackboneTrajectoryLoss
+    participant SC as AllAtomFAPE
+    participant TOR as TorsionAngleLoss
+    participant AUX as 辅助损失
+    participant SUM as 加权和
+
+    SM->>A26: "atom14_coords，true + alt 位置"
+    GT->>A26: "原子掩码，is_ambiguous"
+    A26-->>BB: "重命名帧 + 掩码"
+    A26-->>SC: "重命名位置 + 掩码7quot;
+    SM->>BB: "traj_rotations, traj_translations"
+    GT->>BB: "true_rotations, true_translations"
+    BB-->>SUM: "L_auxᵃᵘˣ^{FAPE} × (1 − 0.5)"
+    SM->>SC: "all_frames_R/t, atom14_coords"
+    SC-->>SUM: "L_FAPE × 0.5"
+    SM->>TOR: "traj_torsion_angles"
+    TOR-->>SUM: "预打包扭转角 + 角度范数"
+    AUX-->>SUM: "L_dist, L_msa, L_conf"
+    Note over SUM: 微调新增<br/>L_viol, L_exp_resolved, L_pae
+```
+
+<CgxTip>每个损失返回形状为 `(batch,)` 的逐样本张量——调用者（训练器）对批次取平均。此设计支持逐样本梯度裁剪和指标记录，而无需在损失模块内部进行归约。</CgxTip>
+
+<CgxTip>`AlphaFoldLoss.forward` 上的 `return_breakdown=True` 标志同时返回标量总和与命名损失项的完整字典，无需单独的评估过程即可实现细粒度训练监控。</CgxTip>
+
+来源：[losses.py](/minalphafold/losses.py#L269-L489), [losses.py](/minalphafold/losses.py#L429-L445)
+
+## FAPE 几何直觉
+
+为什么进行帧对齐，而不是简单地在全局帧中比较原子位置？考虑两个由刚体运动（旋转 + 平移）关联的相同结构。对原始坐标的朴素 L2 损失会报告巨大误差，但两结构在物理上是完全相同的。FAPE 通过以下方式避免了此问题：
+
+1. **将两个结构转换至每个残基的局部帧**——这抵消了任何全局刚体运动，因为相同的运动同时出现在 T_i 和 T_i^{true} 中，并被逆变换消除。
+A2. **比较局部帧位置**——现在比较真正是帧不变的：旋转或平移整个预测结构会同时改变 T_i 和 x_j，但 T_i⁻¹ ∘ x_j 保持不变。
+
+这使得 FAPE 成为结构间恰当的 **SE(3) 不变** 距离，这一点至关重要，因为蛋白质结构仅在刚体运动的意义上被定义。
+
+来源：[losses.py](/minalphafold/losses.py#L64-L80)
+
+## 测试策略
+
+测试套件针对手工计算的参考值对 FAPE 进行了验证：
+
+- **`test_backbone_fape_matches_af2_frame_aligned_point_error`**：构建一个具有恒等旋转和非平凡平移的 2 残基系统，然后手动计算逆变换、局部帧位置、截断距离和掩码平均——验证模块输出匹配至 1e-6。
+- **`test_all_atom_fape_matches_joint_masked_mean`**：针对直接联合掩码计算，验证展平的（8 帧 × 14 原子）全原子 FAPE。
+- **`test_tm_score_loss_uniform_logits_match_log_nbins_when_prediction_matches_truth`**：当预测等于真实值时，所有 e_ij = 0 → 目标分箱 0；均匀 logits 的交叉熵 = 每对 log(64)。
+- **`test_select_best_atom14_ground_truth_uses_pairwise_distance_rule`**：构造一个备选真实中歧义原子被交换的场景，验证函数选择了具有更小两两距离误差的命名。
+
+来源：[test_losses.py](/tests/test_losses.py#L22-L111), [test_losses.py](/tests/test_losses.py#L114-L172)
+
+---
+
+理解这些损失项在两阶段协议中如何交互对于实际训练至关重要。下一页[两阶段训练协议](12-two-stage-training-protocol)解释了损失构成在初始训练与微调之间如何转移，而[零初始化与参数 EMA](13-zero-init-and-parameter-ema)则涵盖了为何 FAPE 是第零步中*唯一*梯度源的原因。
+
+---
+
+- [深入解析/训练与损失/两阶段训练协议](https://zread.ai/ChrisHayduk/minAlphaFold2/12-two-stage-training-protocol)
+
+---
+slug:12-two-stage-training-protocol
+blog_type:normal
+---
+
+
+AlphaFold2 的训练流程并非单体的优化运行——它是一个**两阶段协议**（补充材料 §1.11.1，表 4），刻意将学习过程划分为粗略的“初始训练”阶段和几何精修的“微调”阶段。这两个阶段在裁剪尺寸、MSA 深度、学习率、预热调度以及最关键的**激活损失项**上均有所不同。minAlphaFold2 通过 `TrainingProtocol`、`StageConfig` 和 `OptimizerConfig` 数据类，将此协议作为一等配置数据捕获，并通过一对切换 `finetune` 标志的 `AlphaFoldLoss` 实例接入 `fit` 循环。本页将剖析该两阶段机制的架构：阶段间发生了什么变化，为何重要，以及代码如何实现补充材料中的每条转换规则。
+
+来源：[trainer.py](minalphafold/trainer.py#L1-L26)，[losses.py](minalphafold/losses.py#L129-L163)
+
+## 协议一览
+
+下表总结了两个阶段之间发生变化的每个超参数，数据直接取自补充表 4 及编码它的 TOML 配置：
+
+| 参数 | 初始训练 | 微调 | 补充材料参考 |
+|---|---|---|---|
+| **裁剪尺寸** (N_res) | 256 | 384 | 表 4 |
+| **MSA 深度** (N_seq) | 128 | 512 | 表 4 |
+| **额外 MSA 深度** (N_extra_seq) | 1024 | 5120 | 表 4 |
+| **最大模板数** (N_templ) | 4 | 4 | 表 4（未变） |
+| **学习率** | 1 × 10⁻³ | 5 × 10⁻⁴ | §1.11.3（基础 LR 减半） |
+| **LR 预热** | 128k 样本线性预热 | 无 | §1.11.3 |
+| **违规损失权重** | 0.0（禁用） | 1.0（启用） | §1.9.11 |
+| **实验已分辨损失** | 关闭 | 0.01 | §1.9.10 |
+| **pTM / PAE 损失** | 关闭 | 0.1 | §1.9.7 |
+| **总样本数** | ~10M | ~1.5M | 表 4 |
+| **权重初始化** | 随机 | 来自初始阶段检查点 | §1.11.1 |
+
+来源：[training_alphafold2.toml](configs/training_alphafold2.toml#L1-L54)，[trainer.py](minalphafold/trainer.py#L216-L278)
+
+## 各阶段损失构成
+
+阶段之间架构上最显著的差异是**哪些损失项处于激活状态**。`AlphaFoldLoss` 类实例化了两个版本——`pretrain_loss_fn = AlphaFoldLoss(finetune=False)` 和 `finetune_loss_fn = AlphaFoldLoss(finetune=True)`——训练循环在每一步中通过 `use_finetune_loss` 在二者之间进行选择。
+
+**阶段 1（初始训练）**——公式 7 训练行：
+
+$$L = 0.5 \, L_{\text{FAPE}} + 0.5 \, L_{\text{aux}} + 0.3 \, L_{\text{dist}} + 2.0 \, L_{\text{msa}} + 0.01 \, L_{\text{conf}}$$
+
+**阶段 2（微调）**——公式 7 微调行，*新增*三项：
+
+$$L \mathrel{+}= 0.01 \, L_{\text{exp\_resolved}} + 1.0 \, L_{\text{viol}} + 0.1 \, L_{\text{pae}}$$
+
+条件逻辑位于 `AlphaFoldLoss.compute_loss_terms` 中：共享项（FAPE、扭转角、距离图、MSA、pLDDT）总会被计算，而当 `self.finetune` 为 `True` 时，将追加这三个仅用于微调的项。这种设计意味着基础损失张量只构建一次，然后就地扩展，避免了因未改变项而产生的冗余计算。
+
+```mermaid
+graph TB
+    subgraph "阶段 1 — 初始训练"
+        A1["0.5 · L_FAPE<br/>(全原子，最终层)"]
+        A2["0.5 · L_aux<br/>(主链 FAPE + 扭转角)"]
+        A3["0.3 · L_dist<br/>(距离图 CE)"]
+        A4["2.0 · L_msa<br/>(掩码 MSA CE)"]
+        A5["0.01 · L_conf<br/>(pLDDT CE)"]
+    end
+
+    subgraph "阶段 2 — 微调 (新增)"
+        B1["0.01 · L_exp_resolved<br/>(二元 CE, §1.9.10)"]
+        B2["1.0 · L_viol<br/>(键 + 角度 + 空间冲突, §1.9.11)"]
+        B3["0.1 · L_pae<br/>(PAE CE, §1.9.7)"]
+    end
+
+    A1 --> L["L_total"]
+    A2 --> L
+    A3 --> L
+    A4 --> L
+    A5 --> L
+    B1 --> L
+    B2 --> L
+    B3 --> L
+
+    style B1 fill:#e8f5e9,stroke:#388e3c
+    style B2 fill:#e8f5e9,stroke:#388e3c
+    style B3 fill:#e8f5e9,stroke:#388e3c
+```
+
+来源：[losses.py](minalphafold/losses.py#L129-L199)，[losses.py](minalphafold/losses.py#L415-L489)
+
+## 阶段配置架构
+
+该协议被建模为三个嵌套的数据类，将**随阶段变化**的设置与**共享的**优化器设置分离开来。这种分离确保了单个 TOML 文件能完整指定两个阶段，同时使得意外遗漏阶段专属字段变得不可能——数据类构造器在加载时遇到任何缺失的键都会抛出 `TypeError`。
+
+`StageConfig` 捕获了表 4 中的一列——裁剪/MSA 尺寸、学习率、预热窗口、违规损失权重以及总样本预算。`OptimizerConfig` 包含了在两个阶段中**完全相同**的 Adam 超参数、梯度裁剪范数、EMA 衰减以及一次性 LR 衰减调度。`TrainingProtocol` 将它们绑定在一起：
+
+```mermaid
+classDiagram
+    class TrainingProtocol {
+        +protocol: str
+        +optimizer: OptimizerConfig
+        +initial: StageConfig
+        +finetune: StageConfig
+        +stage(name: str) StageConfig
+    }
+    class StageConfig {
+        +crop_size: int
+        +msa_depth: int
+        +extra_msa_depth: int
+        +max_templates: int
+        +learning_rate: float
+        +warmup_samples: int
+        +violation_loss_weight: float
+        +total_samples: int
+    }
+    class OptimizerConfig {
+        +"adam_beta1: float = 0.9"
+        +"adam_beta2: float = 0.999"
+        +"adam_eps: float = 1e-6"
+        +"grad_clip_norm: float = 0.1"
+        +"ema_decay: float = 0.999"
+        +"mini_batch_size: int = 128"
+        +"lr_decay_samples: int = 6_400_000"
+        +"lr_decay_factor: float = 0.95"
+    }
+    TrainingProtocol --> StageConfig : initial
+    TrainingProtocol --> StageConfig : finetune
+    TrainingProtocol --> OptimizerConfig : optimizer
+```
+
+TOML 文件 `configs/training_alphafold2.toml` 是权威的磁盘表现形式。它由 `load_training_protocol` 加载，该函数使用 `tomllib` 解析 TOML，并将每个子表转发给相应的数据类构造器。TOML 中的拼写错误会在加载时表现为 `TypeError`，而不是在训练中途表现为静默的 `AttributeError`。
+
+来源：[trainer.py](minalphafold/trainer.py#L216-L331)，[training_alphafold2.toml](configs/training_alphafold2.toml#L1-L54)
+
+## 学习率调度转换
+
+LR 调度是区分两个阶段的另一个关键轴。三种调度实现共存，正确的调度会根据配置自动选择：
+
+| 调度 | 触发条件 | 阶段使用 | 论文保真度 |
+|---|---|---|---|
+| `learning_rate_for_samples` | `warmup_samples > 0` 或设置了 `lr_decay_samples` | **两个阶段**（符合论文的路径） | 精确 |
+| `learning_rate_for_step` | `lr_schedule = "warmup_cosine"` | 教学备用方案 | 近似 |
+| 常量 | `lr_schedule = "constant"`，无样本钩子 | 快速运行的默认值 | 低 |
+
+**初始训练**使用基于样本的调度：LR 在前 128k 个训练样本中从 0 线性增长至 1×10⁻³，随后保持恒定，并在达到 6.4M 样本时乘以 0.95 执行一次衰减（即 §1.11.3 中的一次性衰减）。**微调**阶段以 `warmup_samples = 0`（根据补充材料无预热）进入，基础 LR 为 5×10⁻⁴（初始阶段 LR 的一半，通过 `finetune_lr_scale = 0.5` 实现）。如果在单次连续运行中，累积样本数跨越了 6.4M 阈值，则一次性衰减可能会在微调期间触发。
+
+`learning_rate_at_step` 函数负责在这些路径间分派。当 `is_finetune=True` 时，它完全绕过基于步数的调度，并计算 `learning_rate * finetune_lr_scale`，如果一次性触发器已触发，则可选地进一步乘以 `lr_decay_factor` 缩放。这确保了微调永远不会意外地从过期的初始阶段配置中接收到预热爬升。
+
+来源：[trainer.py](minalphafold/trainer.py#L435-L627)
+
+## 阶段转换机制
+
+从初始训练到微调的转换在单个 `fit` 调用内**不是自动的**——这是调用者的责任，这与论文的设计相符，即两个阶段是独立的训练运行。有两种机制支持这一点：
+
+**1. `init_weights_from_checkpoint`**——从先前的检查点中提取模型权重作为种子，但不恢复优化器状态、EMA 或样本计数器。这正是论文在微调开始时所做的工作：继承已学习的权重，但从全新的 Adam 状态和零 LR 预热开始。`fit` 函数从指定检查点加载模型 `state_dict` 并打印确认信息，然后使用全新构建的优化器继续执行。
+
+**2. `finetune_start_step`**——一种允许**单次连续运行**在特定全局步骤转换到微调的替代方案。设置后，`use_finetune_loss` 在所有 ≥ `finetune_start_step` 的步骤中返回 `True`，损失函数在运行中途从 `pretrain_loss_fn` 切换为 `finetune_loss_fn`。LR 调度也会转换：`learning_rate_at_step` 检查 `is_finetune` 并立即应用减半的 LR。
+
+`fit` 循环在启动时实例化两个损失函数——`pretrain_loss_fn = AlphaFoldLoss(finetune=False)` 和 `finetune_loss_fn = AlphaFoldLoss(finetune=True)`——并在每一步选择激活的函数：
+
+```python
+is_finetune = use_finetune_loss(training_config, global_step)
+loss_fn = finetune_loss_fn if is_finetune else pretrain_loss_fn
+```
+
+这种逐步骤的选择意味着仅用于微调的损失（结构违规、实验已分辨、pTM/PAE）会在转换步骤立即激活，从损失的角度来看不会产生梯度不连续性——共享项继续不变地流动梯度，新项只是在原有基础上叠加其贡献。
+
+来源：[trainer.py](minalphafold/trainer.py#L568-L577)，[trainer.py](minalphafold/trainer.py#L846-L934)，[trainer.py](minalphafold/trainer.py#L994-L996)
+
+## 结构违规损失——微调的核心区分项
+
+`StructuralViolationLoss`（§1.9.11）是最重要的仅微调项。它强制执行物理上有效的肽键几何和空间位阻分离，充当清理初始训练产生的粗略结构的正则化器。它分解为三个子损失：
+
+| 子损失 | 公式 | 惩罚内容 | 容差 |
+|---|---|---|---|
+| **L_bondlength** | 公式 44 | 残基间 C–N 肽键长度与文献值的偏差 | 12σ_lit |
+| **L_bondangle** | 公式 45 | 肽键角度（CA–C–N 和 C–N–CA）的余弦 | 12σ_lit |
+| **L_clash** | 公式 46 | 非键合重原子间的范德华重叠 | 1.5 Å |
+
+三者均使用**平底**惩罚——当预测值在容差范围内时不流动梯度，因此一旦几何结构已经有效，该损失不会与 FAPE 驱动的结构优化相冲突。12.0 的违规容差因子和 1.5 Å 的重叠容差作为与补充材料匹配的构造器默认值被注册。公式 7 中整体 `structural_violation_weight = 1.0` 施加了一个绝对权重，使 L_viol 的规模与 FAPE 项保持可比。
+
+补充材料明确指出：*“网络仅在微调阶段使用结构违规损失进行训练”*——在初始训练期间启用它会破坏早期优化，因为此时结构模块仍在产生近乎随机的坐标，会同时违反每一个几何约束。
+
+来源：[losses.py](minalphafold/losses.py#L1117-L1195)，[losses.py](minalphafold/losses.py#L447-L457)
+
+## 钳位 FAPE 机制转换
+
+与两阶段协议的一个更微妙的交互涉及补充材料 §1.11.5 中的**钳位与非钳位 FAPE** 混合。在 90% 的训练小批量中，主链 FAPE 被钳位在 10 Å（超过 10 Å 的误差贡献恒定梯度），而在剩余的 10% 中则完全非钳位。这种随机混合由 `AlphaFoldLoss` 中的 `use_clamped_fape` 控制，并在 `BackboneTrajectoryLoss.forward` 中实现：
+
+- 当 `use_clamped_fape` 为 `None`（默认）时：完全钳位的主链 FAPE。
+- 当 `use_clamped_fape` 为 [0, 1] 区间内的浮点数时：`use_clamped_fape × 钳位 + (1 - use_clamped_fape) × 非钳位` 的软混合。
+- 设置 `use_clamped_fape = 0.9` 可重现论文预期的每批次损失。
+
+侧链（全原子）FAPE **始终被钳位**，与阶段无关——`AllAtomFAPE` 类在其对 `frame_aligned_point_error` 的调用中硬编码了 `l1_clamp_distance = self.d_clamp_val`（10 Å）。只有主链轨迹 FAPE 参与了随机非钳位机制。
+
+来源：[losses.py](minalphafold/losses.py#L491-L559)，[losses.py](minalphafold/losses.py#L741-L816)
+
+## 裁剪尺寸与 MSA 深度缩放
+
+阶段间裁剪从 256 → 384 个残基、MSA 深度从 128 → 512 的跃升不仅仅是数据的改变——它重塑了 Evoformer 的**有效感受野**。使用 384 个残基的裁剪，配对表示 `z_ij` 覆盖了 384² = 147,456 个成对位置（从 65,536 增加），额外 MSA 行从 1,024 扩展到 5,120。这意味着：
+
+- **内存**：仅配对表示就增长了 2.25 倍，额外 MSA 表示增长了 5 倍。在单 GPU 上进行微调可能需要进一步减小 `batch_size` 或依赖梯度累加。
+- **信息**：每次裁剪包含更多残基意味着训练期间能看到更远距离的接触，更深的 MSA 输入意味着 Evoformer 拥有更丰富的进化证据可供整合。
+- **优化稳定性**：更大的裁剪之所以可行，仅仅是因为微调从良好收敛的初始阶段检查点开始。在裁剪为 384 时从随机初始化训练将极度不稳定——仅违规损失就会在未经训练的结构预测上压倒 FAPE 项的信号。
+
+`DataConfig` 数据类的默认值匹配初始训练列；调用者在进入微调时覆盖 `crop_size`、`msa_depth` 和 `extra_msa_depth`。
+
+来源：[trainer.py](minalphafold/trainer.py#L93-L124)，[training_alphafold2.toml](configs/training_alphafold2.toml#L32-L53)
+
+## 跨阶段的检查点与 EMA
+
+参数 EMA（§1.11.7，衰减 0.999）在两个阶段中运行方式相同，但在每个阶段中发挥的战略作用不同：
+
+- **初始训练**：EMA 影子追踪约 10M 样本上快速演变的权重移动平均值。最佳检查点通过评估 EMA 模型在验证损失上的表现来选择。
+- **微调**：当使用 `init_weights_from_checkpoint` 时，EMA 从加载的权重中**重新提取种子**（`build_ema_model` 首次更新的特殊情况在 `num_averaged == 0` 时将 `current` 完整拷贝）。这意味着微调 EMA 从初始阶段的最终权重开始，而不是从零初始化的影子开始，这至关重要——零起始的 EMA 需要数千步才能赶上已收敛的权重，导致早期验证毫无意义。
+
+当使用 `resume_from_checkpoint` 替代时，完整的 EMA 状态字典从检查点恢复，因此影子从它中断的地方精确继续。`init_weights_from_checkpoint` 路径有意**不**恢复 EMA——它仅加载模型权重，这与论文的隐含假设一致，即微调以跟踪新加载参数的全新 EMA 开始。
+
+<CgxTip>在编排完整的论文协议时，使用 `finetune=False` 运行阶段 1 并保存最佳检查点，然后启动阶段 2，使 `init_weights_from_checkpoint` 指向该检查点，设置 `finetune=True`、`finetune_lr_scale=0.5` 以及表 4 中增加的裁剪/MSA 值。`finetune_start_step` 路径可用于单次运行实验，但不处理裁剪尺寸变化——DataLoader 在 `fit` 入口处使用初始 `DataConfig` 裁剪尺寸构建一次。</CgxTip>
+
+<CgxTip>`TrainingProtocol` 数据类和 `load_training_protocol` 函数提供了一种单次调用的方式，可从 `configs/training_alphafold2.toml` 加载两个阶段。协议文件通过 `training_` 前缀与模型配置文件区分——`load_training_protocol("alphafold2")` 解析为 `configs/training_alphafold2.toml`，而 `load_model_config("alphafold2")` 解析为 `configs/alphafold2.toml`。</CgxTip>
+
+来源：[trainer.py](minalphafold/trainer.py#L516-L536)，[trainer.py](minalphafold/trainer.py#L916-L934)，[trainer.py](minalphafold/trainer.py#L1042-L1043)
+
+## 接下来阅读什么
+
+两阶段协议与多个其他子系统深度交互。有关组成每个阶段的损失函数，请参阅[损失函数与 FAPE](11-loss-functions-and-fape)。有关稳定从初始阶段检查点进行微调的零初始化技巧，请参阅[零初始化与参数 EMA](13-zero-init-and-parameter-ema)。有关必须在阶段间调整裁剪和 MSA 深度的数据流水线，请参阅[数据流水线与裁剪](14-data-pipeline-and-cropping)。有关编码这些超参数的配置文件，请参阅[模型配置文件](16-model-config-profiles)。
+
+---
+
+- [深入解析/训练与损失/零初始化与参数 EMA](https://zread.ai/ChrisHayduk/minAlphaFold2/13-zero-init-and-parameter-ema)
+
+---
+slug:13-zero-init-and-parameter-ema
+blog_type:normal
+---
+
+
+AlphaFold2的训练稳定性依赖于两个精心设计的参数管理机制：残差输出投影的**零初始化**（补充材料 §1.11.4）和模型权重的**指数移动平均**（补充材料 §1.11.7）。两者共同确保了深厚的Evoformer+StructureModule堆栈在初始时表现为一组近恒等变换，并确保推理时使用的是经过平滑且噪声更低的训练轨迹版本。本文剖析了minAlphaFold2中这两种机制的实现，追溯了初始化扫描从其五种配方到逐模块分发逻辑的过程，以及EMA从其影子参数构造到其在验证和检查点选择中的作用。
+
+来源：[initialization.py](/minalphafold/initialization.py#L1-L81), [model.py](/minalphafold/model.py#L106-L153), [trainer.py](/minalphafold/trainer.py#L516-L536)
+
+## 五种初始化配方
+
+补充材料 §1.11.4 精确规定了网络中每个 `nn.Linear` 的初始化方式。`initialization` 模块是唯一的可信源，提供了由 `init_linear` 分发的五种命名配方。在所有配方中，偏置**始终**为零；只有权重分布有所不同。
+
+| 配方 | 权重分布 | 偏置 | 使用场景 | σ / 范围 |
+|--------|--------------------|------|----------|-----------|
+| `default` / `linear` | LeCun fan-in 截断正态分布 | 0 | 常规投影 | σ = √(1/fan_in), 裁剪 ±2σ |
+| `relu` | He 截断正态分布 | 0 | 紧接在 ReLU 之前的投影 | σ = √(2/fan_in), 裁剪 ±2σ |
+| `glorot` | Xavier 均匀分布 | 0 | 自注意力中的 Query/key/value | uniform(−a, a), a = √(6/(fan_in+fan_out)) |
+| `final` | 零 | 0 | 残差输出投影，logit 头 | — |
+| `gate` | 零 | 1 | 送入 sigmoid 的门控 Linear 层 | 初始化时 sigmoid(1) ≈ 0.73 |
+
+截断正态分布使用了补充材料中的 **±2σ 裁剪**，通过设置 `a=-2σ, b=+2σ` 的 `torch.nn.init.trunc_normal_` 实现。`final` 和 `gate` 配方是直接实现零初始化设计的两种配方：`final` 使残差块以恒等变换起步，而 `gate` 使 sigmoid 门控路径在初始时主要表现为直通。
+
+来源：[initialization.py](/minalphafold/initialization.py#L33-L80)
+
+## 零初始化为何产生恒等残差
+
+其核心洞见在于架构而非仅仅是数值。每个Evoformer子块和StructureModule迭代都使用了**残差连接**：块的输出被添加到其输入中（`x ← x + block(x)`）。如果 `block` 的最终投影具有零权重和零偏置，那么对于所有 `x`，`block(x) = 0`，残差求和退化为 `x ← x + 0 = x` —— 即**恒等函数**。
+
+```mermaid
+flowchart LR
+    subgraph "初始化时"
+        A["x (输入)"] --> B["子块内部\n(非零权重)"]
+        B --> C["linear_output\nW=0, b=0"]
+        C --> D["输出 = 0"]
+        D --> E["x + 0 = x\n(恒等)"]
+    end
+    subgraph "训练后"
+        A2["x (输入)"] --> B2["子块内部"]
+        B2 --> C2["linear_output\nW 已学习"]
+        C2 --> D2["输出 = Δx"]
+        D2 --> E2["x + Δx\n(细化)"]
+    end
+```
+
+这意味着一个48层的Evoformer堆栈在初始时表现为48个堆叠的恒等操作——模型以直通方式起步，并**学习添加增量细化**。这之所以至关重要，原因有二：(1) 它防止了极深堆栈在训练早期出现梯度爆炸；(2) 它使模型的初始预测仅依赖于输入嵌入路径，从而为优化器提供了一个干净的起始信号。同一原则也适用于StructureModule的8次IPA迭代及其过渡MLP。
+
+<CgxTip>零初始化扫描由 `config.zero_init` 控制（在所有内置配置中默认为 `True`）。将其设置为 `False` 会禁用所有 `linear_output` 和 `linear_down` 投影的零初始化，同时保留门控初始化——这在消融实验或从已学习权重的检查点进行微调时非常有用。</CgxTip>
+
+来源：[model.py](/minalphafold/model.py#L106-L153), [evoformer.py](/minalphafold/evoformer.py#L127-L135)
+
+## 零初始化扫描：逐模块分发
+
+`AlphaFold2._initialize_alphafold_parameters` 通过 `self.modules()` 遍历网络中的每个模块，并根据模块的类名分发正确的初始化配方。这是一个**构造后扫描**——模块首先使用其默认的PyTorch初始化进行构建，然后扫描覆盖选定的层。分发目标分为四类：
+
+### 1. 注意力块的输出投影
+
+这是八个基于注意力的类的 `linear_output` 层。将它们置零会使每个注意力块以恒等变换起步：
+
+| 模块类 | 置零层 | 算法 |
+|-------------|-------------|-----------|
+| `MSARowAttentionWithPairBias` | `linear_output` | Alg 7 |
+| `MSAColumnAttention` | `linear_output` | Alg 8 |
+| `MSAColumnGlobalAttention` | `linear_output` | Alg 19 |
+| `TemplatePointwiseAttention` | `linear_output` | Alg 17 |
+| `ExtraMsaStack` | `linear_output` | Alg 18 |
+| `TriangleAttentionStartingNode` | `linear_output` | Alg 13 |
+| `TriangleAttentionEndingNode` | `linear_output` | Alg 14 |
+| `InvariantPointAttention` | `linear_output` | Alg 22 |
+
+### 2. 过渡下投影
+
+`MSATransition` 和 `PairTransition` 是具有拓宽瓶颈的两层MLP。`linear_down` 层（即缩窄回原始通道维度的第二个投影）被零初始化，使过渡以恒等变换起步：
+
+| 模块类 | 置零层 | 算法 |
+|-------------|-------------|-----------|
+| `MSATransition` | `linear_down` | Alg 9 |
+| `PairTransition` | `linear_down` | Alg 15 |
+
+### 3. 三角乘法与结构模块特殊处理
+
+三角乘法模块（`Outgoing`/`Incoming`）接收**三部分零初始化**：`gate1` 和 `gate2` 均使用门控初始化（零权重，偏置=1），最终的 `gate` 也使用门控初始化，而 `out_linear` 被置零。StructureModule的 `transition_linear_3`（其三层过渡MLP的第三层）、`BackboneUpdate.linear` 和 `AngleResnetBlock.linear_2` 均被置零。`OuterProductMean.linear_out` 也被置零。
+
+### 4. 不变点注意力头权重
+
+IPA的 `head_weights` 参数控制每个注意力头的 softplus 门控权重。这些权重并未被置零，而是被设置为 `log(e − 1)`，使得在初始化时 `softplus(head_weights) = 1.0`，从而在训练调整平衡之前赋予每个头单位权重。
+
+来源：[model.py](/minalphafold/model.py#L106-L153)
+
+## 门控初始化：Sigmoid 直通
+
+`gate` 配方（零权重，偏置=1）被应用于每个门控注意力模块中的 `linear_gate`，以及两种三角乘法类中的 `gate1`、`gate2` 和 `gate`。其机制工作原理如下：门控路径计算 `sigmoid(W·x + b)`。在初始化时，`W=0` 且 `b=1`，因此无论输入为何，预 sigmoid 激活始终为1，且 `sigmoid(1) ≈ 0.73`。这意味着门以约73%的容量开启——该路径**主要表现为直通**但并未完全打开，允许受控量的门控信号通过，同时为优化器留出余量，以便进一步打开门（偏置 → +∞）或将其关闭（偏置 → −∞）。
+
+```python
+# 门控初始化：W=0, b=1 → sigmoid(1) ≈ 0.73
+def init_gate_linear(linear):
+    with torch.no_grad():
+        linear.weight.zero_()
+        if linear.bias is not None:
+            linear.bias.fill_(1.0)
+```
+
+这一设计选择在补充材料 §1.11.4 的“Gating Linear layers”下被明确指出，且与 `final` 配方不同——门控的重点在于**控制信息流**，而非使残差块成为恒等变换。
+
+来源：[initialization.py](/minalphafold/initialization.py#L70-L80)
+
+## 参数 EMA：权重的指数移动平均
+
+补充材料 §1.11.7 规定，训练过程需维护所有模型参数的**指数移动平均（EMA）**。EMA 影子模型专门用于验证损失计算和检查点选择，而实时的 `model.state_dict()` 则继续持有接收梯度更新的训练参数。这解耦了噪声较大的训练时权重与更平滑的推理时权重。
+
+### 构造与更新规则
+
+EMA 通过 `build_ema_model` 构建，它将实时的 `AlphaFold2` 包装在 `torch.optim.swa_utils.AveragedModel` 中，并带有一个实现以下逻辑的自定义平均函数：
+
+```
+ema ← decay · ema + (1 − decay) · current
+```
+
+论文指定 `decay = 0.999`，这赋予每个新的优化器步骤0.001的权重混合到运行平均值中。特殊情况处理第一次更新（`num_averaged == 0`）：EMA **直接从第一步后的模型中播种**，而不是混合两个相同的初始化参数副本。这避免了 `0.999·θ_init + 0.001·θ_init = θ_init` 在第1步无法产生有意义更新的微妙问题。
+
+```python
+def avg_fn(averaged_param, current_param, num_averaged):
+    if int(num_averaged) == 0:
+        return current_param.detach().clone()    # 第一次更新：直接播种
+    return ema_decay * averaged_param + (1.0 - ema_decay) * current_param
+```
+
+该更新在 `fit` 循环内每次优化器步骤后触发：`ema_model.update_parameters(model)`。这发生在 `optimizer.step()` **之后**且下一次前向传播**之前**，因此 EMA 始终反映最新的参数值。
+
+来源：[trainer.py](/minalphafold/trainer.py#L516-L536), [trainer.py](/minalphafold/trainer.py#L1042-L1043)
+
+### 验证与检查点中的 EMA
+
+EMA 影子模型的唯一目的就是评估。在验证期间，训练循环显式地选择 EMA 模型而非实时模型：
+
+```python
+eval_model = ema_model if ema_model is not None else model
+val_metrics = evaluate(eval_model, val_loss_fn, val_loader, training_config)
+```
+
+因为 `AveragedModel.__call__` 会使用平均参数转发到其包装的模块，所以无论是否启用 EMA，调用点都是相同的。**最佳检查点选择**（在 `val_loss` 改善时保存）基于此 EMA 评估的损失，因此保存的“最佳”权重是在平滑参数下表现最佳的权重。
+
+检查点持久化在实时模型和优化器状态旁边包含了 EMA 状态字典。恢复时，`load_checkpoint_for_resume` 从 `checkpoint["ema_state_dict"]` 恢复 EMA 影子模型，确保运行平均值在中断的运行中无缝延续。当使用 `init_weights_from_checkpoint`（§1.11.1 中的微调跨阶段权重转移）时，仅加载实时模型权重——EMA 从转移的权重重新初始化，符合论文中微调启动全新 EMA 轨迹的意图。
+
+来源：[trainer.py](/minalphafold/trainer.py#L1066-L1076), [trainer.py](/minalphafold/trainer.py#L803-L843), [trainer.py](/minalphafold/trainer.py#L539-L565)
+
+## 零初始化与 EMA 的交互
+
+在训练开始时，零初始化与参数 EMA 以一种微妙而重要的方式交互。因为零初始化使模型的输出投影产生零，前几个优化器步骤会对那些先前为零的权重产生微小但非零的更新。从第一步后模型播种的 EMA 立即捕获了这些微小更新（多亏了 `num_averaged == 0` 特殊情况）。如果没有该特殊情况，EMA 将从零初始化值开始，并需要许多步才能通过 0.999 的衰减积累有意义的信号——`clone` 捷径确保了 EMA 从第1步开始追踪训练轨迹。
+
+```mermaid
+sequenceDiagram
+    participant M as 实时模型
+    participant O as 优化器
+    participant E as EMA 影子
+    participant V as 验证
+
+    Note over M: 零初始化：所有输出<br/>投影均为 W=0, b=0
+    M->>O: 前向 + 反向
+    O->>M: optimizer.step()<br/>(W 变为微小的非零值)
+    M->>E: update_parameters(model)<br/>num_averaged==0 → clone
+    Note over E: EMA 从第一步后<br/>的权重中播种
+    E->>V: evaluate(ema_model, ...)
+    V->>V: 基于平滑权重的验证损失
+    Note over V: 基于 EMA 验证损失<br/>保存最佳检查点
+```
+
+<CgxTip>当使用 `init_weights_from_checkpoint` 进行微调时，EMA 在将预训练权重加载到实时模型（第930行）*之后*构建，随后 `build_ema_model` 将这些权重复制为 EMA 的初始状态。这意味着微调 EMA 从有意义的参数快照而非随机初始化开始——0.999 的衰减随后从该起点平滑追踪微调轨迹。</CgxTip>
+
+来源：[trainer.py](/minalphafold/trainer.py#L916-L939), [model.py](/minalphafold/model.py#L106-L153)
+
+## 配置参考
+
+这两种机制均通过模型配置和训练配置数据类进行控制：
+
+| 参数 | 位置 | 默认值 | 论文值 | 效果 |
+|-----------|----------|---------|-------------|--------|
+| `zero_init` | `ModelConfig` | `True` | `True` | 启用/禁用输出投影的零初始化扫描 |
+| `ema_decay` | `TrainingConfig` | `None` (禁用) | `0.999` | EMA 衰减率；`None` 表示完全禁用 EMA |
+| `ema_decay` | `OptimizerConfig` | `0.999` | `0.999` | 两阶段协议包装器中的 EMA 衰减 |
+
+`--ema-decay` CLI 标志映射到 `TrainingConfig.ema_decay`。`zero_init` 字段存在于所有内置 TOML 配置文件（`tiny.toml`、`medium.toml`、`alphafold2.toml`）中，且默认为 `True`。
+
+来源：[model_config.py](/minalphafold/model_config.py#L93-L93), [trainer.py](/minalphafold/trainer.py#L1181-L1184), [trainer.py](/minalphafold/trainer.py#L254-L254)
+
+## 架构原理与设计权衡
+
+零初始化 + EMA 的组合解决了一个特定问题：训练一个48块的Evoformer + 8层StructureModule堆栈，该堆栈否则容易在训练早期出现不稳定和在训练后期出现过拟合噪声。零初始化通过使网络以恒等堆栈起步来提供**初始化稳定性**，而 EMA 通过平均消除单个 SGD 步骤的随机噪声来提供**推理稳定性**。
+
+权衡在于零初始化减缓了早期学习——模型必须首先“解除零化”其输出投影，然后才能产生有意义的预测。这是可以接受的，因为 (1) 带有其逐参数自适应学习率的 Adam 优化器自然会加速逃离零值；(2) 补充材料中的线性预热计划（§1.11.3）将全局学习率从零逐渐提升，给予模型一个宽限期以开始调整。EMA 的 0.999 衰减在实时权重与影子权重之间引入了大约1000步的滞后，这就是为什么补充材料规定其仅用于评估——训练指标使用的是实时权重。
+
+有关这些机制如何融入更广泛的训练协议的更多阅读，请参阅[两阶段训练协议](12-two-stage-training-protocol)，其中描述了初始训练 → 微调的过渡，零初始化的恒等起步特性和 EMA 的跨阶段重新初始化都在其中发挥着关键作用。有关这些机制有助于导航的损失景观，请参阅[损失函数与 FAPE](11-loss-functions-and-fape)。
+
+---
+
+## 数据与预处理
+
+- [深入解析/数据与预处理/数据流水线与裁剪](https://zread.ai/ChrisHayduk/minAlphaFold2/14-data-pipeline-and-cropping)
+
+---
+slug:14-data-pipeline-and-cropping
+blog_type:normal
+---
+
+
+minAlphaFold2 的数据流水线将原始结构生物学产物——mmCIF 文件、A3M 多序列比对和 HHR 模板命中——桥接到 `AlphaFold2.forward` 所消费的精确张量批次。该流水线在两个截然不同的阶段中运行：**离线预处理**步骤，将逐链的 `.npz` 特征/标签缓存具象化；以及**在线逐批次流水线**，加载这些缓存，应用随机 MSA 增强，裁剪至固定的残基预算，构建表 1 特征张量，并将变长样本整理为填充批次。裁剪（补充材料 §1.2.8）是关键的长控制机制：在训练期间，选择均匀随机的连续窗口；而在推理时，则确定性地将裁剪居中，从而同时确保 GPU 内存的稳定可预测性和训练时对完整残基范围的覆盖。
+
+来源: [data.py](/minalphafold/data.py#L1-L33), [preprocess_openproteinset.py](/scripts/preprocess_openproteinset.py#L1-L35)
+
+## 架构：两阶段流水线
+
+该流水线将关注点分离为缓慢的、受磁盘 I/O 限制的预处理阶段和快速的、感知 GPU 的在线阶段。这种拆分是刻意为之的：MSA 合并、模板坐标投影和 mmCIF 解析开销大且具有确定性，因此它们只运行一次并缓存为 NumPy 压缩归档。在线阶段——块删除、簇/额外拆分、BERT 风格掩码、裁剪和特征组装——每个批次都是随机的，且必须在每次前向传播中重新执行以提供数据增强。
+
+```mermaid
+flowchart TD
+    subgraph Offline["离线预处理 (scripts/)"]
+        A[原始 mmCIF + A3M + HHR] --> B[read_merged_msa]
+        B --> C[通过 HHR 命中获取 template_features]
+        C --> D[preprocess_chain]
+        D --> E["features.npz + labels.npz"]
+    end
+
+    subgraph Online["在线逐批次流水线 (data.py)"]
+        E --> F[ProcessedOpenProteinSetDataset]
+        F --> G[crop_example]
+        G --> H[build_msa_features]
+        H --> I[build_target_feat + templates + supervision]
+        I --> J[带填充和掩码的 collate_batch]
+    end
+
+    J --> K["AlphaFold2.forward"]
+```
+
+来源: [data.py](/minalphafold/data.py#L1-L33), [preprocess_openproteinset.py](/scripts/preprocess_openproteinset.py#L378-L447)
+
+## 离线预处理：`preprocess_openproteinset.py`
+
+`preprocess_chain` 函数是离线工作的原子单元。对于 OpenProteinSet `roda_pdb` 层级结构中的每个链目录，它执行四项操作：（1）通过 `read_merged_msa` 进行 **MSA 合并**，该过程读取一个或多个 `.a3m` 文件，按内容哈希对行去重，并限制为最多 `max_msa_seqs`（默认 2048）条序列；（2）从对应的 mmCIF 中**提取结构**，当晶体序列与 MSA 查询序列不完全匹配时，使用 `project_to_query`——通过 Needleman–Wunsch 全局比对将模板坐标映射到查询位置；（3）通过 `template_features` 计算**模板特征**，该过程解析 `.hhr` 命中文件，从 mmCIF 中解析 PDB 链原子，并投影对齐位置；（4）将数据**序列化**为独立的特征和标签 `.npz` 文件。
+
+`residue_index` 字段始终是连续的（`np.arange(len(query))`），而非 PDB 自身的残基编号。当晶体的无序末端产生编号间隙时，这可以避免冲突——否则相同的 PDB 残基编号会出现在两个不同的查询位置，从而破坏相对位置编码（算法 4）。
+
+| 输出文件 | 关键字段 | 形状 |
+|---|---|---|
+| `features.npz` | `aatype`, `msa`, `deletions`, `between_segment_residues`, `residue_index` | `(N_res,)`, `(N_seq, N_res)`, `(N_seq, N_res)`, `(N_res,)`, `(N_res,)` |
+| `features.npz` | `template_aatype`, `template_atom14_positions`, `template_atom14_mask` | `(N_templ, N_res)`, `(N_templ, N_res, 14, 3)`, `(N_templ, N_res, 14)` |
+| `labels.npz` | `atom14_positions`, `atom14_mask`, `resolution` | `(N_res, 14, 4)`, `(N_res, 14)`, 标量 |
+
+来源: [preprocess_openproteinset.py](/scripts/preprocess_openproteinset.py#L378-L447), [preprocess_openproteinset.py](/scripts/preprocess_openproteinset.py#L319-L375), [preprocess_openproteinset.py](/scripts/preprocess_openproteinset.py#L450-L493)
+
+## 数据集：`ProcessedOpenProteinSetDataset`
+
+该数据集是一个轻量级的 `torch.utils.data.Dataset`，用于枚举链级别的 `.npz` 文件对。其构建遵循三步过滤级联：（1）**发现**——`discover_chain_ids` 通过 glob 匹配特征文件，并与标签文件取交集；（2）**清单过滤**——如果提供了 `chains_manifest`（即实现补充材料 §1.2.5 过滤的 `filter_openproteinset.py` 的 JSON 输出），则仅保留 `accepted == True` 的链；（3）**带种子的训练/验证拆分**——`split_chain_ids` 通过带种子的 `random.Random` 进行洗牌，然后按 `val_fraction`（默认 0.1）划分为训练集和验证集。
+
+拆分是在**过滤后**的总体上计算的，确保相同的 `seed` 始终产生相同的训练/验证分配，而不受过滤器拒绝了多少链的影响。`__getitem__` 方法仅加载两个 `.npz` 文件并将它们合并为单个字典——所有的随机增强均发生在下游。
+
+来源: [data.py](/minalphafold/data.py#L248-L293), [data.py](/minalphafold/data.py#L148-L194)
+
+## 裁剪：`crop_example`（补充材料 §1.2.8）
+
+裁剪是将残基维度限制为固定 `crop_size` 的机制，从而实现静态 GPU 内存分配。该函数选择一个包含 `crop_size` 个残基的连续窗口，并沿该窗口对样本字典中**所有**以残基索引的字段进行切片。
+
+起始位置由 `_crop_start` 确定，该函数实现了两种模式：
+
+| 模式 | 起始位置选择 | 依据 |
+|---|---|---|
+| **训练** | `randint(0, length - crop_size + 1)` | 均匀覆盖——在每个 epoch 中，每个连续窗口被选中的概率相等 |
+| **推理** | `(length - crop_size) // 2` | 确定性居中，以保证可复现的评估 |
+
+短于 `crop_size` 的链将原样通过（起始位置 = 0，无切片），并且 `crop_start` 会被记录在输出字典中，以便能够为全局坐标输出重建 `residue_index`。
+
+切片会同时应用于所有张量类别——aatype、MSA 行、deletions、between_segment_residues、residue_index、模板字段和 atom14 监督——以保证批次中的每个张量都引用相同的残基窗口。这一点至关重要：MSA 与监督之间的裁剪错位会导致训练信号被静默破坏。
+
+```mermaid
+flowchart LR
+    A["完整链 (L 个残基)"] --> B{L > crop_size?}
+    B -- 否 --> C["原样通过"]
+    B -- 是 --> D{训练模式?}
+    D -- 是 --> E["start ~ Uniform(0, L - crop_size)"]
+    D -- 否 --> F["start = (L - crop_size) // 2"]
+    E --> G["切片 [start : start + crop_size]"]
+    F --> G
+    G --> H["裁剪后样本 (crop_size 个残基1! |MISSING|_EV! |FOLLOW|_OR! |KEYWORD|! |INDIRECT17!"]
+, and |MISSING|_EV! |FOLLOW|_OR! |KEYWORD|! |INDIRECT17! ]
+)]
+```
+
+来源: [data.py](/minalphafold/data.py#L296-L362)
+
+## 在线 MSA 处理流水线
+
+裁剪之后，在线阶段通过严格有序的五项操作构建随机 MSA 特征，这些操作与补充材料 §1.2 相对应：
+
+**步骤 1 — HHblits 概况**：`hhblits_profile` 计算完整（裁剪后）MSA 上的逐列氨基酸频率，生成一个 `(N_res, 22)` 的概况，稍后用于 BERT 风格的替换采样。该概况在块删除**之前**计算，因此它反映了完整 MSA 的进化信息。
+
+**步骤 2 — 块删除**（`block_delete_msa`，算法 1 / §1.2.6）：在训练期间，移除 `num_blocks`（默认 5）个连续的行块，每个块包含 `msa_fraction_per_block × (N_seq - 1)` 行非查询序列。核心见解是，来自 HHblits 的 MSA 是按 e 值排序的——相似序列聚集在一起，因此删除连续块会移除整个系统发育分支，从而为 Evoformer 生成相关性更低的样本。查询行（索引 0）始终被保留。
+
+**步骤 3 — 簇/额外拆分**（`sample_cluster_and_extra`，§1.2.7）：MSA 被拆分为 `msa_depth` 个簇中心（馈入主 Evoformer 堆栈，O(N_seq² × N_res)）和 `extra_msa_depth` 个额外行（馈入浅层额外 MSA 堆栈，§1.2.7）。在训练时，簇中心在不放回的情况下均匀采样；在推理时，取前 `msa_depth - 1` 行（稳定排序）。
+
+**步骤 4 — BERT 风格掩码**（`masked_msa_inputs`，§1.2.7）：每个位置以 0.15 的概率被掩码。被掩码的位置从以下混合分布中抽取替换：10% MSA 概况，10% 原始残基，10% 均匀氨基酸，70% 掩码词元。损坏的 MSA 作为模型输入；原始词元（独热编码）作为掩码 MSA 损失的监督目标（公式 42）。
+
+**步骤 5 — 簇统计**（`cluster_statistics`）：每行额外 MSA 通过汉明相似度加权一致性（忽略间隙和掩码词元）被软分配到其最近的簇中心。簇概况和平均删除计数通过 scatter-add 累加，然后除以分配计数进行归一化。这些逐簇统计信息填充了 `msa_feat` 的 `cluster_profile`（23 维）和 `cluster_deletion_mean`（1 维）通道。
+
+来源: [data.py](/minalphafold/data.py#L1003-L1071), [data.py](/minalphafold/data.py#L365-L413), [data.py](/minalphafold/data.py#L416-L476), [data.py](/minalphafold/data.py#L559-L620), [data.py](/minalphafold/data.py#L479-L546)
+
+## 特征组装：表 1 构建器
+
+一旦 MSA 处理完成，五个确定性构建器将组装与补充材料表 1 相匹配的张量输入：
+
+| 构建器 | 输出 | 维度 | 组成 |
+|---|---|---|---|
+| `build_msa_feat` | `msa_feat` | 49 | one_hot(23) + has_deletion(1) + deletion_value(1) + cluster_profile(23) + deletion_mean(1) |
+| `build_extra_msa_feat` | `extra_msa_feat` | 25 | one_hot(23) + has_deletion(1) + deletion_value(1) |
+| `build_target_feat` | `target_feat` | 22 | between_segment_residues(1) + aatype_one_hot(21) |
+| `build_template_pair_feat` | `template_pair_feat` | 88 | distogram(39) + mask(1) + aatype_i(22) + aatype_j(22) + unit_vec(3) + backbone_mask(1) |
+| `build_template_angle_feat` | `template_angle_feat` | 57 | aatype(22) + torsion(14) + alt_torsion(14) + torsion_mask(7) |
+
+删除值变换 `atan(d / 3) × 2 / π`（在 `transformed_deletions` 中实现）将大间隙保持在 [0, 1] 范围内，防止无界整数删除计数导致梯度不稳定。
+
+<CgxTip>57 维的 `template_angle_feat` 与表 1 印刷的 51 维不同——论文将扭转掩码计为 14（复制了 sin/cos），但 DeepMind 发布的代码及本实现使用的是 7（每个扭转角一个掩码，独立于 sin/cos 拆分）。此为权威维度。</CgxTip>
+
+来源: [data.py](/minalphafold/data.py#L623-L653), [data.py](/minalphafold/data.py#L656-L680), [data.py](/minalphafold/data.py#L683-L704), [data.py](/minalphafold/data.py#L755-L831), [data.py](/minalphafold/data.py#L834-L873), [data.py](/minalphafold/data.py#L133-L136)
+
+## 真实值：`build_supervision`
+
+监督构建器生成 `AlphaFoldLoss` 消费的每个 `true_*` 张量。骨架帧来自实原子位置（N、Cα、C）的 Gram-Schmidt 正交化，将帧置于论文的 +x = Cα→C 约定中。**侧链刚体帧并非取自 Gram-Schmidt**——相反，它们是通过 `rigid_group_frames_from_torsions`（算法 24 第 1–10 行）参数化重建的，与结构模块的预测路径完全匹配。这确保了当预测与真实值匹配时，侧链 FAPE 可以达到零；来自非理想键长的 Gram-Schmidt 侧链帧会产生不可约的间隙。
+
+该构建器还生成“替代真值”（§1.8.5 / 算法 26）：对于具有对称原子命名的残基（如 ASP OD1↔OD2），计算替代的 atom14 布局和 π 周期替代扭转角，以便损失函数可以在两种对称性中取最小值。
+
+来源: [data.py](/minalphafold/data.py#L876-L986)
+
+## 端到端：`build_processed_example`
+
+顶层编排器 `build_processed_example` 按固定顺序将所有内容串联起来：（1）裁剪 → （2）构建 MSA 特征（随机） → （3）构建 target_feat（确定性） → （4）构建模板特征（确定性） → （5）构建监督（确定性） → （6）合并为单个字典。伴随函数 `build_processed_example_from_cropped` 跳过裁剪步骤，用于在循环/集成 MSA 重采样之间共享同一裁剪的情况。
+
+对于循环和集成（算法 2 第 4 行），`_build_sampled_msa_features` 为每个样本预采样 `num_recycling_samples × num_ensemble_samples` 个独立的 MSA 特征字典，每个字典拥有自己带种子的随机状态。只有依赖于 MSA 的键（`msa_feat`、`msa_mask`、`extra_msa_feat`、`extra_msa_mask`、`masked_msa_target`、`masked_msa_mask`）会获得额外的前导轴——模板和监督张量在重采样间共享。
+
+来源: [data.py](/minalphafold/data.py#L1163-L1192), [data.py](/minalphafold/data.py#L1109-L1160)
+
+##= 批次整理：`collate_batch`
+
+处理后8处理后8处理后，单个样本具有不同的 `N_res` 和 `N_seq` 长度。`collate_batch` 沿每个轴将每个张量向右填充至批次最大长度，并发出显式的浮点掩码（`msa_mask`、`extra_msa_mask` 等），用于标记真实位置与填充位置。填充约定仅为右侧（`pad_tensor` 从索引 0 复制并填充尾部），保持残基/MSA 排序，以便掩码能正确地将填充排除在所有损失项之外。
+
+来源: [data.py](/minalphafold/data.py#L989-L1000)
+
+## 随机种子与可复现性
+
+整个随机流水线的种子是可控的。`build_processed_example` 接受一个 `random_seed`，该种子驱动一个 `torch.Generator`，并传递给每个随机函数——块删除、簇/额外拆分、BERT 掩码和裁剪起始位置选择。种子方案使用 `_example_seed(base_seed, example_index) = base_seed + example_index`，确保同一批次中的不同样本获得独立但可复现的随机流。对于循环重采样，种子偏移 `1000 × sample_index` 以避免与主批次种子发生冲突。
+
+来源: [data.py](/minalphafold/data.py#L103-L112), [data.py](/minalphafold/data.py#L1139-L1156)
+
+<CgxTip>裁剪在 MSA 处理**之前**应用，因此 MSA 概况和块删除在已经裁剪后的残基窗口上操作。这符合 AF2 补充材料的顺序（§1.2.8 裁剪先于 §1.2.6–§1.2.7 MSA 增强），且这一点很重要：这意味着 MSA 增强看到的是更短的、位置局部的视图，而不是全链视图，这同时影响了 HHblits 概况分布和块删除的块大小。</CgxTip>
+
+---
+
+**下一步**：有关 MSA 特定的增强细节（块删除机制、簇/额外拆分和 BERT 掩码），请参阅 [MSA Processing and Masking](15-msa-processing-and-masking)。有关处理后的批次如何馈入模型的输入嵌入器，请参阅 [Input Embedder and RelPos](5-input-embedder-and-relpos)。有关消费监督张量的损失函数，请参阅 [Loss Functions and FAPE](11-loss-functions-and-fape)。
+
+---
+
+- [深入解析/数据与预处理/MSA 处理与掩码](https://zread.ai/ChrisHayduk/minAlphaFold2/15-msa-processing-and-masking)
+
+---
+slug:15-msa-processing-and-masking
+blog_type:normal
+---
+
+
+MSA处理是数据侧的基础，它将原始多序列比对转换为Evoformer所消耗的随机、掩码特征张量。minAlphaFold2实现了完整的补充材料§1.2流程——从A3M解析、块删除、聚类/额外分裂、BERT风格掩码，到表1的特征组装——该流程在[`data.py`](minalphafold/data.py)和[`a3m.py`](minalphafold/a3m.py)中作为可组合函数的确定性序列实现。本页面端到端地追踪该流程，解释每个操作的目的、其补充材料参考以及它生成的张量形状。
+
+来源: [data.py](minalphafold/data.py#L1-L33), [a3m.py](minalphafold/a3m.py#L1-L31)
+
+## A3M解析与词元化
+
+流程从原始A3M文件开始——HHsuite的类FASTA MSA格式。每个序列行编码了三种字符类别：**大写字母**是已对齐的匹配状态（MSA的列），**小写字母**是相对于查询序列的插入且不占据对齐列，**破折号**是占据一列但不携带残基的删除。[`read_a3m`](minalphafold/a3m.py#L161-L191)函数将其解析为包含原始头部和大小写混合序列的[`A3M`](minalphafold/a3m.py#L94-L99)数据类。
+
+关键的转换是[`A3M.to_aligned_msa`](minalphafold/a3m.py#L101-L138)，它将每一行拆分为对齐的大写+破折号字符串和逐列的**删除计数**——即每个匹配状态之前的小写插入数量。此删除计数成为表1中的`cluster_has_deletion` / `cluster_deletion_value`特征。对齐字符串会验证其长度一致性，然后由[`A3M.to_tokens`](minalphafold/a3m.py#L140-L158)进行整型词元化，为MSA和删除计数生成`(N_seq, N_res)`整型数组。
+
+词元化字母表严格遵循补充材料§1.9.9：
+
+| 词元 | ID | 字母表 | 大小 |
+|---|---|---|---|
+| 20种标准氨基酸 (ARNDCQEGHILKMFPSTWYV) | 0–19 | `RESTYPES` | `SEQ_ALPHABET_SIZE = 21` |
+| 未知残基 | 20 | `UNK_ID` | — |
+| 对齐空位 `-` | 21 | `GAP_ID` | `MSA_ALPHABET_SIZE = 23` |
+| BERT掩码词元 | 22 | `MASK_ID` | — |
+
+**target_feat**路径使用21个类别（无空位，无掩码），而**msa_feat**路径使用完整的23类字母表。规范排序与DeepMind发布的代码相匹配——例如，甘氨酸是索引7，这就是为什么在整个几何和循环模块中`aatype == 7`作为GLY检查的原因。可选的`max_seqs`参数将MSA截断至前N行（查询序列始终是第0行）。[`ungap_query_columns`](minalphafold/a3m.py#L70-L91)工具函数在下游处理之前去除查询行中的任何空位列，返回无空位的MSA、删除计数和连接的目标序列。
+
+来源: [a3m.py](minalphafold/a3m.py#L42-L68), [a3m.py](minalphafold/a3m.py#L101-L158), [a3m.py](minalphafold/a3m.py#L70-L91)
+
+## MSA处理流程
+
+所有随机MSA转换由[`build_msa_features`](minalphafold/data.py#L1003-L1071)协调，它按照补充材料§1.2依序执行五个步骤：
+
+```mermaid
+flowchart TD
+    A["裁剪后的 MSA + 删除<br/>(N_seq, N_res)"] --> B["1. HHblits Profile<br/>hhblits_profile()"]
+    A --> C["2. 块删除<br/>block_delete_msa()"]
+    B --> D["3. 聚类 / 额外分裂<br/>sample_cluster_and_extra()"]
+    C --> D
+    D --> E["4. BERT风格掩码<br/>masked_msa_inputs()"]
+    B --> E
+    D --> F["5. 聚类统计<br/>cluster_statistics()"]
+    E --> F
+    F --> G["特征组装<br/>build_msa_feat() → 49维<br/>build_extra_msa_feat() → 25维"]
+    E --> G
+    D --> G
+```
+
+步骤1中计算的HHblits profile既输入到BERT掩码（步骤4，作为profile替换分布），又通过聚类统计被间接消耗。步骤2-4在训练时是随机的，在推理时是恒等映射，这就是为什么它们生成的六个特征键（`msa_feat`、`msa_mask`、`extra_msa_feat`、`extra_msa_mask`、`masked_msa_target`、`masked_msa_mask`）被标记为[`MSA_SAMPLE_FEATURE_KEYS`](minalphafold/data.py#L93-L100)——根据算法2第4行，循环和集成仅对这些字段进行重采样。
+
+来源: [data.py](minalphafold/data.py#L1003-L1071), [data.py](minalphafold/data.py#L90-L100)
+
+## 块删除（算法1 / 补充材料 §1.2.6）
+
+[`block_delete_msa`](minalphafold/data.py#L365-L413)实现了MSA块删除数据增强。在训练时，它从MSA中移除`num_blocks`（默认5）个连续的非查询行，每个块包含`msa_fraction_per_block × (N_seq - 1)`行。默认比例为0.3，因此每个块移除约30%的非查询序列。
+
+核心洞察是**连续**删除是故意的：MSA由搜索工具分组并按e值排序，因此相似的序列聚集在一起。块删除移除了整个系统发育分支，为Evoformer产生了相关性较低的样本——补充材料§1.2.6明确指出了这一点。实现通过构造布尔`keep_mask`来工作，从第1..N_seq行中随机采样`num_blocks`个起始位置，并将每个块的范围标记为`False`。查询行（第0行）始终保留。当`randomize_num_blocks=True`时，块的实际数量从`[0, num_blocks]`中均匀抽取，增加了进一步的随机性。在推理时，该函数为空操作。
+
+来源: [data.py](minalphafold/data.py#L365-L413)
+
+## 聚类 / 额外MSA分裂（补充材料 §1.2.7）
+
+Evoformer主栈的复杂度为O(N_seq² × N_res)，因此无法直接处理完整的MSA。[`sample_cluster_and_extra`](minalphafold/data.py#L416-L476)将（块删除后的）MSA分裂为两个池：
+
+| 池 | 深度 | 目的 | Evoformer路径 |
+|---|---|---|---|
+| **聚类中心** | `msa_depth`（如128或256） | 主Evoformer栈的核心MSA | 完整Evoformer（算法7-15） |
+| **额外MSA** | `extra_msa_depth`（如1024） | 剩余序列 | 浅层ExtraMsaStack（算法18） |
+
+查询行（第0行）始终是第一个聚类中心。在训练时，剩余的`msa_depth - 1`个中心从非查询行中**无放回均匀**采样。在推理时，为了可复现性，按其现有的e值排序取前`msa_depth - 1`个非查询行。剩余行成为额外MSA池，上限为`extra_msa_depth`。该函数返回四个张量：`cluster_msa`、`cluster_deletions`、`extra_msa`、`extra_deletions`。
+
+来源: [data.py](minalphafold/data.py#L416-L476)
+
+## 聚类统计（补充材料 §1.2.7）
+
+[`cluster_statistics`](minalphafold/data.py#L479-L546)从聚类/额外分裂中构建两个表1特征：**cluster_profile**和**cluster_deletion_mean**。每个额外MSA序列通过计算汉明相似度加权的一致性得分，被软分配到其最近的聚类中心——具体来说，是额外序列的独热编码与每个聚类中心profile的点积，其中**空位和掩码词元在一致性权重中被置零**。分配方式为在聚类上的argmax。一旦分配，额外序列的独热编码和删除计数就被散列累加到聚类的累加器中。最后，profile和删除均值都通过逐聚类计数（中心 + 所有分配的额外序列）进行归一化。
+
+输出形状为`cluster_profile: (N_cluster, N_res, 23)`和`cluster_deletion_mean: (N_cluster, N_res)`。这些直接输入到[`build_msa_feat`](minalphafold/data.py#L623-L653)中，作为五个拼接通道中的两个。
+
+来源: [data.py](minalphafold/data.py#L479-L546), [data.py](minalphafold/data.py#L515-L517)
+
+## BERT风格MSA掩码（补充材料 §1.2.7）
+
+[`masked_msa_inputs`](minalphafold/data.py#L559-L620)实现了驱动掩码MSA损失（公式42）的掩码语言建模目标。对于`cluster_msa`中的每个位置，以`mask_probability = 0.15`的伯努利抽取决定是否破坏该位置。对于每个被破坏的位置，从四组分混合物中采样一个**替换词元**：
+
+| 替换来源 | 权重 | 描述 |
+|---|---|---|
+| MSA profile | 0.1 | 从HHblits列profile中采样 |
+| 原始残基 | 0.1 | 保留真实词元（噪声） |
+| 均匀氨基酸 | 0.1 | 在20种标准氨基酸上均匀分布（各0.05） |
+| 掩码词元 | 0.7 | 替换为`MASK_ID = 22` |
+
+替换概率分布通过累加各分量的加权贡献来构建。HHblits profile提供位置特异性的氨基酸频率；“相同”分量在原始词元处添加一个狄拉克δ函数；均匀分量将0.1的总概率均匀分散到20种氨基酸上；掩码词元吸收剩余的0.7。填充至23类（添加掩码词元槽位）后，重新归一化该分布。通过[`_sample_categorical`](minalphafold/data.py#L549-L556)的分类采样仅替换被掩码的位置。
+
+该函数返回三个张量：**corrupted_msa**（输入模型）、**one_hot_target**（用于损失计算的原始词元独热编码）和**bert_mask**（选择监督位置的浮点掩码）。在推理时不进行掩码——该函数返回未修改的MSA及全零掩码。
+
+<CgxTip>10/10/10/70的分配是刻意不对称的：70%的掩码词元替换为模型提供了关于需重建位置的强烈信号，而10%的“相同”和10%的“均匀”分量防止模型通过真实残基的缺失来平凡地检测掩码位置——这是引入MSA域的标准BERT设计选择。</CgxTip>
+
+来源: [data.py](minalphafold/data.py#L559-L620), [data.py](minalphafold/data.py#L77-L83), [data.py](minalphafold/data.py#L549-L556)
+
+## 特征组装（表1）
+
+两个特征构建器将处理后的MSA数组转换为模型消耗的固定宽度浮点张量：
+
+### msa_feat（49维）
+
+[`build_msa_feat`](minalphafold/data.py#L623-L653)沿特征轴拼接五个通道：
+
+| 通道 | 维度 | 来源 | 变换 |
+|---|---|---|---|
+| `cluster_msa`独热编码 | 23 | 掩码聚类MSA | 在23类上`F.one_hot` |
+| `cluster_has_deletion` | 1 | 聚类删除 | `(deletions > 0).float()` |
+| `cluster_deletion_value` | 1 | 聚类删除 | `atan(d / 3) × 2/π` |
+| `cluster_profile` | 23 | 聚类统计 | 直接来自`cluster_statistics` |
+| `cluster_deletion_mean` | 1 | 聚类统计 | `atan(d / 3) × 2/π` |
+
+[`transformed_deletions`](minalphafold/data.py#L133-L135)函数应用`atan(d / 3) × 2/π`——一种有界单调变换，将无界删除计数映射到[0, 1)，防止大空位计数主导特征。输出形状：`(N_cluster, N_res, 49)`。
+
+### extra_msa_feat（25维）
+
+[`build_extra_msa_feat`](minalphafold/data.py#L656-L680)更简单——额外栈不应用聚类profile或掩码：
+
+| 通道 | 维度 | 变换 |
+|---|---|---|
+| `extra_msa`独热编码 | 23 | 在23类上`F.one_hot` |
+| `extra_msa_has_deletion` | 1 | `(deletions > 0).float()` |
+| `extra_msa_deletion_value` | 1 | `atan(d / 3) × 2/π` |
+
+输出形状：`(N_extra, N_res, 25)`。空的额外MSA情况（聚类中心之外无行）返回具有正确形状的零张量。
+
+来源: [data.py](minalphafold/data.py#L623-L680), [data.py](minalphafold/data.py#L133-L135), [data.py](minalphafold/data.py#L64-L70)
+
+## 删除变换与HHblits Profile
+
+两个工具函数支撑该流程：
+
+**[`transformed_deletions`](minalphafold/data.py#L133-L135)**应用有界变换`atan(d / 3) × 2/π`。这将原始整型删除计数（无界——一列可以有任意数量的插入）映射到范围[0, 1)。除数3的选择控制饱和速率：删除计数3映射到约0.5，而计数10+渐近接近1.0。这符合表1的规范并确保输入对梯度友好。
+
+**[`hhblits_profile`](minalphafold/data.py#L138-L145)**计算掩码前所有MSA行的逐位置氨基酸频率。它对每行的词元进行独热编码（截断至22类的HHblits字母表，排除掩码词元）并在序列轴上求平均，生成`(N_res, 22)`的profile。该profile发挥双重作用：它为BERT掩码替换分布提供输入，并捕获聚类profile随后细化的进化保守信号。
+
+来源: [data.py](minalphafold/data.py#L133-L145), [data.py](minalphafold/data.py#L72-L75)
+
+## 随机性、种子设定与重采样
+
+MSA流程中的每个随机操作都接受可选的`torch.Generator`以实现可复现的种子设定。[`build_msa_features`](minalphafold/data.py#L1003-L1071)中的协调器从`random_seed`创建单个生成器，并将其贯穿所有五个步骤——块删除、聚类/额外分裂、BERT掩码，以及用于额外MSA洗牌的辅助Python `random.Random`。这确保了相同的种子始终产生相同的破坏性MSA，这对于确定性训练和评估至关重要。
+
+对于循环和集成（算法2第4行），[`_build_sampled_msa_features`](minalphafold/data.py#L1109-L1160)在`num_recycling_samples × num_ensemble_samples`种组合中预采样独立的MSA特征集，每个组合使用从基础种子派生的独特种子。仅[`MSA_SAMPLE_FEATURE_KEYS`](minalphafold/data.py#L93-L100)中的六个键被重采样——模板特征、目标特征和监督标签在循环和集成中保持确定性。
+
+<CgxTip>调试MSA流程输出时，将`random_seed`设置为固定整数且`training=False`——这会禁用块删除，使用确定性聚类选择，并跳过BERT掩码，为你提供用于检查的“干净”MSA特征，同时仍生成有效的49维和25维特征张量。</CgxTip>
+
+来源: [data.py](minalphafold/data.py#L1109-L1160), [data.py](minalphafold/data.py#L103-L124), [data.py](minalphafold/data.py#L93-L100)
+
+## 综合汇总：流程总结
+
+下表总结了从原始A3M到模型就绪特征的完整MSA处理流程，以及典型配置下各阶段的张量形状：
+
+| 阶段 | 函数 | 输入形状 | 输出形状 | 随机？ |
+|---|---|---|---|---|
+| A3M解析 | `read_a3m` → `to_tokens` | 原始文本 | `(N_seq, N_res)` int | 否 |
+| 查询去空位 | `ungap_query_columns` | `(N_seq, N_res)` | `(N_seq, N_res')` | 否 |
+| 裁剪 | `crop_example` | `(N_seq, N_res')` | `(N_seq, crop_size)` | 是（训练） |
+| HHblits profile | `hhblits_profile` | `(N_seq, crop_size)` | `(crop_size, 22)` | 否 |
+| 块删除 | `block_delete_msa` | `(N_seq, crop_size)` | `(N_seq', crop_size)` | 是（训练） |
+| 聚类/额外分裂 | `sample_cluster_and_extra` | `(N_seq', crop_size)` | `(N_cluster, crop_size)` + `(N_extra, crop_size)` | 是（训练） |
+| BERT掩码 | `masked_msa_inputs` | `(N_cluster, crop_size)` | 破坏后 + 目标 + 掩码 | 是（训练） |
+| 聚类统计 | `cluster_statistics` | 聚类 + 额外 | `(N_cluster, crop_size, 23)` + `(N_cluster, crop_size)` | 否 |
+| msa_feat构建 | `build_msa_feat` | 聚类数据 | `(N_cluster, crop_size, 49)` | 否 |
+| extra_msa_feat构建 | `build_extra_msa_feat` | 额外数据 | `(N_extra, crop_size, 25)` | 否 |
+
+该流程确保Evoformer的每次前向传播都能接收到进化信息的新鲜、增强视图——块删除解相关MSA，BERT掩码创建自监督重建目标，而聚类/额外分裂在计算成本与信息容量之间取得平衡。
+
+来源: [data.py](minalphafold/data.py#L1003-L1071), [a3m.py](minalphafold/a3m.py#L140-L158), [data.py](minalphafold/data.py#L317-L362)
+
+## 导航
+
+- **上一节**: [数据流程与裁剪](14-data-pipeline-and-cropping) —— 包裹此MSA处理的裁剪和批次整理
+- **下一节**: [模型配置Profile](16-model-config-profiles) —— 如何配置`msa_depth`、`extra_msa_depth`和掩码超参数
+- **相关**: [MSA与配对表示](8-msa-and-pair-representations) —— 49维的`msa_feat`如何嵌入到Evoformer的`m`表示中
+- **相关**: [损失函数与FAPE](11-loss-functions-and-fape) —— 掩码MSA目标与掩码如何输入公式42
+
+---
+
+## 配置与推理
+
+- [深入解析/配置与推理/模型配置档案](https://zread.ai/ChrisHayduk/minAlphaFold2/16-model-config-profiles)
+
+---
+slug:16-model-config-profiles
+blog_type:normal
+---
+
+
+minAlphaFold2 将**架构超参数**与**训练超参数**分离为两套独立的配置系统：模型配置（定义网络的形状和容量）与训练协议（定义优化方案）。本页重点介绍模型配置——即 `configs/` 目录下的 TOML 文件，它们控制着网络中的每个通道维度、注意力头数、模块深度和 dropout 率。与之配套的训练协议系统（`configs/training_*.toml`）则控制两阶段训练计划，并在 [两阶段训练协议](12-two-stage-training-protocol) 中介绍。
+
+来源：[model_config.py](minalphafold/model_config.py#L1-L18), [trainer.py](minalphafold/trainer.py#L50-L53)
+
+## 类型化 Schema：`ModelConfig`
+
+模型读取的每个旋钮都被捕获在单一的 **`@dataclass`** —— `ModelConfig` 中。这并非松散的字典：每个字段都带有 Python 类型注解，因此 `load_model_config` 能够解析 TOML 文件，并在加载时将文件或 schema 中的拼写错误作为立即抛出的 `TypeError` 呈现，而非在前向传播中引发隐式的 `AttributeError`。Pyright 还会对整个代码库中的每次 `config.c_m` 访问进行类型检查，从而消除一整类形状不匹配的 bug。
+
+来源：[model_config.py](minalphafold/model_config.py#L25-L107)
+
+这 40 多个字段自然地归为六个架构部分，与附录的组织结构相呼应：
+
+| 部分 | 字段 | 附录参考 | 关键参数 |
+|---|---|---|---|
+| **通道维度** | `c_m`, `c_s`, `c_z`, `c_t`, `c_e` | §1.5, §1.6 | MSA、单一、配对、模板、额外 MSA 通道 |
+| **MSA 注意力** | `dim`, `num_heads`, `msa_transition_n`, `outer_product_dim` | Alg 7–10 | 头维度、头数量、过渡扩展、外积隐藏层 |
+| **配对更新** | `triangle_mult_c`, `triangle_dim`, `triangle_num_heads`, `pair_transition_n` | Alg 11–15 | 三角乘法/注意力通道、过渡扩展 |
+| **模板与额外 MSA** | 12 个字段 (`template_*`, `extra_*`, `num_extra_msa`) | §1.7.1, §1.7.2 | 模板堆栈维度、额外 MSA 模块数量及 dropout |
+| **Evoformer 主干** | `num_evoformer`, `evoformer_msa_dropout`, `evoformer_pair_dropout` | Alg 6 | 模块数量（论文：48），行/列 dropout |
+| **结构模块与头** | 15 个字段 (`structure_module_*`, `ipa_*`, `n_dist_bins` 等) | §1.8, §1.9 | IPA 几何、侧链通道、辅助头分箱 |
+
+该数据类有意**设为非冻结**（not frozen）——配置通常只加载一次并以只读方式在线程中传递给模型，但 `zero_dropout_model_config` 等辅助函数可以借助 `dataclasses.replace` 受益，而无需手动处理 `object.__setattr__`。
+
+来源：[model_config.py](minalphafold/model_config.py#L14-L17), [model_config.py](minalphafold/model_config.py#L25-L107)
+
+## 加载与发现
+
+加载器 `load_model_config` 接受单独的配置名称（在 `configs/` 目录中查找）或直接的文件系统路径：
+
+```python
+from minalphafold.trainer import load_model_config
+
+# 按名称 — 解析为 configs/medium.toml
+cfg = load_model_config("medium")
+
+# 按路径 — 任何具有相同 schema 的 TOML 文件
+cfg = load_model_config("/path/to/my_custom.toml")
+```
+
+在内部，该函数针对 `CONFIGS_DIR`（位于仓库根目录的 `configs/` 目录）解析名称，使用 `tomllib`（标准库，只读，Python 3.11+）解析 TOML，并将顶层表直接传递给 `ModelConfig` 构造函数。缺失的键或多余的键都会立即抛出 `TypeError` —— 在配置数据与模型代码的边界处实现快速失败。
+
+两个发现函数用于枚举磁盘上可用的配置：
+
+- **`list_available_profiles()`** —— 返回模型配置名称（排除 `training_*.toml`）
+- **`list_available_training_protocols()`** —— 返回训练协议名称（名为 `training_<name>.toml` 的文件）
+
+来源：[trainer.py](minalphafold/trainer.py#L60-L89), [trainer.py](minalphafold/trainer.py#L280-L301)
+
+## 三种模型配置
+
+minAlphaFold2 提供了三种模型配置，每种都针对容量与成本权衡谱上的不同点：
+
+```mermaid
+graph LR
+    subgraph "Profile Spectrum"
+        direction LR
+        T["**tiny**<br/>测试与冒烟运行<br/>CPU 上约需数秒"] --> M["**medium**<br/>本地实验<br/>CPU 上约需数分钟"] --> A["**alphafold2**<br/>论文规格<br/>TPU 上约需数天"]
+    end
+    style T fill:#4a9eff,color:#fff
+    style M fill:#f5a623,color:#fff
+    style A fill:#d0021b,color:#fff
+```
+
+### `tiny` —— 缩减至 CPU 级别
+
+每个通道维度、注意力头数和模块数量都被缩减，使得 `test_shapes` 能在数秒内运行。这是测试套件中 `MockConfig` 的默认配置，也适用于快速冒烟测试。所有 dropout 率均为 **0.0**，使前向传播具有确定性 —— 非常适合在没有随机噪声的情况下验证形状约定。
+
+来源：[tiny.toml](configs/tiny.toml#L1-L78)
+
+### `medium` —— 本地实验
+
+中等规模的配置，使模型能够在 CPU 上数分钟内真正学习小蛋白质，而非数天。通道维度大约是论文规格的**一半**；Evoformer 运行 **4 个模块**而非 48 个；结构模块使用 **4 层**而非 8 层。默认情况下所有 dropout 为 0.0（适合过拟合/记忆化实验）。
+
+来源：[medium.toml](configs/medium.toml#L1-L78)
+
+### `alphafold2` —— 完整论文规格
+
+与附录 §1.5 / §1.6 / §1.7 / §1.8 及算法 3–24 **完全**匹配。每个值都带有内联的附录参考。这是用于复现运行的配置，也是 `scripts/train_af2.py` 中的默认配置。
+
+来源：[alphafold2.toml](configs/alphafold2.toml#L1-L80)
+
+### 配置对比：关键维度
+
+| 参数 | `tiny` | `medium` | `alphafold2` | 附录 |
+|---|---|---|---|---|
+| `c_m` (MSA 通道) | 32 | 128 | 256 | §1.5 |
+| `c_s` (单一通道) | 32 | 192 | 384 | §1.6 |
+| `c_z` (配对通道) | 16 | 64 | 128 | §1.5 |
+| `num_heads` (MSA 注意力) | 4 | 8 | 8 | Alg 7 |
+| `dim` (MSA 注意力头维度) | 8 | 16 | 32 | Alg 7 |
+| `num_evoformer` (模块) | 1 | 4 | 48 | Alg 6 |
+| `structure_module_layers` | 2 | 4 | 8 | Alg 20 |
+| `structure_module_c` | 16 | 64 | 128 | Alg 20 |
+| `ipa_num_heads` | 4 | 8 | 12 | Alg 22 |
+| `triangle_mult_c` | 16 | 64 | 128 | Alg 11 |
+| `evoformer_msa_dropout` | 0.0 | 0.0 | 0.15 | §1.11.6 |
+| `evoformer_pair_dropout` | 0.0 | 0.0 | 0.25 | §1.11.6 |
+| `zero_init` | true | true | true | §1.11.4 |
+
+来源：[tiny.toml](configs/tiny.toml#L5-L78), [medium.toml](configs/medium.toml#L5-L78), [alphafold2.toml](configs/alphafold2.toml#L5-L80)
+
+## 基于配置的实用工具函数
+
+两个辅助函数可在不改变原有配置的情况下派生新配置：
+
+### `copy_model_config(config, **overrides)`
+
+`dataclasses.replace` 的轻量封装 —— 返回一个指定字段被覆盖的新 `ModelConfig`。适用于编程式参数扫描：
+
+```python
+cfg = load_model_config("medium")
+wider = copy_model_config(cfg, c_z=96, num_evoformer=8)
+```
+
+来源：[trainer.py](minalphafold/trainer.py#L334-L336)
+
+### `zero_dropout_model_config(config)`
+
+克隆一份**所有 dropout 率强制为 0** 的配置，并在 `model_profile` 标签后附加 `_no_dropout`。这是过拟合/记忆化脚本（`scripts/overfit_*.py`）使用的配置变体，因为在这些场景下，附录 §1.11.6 中的随机正则化会阻碍模型拟合单个样本。被置零的七个字段为：`template_pair_dropout`、`extra_msa_dropout`、`extra_pair_dropout`、`evoformer_msa_dropout`、`evoformer_pair_dropout`、`structure_module_dropout_ipa` 和 `structure_module_dropout_transition`。
+
+来源：[trainer.py](minalphafold/trainer.py#L339-L356)
+
+## 配置在模型中的流转
+
+`ModelConfig` 实例是每个模块构造的唯一事实来源。`AlphaFold2.__init__` 接收该实例，并将其原封不动地传递给每个子模块 —— `InputEmbedder`、`Evoformer`、`TemplatePair`、`ExtraMsaStack`、`StructureModule` 以及所有五个辅助头。每个模块仅通过普通属性访问（如 `config.c_m`、`config.num_heads` 等）读取所需字段，没有中间字典或字符串键查找。
+
+```mermaid
+flowchart TD
+    TOML["configs/&lt;name&gt;.toml"] -->|tomllib.load| DICT["扁平字典"]
+    DICT -->|ModelConfig **data| MC["ModelConfig 数据类"]
+    MC -->|__init__| AF2["AlphaFold2"]
+    AF2 --> IE["InputEmbedder<br/>(c_m, c_z)"]
+    AF2 --> EVO["Evoformer × N<br/>(c_m, c_z, dim, heads, …)"]
+    AF2 --> SM["StructureModule<br/>(c_s, c_z, ipa_*, structure_module_*)"]
+    AF2 --> HEADS["辅助头<br/>(c_z, n_dist_bins, plddt_*, …)"]
+    MC -.->|zero_dropout| ZD["zero_dropout_model_config<br/>→ overfit 脚本"]
+    MC -.->|copy + overrides| CUSTOM["自定义配置<br/>→ 超参数扫描"]
+```
+
+<CgxTip>`model_profile` 字符串标签会传播至检查点元数据和产物目录名称中。当 `zero_dropout_model_config` 附加 `_no_dropout` 时，你无需检查完整配置即可区分过拟合运行产物与标准训练产物。</CgxTip>
+
+来源：[model.py](minalphafold/model.py#L53-L96), [embedders.py](minalphafold/embedders.py#L54-L68)
+
+## 训练协议：配套配置系统
+
+模型配置定义了*网络的具体形态*；训练协议则定义了*如何训练它*。`configs/training_alphafold2.toml` 文件编码了论文中来自补充表 4 和 §1.11 的两阶段方案：
+
+- **`[optimizer]`** —— 共享的 Adam 设置（β₁=0.9, β₂=0.999, ε=1e-6），梯度裁剪为 0.1，EMA 衰减 0.999，迷你批次 128，在 6.4M 样本处一次性 ×0.95 学习率衰减。
+- **`[initial]`** —— 阶段 1：裁剪 256，MSA 深度 128，额外 MSA 深度 1024，学习率 1e-3 并带有 128k 样本预热，违规损失**禁用**（权重 0.0），总样本数 10M。
+- **`[finetune]`** —— 阶段 2：裁剪 384，MSA 深度 512，额外 MSA 深度 5120，学习率 5e-4 **无预热**，违规损失**启用**（权重 1.0），总样本数 1.5M。
+
+该协议被解析为包含一个 `OptimizerConfig` 和两个 `StageConfig` 实例的 `TrainingProtocol` 数据类。与模型配置一样，拼写错误会在加载时作为 `TypeError` 抛出。完整的训练循环集成详见 [两阶段训练协议](12-two-stage-training-protocol)。
+
+来源：[training_alphafold2.toml](configs/training_alphafold2.toml#L1-L54), [trainer.py](minalphafold/trainer.py#L216-L331)
+
+## 创建自定义配置
+
+若要实验新的容量点，复制现有的 TOML 文件并编辑其中的值即可 —— 无需修改 Python 代码：
+
+```bash
+# 从 medium 派生一个 "small" 配置
+cp configs/medium.toml configs/small.toml
+# 编辑通道维度、模块数量等
+```
+
+Schema 在加载时强制执行，因此任何缺失字段或拼写错误都会立即抛出异常。除了架构参数外，唯一必需的字段是 `model_profile`（人类可读的标签）。所有数字字段必须与其声明的类型（`int` 或 `float`）匹配；`zero_init` 为 `bool` 类型。
+
+<CgxTip>创建自定义配置时，请确保 `dim * num_heads` 能被 `c_m`（对于 MSA 注意力）和 `c_z`（对于配对注意力）整除，并且 `ipa_c * ipa_num_heads` 能被 `c_z` 整除。违反这些可整除性约束将在模型构造时而非加载时抛出形状错误。</CgxTip>
+
+来源：[trainer.py](minalphafold/trainer.py#L60-L89), [model_config.py](minalphafold/model_config.py#L25-L107)
+
+## 脚本与测试中的配置使用
+
+每个入口脚本都接受一个 `--model-profile` 标志，该标志经由 `load_model_config` 流转：
+
+| 脚本 | 默认配置 | 备注 |
+|---|---|---|
+| `scripts/train_af2.py` | `alphafold2` | 同时通过 `--training-protocol` 加载训练协议 |
+| `scripts/overfit_processed_chain.py` | `alphafold2` | 自动应用 `zero_dropout_model_config` |
+| `scripts/overfit_single_pdb.py` | `medium` | 最小单 PDB 过拟合，无 dropout |
+| `scripts/modal_overfit.py` | `alphafold2` | 将 `--model-profile` 转发至远程 GPU |
+
+测试套件使用内联的 `MockConfig` 类，该类完全镜像了 `tiny` 配置的值，确保形状测试能在任何机器上于数秒内运行。
+
+来源：[train_af2.py](scripts/train_af2.py#L179-L180), [overfit_single_pdb.py](scripts/overfit_single_pdb.py#L49-L58), [modal_overfit.py](scripts/modal_overfit.py#L109-L110), [test_shapes.py](tests/test_shapes.py#L22-L81)
+
+---
+
+**下一步**：在 [两阶段训练协议](12-two-stage-training-protocol) 中了解训练协议如何驱动两阶段计划，或在 [循环与集成](17-recycling-and-ensembling) 中查看循环与集成在推理时如何与配置交互。
+
+---
+
+- [深入解析/配置与推理/循环与集成](https://zread.ai/ChrisHayduk/minAlphaFold2/17-recycling-and-ensembling)
+
+---
+slug:17-recycling-and-ensembling
+blog_type:normal
+---
+
+
+AlphaFold2 的预测精度不仅取决于其 Evoformer 主干的深度，还取决于在该主干**周围**运行的两个迭代优化机制：**循环**将上一次预测的表征重新输入模型进行下一次计算，**集成**则在单个周期内对多次随机前向传播的结果求平均。minAlphaFold2 忠实实现了这两种机制——循环遵循算法 31 / 32，集成遵循补充材料 1.11.2 / 算法 2 第 4、18、20 行——并通过精细的梯度控制确保训练稳定且推理准确。
+
+来源: [model.py](minalphafold/model.py#L15-L51), [trainer.py](minalphafold/trainer.py#L127-L200)
+
+## 双循环架构
+
+`AlphaFold2` 的前向传播由两个嵌套循环构成：基于 `n_cycles` 次迭代的外层**循环**，以及基于 `n_ensemble` 次采样的内层**集成循环**。每次循环迭代都会运行完整的 输入嵌入 → 模板 → 额外 MSA → Evoformer → 结构模块 流水线，但会将*上一*周期的输出重新注入到嵌入阶段。集成循环在每个周期内仅重复运行结构模块之前的部分，累加求平均后的表征供结构模块一次性消耗。
+
+```mermaid
+flowchart TD
+    INIT["Initialize prev: m̂₁ᵢ = 0, ẑᵢⱼ = 0, x̄ᵢ = 0"] --> RCYCLE
+
+    subgraph RCYCLE["Recycling Loop  (i = 0 … n_cycles-1)"]
+        direction TB
+        EINIT["Zero accumulators: Σm₁ᵢ = 0, Σzᵢⱼ = 0"]
+        EINIT --> ENSMB
+
+        subgraph ENSMB["Ensemble Loop  (e = 0 … n_ensemble-1)"]
+            direction TB
+            EMBED["Input Embedder  (Algorithm 3)"]
+            RECYCLE["Recycling Embedder  (Algorithm 32)"]
+            TMPL["Template + Extra MSA"]
+            EVO["Evoformer  (Algorithm 6)"]
+            ACCUM["Accumulate: Σm₁ᵢ += m₁ᵢ,  Σzᵢⱼ += zᵢⱼ"]
+            EMBED --> RECYCLE --> TMPL --> EVO --> ACCUM
+        end
+
+        AVG["Average: m̂₁ᵢ = Σm₁ᵢ / n_ensemble,  ẑᵢⱼ = Σzᵢⱼ / n_ensemble"]
+        SM["Structure Module  (Algorithm 20)"]
+        HEADS["Auxiliary Heads"]
+        STORE["Store prev representations  (detached)"]
+        AVG --> SM --> HEADS --> STORE
+    end
+
+    RCYCLE --> OUT["Return predictions"]
+```
+
+核心洞察在于：**集成是对表征求平均，而非对预测结果求平均**——求平均后的 `m̂₁ᵢ` 和 `ẑᵢⱼ` 仅作为结构模块的*单次*输入，这使得集成的成本远低于运行 `n_ensemble` 次完整流水线。
+
+来源: [model.py](minalphafold/model.py#L236-L377)
+
+## 循环：迭代表征优化
+
+### 机制（算法 31 / 32）
+
+在首次循环周期中，“上一次”的表征为零张量，因此循环嵌入器不起作用。在随后的周期中，上一周期的三个信号会被重新注入到嵌入中：
+
+| 信号 | 来源 | 目标 | 变换 |
+|--------|--------|-------------|-----------|
+| 单一表征 `m̂₁ᵢ^prev` | 上一周期的首行 MSA | 加至首行 MSA `m[:, 0, :, :]` | `LayerNorm`（无可学习仿射参数） |
+| 配对表征 `ẑᵢⱼ^prev` | 平均配对表征 | 加至 `zᵢⱼ` | `LayerNorm`（无可学习仿射参数） |
+| 伪 β 位点 `x̄ᵢ^prev` | 结构模块的 Cα（甘氨酸）或 Cβ（其他所有残基） | 加至 `zᵢⱼ` | 15 区间距离独热编码 → `Linear(15, c_z)` |
+
+伪 β 约定针对甘氨酸 (aatype == 7) 选择 atom14 索引 1 (Cα)，针对其他所有残基选择索引 4 (Cβ)，这与补充材料中关于 AF2 全局配对距离特征的定义一致。
+
+来源: [model.py](minalphafold/model.py#L268-L278), [model.py](minalphafold/model.py#L419-L437)
+
+### 15 区间循环距离嵌入
+
+循环距离嵌入采用了比 distogram 头**更粗粒度的分箱方案**：15 个区间覆盖 [3.375, 21.375] Å，间距为 1.25 Å，而 distogram 则在 [2, 22] Å 范围内划分了 64 个区间。此粗粒度方案由算法 32 规定，并在 `recycling_distance_bin` 中实现——该函数通过 `torch.cdist` 计算配对的 Cβ–Cβ 距离，然后根据算法 5 将每个距离分配至最近的区间中心。
+
+来源: [utils.py](minalphafold/utils.py#L71-L80)
+
+### 训练过程中的梯度控制
+
+训练时采用**随机采样周期数**，以防模型对固定的循环迭代次数过拟合。在每个训练步中，从 `{1, …, n_cycles}` 中均匀抽取 `n'`，且仅有**最后**一个周期携带梯度——所有更早的周期都在 `torch.set_grad_enabled(False)` 上下文中执行，其输出在传入下一周期前均执行了 `.detach()`。这实现了算法 31 第 4 行：反向传播仅精确流经一次展开的循环迭代，在保持内存和计算量可控的同时，依然能有效训练循环路径。
+
+```python
+# Sampled cycle count (training only)
+if sample_recycles:
+    n_cycles = int(torch.randint(1, n_cycles + 1, (1,)).item())
+
+# Gradient gating: only the last cycle is unrolled for backward
+for i in range(n_cycles):
+    is_last = (i == n_cycles - 1)
+    with torch.set_grad_enabled(is_last and outer_grad):
+        ...
+    # Store detached representations for the next cycle
+    single_rep_prev = msa_first_row.detach()
+    z_prev = pair_repr.detach()
+    x_prev = pseudo_beta.detach()
+```
+
+来源: [model.py](minalphafold/model.py#L204-L212), [model.py](minalphafold/model.py#L240-L241), [model.py](minalphafold/model.py#L424-L437)
+
+## 集成：随机表征平均
+
+### 哪些内容参与求平均（哪些不参与）
+
+集成在每个循环周期内运行 `n_ensemble` 次结构模块前的流水线，每次使用不同的随机输入样本（掩码 MSA 特征、dropout 模式）。**仅**首行 MSA `m₁ᵢ` 和配对表征 `zᵢⱼ` 会被累加并求平均：
+
+```
+m̂₁ᵢ = (1/N_ensemble) Σ_e m₁ᵢ⁽ᵉ⁾
+ẑᵢⱼ = (1/N_ensemble) Σ_e zᵢⱼ⁽ᵉ⁾
+```
+
+单一表征 `sᵢ = Linear(m̂₁ᵢ)` 在求平均*之后*计算，由投影的线性性质可知，这等同于对 `sᵢ` 本身求平均。**完整的 MSA 表征** `mₛᵢ` **不**参与求平均——掩码 MSA 头消耗的是最后一次集成样本的完整 MSA 表征，这仅在推理阶段 `n_ensemble > 1` 时才有意义。
+
+| 表征 | 是否求平均？ | 原理 |
+|----------------|-----------|-----------|
+| `m₁ᵢ`（首行 MSA） | ✅ | 提供单一表征 `sᵢ` → 结构模块 |
+| `zᵢⱼ`（配对表征） | ✅ | 提供结构模块 + distogram + TM 头 |
+| `mₛᵢ`（完整 MSA，s > 1） | ❌ | 仅被掩码 MSA 头消耗（仅限训练） |
+| `sᵢ`（单一表征） | ✅（依线性性质） | `Linear(avg)` = `avg(Linear)` |
+
+来源: [model.py](minalphafold/model.py#L240-L377)
+
+### 特征切片索引
+
+当 `n_cycles > 1` 或 `n_ensemble > 1` 时，数据流水线可能会通过前插外层 `[cycle, ensemble, ...]` 轴，预先物化多个随机特征样本（`msa_feat`、`extra_msa_feat`）。`_sampled_feature_slice` 辅助函数会剥离现有的采样轴，使模型始终只看到单个切片：
+
+```python
+if tensor.ndim == base_ndim + 2:   # [cycle, ensemble, ...]
+    return tensor[cycle_index, ensemble_index]
+if tensor.ndim == base_ndim + 1:   # [cycle, ...]
+    return tensor[cycle_index]
+return tensor                        # no sampling axes
+```
+
+这能优雅地处理三类数据集：预采样所有 `N_cycle × N_ensemble` 抽取的数据集、仅按周期采样的数据集，以及提供单一固定样本的数据集。
+
+来源: [model.py](minalphafold/model.py#L154-L176)
+
+## 训练与推理配置
+
+论文与 minAlphaFold2 在训练和推理时使用了**不同的循环/集成设置**，这反映了训练成本与预测质量之间的权衡：
+
+| 设置 | 训练 | 推理 | 原理 |
+|---------|----------|-----------|-----------|
+| `n_cycles` | 4（从 {1,…,4} 中采样） | 3（固定） | 补充材料 1.10：推理时 3 个周期；训练时最大 4 个周期并均匀采样 |
+| `n_ensemble` | 1 | 8（用于排序预测） | 补充材料 1.11.2：集成仅在推理时使用 |
+| `sample_recycles` | `True` | `False` | 随机周期数可防止对固定深度过拟合 |
+| 梯度流 | 仅最后周期 | N/A (`no_grad`) | 算法 31 第 4 行 |
+
+`TrainingConfig` 默认设置 `n_cycles=1, n_ensemble=1` 以方便教学；论文规范的训练值为 `n_cycles=4, n_ensemble=1`。`model_inputs_from_batch` 函数会将这些配置值传入每次 `AlphaFold2.forward` 调用中。
+
+来源: [trainer.py](minalphafold/trainer.py#L187-L188), [trainer.py](minalphafold/trainer.py#L630-L648)
+
+## 配置参考
+
+循环和集成在**训练配置**层级（而非模型配置 TOML）进行控制，因为它们属于操作设置而非架构超参数：
+
+| 参数 | 类型 | 默认值 | 论文值 | 描述 |
+|-----------|------|---------|-------------|-------------|
+| `n_cycles` | `int` | 1 | 4（训练）/ 3（推理） | 最大循环迭代次数 |
+| `n_ensemble` | `int` | 1 | 1（训练）/ 8（推理） | 每个周期的集成样本数 |
+| `sample_recycles` | `bool\|None` | `None` | — | 自动解析为 `self.training`；可强制覆写 |
+| `detach_rotations` | `bool` | `True` | — | 结构模块是否分离旋转梯度 |
+
+<CgxTip>调试循环时，请在前向传播后检查 `model.last_n_cycles` 和 `model.last_n_ensemble`——它们存储了实际使用的值（包括训练期间任何采样缩减后的值）。这也是输出字典中作为 `sampled_n_cycles` 和 `sampled_n_ensemble` 报告的内容。</CgxTip>
+
+来源: [model.py](minalphafold/model.py#L192-L196), [trainer.py](minalphafold/trainer.py#L162-L200)
+
+## 循环状态的数据流
+
+三个循环状态张量在各周期间形成了一个自指循环。理解它们的形状和变换对于调试或扩展流水线至关重要：
+
+```mermaid
+flowchart LR
+    subgraph Cycle["Recycling Cycle i"]
+        direction TB
+        RSN["recycle_norm_s: LayerNorm(c_m, c_m)"] 
+        RZN["recycle_norm_z: LayerNorm(c_z)"]
+        RDL["recycle_linear_d: Linear(15 → c_z)"]
+
+        PREV["prev state<br/>(B, N_res, c_m)<br/>(B, N_res, N_res, c_z)<br/>(B, N_res, 3)"]
+        PREV --> RSN
+        PREV --> RZN
+        PREV --> RDL
+    end
+
+    RSN --> M["m[:, 0, :, :] += ..."]
+    RZN --> Z["z += ..."]
+    RDL --> Z
+
+    M --> EVO["Evoformer"]
+    Z --> EVO
+    EVO --> SM["Structure Module"]
+    SM --> CBI["Pseudo-β extraction<br/>Cα if GLY, Cβ otherwise"]
+    CBI --> NEXTPREV["next prev state<br/>(.detach())"]
+    NEXTPREV -.->|next cycle| PREV
+```
+
+在第一个周期（`i = 0`）中，三个 prev 张量全为零——`LayerNorm(0)` 和 `Linear(one_hot(0))` 均产生零，因此循环的加法操作会干净地抵消，模型退化为单次前向传播。此零初始化在算法 2 第 1 行中明确指出。
+
+来源: [model.py](minalphafold/model.py#L231-L234), [model.py](minalphafold/model.py#L60-L64)
+
+## 实践指南
+
+**推理时选择 `n_cycles`**：论文在推理时使用了 3 个周期。收益递减效应会迅速显现——大部分结构改进发生在周期 1→2 中，周期 3 仅提供边缘优化。若需快速近似预测，1–2 个周期通常已足够。
+
+**推理时集成**：推理时设置 `n_ensemble > 1` 可提供随机平均，从而改进排序预测的质量。由于仅重复运行结构模块前的流水线（高开销的 Evoformer 主干，不含结构模块），每增加一个集成样本的代价约为一次完整前向传播的 80%。论文针对排序预测设定的 `n_ensemble = 8` 是质量与成本的权衡。
+
+**带循环的训练**：务必设置 `sample_recycles = True`（训练时的默认值），以避免对特定的周期深度过拟合。按周期隔离梯度的设计意味着，无论 `n_cycles` 多大，显存开销均按*单次*展开的周期缩放，因此训练时增加周期数对显存影响甚微——仅有计算成本呈线性增长。
+
+来源: [model.py](minalphafold/model.py#L204-L212), [model.py](minalphafold/model.py#L405-L417)
+
+## 与其他模块的关系
+
+循环和集成位于调用栈顶端，调度着所有其他模块。循环嵌入器的 `recycle_norm_s` 和 `recycle_norm_z` 是训练期间学习的 `LayerNorm` 模块（补充材料 1.10），而 `recycle_linear_d` 是从 15 区间距离空间到 `c_z` 的可学习线性投影。它们是仅有的循环专属参数——其他所有参数均复用自主流水线。[零初始化与参数 EMA](13-zero-init-and-parameter-ema) 协议不会对这些循环参数进行零初始化，因为它们是采用默认方案初始化的标准 `LayerNorm` 和 `Linear` 模块。[模型配置档案](16-model-config-profiles) 不包含循环/集成设置；这些设置隶属于 `TrainingConfig` 并在调用时传入。
+
+---
+
+- [深入解析/配置与推理/结构弛豫](https://zread.ai/ChrisHayduk/minAlphaFold2/18-structure-relaxation)
+
+---
+slug:18-structure-relaxation
+blog_type:normal
+---
+
+
+结构模块的 IPA 驱动帧迭代产生的原子坐标，虽然在骨架层面上几何合理，但可能存在**空间位阻冲突、键长扭曲或肽键几何结构破坏**——尤其是在低置信度区域的侧链中。结构弛豫是预测后的修正手段：一种基于 **AMBER99SB 力场**的迭代受限能量最小化过程，可在解决违规问题的同时保留预测的折叠结构。本页介绍 minAlphaFold2 对 AlphaFold2 补充材料 §1.8.6 的忠实移植，即 `relax_pdb.py` 脚本，以及其与已驱动微调的 `StructuralViolationLoss` 之间的紧密耦合。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L1-L42), [losses.py](/minalphafold/losses.py#L1050-L1100)
+
+## 迭代受限弛豫循环
+
+核心算法是一个 **最小化 → 检测违规 → 释放残基 → 重复** 的迭代循环，直接遵循补充材料 §1.8.6（第 31 页）：
+
+> *"在每一轮中，我们对 AMBER99SB 力场进行最小化，并附加谐波限制以使系统保持在其输入结构附近。这些限制独立施加于重原子上，弹簧常数为 10 kcal/mol Å²。一旦最小化器收敛，我们就确定哪些残基仍包含违规。然后，我们移除这些残基内所有原子的限制，并从上一次迭代的最小化结构开始，再次执行受限最小化。此过程重复进行，直到所有违规均被解决。"*
+
+限制起到了双重作用：它们将折叠良好的区域锚定到预测结果上（防止物理引擎使蛋白质展开），同时允许新释放的残基不受约束地向物理有效的几何结构移动。
+
+```mermaid
+flowchart TD
+    A["Input PDB"] --> B["PDBFixer: add missing heavy atoms"]
+    B --> C["Modeller: add hydrogens (pH 7.0)"]
+    C --> D["Build AMBER99SB + GBSA(OBC) system"]
+    D --> E["Add harmonic restraints: k=10 kcal/mol/Å² on every heavy atom"]
+    E --> F{Initial energy finite?}
+    F -- No --> G["Soft-start: scale LJ ε × 0.01, pre-minimize"]
+    F -- Yes --> H["Round i: restrained L-BFGS minimization"]
+    G --> H
+    H --> I["Detect violations via StructuralViolationLoss"]
+    I --> J{Any violations?}
+    J -- No --> K["✓ Converged — write relaxed PDB"]
+    J -- Yes --> L{New residues to free?}
+    L -- Yes --> M["Remove restraints on violating residues; update anchor positions"]
+    M --> H
+    L -- No --> N["⚠ Cannot make progress — stop with remaining violations"]
+```
+
+循环在以下三种情况下终止：(1) 零剩余违规 → 收敛成功，(2) 所有违规残基均已解除限制 → 无法取得进一步进展，或 (3) `max_rounds` 耗尽。在第 (2) 和 (3) 种情况下，仍会写入输出 PDB，但调用方应检查 `round_stats` 以评估残留问题。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L209-L398)
+
+## 流水线阶段详解
+
+### 阶段 1 — PDB 修复与氢原子放置
+
+来自结构模块的原始预测 PDB 可能缺乏氢原子，并且残基记录可能不完整。流水线使用 **PDBFixer** 添加缺失的重原子（设置 `missingResidues = {}` 以防止填补空缺），并使用 OpenMM 的 **Modeller** 在 pH 7.0 下放置氢原子。在严重退化的输入下，氢原子放置可能会失败——当重原子重叠时，Modeller 使用的内部最小化会遇到无穷大的 Lennard-Jones 势。这会触发一个 `RuntimeError`，其解释性消息区分了收敛预测（轻微破坏的肽键，可正常处理）与早期训练检查点（近乎同一的刚体帧，所有原子位于同一坐标，无法处理）。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L238-L267)
+
+### 阶段 2 — 力场与隐式溶剂
+
+系统使用 **AMBER99SB** 加上 **GBSA-OBC** 隐式溶剂构建——这是蛋白质能量最小化的标准组合，避免了使用显式水的需要。值得注意的是，`constraints=None` 是刻意设置的：SHAKE 风格的氢键限制在原始预测的扭曲初始几何结构上可能会失败，因此最小化器在无约束下运行。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L268-L275)
+
+### 阶段 3 — 逐粒子谐波限制
+
+限制被实现为 OpenMM 的 `CustomExternalForce`，其能量表达式为：
+
+```
+E_restraint = 0.5 * k_active * ((x - x0)² + (y - y0)² + (z - z0)²)
+```
+
+`k_active` 参数是**逐粒子**的，允许在不重建力场系统的情况下选择性移除限制。在初始化时，每个重原子的 `k_active = k_full`（排除氢原子，与论文一致）。当残基被释放时，其所有重原子的 `k_active` 均设为 0。锚点位置 `(x0, y0, z0)` 在每轮中更新为当前最小化坐标，因此仍受限制的原子将固定在其最新的弛豫位置，而非原始输入位置。
+
+| 参数 | 值 | 来源 |
+|-----------|-------|--------|
+| 弹簧常数 k | 10 kcal/mol/Å² | 补充材料 §1.8.6 |
+| 受限原子 | 所有重原子（非氢） | 补充材料 §1.8.6 |
+| 锚点更新 | 每轮（当前位置） | AF2 参考实现 |
+| 限制移除 | 残基级别粒度 | 补充材料 §1.8.6 |
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L276-L322)
+
+### 阶段 4 — 软启动回退
+
+当初始势能非有限（无穷大或 NaN）时，L-BFGS 最小化器无法迈出第一步。这种情况发生在严重的空间位阻冲突产生无穷大的 Lennard-Jones 势时。`_soft_start_minimize` 函数通过暂时将每个粒子的 Lennard-Jones ε 参数缩放至其真实值的 1% 来处理此问题，在弛豫容差下运行简短的预最小化，然后恢复原始 ε。§1.8.6 中未描述此操作，但与 DeepMind 参考代码的 `amber_minimize.py` 在相同情况下的行为一致。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L131-L159)
+
+## 违规检测 — 训练与弛豫的桥梁
+
+一个关键的设计决策：弛豫期间的违规检测**复用相同的 `StructuralViolationLoss` 类**，该类在微调期间计算 L_viol。这确保了训练与事后弛豫之间的标准位级一致——在微调期间对模型进行惩罚的容差，与在弛豫期间检查的容差完全相同。
+
+检测函数 `_detect_violating_residues` 将 OpenMM 位置转换为 atom14 约定，然后评估三种违规子类型：
+
+| 子类型 | 补充材料参考 | 容差 | 描述 |
+|----------|---------------------|-----------|-------------|
+| 残基间键长 | 公式 44 | τ = 12 σ_lit | C-N 肽键偏离文献均值 |
+| 残基间键角 | 公式 45 | τ = 12 σ_lit | CA-C-N 或 C-N-CA 余弦偏离文献值 |
+| 残基间冲突 | 公式 46 | τ = 1.5 Å 重叠 | VDW 半径之和减去距离超过阈值 |
+| 残基内边界 | 公式 46（内部） | 来自 `make_atom14_dists_bounds` | 原子间距离违反残基内边界 |
+
+三个逐残基的掩码通过**逻辑或（OR）组合**为一个布尔值：如果某残基的*任何*原子触发了*任何*类型的违规，则该残基被标记。从 OpenMM 的逐原子拓扑到 atom14 约定的转换，使用 `restype_name_to_atom14_names` 将每个残基的重原子映射到其规范的 14 槽排序中，并跳过氢原子和非标准原子。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L78-L129), [losses.py](/minalphafold/losses.py#L1100-L1200)
+
+## StructuralViolationLoss 内部机制
+
+`StructuralViolationLoss` 实现了补充材料 §1.9.11 中的公式 44–47，既用作训练损失项（根据公式 7 在微调中权重为 1.0），也用作弛豫的违规检测器。其三个子方法均返回逐残基和逐原子的掩码以及标量损失：
+
+**`between_residue_bond_and_angle_loss`** — 计算 C-N 键长和两个肽键角度（CA-C-N, C-N-CA）的平底 L1 惩罚。平底阈值为 `violation_tolerance_factor × σ_lit`，因此只有超过 12σ 的偏差才会产生贡献。脯氨酸独特的 C-N 键长通过 `residue_types` 上的条件判断来处理。`has_no_gap_mask` 确保仅评估序列上相邻的残基。
+
+**`between_residue_clash_loss`** — 计算不同残基上重原子之间的成对 VDW 重叠（排除成键的 C-N 对和形成二硫键的 SG–SG 对）。重叠量为 `max(0, r_i_vdw + r_j_vdw - τ_clash - d_ij)`，因此只有距离小于其半径之和减去 1.5 Å 的原子才会受到惩罚。
+
+**`within_residue_violation_loss`** — 根据 `make_atom14_dists_bounds` 预计算的距离边界（下限和上限）检查残基内原子对。这可以捕获侧链原子折叠进骨架或以其他方式违反已知立体化学结构的情况。
+
+来源：[losses.py](/minalphafold/losses.py#L1100-L1399)
+
+## 漂移测量与输出诊断
+
+在收敛（或提前停止）后，流水线测量相对于输入的**最大位置漂移**，并将其分解为三个类别：
+
+| 指标 | 包含的原子 | 解释 |
+|--------|---------------|----------------|
+| `max_backbone_drift_angstrom` | 仅 N, CA, C | 折叠保留——对于预测良好的区域应小于 1 Å |
+| `max_restrained_heavy_drift_angstrom` | 保持受限残基中的所有非氢原子 | 局部几何结构调整 |
+| `max_any_heavy_drift_angstrom` | 所有非氢原子 | 最坏情况下的移动，通常发生在已释放（违规）残基中 |
+
+`relax_pdb()` 的返回字典提供了完整的审计跟踪：输入/输出路径、初始和最终能量、软启动使用情况、收敛标志、漂移指标、结束时未受限残基数量，以及逐轮统计信息（能量、按类型划分的违规计数、释放残基数）。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L402-L450)
+
+## CLI 接口与配置
+
+该脚本作为独立的命令行工具调用：
+
+```bash
+pip install -e '.[relax]'          # 安装 openmm + pdbfixer
+python scripts/relax_pdb.py path/to/predicted.pdb
+```
+
+这将在输入文件旁生成 `predicted_relaxed.pdb`。完整参数列表：
+
+| 标志 | 默认值 | 补充材料依据 |
+|------|---------|-----------------|
+| `--restraint-k` | 10.0 | §1.8.6 弹簧常数 (kcal/mol/Å²) |
+| `--max-rounds` | 10 | 迭代循环的实际限制 |
+| `--max-iterations-per-round` | 0（无界） | §1.8.6 每轮 L-BFGS 预算 |
+| `--force-tolerance` | 10.0 | 收敛阈值 (kJ/mol/nm ≈ 2.39 kcal/mol) |
+| `--violation-tolerance-factor` | 12.0 | §1.9.11 键/角容差（σ_lit 单位） |
+| `--clash-overlap-tolerance` | 1.5 | §1.9.11 冲突容差 τ (Å) |
+
+`pyproject.toml` 中的 `relax` 可选依赖组指定了 `openmm>=8.0` 和 `pdbfixer>=1.9`。为保持项目纯 PyTorch 的设计理念，这些依赖被有意排除在核心依赖之外——弛豫是一种事后物理清理，而非神经网络本身的一部分。
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L452-L550), [pyproject.toml](/pyproject.toml#L40-L46)
+
+## 与更广泛流水线的关系
+
+结构弛豫运行在完整推理流水线**之后**——在循环收敛之后，在集成平均"表示E"之后，以及在结构模块通过 `4` 输出 atom14 坐标之后。它是不可微的，不会将梯度回传至模型。其目的纯粹是清理最终输出的物理结构，以便下游工具（分子动力学、对接、结构验证）接收化学合理的坐标。
+
+```mermaid
+flowchart LR
+    SM["Structure Module<br/>(Algorithm 20)"] --> PDB["pdbio: atom14 → PDB"]
+    PDB --> RELAX["relax_pdb.py<br/>(§1.8.6)"]
+    RELAX --> OUT["Relaxed PDB<br/>(AMBER-valid geometry)"]
+    
+    VL["StructuralViolationLoss<br/>(§1.9.11)"] -.->|training: L_viol| FT["Fine-tuning<br/>(eq 7)"]
+    VL -.->|inference: violation mask| RELAX
+```
+
+共享的 `StructuralViolationLoss` 创建了重要的一致性保证：如果模型使用 L_viol 进行了微调（根据公式 7 权重为 1.0），则弛豫的违规检测器将应用**相同的** σ_lit 和 τ 阈值。因此，一个经过良好微调的模型应该需要更少的弛豫轮次，因为训练损失已经惩罚了弛豫旨在解决的违规问题。
+
+<CgxTip>-training checkpoints, the root cause is typically near-identity rigid frames producing overlapping atoms — the hydrogen-placement step will fail before relaxation even begins. This is expected and does not indicate a bug in the relaxation code.</CgxTip>
+
+<CgxTip>The `k_active` per-particle restraint design avoids rebuilding the OpenMM `System` between rounds — only `setParticleParameters` + `updateParametersInContext` are called, which is orders of magnitude cheaper than re-creating the force field.</CgxTip>
+
+来源：[relax_pdb.py](/scripts/relax_pdb.py#L1-L550), [losses.py](/minalphafold/losses.py#L1050-L1399), [pdbio.py](/minalphafold/pdbio.py#L1-L60)
+
+## 后续步骤
+
+- 了解使弛豫成为可能的损失函数：[损失函数与 FAPE](11-loss-functions-and-fape)
+- 了解产生原始预测的结构模块：[结构模块与 IPA](7-structure-module-and-ipa)
+- 了解激活 L_viol 的微调协议：[两阶段训练协议](12-two-stage-training-protocol)
+- 了解控制推理参数的配置文件：[模型配置文件](16-model-config-profiles)
+
+---
