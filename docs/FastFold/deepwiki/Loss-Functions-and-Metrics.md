@@ -30,8 +30,46 @@ Sources: [train.py L206](https://github.com/hpcaitech/FastFold/blob/eba49680/tra
 
 ## Loss Architecture
 
-```
+```mermaid
+flowchart TD
 
+ModelOutput["Model Output<br>(forward pass)"]
+Batch["Ground Truth Batch<br>(labels)"]
+Config["Loss Config<br>(config.loss)"]
+AlphaFoldLoss["AlphaFoldLoss<br>criterion"]
+FAPE["FAPE Loss<br>weight=1.0"]
+Distogram["Distogram Loss<br>weight=0.3"]
+LDDT["LDDT Loss<br>weight=0.01"]
+MaskedMSA["Masked MSA Loss<br>weight=2.0"]
+SupervisedChi["Supervised Chi Loss<br>weight=1.0"]
+Violation["Violation Loss<br>weight=0.0 or 1.0"]
+TM["TM Loss<br>weight=0.0 or 0.1"]
+ExpResolved["Experimentally Resolved Loss<br>weight=0.0"]
+WeightedSum["Weighted Sum"]
+TotalLoss["Total Loss"]
+Backward["backward()"]
+
+ModelOutput --> AlphaFoldLoss
+Batch --> AlphaFoldLoss
+Config --> AlphaFoldLoss
+AlphaFoldLoss --> FAPE
+AlphaFoldLoss --> Distogram
+AlphaFoldLoss --> LDDT
+AlphaFoldLoss --> MaskedMSA
+AlphaFoldLoss --> SupervisedChi
+AlphaFoldLoss --> Violation
+AlphaFoldLoss --> TM
+AlphaFoldLoss --> ExpResolved
+FAPE --> WeightedSum
+Distogram --> WeightedSum
+LDDT --> WeightedSum
+MaskedMSA --> WeightedSum
+SupervisedChi --> WeightedSum
+Violation --> WeightedSum
+TM --> WeightedSum
+ExpResolved --> WeightedSum
+WeightedSum --> TotalLoss
+TotalLoss --> Backward
 ```
 
 **Diagram: AlphaFoldLoss Architecture**
@@ -242,8 +280,59 @@ Sources: [fastfold/config.py L30-L125](https://github.com/hpcaitech/FastFold/blo
 
 ## Loss Computation Flow
 
-```
+```mermaid
+flowchart TD
 
+TrainBatch["Train Batch<br>(features + labels)"]
+EngineForward["engine.forward(batch)"]
+ModelOutput["Model Output<br>(predictions)"]
+SliceRecycling["tensor_tree_map<br>slice last recycling"]
+ProcessedBatch["Processed Batch<br>(single recycling)"]
+Criterion["engine.criterion<br>(AlphaFoldLoss)"]
+LossBreakdown["Loss Breakdown<br>(dict of individual losses)"]
+TotalLoss["Total Loss<br>(scalar)"]
+EngineBackward["engine.backward(loss)"]
+Gradients["Gradients"]
+EngineStep["engine.step()"]
+LogLoss["log_loss()<br>(format for logging)"]
+ComputeMetrics["compute_validation_metrics<br>(additional metrics)"]
+Logger["Logger Output"]
+Engine["ColossalAI Engine"]
+
+subgraph subGraph0 ["Training Loop (train.py)"]
+    TrainBatch
+    EngineForward
+    ModelOutput
+    SliceRecycling
+    ProcessedBatch
+    Criterion
+    LossBreakdown
+    TotalLoss
+    EngineBackward
+    Gradients
+    EngineStep
+    LogLoss
+    ComputeMetrics
+    Logger
+    Engine
+    TrainBatch --> EngineForward
+    EngineForward --> ModelOutput
+    ModelOutput --> SliceRecycling
+    TrainBatch --> SliceRecycling
+    SliceRecycling --> ProcessedBatch
+    ProcessedBatch --> Criterion
+    ModelOutput --> Criterion
+    Criterion --> LossBreakdown
+    Criterion --> TotalLoss
+    TotalLoss --> EngineBackward
+    EngineBackward --> Gradients
+    Gradients --> EngineStep
+    LossBreakdown --> LogLoss
+    ProcessedBatch --> LogLoss
+    ModelOutput --> LogLoss
+    LogLoss --> ComputeMetrics
+    ComputeMetrics --> Logger
+end
 ```
 
 **Diagram: Loss Computation in Training Loop**
@@ -266,13 +355,13 @@ Sources: [train.py L226-L238](https://github.com/hpcaitech/FastFold/blob/eba4968
 The `AlphaFoldLoss` class is instantiated with the loss configuration:
 
 ```
-
+criterion = AlphaFoldLoss(config.loss)
 ```
 
 The configuration is loaded from the model preset (e.g., "initial_training", "finetuning"):
 
 ```
-
+config = model_config(args.config_preset, train=True)
 ```
 
 Sources: [train.py L171-L206](https://github.com/hpcaitech/FastFold/blob/eba49680/train.py#L171-L206)
@@ -282,7 +371,7 @@ Sources: [train.py L171-L206](https://github.com/hpcaitech/FastFold/blob/eba4968
 During training, the loss is computed with the `_return_breakdown` flag to get individual loss values:
 
 ```
-
+loss, loss_breakdown = engine.criterion(    output, batch, _return_breakdown=True)
 ```
 
 The `loss_breakdown` dictionary contains individual loss values for each component, enabling detailed monitoring during training.
@@ -294,7 +383,7 @@ Sources: [train.py L230-L231](https://github.com/hpcaitech/FastFold/blob/eba4968
 Before computing loss, the batch tensors are sliced to extract only the last recycling iteration:
 
 ```
-
+batch = tensor_tree_map(lambda t: t[..., -1], batch)
 ```
 
 This is necessary because the model processes multiple recycling iterations, but the loss is only computed on the final iteration.
@@ -308,7 +397,7 @@ During training and validation, additional metrics are computed using `compute_v
 ### Metric Computation
 
 ```
-
+other_metrics = compute_validation_metrics(    batch,     outputs,    superimposition_metrics=(not train))
 ```
 
 **Parameters:**
@@ -323,8 +412,8 @@ Sources: [train.py L26-L32](https://github.com/hpcaitech/FastFold/blob/eba49680/
 
 The `log_loss` function formats loss breakdown and validation metrics for logging:
 
-```
-
+```python
+def log_loss(loss_breakdown, batch, outputs, train=True):    loss_info = ''    for loss_name, loss_value in loss_breakdown.items():        loss_info += (f' {loss_name}=' + "{:.3f}".format(loss_value))    with torch.no_grad():        other_metrics = compute_validation_metrics(            batch,             outputs,            superimposition_metrics=(not train)        )    for loss_name, loss_value in other_metrics.items():        loss_info += (f' {loss_name}=' + "{:.3f}".format(loss_value))    return loss_info
 ```
 
 This produces a formatted string with all loss components and metrics for monitoring.
@@ -354,7 +443,7 @@ During validation:
 * All validation samples evaluated each epoch
 
 ```
-
+batch["use_clamped_fape"] = 0._, loss_breakdown = engine.criterion(    output, batch, _return_breakdown=True)
 ```
 
 Sources: [train.py L240-L251](https://github.com/hpcaitech/FastFold/blob/eba49680/train.py#L240-L251)
@@ -363,8 +452,35 @@ Sources: [train.py L240-L251](https://github.com/hpcaitech/FastFold/blob/eba4968
 
 The loss configuration in `config.py` follows a hierarchical structure:
 
-```
+```mermaid
+flowchart TD
 
+ConfigDict["ConfigDict<br>(ml_collections)"]
+Loss["config.loss"]
+FAPE_Config["fape<br>{backbone, sidechain, eps, weight}"]
+Distogram_Config["distogram<br>{min_bin, max_bin, no_bins, eps, weight}"]
+LDDT_Config["lddt<br>{min_resolution, max_resolution, cutoff, no_bins, eps, weight}"]
+MaskedMSA_Config["masked_msa<br>{eps, weight}"]
+Chi_Config["supervised_chi<br>{chi_weight, angle_norm_weight, eps, weight}"]
+Violation_Config["violation<br>{violation_tolerance_factor, clash_overlap_tolerance, eps, weight}"]
+TM_Config["tm<br>{max_bin, no_bins, min_resolution, max_resolution, eps, weight, enabled}"]
+ExpResolved_Config["experimentally_resolved<br>{min_resolution, max_resolution, eps, weight}"]
+Eps["eps<br>(global epsilon)"]
+Backbone["backbone<br>{clamp_distance, loss_unit_distance, weight}"]
+Sidechain["sidechain<br>{clamp_distance, length_scale, weight}"]
+
+ConfigDict --> Loss
+Loss --> FAPE_Config
+Loss --> Distogram_Config
+Loss --> LDDT_Config
+Loss --> MaskedMSA_Config
+Loss --> Chi_Config
+Loss --> Violation_Config
+Loss --> TM_Config
+Loss --> ExpResolved_Config
+Loss --> Eps
+FAPE_Config --> Backbone
+FAPE_Config --> Sidechain
 ```
 
 **Diagram: Loss Configuration Hierarchy**
@@ -377,8 +493,8 @@ Sources: [fastfold/config.py L468-L530](https://github.com/hpcaitech/FastFold/bl
 
 The loss function integrates with the ColossalAI training engine:
 
-```
-
+```markdown
+engine, train_dataloader, test_dataloader, lr_scheduler = colossalai.initialize(    model=model,    optimizer=optimizer,    criterion=criterion,  # AlphaFoldLoss    lr_scheduler=lr_scheduler,    train_dataloader=train_dataloader,    test_dataloader=test_dataloader,)
 ```
 
 The engine wraps the criterion and handles:
@@ -397,13 +513,13 @@ Sources: [train.py L213-L220](https://github.com/hpcaitech/FastFold/blob/eba4968
 Loss configurations use `FieldReference` objects for shared parameters:
 
 ```
-
+eps = mlc.FieldReference(1e-8, field_type=float)
 ```
 
 This `eps` value is referenced throughout the loss configuration to ensure consistency. It can be globally modified for low precision training:
 
 ```
-
+if low_prec:    config.globals.eps = 1e-4    set_inf(c, 1e4)
 ```
 
 This is useful when training with reduced precision (e.g., float16) to avoid numerical instabilities.

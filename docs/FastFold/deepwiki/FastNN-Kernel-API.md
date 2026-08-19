@@ -18,8 +18,64 @@ For conceptual information about the optimization strategy, see [Performance Opt
 
 The FastNN kernel API is organized in three layers:
 
-```
+```mermaid
+flowchart TD
 
+Linear["Linear<br>ops.py:229-257"]
+SelfAttention["SelfAttention<br>ops.py:259-363"]
+OutProductMean["OutProductMean<br>ops.py:126-227"]
+ChunkTransition["ChunkTransition<br>ops.py:85-123"]
+TriangleOps["Triangle Operations<br>AsyncChunk*"]
+AttentionOps["Attention Operations<br>ChunkAttention"]
+FusedSoftmax["fused_softmax<br>kernel/softmax.py:59"]
+LayerNorm["LayerNorm<br>kernel/init.py"]
+BiasOps["bias_sigmod_ele<br>bias_dropout_add<br>bias_ele_dropout_residual"]
+TritonSoftmax["Triton Softmax<br>triton/softmax.py"]
+CUDASoftmax["CUDA Softmax<br>cuda_native/softmax_cuda_kernel.cu"]
+CUDALayerNorm["CUDA LayerNorm<br>cuda_native/layer_norm_cuda_kernel.cu"]
+ChunkSize["CHUNK_SIZE global<br>set_chunk_size()"]
+
+Linear --> LayerNorm
+SelfAttention --> FusedSoftmax
+OutProductMean --> LayerNorm
+ChunkTransition --> LayerNorm
+TriangleOps --> FusedSoftmax
+TriangleOps --> LayerNorm
+TriangleOps --> BiasOps
+AttentionOps --> FusedSoftmax
+AttentionOps --> LayerNorm
+FusedSoftmax --> TritonSoftmax
+FusedSoftmax --> CUDASoftmax
+LayerNorm --> CUDALayerNorm
+BiasOps --> CUDALayerNorm
+ChunkSize --> ChunkTransition
+ChunkSize --> TriangleOps
+ChunkSize --> AttentionOps
+
+subgraph Configuration ["Configuration"]
+    ChunkSize
+end
+
+subgraph subGraph2 ["Layer 1: CUDA/Triton Kernels"]
+    TritonSoftmax
+    CUDASoftmax
+    CUDALayerNorm
+end
+
+subgraph subGraph1 ["Layer 2: Kernel Wrappers"]
+    FusedSoftmax
+    LayerNorm
+    BiasOps
+end
+
+subgraph subGraph0 ["Layer 3: High-Level Operations"]
+    Linear
+    SelfAttention
+    OutProductMean
+    ChunkTransition
+    TriangleOps
+    AttentionOps
+end
 ```
 
 **Sources:** [fastfold/model/fastnn/ops.py](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/fastnn/ops.py)
@@ -56,8 +112,21 @@ Fused softmax operation with optional masking and bias addition. Automatically s
 
 #### Kernel Selection Logic
 
-```
+```mermaid
+flowchart TD
 
+Input["fused_softmax called"]
+CheckTriton["Triton available?"]
+CheckSeqLen["Sequence length?"]
+WarpKernel["Warp-level kernel<br>cols_per_thread template<br>softmax_cuda_kernel.cu:84-132"]
+SharedMemKernel["Shared memory kernel<br>BlockAllReduce<br>softmax_cuda_kernel.cu:134-161"]
+TritonKernel["Triton kernel<br>softmax_triton_kernel_wrapper<br>triton/softmax.py:153-186"]
+
+Input --> CheckTriton
+CheckTriton --> TritonKernel
+CheckTriton --> CheckSeqLen
+CheckSeqLen --> WarpKernel
+CheckSeqLen --> SharedMemKernel
 ```
 
 **Sources:** [fastfold/model/fastnn/kernel/softmax.py L35-L38](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/fastnn/kernel/softmax.py#L35-L38)
@@ -150,7 +219,7 @@ Multi-head self-attention with optional gating and fused bias operations.
 **Forward Signature:**
 
 ```
-
+forward(in_data, mask, nonbatched_bias=None) -> Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -226,7 +295,7 @@ Memory-efficient transition layer that processes inputs in chunks.
 **Methods:**
 
 ```
-
+forward(src) -> Tensor
 ```
 
 * Chunks input along dim=1 if `CHUNK_SIZE` is set
@@ -234,7 +303,7 @@ Memory-efficient transition layer that processes inputs in chunks.
 * Chunk size: `CHUNK_SIZE * 48` for forward pass
 
 ```
-
+inplace(src: List[Tensor]) -> List[Tensor]
 ```
 
 * In-place variant that modifies `src[0]`
@@ -259,7 +328,7 @@ Chunk-aware MSA row attention with pair bias for memory efficiency.
 **Forward Signature:**
 
 ```
-
+forward(M_raw, Z, M_mask) -> Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -284,8 +353,30 @@ Chunk-aware MSA row attention with pair bias for memory efficiency.
 
 Asynchronous chunk-based triangle multiplication (outgoing edges).
 
-```
+```mermaid
+flowchart TD
 
+Input["Z[i,j] input"]
+LeftProj["Left projection<br>Z[i,k] → left_act"]
+RightProj["Right projection<br>Z[j,k] → right_act"]
+Gather["gather_async<br>right_act across GPUs"]
+Matmul["Matmul<br>left_act @ right_act.T"]
+Output["Z[i,j] output"]
+
+subgraph subGraph0 ["Triangle Update: Outgoing"]
+    Input
+    LeftProj
+    RightProj
+    Gather
+    Matmul
+    Output
+    Input --> LeftProj
+    Input --> RightProj
+    RightProj --> Gather
+    LeftProj --> Matmul
+    Gather --> Matmul
+    Matmul --> Output
+end
 ```
 
 **Algorithm:**
@@ -349,7 +440,7 @@ Triangle attention that starts from nodes, with chunk-based processing.
 **Forward:**
 
 ```
-
+forward(Z_raw, Z_mask) -> Tensor
 ```
 
 **Processing Strategy:**
@@ -383,7 +474,7 @@ Computes mean outer product between MSA features to update pair representation.
 **Forward Signature:**
 
 ```
-
+forward(M, M_mask, Z_raw) -> Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -394,8 +485,30 @@ Computes mean outer product between MSA features to update pair representation.
 
 **Algorithm:**
 
-```
+```mermaid
+flowchart TD
 
+Input["M, M_mask, Z_raw"]
+Norm["LayerNorm(M)"]
+ProjA["Linear projection A<br>M → left_act"]
+ProjB["Linear projection B<br>M → right_act"]
+GatherAsync["gather_async<br>right_act along dim=2"]
+Mask["Apply M_mask"]
+OuterProd["Outer product<br>left_act ⊗ right_act"]
+Normalize["Divide by count"]
+OLinear["Output linear"]
+Residual["Add to Z_raw"]
+
+Input --> Norm
+Norm --> ProjA
+Norm --> ProjB
+ProjB --> GatherAsync
+ProjA --> Mask
+Mask --> OuterProd
+GatherAsync --> OuterProd
+OuterProd --> Normalize
+Normalize --> OLinear
+OLinear --> Residual
 ```
 
 **Computation:**
@@ -417,8 +530,8 @@ output = (left_act ⊗ right_act_all) / norm
 
 Permutes the final dimensions of a tensor while keeping leading dimensions unchanged.
 
-```
-
+```markdown
+permute_final_dims(tensor, [2, 0, 1])# If tensor.shape = [B, H, W, C, D, E]# Result.shape = [B, H, W, E, C, D]
 ```
 
 **Sources:** [fastfold/model/fastnn/ops.py L366-L369](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/fastnn/ops.py#L366-L369)
@@ -427,20 +540,20 @@ Permutes the final dimensions of a tensor while keeping leading dimensions uncha
 
 ### Pattern 1: Basic Operation Usage
 
-```
-
+```javascript
+from fastfold.model.fastnn.kernel import fused_softmax, LayerNormfrom fastfold.model.fastnn.ops import Linear, SelfAttention # Fused softmax with mask and biaslogits = torch.randn(2, 4, 8, 256, 256)mask = torch.ones(2, 4, 256)bias = torch.randn(2, 1, 8, 256, 256)weights = fused_softmax(logits, mask, bias) # Self-attentionattn = SelfAttention(qkv_dim=256, c=32, n_head=8, out_dim=256)output = attn(input_tensor, mask)
 ```
 
 ### Pattern 2: Chunked Processing
 
-```
-
+```javascript
+from fastfold.model.fastnn.ops import set_chunk_size, ChunkTransition # Enable chunked processingset_chunk_size(64) # Operations automatically use chunkingtransition = ChunkTransition(d=256, n=4)output = transition(input_tensor) # Disable chunkingset_chunk_size(None)
 ```
 
 ### Pattern 3: In-place Operations
 
-```
-
+```javascript
+from fastfold.model.fastnn.ops import ChunkTriangleAttentionStartingNode # In-place execution for memory efficiencyattn = ChunkTriangleAttentionStartingNode(d_pair=128, p_drop=0.1)Z_wrapped = [Z_tensor]  # Wrap in list for in-placeZ_wrapped = attn.inplace(Z_wrapped, Z_mask)Z_updated = Z_wrapped[0]  # Unwrap result
 ```
 
 **Sources:** [fastfold/model/fastnn/ops.py](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/fastnn/ops.py)

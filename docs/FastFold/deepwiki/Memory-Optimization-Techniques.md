@@ -41,8 +41,48 @@ The primary control mechanism is the global `CHUNK_SIZE` parameter, which determ
 
 FastFold uses a global `CHUNK_SIZE` variable to control memory-compute tradeoffs across all chunk-aware operations:
 
-```
+```mermaid
+flowchart TD
 
+SetChunk["set_chunk_size(chunk_size)"]
+GetChunk["get_chunk_size()"]
+GlobalVar["Global CHUNK_SIZE variable"]
+ChunkTrans["ChunkTransition"]
+ChunkAttn["ChunkMSARowAttentionWithPairBias"]
+ChunkTriAttn["ChunkTriangleAttentionStartingNode"]
+OutProd["OutProductMean"]
+AsyncTri["AsyncChunkTriangleMultiplication"]
+NoneMode["CHUNK_SIZE = None<br>Process entire tensor"]
+ChunkMode["CHUNK_SIZE > 0<br>Process in chunks"]
+
+GlobalVar --> ChunkTrans
+GlobalVar --> ChunkAttn
+GlobalVar --> ChunkTriAttn
+GlobalVar --> OutProd
+GlobalVar --> AsyncTri
+GlobalVar --> NoneMode
+GlobalVar --> ChunkMode
+
+subgraph subGraph2 ["Execution Modes"]
+    NoneMode
+    ChunkMode
+end
+
+subgraph subGraph1 ["Chunk-Aware Operations"]
+    ChunkTrans
+    ChunkAttn
+    ChunkTriAttn
+    OutProd
+    AsyncTri
+end
+
+subgraph subGraph0 ["Configuration Layer"]
+    SetChunk
+    GetChunk
+    GlobalVar
+    SetChunk --> GlobalVar
+    GetChunk --> GlobalVar
+end
 ```
 
 **Global Chunk Size API**
@@ -61,8 +101,40 @@ The chunk size is managed through two simple functions:
 
 All chunk-aware operations follow a consistent pattern: check `CHUNK_SIZE`, then either process the entire tensor (fast path) or iterate through chunks (memory-efficient path).
 
-```
+```mermaid
+flowchart TD
 
+Input["Input Tensor<br>[batch, seq_len, seq_len, dim]"]
+CheckChunk["CHUNK_SIZE<br>== None?"]
+FastPath["Fast Path:<br>Process entire tensor<br>in one operation"]
+ChunkPath["Memory-Efficient Path:<br>Iterate through chunks"]
+CalcChunk["Calculate chunk_size<br>e.g., CHUNK_SIZE * 32"]
+AllocOutput["Pre-allocate output tensor<br>torch.empty_like(input)"]
+Loop["for ax in range(0, para_dim, chunk_size)"]
+ProcessChunk["Process input[ax:ax+chunk_size]"]
+WriteOutput["Write to output[ax:ax+chunk_size]"]
+Output["Output Tensor"]
+
+Input --> CheckChunk
+CheckChunk --> FastPath
+CheckChunk --> ChunkPath
+FastPath --> Output
+WriteOutput --> Output
+
+subgraph subGraph0 ["Chunked Processing"]
+    ChunkPath
+    CalcChunk
+    AllocOutput
+    Loop
+    ProcessChunk
+    WriteOutput
+    ChunkPath --> CalcChunk
+    CalcChunk --> AllocOutput
+    AllocOutput --> Loop
+    Loop --> ProcessChunk
+    ProcessChunk --> WriteOutput
+    WriteOutput --> Loop
+end
 ```
 
 **Example: ChunkTransition**
@@ -71,8 +143,8 @@ All chunk-aware operations follow a consistent pattern: check `CHUNK_SIZE`, then
 
  demonstrates the chunking pattern:
 
-```
-
+```python
+def forward(self, src):    if CHUNK_SIZE == None:        # Fast path: process entire tensor        out = self.norm(src)        out = self.linear2(F.relu(self.linear1(out)))    else:        # Memory-efficient path: process in chunks        chunk_size = CHUNK_SIZE * 48        para_dim = src.shape[1]        out = torch.empty_like(src)        for ax in range(0, para_dim, chunk_size):            x = self.norm(src[:, ax:ax + chunk_size, :, :])            x = self.linear2(F.relu(self.linear1(x)))            out[:, ax:ax + chunk_size, :, :] = x    out.add_(src)  # Inplace residual addition    return out
 ```
 
 The chunk dimension is typically scaled by a factor (32, 48, etc.) to balance memory and compute efficiency. Different operations use different scaling factors based on their memory footprint.
@@ -99,8 +171,50 @@ Different operations use different chunk size scaling factors based on their com
 
 ### Chunk-Aware Operations Catalog
 
-```
+```mermaid
+flowchart TD
 
+ChunkMSAAttn["ChunkMSARowAttentionWithPairBias<br>ops.py:751-948"]
+ChunkMSACol["ChunkMSAColumnGlobalAttention<br>ops.py:950-1072"]
+ChunkTriAttn["ChunkTriangleAttentionStartingNode<br>ops.py:633-748"]
+AsyncTriOut["AsyncChunkTriangleMultiplicationOutgoing<br>ops.py:372-498"]
+AsyncTriIn["AsyncChunkTriangleMultiplicationIncoming<br>ops.py:501-630"]
+OutProd["OutProductMean<br>ops.py:126-228"]
+OutProdInplace["OutProductMean.inplace<br>ops.py:175-227"]
+ChunkTrans["ChunkTransition<br>ops.py:85-124"]
+SelfAttn["SelfAttention (chunked mode)<br>ops.py:326-361"]
+CHUNK_SIZE["Global CHUNK_SIZE"]
+
+CHUNK_SIZE --> ChunkMSAAttn
+CHUNK_SIZE --> ChunkMSACol
+CHUNK_SIZE --> ChunkTriAttn
+CHUNK_SIZE --> AsyncTriOut
+CHUNK_SIZE --> AsyncTriIn
+CHUNK_SIZE --> OutProd
+CHUNK_SIZE --> OutProdInplace
+CHUNK_SIZE --> ChunkTrans
+CHUNK_SIZE --> SelfAttn
+
+subgraph Utilities ["Utilities"]
+    ChunkTrans
+    SelfAttn
+end
+
+subgraph Communication ["Communication"]
+    OutProd
+    OutProdInplace
+end
+
+subgraph subGraph1 ["Pair Operations"]
+    ChunkTriAttn
+    AsyncTriOut
+    AsyncTriIn
+end
+
+subgraph subGraph0 ["MSA Operations"]
+    ChunkMSAAttn
+    ChunkMSACol
+end
 ```
 
 Each operation implements both fast and chunked paths. The chunked path typically:
@@ -121,8 +235,8 @@ For operations not specifically optimized with chunking, FastFold provides a gen
 
  implements algorithmic chunking as described in AlphaFold section 1.11.8:
 
-```
-
+```python
+def chunk_layer(    layer: Callable,    inputs: Dict[str, Any],    chunk_size: int,    no_batch_dims: int,    low_mem: bool = False,) -> Any:    """    Chunks layer execution across batch dimensions to reduce peak memory.        Args:        layer: Function to apply chunk-wise        inputs: Dictionary of input tensors        chunk_size: Number of sub-batches per chunk        no_batch_dims: How many initial dims are batch dims        low_mem: Avoid flattening large tensors (slower but more memory efficient)    """
 ```
 
 The function:
@@ -147,8 +261,46 @@ The function:
 
 FastFold supports an "inplace" execution mode where tensors are updated in-place rather than creating new allocations. This is controlled by the `config.globals.inplace` flag.
 
-```
+```mermaid
+flowchart TD
 
+Config["model_config()"]
+InplaceFlag["config.globals.inplace"]
+StdInput["Input: tensor"]
+StdOp["Operation"]
+StdOutput["Output: new tensor"]
+InpInput["Input: [tensor] (wrapped in list)"]
+InpOp["operation.inplace()"]
+InpOutput["Output: [modified tensor]<br>(same memory)"]
+MemStd["Memory: 2x tensor size"]
+MemInp["Memory: 1x tensor size"]
+
+InplaceFlag --> StdInput
+InplaceFlag --> InpInput
+StdOutput --> MemStd
+InpOutput --> MemInp
+
+subgraph subGraph2 ["Inplace Forward Pass"]
+    InpInput
+    InpOp
+    InpOutput
+    InpInput --> InpOp
+    InpOp --> InpOutput
+end
+
+subgraph subGraph1 ["Standard Forward Pass"]
+    StdInput
+    StdOp
+    StdOutput
+    StdInput --> StdOp
+    StdOp --> StdOutput
+end
+
+subgraph Configuration ["Configuration"]
+    Config
+    InplaceFlag
+    Config --> InplaceFlag
+end
 ```
 
 **Configuration Example:**
@@ -157,8 +309,8 @@ FastFold supports an "inplace" execution mode where tensors are updated in-place
 
  shows inplace mode being disabled for training:
 
-```
-
+```markdown
+config = model_config(args.config_preset, train=True)config.globals.inplace = False  # Standard mode for training
 ```
 
 Inplace mode is typically used during inference when gradients are not needed and maximum memory efficiency is desired.
@@ -169,8 +321,34 @@ Inplace mode is typically used during inference when gradients are not needed an
 
 Operations that support inplace execution implement a separate `.inplace()` method alongside the standard `.forward()` method:
 
-```
+```mermaid
+flowchart TD
 
+Forward["forward(tensor) -> tensor"]
+Inplace["inplace([tensor]) -> [tensor]"]
+CheckInplace["Check if<br>input is list"]
+RegularPath["Regular processing:<br>allocate new tensors"]
+InplacePath["Inplace processing:<br>modify input[0] directly"]
+NewTensor["Return new tensor"]
+ModifiedTensor["Return modified input[0]"]
+
+Forward --> CheckInplace
+Inplace --> InplacePath
+RegularPath --> NewTensor
+InplacePath --> ModifiedTensor
+
+subgraph subGraph1 ["Implementation Pattern"]
+    CheckInplace
+    RegularPath
+    InplacePath
+    CheckInplace --> RegularPath
+    CheckInplace --> InplacePath
+end
+
+subgraph subGraph0 ["Module Interface"]
+    Forward
+    Inplace
+end
 ```
 
 **Example: ChunkTransition.inplace()**
@@ -179,8 +357,8 @@ Operations that support inplace execution implement a separate `.inplace()` meth
 
  demonstrates the inplace pattern:
 
-```
-
+```python
+def inplace(self, src):    """Inplace version wraps input in list: src = [tensor]"""    para_dim = src[0].shape[1]    chunk_size = CHUNK_SIZE * 48 if CHUNK_SIZE else para_dim        for ax in range(0, para_dim, chunk_size):        x = self.norm(src[0][:, ax:ax + chunk_size, :, :])        x = self.linear2(F.relu(self.linear1(x)))        # Inplace update instead of allocating new tensor        src[0][:, ax:ax + chunk_size, :, :] += x    return src
 ```
 
 Key differences from regular forward:
@@ -210,8 +388,8 @@ Key differences from regular forward:
 
 Inplace methods use list-wrapping to signal mutable intent:
 
-```
-
+```sql
+# Standard mode: create new tensorsz = operation.forward(z_input)  # z_input unchanged # Inplace mode: modify existing tensorz = operation.inplace([z_input])  # z_input[0] modified in-place
 ```
 
 This convention:
@@ -234,8 +412,45 @@ This convention:
 
 FastFold employs selective recomputation to reduce memory usage at the cost of additional computation. The canonical example is bias computation in attention mechanisms.
 
-```
+```mermaid
+flowchart TD
 
+M1["Compute full bias tensor<br>[batch, seq_len, seq_len, n_head]"]
+M2["Store in memory"]
+M3["Use in all chunks"]
+MemCost["Memory: O(seq_len²)"]
+C1["For each chunk:"]
+C2["Compute bias for chunk only<br>[batch, chunk_size, seq_len, n_head]"]
+C3["Use immediately"]
+C4["Discard"]
+CompCost["Compute: O(n_chunks * seq_len²)"]
+Decision["Memory<br>constrained?"]
+
+Decision --> M1
+Decision --> C1
+
+subgraph subGraph1 ["Compute-Intensive Approach"]
+    C1
+    C2
+    C3
+    C4
+    CompCost
+    C1 --> C2
+    C2 --> C3
+    C3 --> C4
+    C4 --> C1
+    C2 --> CompCost
+end
+
+subgraph subGraph0 ["Memory-Intensive Approach"]
+    M1
+    M2
+    M3
+    MemCost
+    M1 --> M2
+    M2 --> M3
+    M2 --> MemCost
+end
 ```
 
 **Example: ChunkMSARowAttentionWithPairBias**
@@ -244,8 +459,8 @@ FastFold employs selective recomputation to reduce memory usage at the cost of a
 
  demonstrates recomputation strategy:
 
-```
-
+```markdown
+# Phase 1: Compute small bias tensor in chunksb = torch.empty((Z.shape[0], Z.shape[1], Z.shape[2], self.n_head), ...)for i in range(0, para_dim_z, chunk_size):    z = self.layernormZ(Z[:, i:i + chunk_size, :, :])    b[:, i:i + chunk_size, :, :] = F.linear(z, self.linear_b_weights) # Gather and broadcast bias (small tensor, affordable to store)b, work = gather_async(b, dim=1)b = gather_async_opp(b, work, dim=1)b = rearrange(b, 'b q k h -> b h q k') # Phase 2: Process MSA in chunks, recomputing layernorm each timefor i in range(0, para_dim_m, chunk_size):    # Recompute: cheaper than storing large normalized MSA    m = self.layernormM(M_raw[:, i:i + chunk_size, :, :])    m_mask = M_mask[:, i:i + chunk_size, :]        # Use pre-computed bias (stored because it's small)    m = self.attention(m, m_mask, (b, -1))
 ```
 
 **Tradeoff Analysis:**
@@ -262,8 +477,8 @@ While not explicitly implemented in the chunking code, FastFold's design support
 
  shows the intended pattern:
 
-```
-
+```rust
+# checkpoint_fn = get_checkpoint_fn()# blocks = [partial(b, msa_mask=msa_mask, ...) for b in self.blocks]# # for b in blocks:#     if(torch.is_grad_enabled()):#         m, z = checkpoint_fn(b, *(m, z))  # Recompute forward during backward#     else:#         m, z = b(m, z)
 ```
 
 This allows trading compute for memory during backpropagation by recomputing forward passes instead of storing all intermediate activations.
@@ -278,8 +493,24 @@ This allows trading compute for memory during backpropagation by recomputing for
 
 FastFold pre-allocates output tensors to avoid repeated allocations during chunked processing:
 
-```
+```mermaid
+flowchart TD
 
+Start["Begin chunked operation"]
+Prealloc["Pre-allocate output:<br>output = torch.empty_like(input)"]
+Loop["For each chunk"]
+Process["Process chunk:<br>result = operation(input_chunk)"]
+Write["Write to output:<br>output[chunk_slice] = result"]
+CheckDone["More<br>chunks?"]
+Return["Return pre-allocated output"]
+
+Start --> Prealloc
+Prealloc --> Loop
+Loop --> Process
+Process --> Write
+Write --> CheckDone
+CheckDone --> Loop
+CheckDone --> Return
 ```
 
 **Example: AsyncChunkTriangleMultiplicationOutgoing**
@@ -288,8 +519,8 @@ FastFold pre-allocates output tensors to avoid repeated allocations during chunk
 
  shows pre-allocation:
 
-```
-
+```markdown
+para_dim = Z_raw.shape[1]chunk_size = CHUNK_SIZE * 32output = torch.empty_like(Z_raw)  # Pre-allocate entire output for i in range(0, para_dim, chunk_size):    # Process chunk and write to pre-allocated buffer    # ...    output[:, i:i + chunk_size, :, :] = z
 ```
 
 **Benefits:**
@@ -308,8 +539,8 @@ For operations requiring temporary buffers, FastFold allocates exactly-sized ten
 
  demonstrates precise allocation:
 
-```
-
+```markdown
+# Allocate temporary buffer for small intermediate (bias)b = torch.empty(    (Z_raw.shape[0], Z_raw.shape[1], Z_raw.shape[2], self.n_head),    device=Z_raw.device,    dtype=Z_raw.dtype)
 ```
 
 This avoids wasting memory on unnecessarily large buffers.
@@ -322,8 +553,8 @@ This avoids wasting memory on unnecessarily large buffers.
 
  shows explicit cache clearing between blocks:
 
-```
-
+```markdown
+for b in self.blocks:    m, z = b(m, z, msa_mask, pair_mask, chunk_size=chunk_size)        if(self.clear_cache_between_blocks):        torch.cuda.empty_cache()  # Free unused memory
 ```
 
 The `clear_cache_between_blocks` flag trades performance for memory by explicitly releasing cached allocations between major operations.
@@ -336,8 +567,25 @@ The `clear_cache_between_blocks` flag trades performance for memory by explicitl
 
 When using Dynamic Axial Parallelism (DAP), tensors are padded to be evenly divisible across GPUs:
 
-```
+```mermaid
+flowchart TD
 
+Input["Input sequence<br>length = N"]
+CalcPad["Calculate padding:<br>pad_size = ceil(N / dap_size) * dap_size - N"]
+Pad["Pad tensor:<br>torch.nn.functional.pad(tensor, (0, pad_size))"]
+Scatter["Scatter across GPUs:<br>Each GPU gets N/dap_size elements"]
+Process["Process in parallel"]
+Gather["Gather results"]
+Unpad["Remove padding:<br>tensor[:-pad_size]"]
+Output["Output sequence<br>length = N"]
+
+Input --> CalcPad
+CalcPad --> Pad
+Pad --> Scatter
+Scatter --> Process
+Process --> Gather
+Gather --> Unpad
+Unpad --> Output
 ```
 
 **Example: ExtraMSABlock**
@@ -346,8 +594,8 @@ When using Dynamic Axial Parallelism (DAP), tensors are padded to be evenly divi
 
  shows padding logic:
 
-```
-
+```markdown
+dap_size = gpc.get_world_size(ParallelMode.TENSOR)seq_cnt = msa_mask.size(-2)seq_len = pair_mask.size(-1) # Calculate padding to make evenly divisibleseq_cnt_padding_size = (int(seq_cnt / dap_size) + 1) * dap_size - seq_cntseq_len_padding_size = (int(seq_len / dap_size) + 1) * dap_size - seq_len # Pad MSA and pair representationsm = torch.nn.functional.pad(    m, (0, 0, 0, seq_len_padding_size, 0, seq_cnt_padding_size))z = torch.nn.functional.pad(    z, (0, 0, 0, seq_len_padding_size, 0, seq_len_padding_size))
 ```
 
 After processing, padding is removed [msa.py L265-L266](https://github.com/hpcaitech/FastFold/blob/eba49680/msa.py#L265-L266)
@@ -355,7 +603,7 @@ After processing, padding is removed [msa.py L265-L266](https://github.com/hpcai
 :
 
 ```
-
+m = m[:, :-seq_cnt_padding_size, :-seq_len_padding_size, :]z = z[:, :-seq_len_padding_size, :-seq_len_padding_size, :]
 ```
 
 This ensures load balancing across GPUs while maintaining correct sequence lengths.
@@ -370,8 +618,36 @@ This ensures load balancing across GPUs while maintaining correct sequence lengt
 
 Choosing an appropriate `CHUNK_SIZE` requires balancing memory and performance:
 
-```
+```mermaid
+flowchart TD
 
+SeqLen["Sequence Length"]
+MemAvail["Available GPU Memory"]
+NumGPUs["Number of GPUs (DAP)"]
+BatchSize["Batch Size"]
+Short["Short sequences<br>(< 512 residues):<br>CHUNK_SIZE = None"]
+Medium["Medium sequences<br>(512-2048 residues):<br>CHUNK_SIZE = 4-16"]
+Long["Long sequences<br>(> 2048 residues):<br>CHUNK_SIZE = 1-4"]
+
+SeqLen --> Short
+SeqLen --> Medium
+SeqLen --> Long
+MemAvail --> Short
+MemAvail --> Medium
+MemAvail --> Long
+
+subgraph Recommendations ["Recommendations"]
+    Short
+    Medium
+    Long
+end
+
+subgraph subGraph0 ["Factors to Consider"]
+    SeqLen
+    MemAvail
+    NumGPUs
+    BatchSize
+end
 ```
 
 **Guidelines:**
@@ -398,8 +674,8 @@ Choosing an appropriate `CHUNK_SIZE` requires balancing memory and performance:
 
 **Configuration:**
 
-```
-
+```markdown
+config = model_config(preset, train=False)config.globals.inplace = True  # Enable for inference
 ```
 
 **Sources:** [train.py L171-L172](https://github.com/hpcaitech/FastFold/blob/eba49680/train.py#L171-L172)
@@ -408,8 +684,8 @@ Choosing an appropriate `CHUNK_SIZE` requires balancing memory and performance:
 
 To monitor memory usage during execution:
 
-```
-
+```javascript
+import torch # Before operationtorch.cuda.reset_peak_memory_stats() # Run operationoutput = model(batch) # Check peak memorypeak_memory = torch.cuda.max_memory_allocated() / (1024**3)  # GBprint(f"Peak memory: {peak_memory:.2f} GB")
 ```
 
 Use this to empirically determine optimal chunk sizes for your hardware and sequence lengths.
@@ -420,8 +696,8 @@ Use this to empirically determine optimal chunk sizes for your hardware and sequ
 
 For maximum memory efficiency, combine multiple techniques:
 
-```
-
+```javascript
+from fastfold.model.fastnn import set_chunk_sizefrom fastfold.config import model_config # Configure modelconfig = model_config('model_1', train=False)config.globals.inplace = True  # Enable inplace operations model = AlphaFold(config)model = inject_fastnn(model)  # Use optimized implementations # Set chunk size based on sequence lengthseq_len = batch['aatype'].shape[-1]if seq_len > 2048:    set_chunk_size(4)  # Aggressive chunking for long sequenceselif seq_len > 512:    set_chunk_size(16)  # Moderate chunkingelse:    set_chunk_size(None)  # No chunking for short sequences # Enable cache clearing for very long sequencesconfig.model.extra_msa.clear_cache_between_blocks = (seq_len > 3000)
 ```
 
 **Sources:** [fastfold/model/fastnn/ops.py](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/fastnn/ops.py)

@@ -21,8 +21,38 @@ The weight import process follows a systematic pipeline that maps JAX parameter 
 
 ### High-Level Flow
 
-```
+```mermaid
+flowchart TD
 
+NPZ["JAX Weights NPZ File<br>from DeepMind"]
+Load["np.load(npz_path)"]
+Data["NumPy Arrays<br>(JAX format)"]
+Model["PyTorch AlphaFold Model"]
+GetDict["get_translation_dict()"]
+TransDict["Translation Dictionary<br>{jax_key: Param}"]
+Flatten["_process_translations_dict()"]
+FlatDict["Flat Dictionary<br>alphafold/alphafold_iteration/..."]
+Assign["assign()"]
+Transform["Apply param_type.transformation"]
+Copy["torch.Tensor.copy_()"]
+Special["Fused Triangle<br>Multiplication?"]
+Swap["_change_tri_mul_in_left_right()<br>Swap left/right projections"]
+Done["Model weights loaded"]
+
+NPZ --> Load
+Load --> Data
+Model --> GetDict
+GetDict --> TransDict
+TransDict --> Flatten
+Flatten --> FlatDict
+Data --> Assign
+FlatDict --> Assign
+Assign --> Transform
+Transform --> Copy
+Copy --> Special
+Special --> Swap
+Special --> Done
+Swap --> Done
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L588-L628](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L588-L628)
@@ -35,8 +65,45 @@ The weight conversion relies on a type system that defines how to transform JAX 
 
 ### ParamType Enumeration
 
-```
+```mermaid
+flowchart TD
 
+LinearWeight["LinearWeight<br>transpose(-1, -2)"]
+LinearWeightMHA["LinearWeightMHA<br>reshape + transpose"]
+LinearMHAOut["LinearMHAOutputWeight<br>reshape + transpose"]
+LinearBiasMHA["LinearBiasMHA<br>reshape"]
+LinearWeightOPM["LinearWeightOPM<br>reshape + transpose"]
+LinearWeightMult["LinearWeightMultimer<br>unsqueeze or reshape + transpose"]
+LinearBiasMult["LinearBiasMultimer<br>reshape"]
+Other["Other<br>identity"]
+Use1["Standard Linear Layers"]
+Use2["Multi-Head Attention Q/K/V"]
+Use3["MHA Output Projection"]
+Use4["MHA Biases"]
+Use5["Outer Product Mean"]
+Use6["Multimer Linear Layers"]
+Use7["Multimer Biases"]
+Use8["LayerNorm, Scalars"]
+
+LinearWeight --> Use1
+LinearWeightMHA --> Use2
+LinearMHAOut --> Use3
+LinearBiasMHA --> Use4
+LinearWeightOPM --> Use5
+LinearWeightMult --> Use6
+LinearBiasMult --> Use7
+Other --> Use8
+
+subgraph subGraph0 ["ParamType Enum"]
+    LinearWeight
+    LinearWeightMHA
+    LinearMHAOut
+    LinearBiasMHA
+    LinearWeightOPM
+    LinearWeightMult
+    LinearBiasMult
+    Other
+end
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L29-L53](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L29-L53)
@@ -64,8 +131,8 @@ The weight conversion relies on a type system that defines how to transform JAX 
 
 The `Param` dataclass wraps PyTorch tensors or lists of tensors with metadata about how to transform them:
 
-```
-
+```python
+@dataclassclass Param:    param: Union[torch.Tensor, List[torch.Tensor]]  # Target PyTorch parameter(s)    param_type: ParamType = ParamType.Other          # Transformation to apply    stacked: bool = False                            # Whether param is list of stacked params
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L55-L60](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L55-L60)
@@ -74,8 +141,40 @@ The `Param` dataclass wraps PyTorch tensors or lists of tensors with metadata ab
 
 Repeated blocks (Evoformer iterations, template pair stack) use stacked parameters to handle JAX's layer stacking convention:
 
-```
+```mermaid
+flowchart TD
 
+JAX["JAX NPZ:<br>shape [num_blocks, ...]"]
+Template["Template Param Dict<br>for single block"]
+Stack["stacked(param_dict_list)"]
+Stacked["Stacked Param:<br>param=[p0, p1, ..., pN]<br>stacked=True"]
+Unbind["torch.unbind(weights, 0)"]
+Weights["[w0, w1, ..., wN]"]
+Assign["assign()"]
+Zip["zip(ref, weights)"]
+Copy["p0.copy_(w0)<br>p1.copy_(w1)<br>..."]
+PyTorch["PyTorch: ModuleList<br>[Block0, Block1, ..., BlockN]"]
+
+subgraph subGraph0 ["Stacked Block Handling"]
+    JAX
+    Template
+    Stack
+    Stacked
+    Unbind
+    Weights
+    Assign
+    Zip
+    Copy
+    PyTorch
+    Template --> Stack
+    Stack --> Stacked
+    JAX --> Unbind
+    Unbind --> Weights
+    Stacked --> Assign
+    Weights --> Assign
+    Assign --> Zip
+    Zip --> Copy
+end
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L81-L107](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L81-L107)
@@ -90,8 +189,47 @@ The `get_translation_dict()` function builds a nested dictionary that maps JAX p
 
 ### Structure Overview
 
-```
+```mermaid
+flowchart TD
 
+Model["AlphaFold Model<br>(PyTorch)"]
+GetTransDict["get_translation_dict(model, version)"]
+CheckMultimer["is_multimer =<br>'multimer' in version"]
+BuildDict["Build Translation Dict"]
+Evo["evoformer:<br>embedders, blocks, outputs"]
+Struct["structure_module:<br>IPA, transitions, angles"]
+Heads["prediction_heads:<br>lddt, distogram, tm, etc."]
+EvoPreprocess["preprocess_1d/msa/single<br>LinearParams"]
+EvoRecycle["prev_pos_linear/norms<br>LinearParams, LayerNormParams"]
+EvoTemplate["template_embedding<br>Nested structure"]
+EvoExtraMSA["extra_msa_stack<br>Stacked blocks"]
+EvoBlocks["evoformer_iteration<br>Stacked blocks"]
+StructNorms["LayerNorms"]
+StructIPA["IPA: q/k/v projections"]
+StructTrans["Transitions"]
+StructAngles["Angle prediction"]
+LDDT["predicted_lddt_head"]
+Dist["distogram_head"]
+TM["predicted_aligned_error_head"]
+
+Model --> GetTransDict
+GetTransDict --> CheckMultimer
+CheckMultimer --> BuildDict
+BuildDict --> Evo
+BuildDict --> Struct
+BuildDict --> Heads
+Evo --> EvoPreprocess
+Evo --> EvoRecycle
+Evo --> EvoTemplate
+Evo --> EvoExtraMSA
+Evo --> EvoBlocks
+Struct --> StructNorms
+Struct --> StructIPA
+Struct --> StructTrans
+Struct --> StructAngles
+Heads --> LDDT
+Heads --> Dist
+Heads --> TM
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L131-L585](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L131-L585)
@@ -121,8 +259,34 @@ Different AlphaFold model versions require specific parameter mappings. The syst
 
 ### Version-Specific Differences
 
-```
+```mermaid
+flowchart TD
 
+Version["Model Version"]
+NoTempl["model_3/4/5<br>model_3/4/5_ptm"]
+WithTempl["model_1/2<br>model_1/2_ptm"]
+Multimer["multimer"]
+RemoveTemplate["Remove template_* keys<br>from evoformer dict"]
+KeepTemplate["Include template_embedding<br>template_projection<br>template_single_embedding"]
+MultTemplate["Special template structure:<br>query_embedding_norm<br>template_pair_embedding_0-8<br>template_embedding_iteration"]
+MultIPA["IPAParamsMultimer:<br>q/k/v_scalar_projection<br>q/k/v_point_projection"]
+MultRelEnc["~_relative_encoding:<br>position_activations"]
+MultQuat["quat_rigid instead of<br>affine_update"]
+PTM["Has _ptm or<br>is_multimer?"]
+AddTM["Add predicted_aligned_error_head"]
+SkipTM["Skip TM head"]
+
+Version --> NoTempl
+Version --> WithTempl
+Version --> Multimer
+NoTempl --> RemoveTemplate
+WithTempl --> KeepTemplate
+Multimer --> MultTemplate
+Multimer --> MultIPA
+Multimer --> MultRelEnc
+Multimer --> MultQuat
+PTM --> AddTM
+PTM --> SkipTM
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L565-L584](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L565-L584)
@@ -146,8 +310,36 @@ Different AlphaFold model versions require specific parameter mappings. The syst
 
 The `assign()` function performs the actual weight transfer with transformation:
 
-```
+```mermaid
+flowchart TD
 
+Start["assign(translation_dict, orig_weights)"]
+Iterate["for k, param in translation_dict.items()"]
+GetWeights["weights = torch.as_tensor(orig_weights[k])"]
+CheckStack["param.stacked?"]
+Unbind["weights = torch.unbind(weights, 0)<br>ref = param.param (list)"]
+Wrap["weights = [weights]<br>ref = [param.param]"]
+Transform["Apply param_type.transformation<br>to each weight"]
+ZipCopy["for p, w in zip(ref, weights):<br>    p.copy_(w)"]
+Error["Error?"]
+Print["Print debug info:<br>key, shape mismatch"]
+Continue["Continue to next param"]
+Done["All weights assigned"]
+Raise["raise Exception"]
+
+Start --> Iterate
+Iterate --> GetWeights
+GetWeights --> CheckStack
+CheckStack --> Unbind
+CheckStack --> Wrap
+Unbind --> Transform
+Wrap --> Transform
+Transform --> ZipCopy
+ZipCopy --> Error
+Error --> Print
+Error --> Continue
+Continue --> Done
+Print --> Raise
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L110-L129](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L110-L129)
@@ -159,10 +351,6 @@ The `assign()` function performs the actual weight transfer with transformation:
 FastFold's fused triangle multiplication implementation requires post-processing after weight import to swap left/right projections for incoming triangle multiplication.
 
 ### Fused Triangle Handling
-
-```
-
-```
 
 **Sources:** [fastfold/utils/import_weights.py L610-L627](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L610-L627)
 
@@ -180,8 +368,30 @@ In JAX AlphaFold (commit b88f8da), the naming convention for incoming vs outgoin
 
 JAX weights use a specific key prefix structure that must be processed for matching:
 
-```
+```mermaid
+flowchart TD
 
+Nested["Nested Translation Dict<br>{evoformer: {preprocess_1d: ...}}"]
+Process["_process_translations_dict()"]
+TopLevel["Top level adds:<br>'alphafold/alphafold_iteration/'"]
+SubLevel["Sub-levels add:<br>'/' prefix"]
+Flat1["'alphafold/alphafold_iteration/evoformer/preprocess_1d/weights'"]
+Flat2["'alphafold/alphafold_iteration/structure_module/single_layer_norm/scale'"]
+FlatDict["Flat Dictionary<br>for weight lookup"]
+NPZ["JAX NPZ Keys"]
+Match["Match against flat keys"]
+Validate["Sanity check:<br>- incorrect = keys in flat not in npz<br>- missing = keys in npz not in flat"]
+
+Nested --> Process
+Process --> TopLevel
+Process --> SubLevel
+TopLevel --> Flat1
+SubLevel --> Flat2
+Flat1 --> FlatDict
+Flat2 --> FlatDict
+NPZ --> Match
+FlatDict --> Match
+Match --> Validate
 ```
 
 **Key Prefix:** All JAX weights have the prefix `"alphafold/alphafold_iteration/"` which is added during flattening.
@@ -198,8 +408,8 @@ JAX weights use a specific key prefix structure that must be processed for match
 
 ### Basic Import
 
-```
-
+```javascript
+from fastfold.utils.import_weights import import_jax_weights_ # Create PyTorch modelmodel = AlphaFold(config) # Import JAX weightsimport_jax_weights_(    model=model,    npz_path="params_model_1.npz",  # DeepMind's JAX weights    version="model_1"                # Model version identifier) # Model now has DeepMind's weights in PyTorch format
 ```
 
 ### Supported Versions
@@ -244,14 +454,14 @@ JAX weights use a specific key prefix structure that must be processed for match
 
 The import process includes validation steps:
 
-```
-
+```markdown
+# Sanity check in import_jax_weights_keys = list(data.keys())              # Keys in JAX NPZflat_keys = list(flat.keys())         # Keys in translation dict incorrect = [k for k in flat_keys if k not in keys]  # Keys we expect but NPZ doesn't havemissing = [k for k in keys if k not in flat_keys]    # Keys in NPZ we don't handle assert len(incorrect) == 0  # Fail if we reference non-existent keys
 ```
 
 During assignment, shape mismatches are caught and printed:
 
-```
-
+```python
+try:    weights = list(map(param_type.transformation, weights))    for p, w in zip(ref, weights):        p.copy_(w)except:    print(k)                    # Parameter key    print(ref[0].shape)        # Expected PyTorch shape    print(weights[0].shape)    # Actual JAX shape    raise
 ```
 
 **Sources:** [fastfold/utils/import_weights.py L596-L605](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L596-L605)

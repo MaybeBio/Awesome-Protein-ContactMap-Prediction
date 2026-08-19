@@ -26,8 +26,104 @@ FastFold provides a containerized deployment option via Docker to ensure reprodu
 
 The following diagram illustrates the layered structure of the FastFold Docker image and its build process:
 
-```
+```mermaid
+flowchart TD
 
+BaseImage["hpcaitech/pytorch-cuda:1.12.0-11.3.0<br>Ubuntu + CUDA 11.3 + PyTorch 1.12"]
+CondaInstall["conda install -c conda-forge -c bioconda"]
+Tool1["openmm=7.7.0"]
+Tool2["pdbfixer"]
+Tool3["hmmer==3.3.2"]
+Tool4["hhsuite=3.3.0"]
+Tool5["kalign2=2.04"]
+PipInstall["pip install"]
+Dep1["biopython==1.79"]
+Dep2["dm-tree==0.1.6"]
+Dep3["ml-collections==0.1.0"]
+Dep4["scipy==1.7.1"]
+Dep5["ray pyarrow pandas"]
+Dep6["einops"]
+Dep7["colossalai"]
+GitClone["git clone Unsupported markdown: link"]
+SetupInstall["python setup.py install"]
+CUDAExt1["fastfold_layer_norm_cuda.so"]
+CUDAExt2["fastfold_softmax_cuda.so"]
+PyPackage["fastfold Python package"]
+Container["Docker Container"]
+GPUAccess["--gpus all<br>NVIDIA GPU access"]
+IPCMode["--ipc=host<br>Shared memory for distributed training"]
+Interactive["bash shell"]
+JackhmmerBin["/usr/bin/jackhmmer"]
+HhblitsBin["/usr/bin/hhblits"]
+HhsearchBin["/usr/bin/hhsearch"]
+KalignBin["/usr/bin/kalign"]
+
+BaseImage --> CondaInstall
+CondaInstall --> PipInstall
+PipInstall --> GitClone
+SetupInstall --> Container
+Tool3 --> JackhmmerBin
+Tool4 --> HhblitsBin
+Tool4 --> HhsearchBin
+Tool5 --> KalignBin
+
+subgraph subGraph4 ["Runtime Environment"]
+    Container
+    GPUAccess
+    IPCMode
+    Interactive
+    Container --> GPUAccess
+    Container --> IPCMode
+    Container --> Interactive
+end
+
+subgraph subGraph3 ["FastFold Installation Layer"]
+    GitClone
+    SetupInstall
+    CUDAExt1
+    CUDAExt2
+    PyPackage
+    GitClone --> SetupInstall
+    SetupInstall --> CUDAExt1
+    SetupInstall --> CUDAExt2
+    SetupInstall --> PyPackage
+end
+
+subgraph subGraph2 ["Python Dependencies Layer"]
+    PipInstall
+    Dep1
+    Dep2
+    Dep3
+    Dep4
+    Dep5
+    Dep6
+    Dep7
+    PipInstall --> Dep1
+    PipInstall --> Dep2
+    PipInstall --> Dep3
+    PipInstall --> Dep4
+    PipInstall --> Dep5
+    PipInstall --> Dep6
+    PipInstall --> Dep7
+end
+
+subgraph subGraph1 ["Bioinformatics Tools Layer"]
+    CondaInstall
+    Tool1
+    Tool2
+    Tool3
+    Tool4
+    Tool5
+    CondaInstall --> Tool1
+    CondaInstall --> Tool2
+    CondaInstall --> Tool3
+    CondaInstall --> Tool4
+    CondaInstall --> Tool5
+end
+
+subgraph subGraph0 ["Base Layer"]
+    BaseImage
+end
 ```
 
 **Diagram: Docker Image Layer Architecture**
@@ -151,8 +247,8 @@ The build requires GPU support during `docker build` because CUDA extension comp
 
 Configure Docker to use NVIDIA runtime by editing `/etc/docker/daemon.json`:
 
-```
-
+```json
+{  "default-runtime": "nvidia",  "runtimes": {    "nvidia": {      "path": "nvidia-container-runtime",      "runtimeArgs": []    }  }}
 ```
 
 Restart Docker after configuration changes.
@@ -164,7 +260,7 @@ Restart Docker after configuration changes.
 From the FastFold repository root:
 
 ```
-
+cd FastFolddocker build -t fastfold ./docker
 ```
 
 Build process stages:
@@ -182,8 +278,62 @@ Total build time: ~15-30 minutes (depending on network and CPU)
 
 ### Build Process Diagram
 
-```
+```mermaid
+flowchart TD
 
+BuildCmd["docker build -t fastfold ./docker"]
+Dockerfile["./docker/Dockerfile"]
+Stage1["FROM hpcaitech/pytorch-cuda:1.12.0-11.3.0"]
+Stage2["RUN conda install<br>openmm pdbfixer hmmer hhsuite kalign2"]
+Stage3["RUN pip install<br>biopython scipy ray colossalai..."]
+Stage4["RUN git clone && python setup.py install"]
+SetupPy["setup.py"]
+DetectCUDA["Check CUDA_HOME"]
+CompileLN["Compile layer_norm_cuda"]
+CompileSM["Compile softmax_cuda"]
+SkipCUDA["Install without CUDA kernels"]
+Image["Docker Image: fastfold"]
+Tagged["fastfold:latest"]
+
+Dockerfile --> Stage1
+Stage4 --> SetupPy
+CompileLN --> Image
+CompileSM --> Image
+SkipCUDA --> Image
+
+subgraph Output ["Output"]
+    Image
+    Tagged
+    Image --> Tagged
+end
+
+subgraph subGraph2 ["CUDA Extension Compilation"]
+    SetupPy
+    DetectCUDA
+    CompileLN
+    CompileSM
+    SkipCUDA
+    SetupPy --> DetectCUDA
+    DetectCUDA --> CompileLN
+    DetectCUDA --> CompileSM
+    DetectCUDA --> SkipCUDA
+end
+
+subgraph subGraph1 ["Build Stages"]
+    Stage1
+    Stage2
+    Stage3
+    Stage4
+    Stage1 --> Stage2
+    Stage2 --> Stage3
+    Stage3 --> Stage4
+end
+
+subgraph subGraph0 ["Docker Build Context"]
+    BuildCmd
+    Dockerfile
+    BuildCmd --> Dockerfile
+end
 ```
 
 **Diagram: Docker Build Process Flow**
@@ -201,7 +351,7 @@ This diagram illustrates the sequential build stages and the CUDA extension comp
 ### Basic Container Execution
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host fastfold bash
 ```
 
 Runtime flag explanations:
@@ -223,14 +373,14 @@ The `--ipc=host` flag is critical for distributed training and inference because
 
 After starting the container, inference can be executed using the standard `inference.py` workflow:
 
-```
-
+```markdown
+# Inside containerpython inference.py target.fasta /path/to/mmcif_files/ \    --output_dir ./outputs/ \    --gpus 2 \    --uniref90_database_path /data/uniref90/uniref90.fasta \    --mgnify_database_path /data/mgnify/mgy_clusters_2022_05.fa \    --pdb70_database_path /data/pdb70/pdb70 \    --uniref30_database_path /data/uniref30/UniRef30_2021_03 \    --bfd_database_path /data/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt \    --jackhmmer_binary_path $(which jackhmmer) \    --hhblits_binary_path $(which hhblits) \    --hhsearch_binary_path $(which hhsearch) \    --kalign_binary_path $(which kalign) \    --enable_workflow \    --inplace
 ```
 
 Database paths must be mounted as volumes when starting the container:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    -v /host/data:/data \    -v /host/outputs:/outputs \    fastfold bash
 ```
 
 **Sources:** [README.md L117-L136](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L117-L136)
@@ -242,7 +392,7 @@ Database paths must be mounted as volumes when starting the container:
 For multi-GPU inference, the container needs access to all GPUs and proper NCCL configuration:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    -e NCCL_DEBUG=INFO \    -e NCCL_IB_DISABLE=1 \    fastfold bash
 ```
 
 Inside the container, `torch.multiprocessing.spawn` [inference.py L293](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L293-L293)
@@ -252,10 +402,6 @@ Inside the container, `torch.multiprocessing.spawn` [inference.py L293](https://
 **Sources:** [inference.py L122-L160](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L122-L160)
 
 ## Container Runtime Architecture
-
-```
-
-```
 
 **Diagram: Docker Container Runtime Architecture**
 
@@ -277,8 +423,8 @@ The Continuous Integration workflow [build.yml](https://github.com/hpcaitech/Fas
 
 CI workflow container configuration:
 
-```
-
+```yaml
+container:  image: hpcaitech/pytorch-cuda:1.12.0-11.3.0
 ```
 
 The CI build process mirrors the Dockerfile steps but installs dependencies directly rather than building an image, allowing for build artifact caching.
@@ -289,8 +435,8 @@ The CI build process mirrors the Dockerfile steps but installs dependencies dire
 
 Developers can use the Docker image for local testing without installing bioinformatics tools:
 
-```
-
+```markdown
+# Build imagedocker build -t fastfold ./docker # Run tests inside containerdocker run -ti --gpus all --rm --ipc=host \    -v $(pwd):/workspace \    -w /workspace \    fastfold bash -c "pip install -e . && pytest tests/"
 ```
 
 This workflow ensures reproducible test results across different development machines.
@@ -312,7 +458,7 @@ The container inherits CUDA environment variables from the base image:
 For extremely long sequences (10K+ residues), set additional memory configuration:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    -e PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:15000 \    fastfold bash
 ```
 
 **Sources:** [README.md L146](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L146-L146)
@@ -340,7 +486,7 @@ When using `--enable_workflow` [inference.py L118](https://github.com/hpcaitech/
  Ray may require additional configuration:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    -e RAY_memory_monitor_refresh_ms=0 \    fastfold bash
 ```
 
 This disables Ray's memory monitoring, which can interfere with CUDA memory allocation.
@@ -354,7 +500,7 @@ This disables Ray's memory monitoring, which can interfere with CUDA memory allo
 AlphaFold databases are typically large (hundreds of GB) and should be mounted read-only:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    -v /mnt/databases/uniref90:/data/uniref90:ro \    -v /mnt/databases/mgnify:/data/mgnify:ro \    -v /mnt/databases/bfd:/data/bfd:ro \    -v /mnt/databases/uniref30:/data/uniref30:ro \    -v /mnt/databases/pdb70:/data/pdb70:ro \    -v /mnt/databases/pdb_mmcif:/data/pdb_mmcif:ro \    fastfold bash
 ```
 
 **Sources:** [README.md L117-L136](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L117-L136)
@@ -364,7 +510,7 @@ AlphaFold databases are typically large (hundreds of GB) and should be mounted r
 Output directories should be mounted read-write for saving predictions and alignments:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    -v /host/outputs:/outputs:rw \    -v /host/alignments:/alignments:rw \    fastfold bash
 ```
 
 The alignment directory [inference.py L242-L244](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L242-L244)
@@ -380,7 +526,7 @@ The alignment directory [inference.py L242-L244](https://github.com/hpcaitech/Fa
 Model weights (.npz files) should be mounted for inference:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    -v /host/params:/data/params:ro \    fastfold bash
 ```
 
 The `import_jax_weights_` function [inference.py L139](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L139-L139)
@@ -398,7 +544,7 @@ The `import_jax_weights_` function [inference.py L139](https://github.com/hpcait
 Use semantic versioning for production images:
 
 ```
-
+docker build -t fastfold:0.2.0 ./dockerdocker tag fastfold:0.2.0 fastfold:latest
 ```
 
 This allows rollback to previous versions if issues arise.
@@ -408,7 +554,7 @@ This allows rollback to previous versions if issues arise.
 Set memory and CPU limits for containerized training:
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host \    --memory=128g \    --cpus=32 \    -v /data:/data \    fastfold bash
 ```
 
 The `--cpus` flag limits CPU cores available for alignment tools [inference.py L526-L529](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L526-L529)
@@ -420,7 +566,7 @@ The `--cpus` flag limits CPU cores available for alignment tools [inference.py L
 Remove stopped containers and dangling images periodically:
 
 ```
-
+docker container prune -fdocker image prune -f
 ```
 
 The `--rm` flag [README.md L77](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L77-L77)
@@ -433,14 +579,14 @@ The `--rm` flag [README.md L77](https://github.com/hpcaitech/FastFold/blob/eba49
 
 If CUDA extension compilation fails during build, run interactively to debug:
 
-```
-
+```markdown
+docker run -ti --gpus all --rm \    hpcaitech/pytorch-cuda:1.12.0-11.3.0 bash    # Inside containergit clone https://github.com/hpcaitech/FastFold.gitcd FastFoldpython setup.py install --verbose
 ```
 
 Check `CUDA_HOME` is set and nvcc is available:
 
-```
-
+```php
+echo $CUDA_HOMEwhich nvccnvcc --version
 ```
 
 **Sources:** [setup.py L86-L127](https://github.com/hpcaitech/FastFold/blob/eba49680/setup.py#L86-L127)

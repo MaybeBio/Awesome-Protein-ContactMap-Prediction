@@ -28,8 +28,40 @@ The weight import system handles three major challenges:
 2. **Tensor layout transformation**: Weight matrices require transposition and reshaping between frameworks
 3. **Model variant compatibility**: Different model versions (model_1-5, PTM, multimer) have different parameter structures
 
-```
+```mermaid
+flowchart TD
 
+NPZ["DeepMind NPZ File<br>(JAX weights)"]
+Load["np.load()"]
+Data["NumPy arrays<br>JAX naming convention"]
+Model["FastFold PyTorch Model"]
+GetTrans["get_translation_dict()"]
+TransDict["Translation Dictionary<br>PyTorch params → JAX names"]
+Process["_process_translations_dict()"]
+Flat["Flattened key mapping<br>with NPZ_KEY_PREFIX"]
+Assign["assign()"]
+Transform["ParamType.transformation<br>transpose/reshape"]
+Copy["tensor.copy_()"]
+Updated["Updated PyTorch Model"]
+Special["is_fused_triangle_multiplication()"]
+TriFix["_change_tri_mul_in_left_right()"]
+Final["Final Model"]
+
+NPZ --> Load
+Load --> Data
+Model --> GetTrans
+GetTrans --> TransDict
+TransDict --> Process
+Process --> Flat
+Data --> Assign
+Flat --> Assign
+Assign --> Transform
+Transform --> Copy
+Copy --> Updated
+Updated --> Special
+Special --> TriFix
+TriFix --> Final
+Special --> Final
 ```
 
 **Diagram: JAX Weight Import Pipeline**
@@ -57,8 +89,8 @@ Sources: [fastfold/utils/import_weights.py L28-L53](https://github.com/hpcaitech
 
 ### Usage Example
 
-```
-
+```javascript
+from fastfold.utils.import_weights import import_jax_weights_from fastfold.model.hub import AlphaFold # Initialize modelmodel = AlphaFold(config) # Import weights from DeepMind NPZimport_jax_weights_(    model,     npz_path="params_model_1.npz",    version="model_1") # Model now has DeepMind's trained parameters
 ```
 
 The `version` parameter determines which translation dictionary to use. Supported versions include:
@@ -73,8 +105,41 @@ Sources: [fastfold/utils/import_weights.py L588-L609](https://github.com/hpcaite
 
 The translation dictionary maps PyTorch model parameters to JAX NPZ keys using a nested structure:
 
-```
+```mermaid
+flowchart TD
 
+Root["Translation Dictionary"]
+Evoformer["'evoformer'"]
+Structure["'structure_module'"]
+Heads["Prediction Heads"]
+InputEmbed["Input embedders:<br>preprocess_1d, preprocess_msa"]
+Recycling["Recycling:<br>prev_pos_linear, prev_msa_first_row_norm"]
+Template["'template_embedding'"]
+ExtraMSA["'extra_msa_stack'"]
+EvoIter["'evoformer_iteration'<br>(stacked blocks)"]
+SingleTemplate["'single_template_embedding'"]
+TPStack["'template_pair_stack'<br>(stacked TemplatePairBlocks)"]
+IPA["'fold_iteration'<br>IPA + transitions"]
+PLDDT["'predicted_lddt_head'"]
+Distogram["'distogram_head'"]
+ExpRes["'experimentally_resolved_head'"]
+PAE["'predicted_aligned_error_head'<br>(PTM/multimer only)"]
+
+Root --> Evoformer
+Root --> Structure
+Root --> Heads
+Evoformer --> InputEmbed
+Evoformer --> Recycling
+Evoformer --> Template
+Evoformer --> ExtraMSA
+Evoformer --> EvoIter
+Template --> SingleTemplate
+SingleTemplate --> TPStack
+Structure --> IPA
+Heads --> PLDDT
+Heads --> Distogram
+Heads --> ExpRes
+Heads --> PAE
 ```
 
 **Diagram: Translation Dictionary Hierarchy**
@@ -87,8 +152,8 @@ Sources: [fastfold/utils/import_weights.py L131-L585](https://github.com/hpcaite
 
 When FastFold's fused triangle multiplication kernels are enabled, the weight import process requires additional post-processing. DeepMind's implementation swaps the "left" and "right" projections in triangle multiplication incoming operations, which differs from FastFold's implementation:
 
-```
-
+```python
+def _change_tri_mul_in_left_right(module):    """Swap left/right parameters for fused triangle multiplication."""    def _change_para(para):        left_right_para = para.clone().chunk(2, dim=0)        return torch.cat((left_right_para[1], left_right_para[0]), dim=0)        with torch.no_grad():        module.linear_p.weight.copy_(_change_para(module.linear_p.weight))        module.linear_p.bias.copy_(_change_para(module.linear_p.bias))        module.linear_g.weight.copy_(_change_para(module.linear_g.weight))        module.linear_g.bias.copy_(_change_para(module.linear_g.bias))
 ```
 
 This correction is automatically applied to all triangle multiplication modules when `is_fused_triangle_multiplication()` returns `True`.
@@ -103,8 +168,40 @@ FastFold's performance optimizations rely on custom CUDA kernels for critical op
 
 ### Build System Architecture
 
-```
+```mermaid
+flowchart TD
 
+Setup["setup.py"]
+CheckPyTorch["PyTorch >= 1.10?"]
+Error["RuntimeError:<br>Unsupported PyTorch"]
+CheckCUDA["CUDA_HOME exists?"]
+CPUOnly["CPU-only install<br>ext_modules = []"]
+VerCheck["check_cuda_torch_binary_vs_bare_metal()"]
+GetVersion["get_cuda_bare_metal_version()"]
+CompareVer["CUDA version<br>matches PyTorch?"]
+Warning["RuntimeError<br>(can be commented out)"]
+BuildExt["Build CUDA Extensions"]
+LN["fastfold_layer_norm_cuda<br>layer_norm_cuda.cpp<br>layer_norm_cuda_kernel.cu"]
+SM["fastfold_softmax_cuda<br>softmax_cuda.cpp<br>softmax_cuda_kernel.cu"]
+Compile["CUDAExtension<br>+ BuildExtension"]
+Flags["Compile flags:<br>-O3, --use_fast_math<br>-std=c++14, -gencode arch=..."]
+SO["Compiled .so files<br>in site-packages"]
+
+Setup --> CheckPyTorch
+CheckPyTorch --> Error
+CheckPyTorch --> CheckCUDA
+CheckCUDA --> CPUOnly
+CheckCUDA --> VerCheck
+VerCheck --> GetVersion
+GetVersion --> CompareVer
+CompareVer --> Warning
+CompareVer --> BuildExt
+BuildExt --> LN
+BuildExt --> SM
+LN --> Compile
+SM --> Compile
+Compile --> Flags
+Flags --> SO
 ```
 
 **Diagram: CUDA Extension Build Flow**
@@ -133,7 +230,7 @@ The CUDA extensions are configured with specific compiler flags and architecture
 **Version-Dependent Macros:**
 
 ```
-
+version_dependent_macros = [    '-DVERSION_GE_1_1',    '-DVERSION_GE_1_3',     '-DVERSION_GE_1_5']
 ```
 
 These macros enable compatibility shims for different PyTorch versions.
@@ -161,19 +258,19 @@ To add a new CUDA extension:
 2. **Register extension in setup.py**:
 
 ```
-
+ext_modules.append(    cuda_ext_helper(        'fastfold_my_kernel_cuda',        ['my_kernel.cpp', 'my_kernel.cu'],        extra_cuda_flags + cc_flag    ))
 ```
 
 1. **Rebuild the package**:
 
-```
-
+```markdown
+python setup.py install# or for developmentpython setup.py develop
 ```
 
 1. **Import in Python**:
 
-```
-
+```javascript
+import fastfold_my_kernel_cuda result = fastfold_my_kernel_cuda.forward(input_tensor)
 ```
 
 Sources: [setup.py L89-L126](https://github.com/hpcaitech/FastFold/blob/eba49680/setup.py#L89-L126)
@@ -183,7 +280,7 @@ Sources: [setup.py L89-L126](https://github.com/hpcaitech/FastFold/blob/eba49680
 The GitHub Actions CI workflow caches built extensions to accelerate subsequent runs:
 
 ```
-
+- name: Restore cached build artifacts  uses: actions/cache@v2  with:    path: /github/home/fastfold_cache/    key: ${{ runner.os }}-build-${{ hashFiles('setup.py') }}
 ```
 
 This cache is keyed on `setup.py` content, so changes to build configuration trigger a rebuild.
@@ -200,8 +297,61 @@ FastFold provides Ray-based workflows that parallelize MSA alignment and templat
 
 ### Workflow Architecture
 
-```
+```mermaid
+flowchart TD
 
+P_Fasta["FASTA"]
+P_Ray["ray.init()"]
+P_Gen["Generate workflow DAG"]
+P_J1["JackHmmerFactory<br>uniref90 node"]
+P_J2["JackHmmerFactory<br>mgnify node"]
+P_H["HHBlits/JackHmmer<br>BFD node"]
+P_HH["HHSearchFactory<br>pdb70 node<br>(depends on uniref90)"]
+P_Batch["batch_run()"]
+P_Out["Alignment files<br>(3x faster)"]
+S_Fasta["FASTA"]
+S_J1["jackhmmer<br>uniref90"]
+S_J2["jackhmmer<br>mgnify"]
+S_H["hhblits/jackhmmer<br>BFD"]
+S_HH["hhsearch<br>pdb70"]
+S_Out["Alignment files"]
+
+subgraph subGraph1 ["Parallel: FastFoldDataWorkFlow"]
+    P_Fasta
+    P_Ray
+    P_Gen
+    P_J1
+    P_J2
+    P_H
+    P_HH
+    P_Batch
+    P_Out
+    P_Fasta --> P_Ray
+    P_Ray --> P_Gen
+    P_Gen --> P_J1
+    P_Gen --> P_J2
+    P_Gen --> P_H
+    P_J1 --> P_HH
+    P_J1 --> P_Batch
+    P_J2 --> P_Batch
+    P_H --> P_Batch
+    P_HH --> P_Batch
+    P_Batch --> P_Out
+end
+
+subgraph subGraph0 ["Sequential: AlignmentRunner"]
+    S_Fasta
+    S_J1
+    S_J2
+    S_H
+    S_HH
+    S_Out
+    S_Fasta --> S_J1
+    S_J1 --> S_J2
+    S_J2 --> S_H
+    S_H --> S_HH
+    S_HH --> S_Out
+end
 ```
 
 **Diagram: Sequential vs. Parallel Data Processing**
@@ -218,14 +368,14 @@ The monomer workflow class orchestrates parallel execution of alignment tools:
 
 **Initialization:**
 
-```
-
+```javascript
+from fastfold.workflow.template import FastFoldDataWorkFlow workflow = FastFoldDataWorkFlow(    jackhmmer_binary_path="/usr/bin/jackhmmer",    hhblits_binary_path="/usr/bin/hhblits",    hhsearch_binary_path="/usr/bin/hhsearch",    uniref90_database_path="data/uniref90/uniref90.fasta",    mgnify_database_path="data/mgnify/mgy_clusters.fa",    bfd_database_path="data/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt",    pdb70_database_path="data/pdb70/pdb70",    use_small_bfd=False,  # Use hhblits with BFD+UniRef30    no_cpus=8,    uniref_max_hits=10000,    mgnify_max_hits=5000,)
 ```
 
 **Execution:**
 
-```
-
+```markdown
+workflow.run(    fasta_path="target.fasta",    alignment_dir="alignments/",    storage_dir="file:///tmp/ray/workflow_data"  # Ray storage)
 ```
 
 The workflow:
@@ -254,8 +404,8 @@ The multimer workflow extends the monomer version with additional databases and 
 
 **Additional Configuration:**
 
-```
-
+```markdown
+multimer_workflow = FastFoldMultimerDataWorkFlow(    # ... standard databases ...    uniprot_database_path="data/uniprot/uniprot.fasta",    pdb_seqres_database_path="data/pdb_seqres/pdb_seqres.txt",    hmmsearch_binary_path="/usr/bin/hmmsearch",    hmmbuild_binary_path="/usr/bin/hmmbuild",    uniprot_max_hits=50000,)
 ```
 
 The workflow generates five parallel nodes:
@@ -272,8 +422,23 @@ Sources: [fastfold/workflow/template/fastfold_multimer_data_workflow.py L1-L193]
 
 Each alignment tool is wrapped in a factory that generates Ray workflow nodes:
 
-```
+```mermaid
+flowchart TD
 
+Factory["ToolFactory<br>(JackHmmer/HHBlits/HHSearch)"]
+Config["Store config:<br>binary_path, database_path, n_cpu"]
+GenNode["gen_node()<br>(input_path, output_path, after=[])"]
+Node["Ray Workflow Node"]
+Metadata["Node metadata:<br>tool, parameters"]
+Deps["Dependencies:<br>after=[previous_nodes]"]
+Execute["Execute when ready:<br>run tool, write output"]
+
+Factory --> Config
+Config --> GenNode
+GenNode --> Node
+Node --> Metadata
+Node --> Deps
+Node --> Execute
 ```
 
 **Diagram: Workflow Factory Pattern**
@@ -316,8 +481,8 @@ FastFold's configuration system supports sophisticated customization beyond basi
 
 The configuration system supports references between fields using `FieldReference`, enabling computed values and dependent parameters:
 
-```
-
+```javascript
+from ml_collections import ConfigDict, FieldReference config = ConfigDict({    'c_z': 128,    'c_m': 256,    'c_hidden': FieldReference(lambda cfg: cfg.c_z * 2),  # 256    'layer_count': FieldReference(lambda cfg: cfg.c_m // 32),  # 8})
 ```
 
 This pattern is used extensively for derived dimensions (e.g., attention head counts, hidden layer sizes) that maintain mathematical relationships with base parameters.
@@ -330,8 +495,8 @@ Sources: [fastfold/config.py](https://github.com/hpcaitech/FastFold/blob/eba4968
 
 Configuration parameters can be overridden at inference time without modifying the model checkpoint:
 
-```
-
+```javascript
+from fastfold.config import model_config # Load base configurationconfig = model_config("model_1") # Override for memory efficiencyconfig.globals.chunk_size = 4  # Reduce memory usageconfig.globals.inplace = True  # Enable inplace operations # Override model architecture (must match checkpoint!)# config.model.evoformer.no_blocks = 48  # DON'T change structural params # Create model with modified configmodel = AlphaFold(config)model.load_state_dict(checkpoint)
 ```
 
 **Safe to override:**
@@ -365,8 +530,8 @@ The `chunk_size` parameter controls how large tensors are processed in chunks, t
 
 **Example:**
 
-```
-
+```markdown
+# Inference script with chunkingpython inference.py target.fasta data/pdb_mmcif/mmcif_files \    --chunk_size 8 \    --inplace \    --output_dir results/
 ```
 
 Sources: [inference_multimer.sh L1-L24](https://github.com/hpcaitech/FastFold/blob/eba49680/inference_multimer.sh#L1-L24)
@@ -375,8 +540,8 @@ Sources: [inference_multimer.sh L1-L24](https://github.com/hpcaitech/FastFold/bl
 
 Dynamic Axial Parallelism can be configured for sequences exceeding single-GPU memory limits:
 
-```
-
+```javascript
+from fastfold.distributed import init_dap # Initialize DAP with 4-way sequence shardinginit_dap(    rank=rank,    world_size=4,    tensor_model_parallel_size=4,  # Shard across 4 GPUs) # Model forward pass automatically uses DAPoutput = model(batch)
 ```
 
 **DAP Guidelines:**
@@ -398,8 +563,27 @@ FastFold provides a comprehensive Docker image with all dependencies pre-install
 
 ### Dockerfile Structure
 
-```
+```mermaid
+flowchart TD
 
+Base["FROM hpcaitech/pytorch-cuda:1.12.0-11.3.0"]
+Conda["conda install"]
+Bio["Bioinformatics tools:<br>openmm, pdbfixer<br>hmmer, hhsuite, kalign2"]
+Pip["pip install"]
+PyDeps["Python dependencies:<br>biopython, dm-tree, ml-collections<br>scipy, ray, einops"]
+Colossal["pip install colossalai"]
+Clone["git clone FastFold"]
+Install["python setup.py install<br>(builds CUDA extensions)"]
+Image["FastFold Docker Image<br>Ready for inference/training"]
+
+Base --> Conda
+Conda --> Bio
+Bio --> Pip
+Pip --> PyDeps
+PyDeps --> Colossal
+Colossal --> Clone
+Clone --> Install
+Install --> Image
 ```
 
 **Diagram: Docker Image Build Layers**
@@ -425,20 +609,20 @@ Sources: [docker/Dockerfile L1](https://github.com/hpcaitech/FastFold/blob/eba49
 
 **Conda packages (bioinformatics tools):**
 
-```
-
+```dockerfile
+RUN conda install openmm=7.7.0 pdbfixer -c conda-forge -y \ && conda install hmmer==3.3.2 hhsuite=3.3.0 kalign2=2.04 -c bioconda -y
 ```
 
 **Pip packages (Python libraries):**
 
-```
-
+```dockerfile
+RUN pip install biopython==1.79 dm-tree==0.1.6 ml-collections==0.1.0 \scipy==1.7.1 ray pyarrow pandas einops
 ```
 
 **ColossalAI (distributed training):**
 
-```
-
+```dockerfile
+RUN pip install colossalai
 ```
 
 Sources: [docker/Dockerfile L3-L9](https://github.com/hpcaitech/FastFold/blob/eba49680/docker/Dockerfile#L3-L9)
@@ -446,7 +630,7 @@ Sources: [docker/Dockerfile L3-L9](https://github.com/hpcaitech/FastFold/blob/eb
 ### Building the Image
 
 ```
-
+cd docker/docker build -t fastfold:latest .
 ```
 
 Build time: ~20-30 minutes depending on network speed and CPU.
@@ -456,13 +640,13 @@ Build time: ~20-30 minutes depending on network speed and CPU.
 **Interactive shell:**
 
 ```
-
+docker run -it --gpus all \    -v /path/to/data:/data \    -v /path/to/output:/output \    fastfold:latest bash
 ```
 
 **Direct inference:**
 
 ```
-
+docker run --gpus all \    -v /path/to/data:/data \    -v /path/to/output:/output \    fastfold:latest \    python inference.py /data/target.fasta /data/pdb_mmcif/mmcif_files \        --output_dir /output \        --uniref90_database_path /data/uniref90/uniref90.fasta \        --model_preset monomer \        --param_path /data/params/params_model_1.npz
 ```
 
 Sources: [docker/Dockerfile L1-L14](https://github.com/hpcaitech/FastFold/blob/eba49680/docker/Dockerfile#L1-L14)
@@ -477,16 +661,16 @@ FastFold includes experimental support for Intel Habana Gaudi accelerators, enab
 
 Habana support requires disabling CUDA-specific optimizations:
 
-```
-
+```markdown
+config = model_config("model_1") # Disable CUDA kernelsconfig.globals.use_fused_kernel = False # Use PyTorch-native operationsconfig.globals.use_triton_kernel = False # Standard chunking still supportedconfig.globals.chunk_size = 16
 ```
 
 ### Execution Environment
 
 Habana execution requires the Habana SynapseAI SDK and PyTorch integration:
 
-```
-
+```javascript
+# Install Habana PyTorchpip install habana-torch-plugin habana-torch-dataloader # Set environment variablesexport HABANA_VISIBLE_DEVICES=0,1,2,3export PT_HPU_LAZY_MODE=1 # Run inferencepython inference.py target.fasta data/pdb_mmcif/mmcif_files \    --device hpu \    --output_dir results/
 ```
 
 **Note:** Habana support is experimental and may not achieve the same performance as NVIDIA GPUs due to missing fused kernel implementations. The FastNN optimizations that rely on CUDA/Triton kernels will fall back to PyTorch operations.

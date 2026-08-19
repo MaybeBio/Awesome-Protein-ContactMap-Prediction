@@ -41,8 +41,79 @@ The Habana implementation requires custom operator compilation before execution,
 
 ## Platform Architecture
 
-```
+```mermaid
+flowchart TD
 
+Model["AlphaFold Model"]
+InjectFastNN["inject_fastnn<br>Evoformer Optimization"]
+DAP["Dynamic Axial Parallelism"]
+TorchBackend["PyTorch Backend Selection"]
+CUDAPath["CUDA Execution Path"]
+HabanaPath["Habana Execution Path"]
+CUDAKernels["CUDA/Triton Kernels"]
+CUDAComm["NCCL Communication"]
+LayerNormCUDA["fastfold_layer_norm_cuda"]
+SoftmaxCUDA["fastfold_softmax_cuda"]
+TritonOps["Triton JIT Kernels"]
+HabanaKernels["Habana Custom Ops"]
+HabanaComm["Habana Collective Comm"]
+HabanaSetup["Custom Op Build<br>setup.py or setup2.py"]
+Gaudi1Ops["Gaudi Ops<br>setup.py build"]
+Gaudi2Ops["Gaudi2 Ops<br>setup2.py build"]
+InferenceScript["habana/inference.sh"]
+TrainScript["habana/train.sh"]
+
+InjectFastNN --> TorchBackend
+DAP --> TorchBackend
+CUDAPath --> CUDAKernels
+CUDAPath --> CUDAComm
+HabanaPath --> HabanaKernels
+HabanaPath --> HabanaComm
+HabanaKernels --> InferenceScript
+HabanaKernels --> TrainScript
+
+subgraph subGraph4 ["Execution Scripts"]
+    InferenceScript
+    TrainScript
+end
+
+subgraph subGraph3 ["Habana Path (Gaudi)"]
+    HabanaKernels
+    HabanaComm
+    HabanaSetup
+    Gaudi1Ops
+    Gaudi2Ops
+    HabanaKernels --> HabanaSetup
+    HabanaSetup --> Gaudi1Ops
+    HabanaSetup --> Gaudi2Ops
+end
+
+subgraph subGraph2 ["CUDA Path (GPU)"]
+    CUDAKernels
+    CUDAComm
+    LayerNormCUDA
+    SoftmaxCUDA
+    TritonOps
+    CUDAKernels --> LayerNormCUDA
+    CUDAKernels --> SoftmaxCUDA
+    CUDAKernels --> TritonOps
+end
+
+subgraph subGraph1 ["Platform Abstraction Layer"]
+    TorchBackend
+    CUDAPath
+    HabanaPath
+    TorchBackend --> CUDAPath
+    TorchBackend --> HabanaPath
+end
+
+subgraph subGraph0 ["FastFold Core"]
+    Model
+    InjectFastNN
+    DAP
+    Model --> InjectFastNN
+    Model --> DAP
+end
 ```
 
 **Diagram: FastFold Platform Abstraction Architecture**
@@ -91,8 +162,43 @@ FastFold's optimized kernels require platform-specific compilation for Habana pr
 
 ### Build Process Overview
 
-```
+```mermaid
+flowchart TD
 
+SourceDir["fastfold/habana/fastnn/custom_op/"]
+SetupScript["Select Setup Script"]
+Setup1["python setup.py build"]
+Setup2["python setup2.py build"]
+Build1["Compile Gaudi Kernels"]
+Build2["Compile Gaudi2 Kernels"]
+Output["Custom Op Binaries"]
+Import["Import Test"]
+Ready["Ready for Execution"]
+
+Output --> Import
+
+subgraph Verification ["Verification"]
+    Import
+    Ready
+    Import --> Ready
+end
+
+subgraph subGraph0 ["Custom Operator Build"]
+    SourceDir
+    SetupScript
+    Setup1
+    Setup2
+    Build1
+    Build2
+    Output
+    SourceDir --> SetupScript
+    SetupScript --> Setup1
+    SetupScript --> Setup2
+    Setup1 --> Build1
+    Setup2 --> Build2
+    Build1 --> Output
+    Build2 --> Output
+end
 ```
 
 **Diagram: Habana Custom Operator Build Workflow**
@@ -104,13 +210,13 @@ The build process differs based on the target Habana generation:
 **For Gaudi (1st Generation):**
 
 ```
-
+cd fastfold/habana/fastnn/custom_op/python setup.py build
 ```
 
 **For Gaudi2 (2nd Generation):**
 
 ```
-
+cd fastfold/habana/fastnn/custom_op/python setup2.py build
 ```
 
 ### Build Script Structure
@@ -144,8 +250,60 @@ These scripts compile platform-specific implementations of critical operations s
 
 Once custom operators are built, inference follows a similar workflow to GPU execution with Habana-specific scripts.
 
-```
+```mermaid
+flowchart TD
 
+DataPrep["Data Preparation<br>FASTA, Alignments, Features"]
+CustomOps["Build Custom Ops<br>setup.py/setup2.py"]
+Ready["Environment Ready"]
+InferenceScript["bash habana/inference.sh"]
+LoadConfig["Load model_config"]
+InitModel["AlphaFold Model Init"]
+InjectOpt["inject_fastnn<br>Apply Optimizations"]
+HabanaBackend["Habana Backend Selection<br>PyTorch Auto-routing"]
+Forward["Forward Pass"]
+Output["Structure Prediction"]
+SavePDB["Save PDB Files"]
+OptRelax["Optional Amber Relaxation"]
+CustomKernels["Custom Op Kernels<br>Platform-specific"]
+HabanaComm["Habana Collectives<br>Multi-device sync"]
+
+Ready --> InferenceScript
+HabanaBackend --> CustomKernels
+HabanaBackend --> HabanaComm
+
+subgraph subGraph2 ["Platform Adaptation"]
+    CustomKernels
+    HabanaComm
+end
+
+subgraph subGraph1 ["Inference Execution"]
+    InferenceScript
+    LoadConfig
+    InitModel
+    InjectOpt
+    HabanaBackend
+    Forward
+    Output
+    SavePDB
+    OptRelax
+    InferenceScript --> LoadConfig
+    LoadConfig --> InitModel
+    InitModel --> InjectOpt
+    InjectOpt --> HabanaBackend
+    HabanaBackend --> Forward
+    Forward --> Output
+    Output --> SavePDB
+    Output --> OptRelax
+end
+
+subgraph subGraph0 ["Setup Phase"]
+    DataPrep
+    CustomOps
+    Ready
+    DataPrep --> Ready
+    CustomOps --> Ready
+end
 ```
 
 **Diagram: Habana Inference Execution Flow**
@@ -155,7 +313,7 @@ Once custom operators are built, inference follows a similar workflow to GPU exe
 Execute the Habana inference script:
 
 ```
-
+bash habana/inference.sh
 ```
 
 The script [habana/inference.sh](https://github.com/hpcaitech/FastFold/blob/eba49680/habana/inference.sh)
@@ -193,8 +351,69 @@ The inference logic remains identical to [inference.py](https://github.com/hpcai
 
 Training on Habana follows the same ColossalAI-based distributed training framework as GPU execution, with platform-specific kernel routing.
 
-```
+```mermaid
+flowchart TD
 
+DatasetPrep["Training Dataset<br>OpenFoldDataset"]
+ModelInit["AlphaFold Model<br>inject_fastnn applied"]
+CustomOpsBuild["Habana Custom Ops<br>Pre-built"]
+ColossalInit["colossalai.initialize<br>Multi-device setup"]
+TrainScript["bash habana/train.sh"]
+Engine["ColossalAI Engine<br>Habana Backend"]
+Batch["Load Batch"]
+ForwardPass["engine.forward<br>Custom ops on Habana"]
+Loss["AlphaFoldLoss"]
+Backward["engine.backward"]
+OptStep["engine.step<br>HybridAdam"]
+Checkpoint["Save Checkpoint?"]
+Save["Save Model State"]
+HabanaOps["Habana Custom Operators"]
+HabanaGrad["Habana Gradient Computation"]
+TPCKernels["TPC Kernels"]
+
+ColossalInit --> TrainScript
+ForwardPass --> HabanaOps
+Backward --> HabanaGrad
+
+subgraph subGraph2 ["Habana Runtime"]
+    HabanaOps
+    HabanaGrad
+    TPCKernels
+    HabanaOps --> TPCKernels
+    HabanaGrad --> TPCKernels
+end
+
+subgraph subGraph1 ["Training Loop"]
+    TrainScript
+    Engine
+    Batch
+    ForwardPass
+    Loss
+    Backward
+    OptStep
+    Checkpoint
+    Save
+    TrainScript --> Engine
+    Engine --> Batch
+    Batch --> ForwardPass
+    ForwardPass --> Loss
+    Loss --> Backward
+    Backward --> OptStep
+    OptStep --> Checkpoint
+    Checkpoint --> Save
+    Checkpoint --> Batch
+    Save --> Batch
+end
+
+subgraph subGraph0 ["Training Setup"]
+    DatasetPrep
+    ModelInit
+    CustomOpsBuild
+    ColossalInit
+    DatasetPrep --> ColossalInit
+    ModelInit --> ColossalInit
+    CustomOpsBuild --> ColossalInit
+end
 ```
 
 **Diagram: Habana Training Execution Flow**
@@ -204,7 +423,7 @@ Training on Habana follows the same ColossalAI-based distributed training framew
 Execute the Habana training script:
 
 ```
-
+bash habana/train.sh
 ```
 
 The script [habana/train.sh](https://github.com/hpcaitech/FastFold/blob/eba49680/habana/train.sh)
@@ -284,8 +503,8 @@ To debug Habana execution:
 
 When running on Habana, certain environment variables must be set:
 
-```
-
+```javascript
+# Example Habana environment setup (typically in habana/inference.sh or habana/train.sh)export HABANA_VISIBLE_DEVICES=0,1,2,3  # Similar to CUDA_VISIBLE_DEVICESexport HABANA_PROFILE=0                 # Disable unless profilingexport PT_HPU_LAZY_MODE=1               # Enable lazy execution mode
 ```
 
 These variables are typically configured within [habana/inference.sh](https://github.com/hpcaitech/FastFold/blob/eba49680/habana/inference.sh)
@@ -304,8 +523,49 @@ These variables are typically configured within [habana/inference.sh](https://gi
 
 The Habana platform integrates with FastFold's existing components without modification:
 
-```
+```mermaid
+flowchart TD
 
+Config["model_config<br>ConfigDict"]
+Model["AlphaFold Model"]
+Inject["inject_fastnn"]
+DataPipe["DataPipeline"]
+PyTorch["PyTorch Runtime"]
+GPUBackend["CUDA Backend"]
+HabanaBackend["Habana Backend"]
+CUDAOps["CUDA Kernels"]
+HabanaOps["Habana Custom Ops"]
+Result["Model Output"]
+
+GPUBackend --> CUDAOps
+HabanaBackend --> HabanaOps
+Inject --> PyTorch
+
+subgraph Execution ["Execution"]
+    CUDAOps
+    HabanaOps
+    Result
+    CUDAOps --> Result
+    HabanaOps --> Result
+end
+
+subgraph subGraph1 ["Backend Selection"]
+    PyTorch
+    GPUBackend
+    HabanaBackend
+    PyTorch --> GPUBackend
+    PyTorch --> HabanaBackend
+end
+
+subgraph Platform-Agnostic ["Platform-Agnostic"]
+    Config
+    Model
+    Inject
+    DataPipe
+    Config --> Model
+    Model --> Inject
+    DataPipe --> Model
+end
 ```
 
 **Diagram: Backend-Agnostic Model Execution**

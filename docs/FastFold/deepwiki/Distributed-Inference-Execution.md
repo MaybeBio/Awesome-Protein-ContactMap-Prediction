@@ -50,8 +50,51 @@ The inference workflow follows this pattern:
 
 FastFold uses `torch.multiprocessing.spawn` to create GPU worker processes. The main process coordinates spawning and result collection:
 
-```
+```mermaid
+flowchart TD
 
+Main["main() / inference_monomer_model()"]
+Features["Generate feature_dict<br>via DataPipeline"]
+Process["Process features<br>via FeaturePipeline"]
+Batch["batch = processed_feature_dict"]
+Manager["mp.Manager()"]
+Queue["result_q = manager.Queue()"]
+Spawn["torch.multiprocessing.spawn"]
+Collect["out = result_q.get()"]
+W0["Worker 0<br>inference_model(rank=0, ...)"]
+W1["Worker 1<br>inference_model(rank=1, ...)"]
+WN["Worker N<br>inference_model(rank=N-1, ...)"]
+
+Spawn --> W0
+Spawn --> W1
+Spawn --> WN
+W0 --> Queue
+W1 --> Queue
+WN --> Queue
+
+subgraph subGraph1 ["Worker Processes (N GPUs)"]
+    W0
+    W1
+    WN
+end
+
+subgraph subGraph0 ["Main Process"]
+    Main
+    Features
+    Process
+    Batch
+    Manager
+    Queue
+    Spawn
+    Collect
+    Main --> Features
+    Features --> Process
+    Process --> Batch
+    Batch --> Manager
+    Manager --> Queue
+    Queue --> Spawn
+    Spawn --> Collect
+end
 ```
 
 **Diagram: Process Spawning Workflow**
@@ -72,8 +115,8 @@ The spawning occurs in both monomer and multimer inference modes:
 
 Each spawned worker executes the `inference_model` function with this signature:
 
-```
-
+```python
+def inference_model(rank, world_size, result_q, batch, args):    # rank: GPU index (0 to world_size-1)    # world_size: Total number of GPUs    # result_q: Multiprocessing queue for result collection    # batch: Preprocessed feature dictionary    # args: Inference configuration arguments
 ```
 
 **Sources:** [inference.py L122](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L122-L122)
@@ -86,8 +129,21 @@ Each spawned worker executes the `inference_model` function with this signature:
 
 Each worker process must set distributed environment variables before calling `init_dap`. The `inference_model` function configures these at entry:
 
-```
+```mermaid
+flowchart TD
 
+Entry["Worker Process Entry<br>inference_model(rank, world_size, ...)"]
+SetRank["os.environ['RANK'] = str(rank)"]
+SetLocal["os.environ['LOCAL_RANK'] = str(rank)"]
+SetWorld["os.environ['WORLD_SIZE'] = str(world_size)"]
+InitDAP["fastfold.distributed.init_dap()"]
+SetDevice["torch.cuda.set_device(rank)"]
+
+Entry --> SetRank
+SetRank --> SetLocal
+SetLocal --> SetWorld
+SetWorld --> InitDAP
+InitDAP --> SetDevice
 ```
 
 **Diagram: Worker Initialization Sequence**
@@ -108,8 +164,29 @@ The `init_dap` function in [fastfold/distributed/core.py L17-L41](https://github
 | 4. Set default env vars | Fallback for single-device launch | [core.py L33-L37](https://github.com/hpcaitech/FastFold/blob/eba49680/core.py#L33-L37) |
 | 5. Launch ColossalAI | Initialize process groups with tensor parallelism | [core.py L39-L40](https://github.com/hpcaitech/FastFold/blob/eba49680/core.py#L39-L40) |
 
-```
+```mermaid
+flowchart TD
 
+InitDAP["init_dap(tensor_model_parallel_size)"]
+DisableLog["colossalai.logging.disable_existing_loggers()"]
+CheckSize["tensor_model_parallel_size<br>provided?"]
+UseEnv["size = int(os.environ['WORLD_SIZE'])"]
+UseParam["size = tensor_model_parallel_size"]
+DefaultOne["size = 1"]
+CheckInit["torch.distributed<br>.is_initialized()?"]
+Error["Error: Already initialized"]
+SetDefaults["set_missing_distributed_environ()<br>WORLD_SIZE=1, RANK=0, etc."]
+Launch["colossalai.launch_from_torch()<br>config={'parallel': {'tensor': {'size': size}}}"]
+
+InitDAP --> DisableLog
+DisableLog --> CheckSize
+CheckSize --> UseEnv
+CheckSize --> UseParam
+UseEnv --> CheckInit
+UseParam --> CheckInit
+CheckInit --> Error
+CheckInit --> SetDefaults
+SetDefaults --> Launch
 ```
 
 **Diagram: init_dap Execution Flow**
@@ -120,8 +197,8 @@ The `init_dap` function in [fastfold/distributed/core.py L17-L41](https://github
 
 For single-device launches, `init_dap` sets missing environment variables:
 
-```
-
+```markdown
+# From core.py:12-14, 33-37set_missing_distributed_environ('WORLD_SIZE', 1)set_missing_distributed_environ('RANK', 0)set_missing_distributed_environ('LOCAL_RANK', 0)set_missing_distributed_environ('MASTER_ADDR', "localhost")set_missing_distributed_environ('MASTER_PORT', 18417)
 ```
 
 This allows code to run identically in single-GPU and multi-GPU modes without conditional logic.
@@ -138,8 +215,33 @@ This allows code to run identically in single-GPU and multi-GPU modes without co
 
 After DAP initialization, each worker loads the model and applies optimizations:
 
-```
+```mermaid
+flowchart TD
 
+InitComplete["DAP Initialization Complete"]
+SetDevice["torch.cuda.set_device(rank)"]
+LoadConfig["config = model_config(args.model_name)"]
+SetChunk["config.globals.chunk_size = args.chunk_size"]
+SetInplace["config.globals.inplace = args.inplace"]
+SetMultimer["config.globals.is_multimer = ..."]
+CreateModel["model = AlphaFold(config)"]
+ImportWeights["import_jax_weights_(model, args.param_path, ...)"]
+InjectFastNN["model = inject_fastnn(model)"]
+SetEval["model = model.eval()"]
+ToCUDA["model = model.cuda()"]
+SetChunkSize["set_chunk_size(model.globals.chunk_size)"]
+
+InitComplete --> SetDevice
+SetDevice --> LoadConfig
+LoadConfig --> SetChunk
+SetChunk --> SetInplace
+SetInplace --> SetMultimer
+SetMultimer --> CreateModel
+CreateModel --> ImportWeights
+ImportWeights --> InjectFastNN
+InjectFastNN --> SetEval
+SetEval --> ToCUDA
+ToCUDA --> SetChunkSize
 ```
 
 **Diagram: Worker Model Initialization**
@@ -157,8 +259,27 @@ After DAP initialization, each worker loads the model and applies optimizations:
 
 Each worker executes the forward pass independently with synchronized communication:
 
-```
+```mermaid
+sequenceDiagram
+  participant Worker 0
+  participant Worker 1
+  participant Worker N
+  participant Distributed Communication
 
+  Worker 0->>Worker 0: Convert batch to CUDA tensors
+  Worker 1->>Worker 1: Convert batch to CUDA tensors
+  Worker N->>Worker N: Convert batch to CUDA tensors
+  note over Worker 0,Worker N: torch.no_grad() context
+  Worker 0->>Worker 0: out = model(batch)
+  Worker 1->>Worker 1: out = model(batch)
+  Worker N->>Worker N: out = model(batch)
+  note over Worker 0,Worker N: DAP communication happens
+  Worker 0->>Distributed Communication: AllGather/Scatter ops
+  Worker 1->>Distributed Communication: AllGather/Scatter ops
+  Worker N->>Distributed Communication: AllGather/Scatter ops
+  Worker 0->>Worker 0: Convert output to CPU numpy
+  Worker 1->>Worker 1: Convert output to CPU numpy
+  Worker N->>Worker N: Convert output to CPU numpy
 ```
 
 **Diagram: Worker Forward Pass with DAP Communication**
@@ -173,8 +294,19 @@ Each worker executes the forward pass independently with synchronized communicat
 
 Workers synchronize at completion using PyTorch distributed barriers:
 
-```
+```mermaid
+flowchart TD
 
+Forward["Forward Pass Complete"]
+ToCPU["out = tensor_tree_map(lambda x: np.array(x.cpu()), out)"]
+PutQueue["result_q.put(out)"]
+Barrier["torch.distributed.barrier()"]
+CUDASync["torch.cuda.synchronize()"]
+
+Forward --> ToCPU
+ToCPU --> PutQueue
+PutQueue --> Barrier
+Barrier --> CUDASync
 ```
 
 **Diagram: Worker Completion Synchronization**
@@ -194,8 +326,8 @@ The barrier ensures all workers complete before any process exits. Only one work
 
 The main process retrieves results from the queue after all workers spawn:
 
-```
-
+```markdown
+# From inference.py:441-445 (monomer) and 293-295 (multimer)manager = mp.Manager()result_q = manager.Queue()torch.multiprocessing.spawn(inference_model, nprocs=args.gpus, args=(args.gpus, result_q, batch, args))out = result_q.get()
 ```
 
 The `spawn` call blocks until all workers exit. Since only rank 0 puts results, `result_q.get()` retrieves the single output dictionary.
@@ -212,8 +344,35 @@ The `spawn` call blocks until all workers exit. Since only rank 0 puts results, 
 
 Each worker is assigned to a specific GPU via `torch.cuda.set_device(rank)`:
 
-```
+```mermaid
+flowchart TD
 
+W0Model["Worker 0 Model"]
+W0Batch["Worker 0 Batch Tensors"]
+W1Model["Worker 1 Model"]
+W1Batch["Worker 1 Batch Tensors"]
+WNModel["Worker N Model"]
+WNBatch["Worker N Batch Tensors"]
+SharedBatch["Shared Feature Dict<br>(CPU Memory)"]
+
+SharedBatch --> W0Batch
+SharedBatch --> W1Batch
+SharedBatch --> WNBatch
+
+subgraph subGraph2 ["GPU N"]
+    WNModel
+    WNBatch
+end
+
+subgraph subGraph1 ["GPU 1"]
+    W1Model
+    W1Batch
+end
+
+subgraph subGraph0 ["GPU 0"]
+    W0Model
+    W0Batch
+end
 ```
 
 **Diagram: GPU Memory Allocation per Worker**
@@ -222,8 +381,8 @@ Each worker is assigned to a specific GPU via `torch.cuda.set_device(rank)`:
 
 Input features are transferred from CPU to GPU in each worker:
 
-```
-
+```css
+# From inference.py:148batch = {k: torch.as_tensor(v).cuda() for k, v in batch.items()}
 ```
 
 This creates independent GPU copies, enabling concurrent execution without data races.
@@ -255,8 +414,8 @@ For detailed sharding mechanics, see [Dynamic Axial Parallelism (DAP)](/hpcaitec
 
 The `--gpus` argument controls the number of spawned workers:
 
-```
-
+```markdown
+# Single GPU (no parallelism)python inference.py target.fasta data/pdb_mmcif/mmcif_files/ --gpus 1 ... # Dual GPU (DAP with 2-way sharding)python inference.py target.fasta data/pdb_mmcif/mmcif_files/ --gpus 2 ... # Quad GPU (DAP with 4-way sharding)python inference.py target.fasta data/pdb_mmcif/mmcif_files/ --gpus 4 ...
 ```
 
 **Sources:** [README.md L115-L136](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L115-L136)
@@ -275,7 +434,7 @@ Additional flags control memory usage within each worker:
 Example for ultra-long sequences:
 
 ```
-
+python inference.py target.fasta data/pdb_mmcif/mmcif_files/ \    --gpus 2 \    --chunk_size 64 \    --inplace \    ...
 ```
 
 **Sources:** [README.md L141-L164](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L141-L164)

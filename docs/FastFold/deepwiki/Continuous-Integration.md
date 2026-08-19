@@ -19,8 +19,106 @@ FastFold's CI is implemented as a single GitHub Actions workflow defined in `.gi
 
 **CI Pipeline Architecture**
 
-```
+```mermaid
+flowchart TD
 
+PR["Pull Request Event"]
+CheckDraft["draft == false?"]
+Skip1["Skip Workflow"]
+CheckBase["base_ref == 'main'?"]
+Skip2["Skip Workflow"]
+CheckRepo["repo == 'hpcaitech/FastFold'?"]
+Skip3["Skip Workflow"]
+CheckLabel["Has label<br>'Run Build and Test'?"]
+Skip4["Skip Workflow"]
+Execute["Execute Workflow"]
+Runner["self-hosted GPU runner"]
+Container["Docker Container:<br>hpcaitech/pytorch-cuda:1.12.0-11.3.0"]
+MountVol["Mount Volume:<br>/data/scratch/fastfold"]
+Timeout["40 minute timeout"]
+Checkout["actions/checkout@v2<br>with SSH_KEY_FOR_CI"]
+CheckCache["Cache exists at<br>/github/home/fastfold_cache/?"]
+RestoreCache["cp -r /github/home/fastfold_cache/*<br>to workspace"]
+FreshBuild["Fresh build"]
+InstallReq["pip install -r<br>requirements/requirements.txt"]
+InstallPkg["pip install -e ."]
+InstallTest["pip install -r<br>requirements/test_requirements.txt"]
+SaveCache["cp build/*.so to<br>/github/home/fastfold_cache/"]
+SetPythonPath["PYTHONPATH=$PWD"]
+SetNCCL["NCCL_SHM_DISABLE=1"]
+RunTests["pytest tests"]
+Results["Tests Pass?"]
+Success["✓ Workflow Success"]
+Failure["✗ Workflow Failure"]
+
+Execute --> Runner
+Timeout --> Checkout
+SaveCache --> SetPythonPath
+
+subgraph subGraph3 ["Test Stage"]
+    SetPythonPath
+    SetNCCL
+    RunTests
+    Results
+    Success
+    Failure
+    SetPythonPath --> SetNCCL
+    SetNCCL --> RunTests
+    RunTests --> Results
+    Results --> Success
+    Results --> Failure
+end
+
+subgraph subGraph2 ["Build Stage"]
+    Checkout
+    CheckCache
+    RestoreCache
+    FreshBuild
+    InstallReq
+    InstallPkg
+    InstallTest
+    SaveCache
+    Checkout --> CheckCache
+    CheckCache --> RestoreCache
+    CheckCache --> FreshBuild
+    RestoreCache --> InstallReq
+    FreshBuild --> InstallReq
+    InstallReq --> InstallPkg
+    InstallPkg --> InstallTest
+    InstallTest --> SaveCache
+end
+
+subgraph subGraph1 ["Execution Environment"]
+    Runner
+    Container
+    MountVol
+    Timeout
+    Runner --> Container
+    Container --> MountVol
+    MountVol --> Timeout
+end
+
+subgraph subGraph0 ["Trigger Conditions"]
+    PR
+    CheckDraft
+    Skip1
+    CheckBase
+    Skip2
+    CheckRepo
+    Skip3
+    CheckLabel
+    Skip4
+    Execute
+    PR --> CheckDraft
+    CheckDraft --> Skip1
+    CheckDraft --> CheckBase
+    CheckBase --> Skip2
+    CheckBase --> CheckRepo
+    CheckRepo --> Skip3
+    CheckRepo --> CheckLabel
+    CheckLabel --> Skip4
+    CheckLabel --> Execute
+end
 ```
 
 **Sources:** [.github/workflows/build.yml L1-L40](https://github.com/hpcaitech/FastFold/blob/eba49680/.github/workflows/build.yml#L1-L40)
@@ -35,8 +133,8 @@ The CI workflow uses a gated execution model with multiple conditions to control
 
 The workflow triggers on `pull_request` events with specific types:
 
-```
-
+```yaml
+on:   pull_request:    types: [synchronize, labeled]
 ```
 
 * **synchronize**: Triggered when new commits are pushed to the PR branch
@@ -68,7 +166,7 @@ The label-based gating mechanism allows maintainers to control which PRs trigger
 The workflow executes on a self-hosted runner with GPU access:
 
 ```
-
+runs-on: [self-hosted, gpu]
 ```
 
 Self-hosted runners are required because:
@@ -83,8 +181,8 @@ Self-hosted runners are required because:
 
 The workflow runs inside a pre-configured Docker container:
 
-```
-
+```yaml
+container:  image: hpcaitech/pytorch-cuda:1.12.0-11.3.0  options: --gpus all --rm -v /data/scratch/fastfold:/data/scratch/fastfold
 ```
 
 **Container Specifications:**
@@ -110,7 +208,7 @@ The container provides a consistent environment with:
 The workflow enforces a 40-minute timeout to prevent hung jobs from consuming runner resources:
 
 ```
-
+timeout-minutes: 40
 ```
 
 Typical execution time breakdown:
@@ -131,8 +229,51 @@ FastFold implements a custom caching mechanism to accelerate subsequent CI runs 
 
 **Caching Architecture**
 
-```
+```mermaid
+flowchart TD
 
+WS["/__w/FastFold/FastFold/"]
+WS_Build["/__w/FastFold/FastFold/build/"]
+WS_SO["/__w/FastFold/FastFold/*.so"]
+Cache["/github/home/fastfold_cache/"]
+Cache_Build["/github/home/fastfold_cache/build/"]
+Cache_SO["/github/home/fastfold_cache/*.so"]
+CheckCache["Cache exists?"]
+Restore["cp -r /github/home/fastfold_cache/*<br>to /__w/FastFold/FastFold/"]
+Fresh["Fresh build proceeds"]
+SaveBuild["cp -r build/<br>to /github/home/fastfold_cache/"]
+SaveSO["cp *.so<br>to /github/home/fastfold_cache/"]
+
+Restore --> WS
+WS_Build --> SaveBuild
+SaveBuild --> Cache_Build
+WS_SO --> SaveSO
+SaveSO --> Cache_SO
+
+subgraph subGraph3 ["Save Phase"]
+    SaveBuild
+    SaveSO
+end
+
+subgraph subGraph2 ["Restore Phase"]
+    CheckCache
+    Restore
+    Fresh
+    CheckCache --> Restore
+    CheckCache --> Fresh
+end
+
+subgraph subGraph1 ["Persistent Cache"]
+    Cache
+    Cache_Build
+    Cache_SO
+end
+
+subgraph Workspace ["Workspace"]
+    WS
+    WS_Build
+    WS_SO
+end
 ```
 
 ### Cache Restoration
@@ -140,7 +281,7 @@ FastFold implements a custom caching mechanism to accelerate subsequent CI runs 
 Before dependency installation, the workflow checks for cached artifacts:
 
 ```
-
+[ ! -z "$(ls -A /github/home/fastfold_cache/)" ] && \  cp -r /github/home/fastfold_cache/* /__w/FastFold/FastFold/
 ```
 
 This command:
@@ -157,7 +298,7 @@ This command:
 After successful installation, the workflow saves artifacts for future runs:
 
 ```
-
+cp -r /__w/FastFold/FastFold/build /github/home/fastfold_cache/cp /__w/FastFold/FastFold/*.so /github/home/fastfold_cache/
 ```
 
 **Cached Artifacts:**
@@ -183,14 +324,65 @@ The installation phase installs dependencies and compiles CUDA extensions. The p
 
 **Installation Dependency Graph**
 
-```
+```mermaid
+flowchart TD
 
+Start["Installation Start"]
+Req["pip install -r<br>requirements/requirements.txt"]
+Einops["einops"]
+ColossalAI["colossalai"]
+Package["pip install -e ."]
+SetupPy["setup.py execution"]
+CheckPyTorch["PyTorch >= 1.10?"]
+Error["RuntimeError"]
+CheckCUDA["CUDA_HOME exists?"]
+SkipExt["Skip CUDA extensions"]
+CompileExt["Compile CUDA extensions"]
+LayerNorm["fastfold_layer_norm_cuda.so"]
+Softmax["fastfold_softmax_cuda.so"]
+TestReq["pip install -r<br>requirements/test_requirements.txt"]
+Biopython["biopython==1.79"]
+DMTree["dm-tree==0.1.6"]
+MLCollections["ml-collections==0.1.0"]
+Scipy["scipy==1.7.1"]
+Pandas["pandas"]
+Pytest["pytest"]
+Complete["Installation Complete"]
+
+Start --> Req
+Req --> Einops
+Req --> ColossalAI
+Einops --> Package
+ColossalAI --> Package
+Package --> SetupPy
+SetupPy --> CheckPyTorch
+CheckPyTorch --> Error
+CheckPyTorch --> CheckCUDA
+CheckCUDA --> SkipExt
+CheckCUDA --> CompileExt
+CompileExt --> LayerNorm
+CompileExt --> Softmax
+LayerNorm --> TestReq
+Softmax --> TestReq
+SkipExt --> TestReq
+TestReq --> Biopython
+TestReq --> DMTree
+TestReq --> MLCollections
+TestReq --> Scipy
+TestReq --> Pandas
+TestReq --> Pytest
+Biopython --> Complete
+DMTree --> Complete
+MLCollections --> Complete
+Scipy --> Complete
+Pandas --> Complete
+Pytest --> Complete
 ```
 
 ### Step 1: Core Dependencies
 
 ```
-
+pip install -r requirements/requirements.txt
 ```
 
 Installs minimal runtime dependencies:
@@ -205,7 +397,7 @@ Installs minimal runtime dependencies:
 ### Step 2: Package Installation with CUDA Extensions
 
 ```
-
+pip install -e .
 ```
 
 Executes `setup.py` in editable mode, which:
@@ -223,7 +415,7 @@ The editable install (`-e`) allows modifications to Python source files without 
 ### Step 3: Test Dependencies
 
 ```
-
+pip install -r requirements/test_requirements.txt
 ```
 
 Installs testing and validation dependencies:
@@ -254,15 +446,15 @@ Two environment settings are critical for test execution:
 **PYTHONPATH Configuration:**
 
 ```
-
+PYTHONPATH=$PWD pytest tests
 ```
 
 Sets Python module search path to current working directory, ensuring `fastfold` package imports resolve correctly from the workspace rather than any system-installed version.
 
 **NCCL Shared Memory Disable:**
 
-```
-
+```yaml
+env:  NCCL_SHM_DISABLE: 1
 ```
 
 Disables NVIDIA Collective Communications Library (NCCL) shared memory transport. This is required in containerized environments where:
@@ -282,7 +474,7 @@ NCCL WARN Failed to open shared memory segment
 ### Pytest Execution
 
 ```
-
+pytest tests
 ```
 
 The command executes all test files in the `tests/` directory. Pytest automatically discovers:
@@ -293,8 +485,51 @@ The command executes all test files in the `tests/` directory. Pytest automatica
 
 **Test Execution Flow**
 
-```
+```mermaid
+flowchart TD
 
+Start["pytest tests"]
+Discovery["Test Discovery"]
+UnitTests["Unit Tests<br>(individual modules)"]
+IntegrationTests["Integration Tests<br>(end-to-end)"]
+KernelTests["Kernel Tests<br>(CUDA operations)"]
+ModelTests["Model component tests"]
+DataTests["Data pipeline tests"]
+ConfigTests["Configuration tests"]
+InferenceTests["Inference pipeline tests"]
+TrainingTests["Training loop tests"]
+SoftmaxTest["Softmax kernel validation"]
+AttnTest["Attention kernel validation"]
+LNTest["LayerNorm kernel validation"]
+Results["All Pass?"]
+Success["Exit 0: Success"]
+Failure["Exit 1: Failure"]
+Report["Test Report<br>in GitHub UI"]
+
+Start --> Discovery
+Discovery --> UnitTests
+Discovery --> IntegrationTests
+Discovery --> KernelTests
+UnitTests --> ModelTests
+UnitTests --> DataTests
+UnitTests --> ConfigTests
+IntegrationTests --> InferenceTests
+IntegrationTests --> TrainingTests
+KernelTests --> SoftmaxTest
+KernelTests --> AttnTest
+KernelTests --> LNTest
+ModelTests --> Results
+DataTests --> Results
+ConfigTests --> Results
+InferenceTests --> Results
+TrainingTests --> Results
+SoftmaxTest --> Results
+AttnTest --> Results
+LNTest --> Results
+Results --> Success
+Results --> Failure
+Success --> Report
+Failure --> Report
 ```
 
 **Sources:** [.github/workflows/build.yml L35](https://github.com/hpcaitech/FastFold/blob/eba49680/.github/workflows/build.yml#L35-L35)

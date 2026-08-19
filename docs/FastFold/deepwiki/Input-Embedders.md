@@ -34,8 +34,92 @@ Input embedders are the first processing stage in the AlphaFold model, convertin
 
 The following diagram shows how embedders fit into the AlphaFold model's forward pass:
 
-```
+```mermaid
+flowchart TD
 
+TF["target_feat<br>[*, N, tf_dim]"]
+RI["residue_index<br>[*, N]"]
+MSA["msa_feat<br>[*, S_c, N, msa_dim]"]
+ExtraMSA["extra_msa_feat<br>[*, S_e, N, C_e]"]
+TemplFeats["template_*<br>features"]
+PrevM["m_1_prev<br>[*, N, C_m]"]
+PrevZ["z_prev<br>[*, N, N, C_z]"]
+PrevX["x_prev<br>[*, N, 3]"]
+IE["InputEmbedder"]
+RE["RecyclingEmbedder"]
+TE["TemplateEmbedder"]
+EME["ExtraMSAEmbedder"]
+M["m: MSA embedding<br>[*, S_c, N, C_m]"]
+Z["z: Pair embedding<br>[*, N, N, C_z]"]
+M_recycle["m_1_prev_emb<br>[*, N, C_m]"]
+Z_recycle["z_prev_emb<br>[*, N, N, C_z]"]
+TemplEmb["template_pair_embedding<br>[*, N, N, C_z]"]
+TemplAngle["template_angle_embedding<br>[*, S_t, N, C_m]"]
+ExtraEmb["extra_msa_emb<br>[*, S_e, N, C_e]"]
+EMSA["ExtraMSAStack"]
+Evo["EvoformerStack"]
+SM["StructureModule"]
+
+TF --> IE
+RI --> IE
+MSA --> IE
+IE --> M
+IE --> Z
+PrevM --> RE
+PrevZ --> RE
+PrevX --> RE
+RE --> M_recycle
+RE --> Z_recycle
+TemplFeats --> TE
+Z --> TE
+TE --> TemplEmb
+TE --> TemplAngle
+ExtraMSA --> EME
+EME --> ExtraEmb
+ExtraEmb --> EMSA
+Z --> EMSA
+M --> Evo
+Z --> Evo
+
+subgraph subGraph3 ["Downstream Processing"]
+    EMSA
+    Evo
+    SM
+    EMSA --> Evo
+    Evo --> SM
+end
+
+subgraph Embeddings ["Embeddings"]
+    M
+    Z
+    M_recycle
+    Z_recycle
+    TemplEmb
+    TemplAngle
+    ExtraEmb
+    M_recycle --> M
+    Z_recycle --> Z
+    TemplEmb --> Z
+    TemplAngle --> M
+end
+
+subgraph Embedders ["Embedders"]
+    IE
+    RE
+    TE
+    EME
+end
+
+subgraph subGraph0 ["Feature Inputs"]
+    TF
+    RI
+    MSA
+    ExtraMSA
+    TemplFeats
+    PrevM
+    PrevZ
+    PrevX
+end
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L173-L424](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L173-L424)
@@ -48,8 +132,70 @@ The `InputEmbedder` class implements Algorithms 3 and 4 from the AlphaFold suppl
 
 ### Architecture
 
-```
+```mermaid
+flowchart TD
 
+TF["target_feat<br>[*, N, tf_dim]"]
+RI["residue_index<br>[*, N]"]
+MSA["msa_feat<br>[*, S_c, N, msa_dim]"]
+LinearTF_Z_I["linear_tf_z_i<br>Linear(tf_dim, c_z)"]
+LinearTF_Z_J["linear_tf_z_j<br>Linear(tf_dim, c_z)"]
+LinearTF_M["linear_tf_m<br>Linear(tf_dim, c_m)"]
+LinearMSA_M["linear_msa_m<br>Linear(msa_dim, c_m)"]
+RelPos["relpos<br>Linear(2*k+1, c_z)"]
+TF_I["tf_emb_i<br>[*, N, c_z]"]
+TF_J["tf_emb_j<br>[*, N, c_z]"]
+OuterSum["Outer sum:<br>i[..., None, :] + j[..., None, :, :]"]
+RelPosEnc["Relative position<br>encoding"]
+PairEmb["pair_emb<br>[*, N, N, c_z]"]
+TF_M["tf_m<br>[*, S_c, N, c_m]"]
+MSA_M["msa_m<br>[*, S_c, N, c_m]"]
+MSAEmb["msa_emb<br>[*, S_c, N, c_m]"]
+
+TF --> LinearTF_Z_I
+LinearTF_Z_I --> TF_I
+TF --> LinearTF_Z_J
+LinearTF_Z_J --> TF_J
+RI --> RelPos
+RelPos --> RelPosEnc
+TF --> LinearTF_M
+LinearTF_M --> TF_M
+MSA --> LinearMSA_M
+LinearMSA_M --> MSA_M
+
+subgraph subGraph3 ["MSA Embedding Construction"]
+    TF_M
+    MSA_M
+    MSAEmb
+    TF_M --> MSAEmb
+    MSA_M --> MSAEmb
+end
+
+subgraph subGraph2 ["Pair Embedding Construction"]
+    TF_I
+    TF_J
+    OuterSum
+    RelPosEnc
+    PairEmb
+    TF_I --> OuterSum
+    TF_J --> OuterSum
+    OuterSum --> PairEmb
+    RelPosEnc --> PairEmb
+end
+
+subgraph subGraph1 ["InputEmbedder Components"]
+    LinearTF_Z_I
+    LinearTF_Z_J
+    LinearTF_M
+    LinearMSA_M
+    RelPos
+end
+
+subgraph subGraph0 ["Input Features"]
+    TF
+    RI
+    MSA
+end
 ```
 
 **Sources:** [fastfold/model/nn/embedders.py L35-L137](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/nn/embedders.py#L35-L137)
@@ -84,8 +230,61 @@ The `RecyclingEmbedder` class implements Algorithm 32 from the AlphaFold supplem
 
 ### Architecture
 
-```
+```mermaid
+flowchart TD
 
+M_prev["m_1_prev<br>[*, N, C_m]<br>First MSA row"]
+Z_prev["z_prev<br>[*, N, N, C_z]<br>Pair embedding"]
+X_prev["x_prev<br>[*, N, 3]<br>Pseudo-beta coords"]
+LN_M["layer_norm_m<br>LayerNorm(C_m)"]
+LN_Z["layer_norm_z<br>LayerNorm(C_z)"]
+DistBin["Distance binning<br>(min_bin to max_bin)"]
+LinearDist["linear<br>Linear(no_bins, C_z)"]
+NormM["Normalize m"]
+ComputeDist["Compute pairwise<br>C_beta distances"]
+BinDist["Bin distances<br>into no_bins bins"]
+ProjDist["Project binned<br>distances"]
+AddZ["Add to normalized z"]
+M_update["m_update<br>[*, N, C_m]"]
+Z_update["z_update<br>[*, N, N, C_z]"]
+
+M_prev --> LN_M
+LN_M --> NormM
+NormM --> M_update
+Z_prev --> LN_Z
+X_prev --> ComputeDist
+BinDist --> LinearDist
+LinearDist --> ProjDist
+LN_Z --> AddZ
+AddZ --> Z_update
+
+subgraph Outputs ["Outputs"]
+    M_update
+    Z_update
+end
+
+subgraph subGraph2 ["Processing Steps"]
+    NormM
+    ComputeDist
+    BinDist
+    ProjDist
+    AddZ
+    ComputeDist --> BinDist
+    ProjDist --> AddZ
+end
+
+subgraph subGraph1 ["RecyclingEmbedder Components"]
+    LN_M
+    LN_Z
+    DistBin
+    LinearDist
+end
+
+subgraph subGraph0 ["Previous Iteration Outputs"]
+    M_prev
+    Z_prev
+    X_prev
+end
 ```
 
 **Sources:** [fastfold/model/nn/embedders.py L140-L233](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/nn/embedders.py#L140-L233)
@@ -122,8 +321,63 @@ The `TemplateEmbedder` class embeds template structural information into the pai
 
 ### Architecture
 
-```
+```mermaid
+flowchart TD
 
+TemplAA["template_aatype"]
+TemplPos["template_all_atom_positions"]
+TemplMask["template_mask"]
+TemplPseudoBeta["template_pseudo_beta"]
+AngleFeat["build_template_angle_feat<br>Torsion angles"]
+PairFeat["build_template_pair_feat<br>Distances, unit vectors"]
+AngleEmb["TemplateAngleEmbedder<br>[*, N, C_m]"]
+PairEmb["TemplatePairEmbedder<br>[*, N, N, C_t]"]
+TPS["TemplatePairStack<br>Algorithm 16<br>Triangle attention/multiplication"]
+LNTPS["LayerNorm(C_t)"]
+TPA["TemplatePointwiseAttention<br>Algorithm 17<br>Attention over templates"]
+TemplPairOut["template_pair_embedding<br>[*, N, N, C_z]"]
+TemplAngleOut["template_angle_embedding<br>[*, S_t, N, C_m]"]
+
+TemplAA --> AngleFeat
+TemplPos --> AngleFeat
+TemplPos --> PairFeat
+TemplPseudoBeta --> PairFeat
+AngleEmb --> TemplAngleOut
+PairEmb --> TPS
+LNTPS --> TPA
+TemplMask --> TPA
+TPA --> TemplPairOut
+
+subgraph Outputs ["Outputs"]
+    TemplPairOut
+    TemplAngleOut
+end
+
+subgraph subGraph3 ["Pointwise Attention"]
+    TPA
+end
+
+subgraph subGraph2 ["Template Stack"]
+    TPS
+    LNTPS
+    TPS --> LNTPS
+end
+
+subgraph subGraph1 ["Per-Template Processing"]
+    AngleFeat
+    PairFeat
+    AngleEmb
+    PairEmb
+    AngleFeat --> AngleEmb
+    PairFeat --> PairEmb
+end
+
+subgraph subGraph0 ["Template Features"]
+    TemplAA
+    TemplPos
+    TemplMask
+    TemplPseudoBeta
+end
 ```
 
 **Sources:** [fastfold/model/nn/embedders.py L235-L324](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/nn/embedders.py#L235-L324)
@@ -171,8 +425,33 @@ The `ExtraMSAEmbedder` embeds the extra MSA sequences that are not clustered int
 
 ### Architecture
 
-```
+```mermaid
+flowchart TD
 
+ExtraMSA["extra_msa_feat<br>[*, S_e, N, C_in]<br>Built from extra_msa features"]
+Linear["linear<br>Linear(C_in, C_out)"]
+ExtraEmb["extra_msa_emb<br>[*, S_e, N, C_out]"]
+ExtraMSAStack["ExtraMSAStack<br>Updates pair embedding z"]
+
+ExtraMSA --> Linear
+Linear --> ExtraEmb
+ExtraEmb --> ExtraMSAStack
+
+subgraph Downstream ["Downstream"]
+    ExtraMSAStack
+end
+
+subgraph Output ["Output"]
+    ExtraEmb
+end
+
+subgraph ExtraMSAEmbedder ["ExtraMSAEmbedder"]
+    Linear
+end
+
+subgraph Input ["Input"]
+    ExtraMSA
+end
 ```
 
 **Sources:** [fastfold/model/nn/embedders.py L414-L451](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/nn/embedders.py#L414-L451)
@@ -220,8 +499,8 @@ The multimer template embedder includes:
 
 **Usage Pattern:**
 
-```
-
+```markdown
+# In AlphaFold.__init__()if self.globals.is_multimer:    self.input_embedder = InputEmbedderMultimer(**config["input_embedder"])    self.template_embedder = TemplateEmbedderMultimer(template_config)else:    self.input_embedder = InputEmbedder(**config["input_embedder"])    self.template_embedder = TemplateEmbedder(template_config)
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L67-L80](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L67-L80)
@@ -234,8 +513,40 @@ The multimer template embedder includes:
 
 The following diagram shows the complete flow of embedders within a single iteration of the AlphaFold model:
 
-```
+```mermaid
+flowchart TD
 
+Start["iteration() begins<br>fastfold/model/hub/alphafold.py:173"]
+Init["Initialize or reuse<br>m_1_prev, z_prev, x_prev"]
+InputEmbed["self.input_embedder()<br>Generate initial m, z"]
+RecycleEmbed["self.recycling_embedder()<br>Embed previous outputs"]
+AddRecycle["Add recycling to m[0] and z<br>Lines 252-255"]
+TemplateCheck["Template enabled?"]
+TemplateEmbed["self.template_embedder()<br>Lines 270-303"]
+TemplateAdd["Add/concat template embeddings<br>to z and m"]
+ExtraCheck["Extra MSA enabled?"]
+ExtraEmbed["self.extra_msa_embedder()<br>Lines 338-339"]
+ExtraMSAStack["self.extra_msa_stack()<br>Update z"]
+Evoformer["self.evoformer()<br>Main trunk processing"]
+Structure["self.structure_module()<br>3D structure prediction"]
+SaveState["Save m[0], z, x for<br>next iteration"]
+
+Start --> Init
+Init --> InputEmbed
+Init --> RecycleEmbed
+InputEmbed --> AddRecycle
+RecycleEmbed --> AddRecycle
+AddRecycle --> TemplateCheck
+TemplateCheck --> TemplateEmbed
+TemplateEmbed --> TemplateAdd
+TemplateAdd --> ExtraCheck
+TemplateCheck --> ExtraCheck
+ExtraCheck --> ExtraEmbed
+ExtraEmbed --> ExtraMSAStack
+ExtraMSAStack --> Evoformer
+ExtraCheck --> Evoformer
+Evoformer --> Structure
+Structure --> SaveState
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L173-L424](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L173-L424)

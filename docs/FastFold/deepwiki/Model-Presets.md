@@ -21,8 +21,51 @@ FastFold uses `ml_collections.ConfigDict` to manage model configurations. The `m
 
 ### Configuration System Architecture
 
-```
+```mermaid
+flowchart TD
 
+BaseConfig["Base ConfigDict<br>(config)"]
+ModelConfigFunc["model_config(name, train, low_prec)"]
+TrainingPresets["Training Presets<br>initial_training, finetuning"]
+MonomerPresets["Monomer Presets<br>model_1 - model_5"]
+PTMPresets["PTM Presets<br>model_1_ptm - model_5_ptm"]
+MultimerPresets["Multimer Presets<br>multimer variants"]
+RelaxPreset["relax"]
+DataConfig["Data Configuration<br>max_extra_msa, crop_size, etc."]
+ModelConfig["Model Configuration<br>template.enabled, heads.tm.enabled"]
+LossConfig["Loss Configuration<br>violation.weight, tm.weight"]
+GlobalsConfig["Globals Configuration<br>blocks_per_ckpt, chunk_size"]
+
+BaseConfig --> ModelConfigFunc
+ModelConfigFunc --> TrainingPresets
+ModelConfigFunc --> MonomerPresets
+ModelConfigFunc --> PTMPresets
+ModelConfigFunc --> MultimerPresets
+ModelConfigFunc --> RelaxPreset
+TrainingPresets --> DataConfig
+MonomerPresets --> DataConfig
+MonomerPresets --> ModelConfig
+PTMPresets --> DataConfig
+PTMPresets --> ModelConfig
+PTMPresets --> LossConfig
+MultimerPresets --> DataConfig
+MultimerPresets --> ModelConfig
+MultimerPresets --> GlobalsConfig
+
+subgraph subGraph1 ["Configuration Updates"]
+    DataConfig
+    ModelConfig
+    LossConfig
+    GlobalsConfig
+end
+
+subgraph subGraph0 ["Preset Categories"]
+    TrainingPresets
+    MonomerPresets
+    PTMPresets
+    MultimerPresets
+    RelaxPreset
+end
 ```
 
 **Sources:** [fastfold/config.py L30-L125](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L30-L125)
@@ -35,8 +78,8 @@ FastFold uses `ml_collections.ConfigDict` to manage model configurations. The `m
 
 To instantiate a model configuration, call the `model_config()` function with the preset name:
 
-```
-
+```javascript
+from fastfold.config import model_config # Get configuration for AlphaFold2 Model 1config = model_config("model_1") # Get configuration for trainingconfig = model_config("initial_training", train=True) # Get configuration with low precision settingsconfig = model_config("model_3_ptm", low_prec=True)
 ```
 
 The function accepts three parameters:
@@ -67,8 +110,35 @@ The five monomer model variants correspond to AlphaFold2 Supplementary Table 5. 
 
 ### Configuration Details by Model
 
-```
+```mermaid
+flowchart TD
 
+Model1["model_1<br>Templates: ON<br>Extra MSA: 5120<br>Reduce by templates: ON"]
+Model2["model_2<br>Templates: ON<br>Extra MSA: 1024<br>Reduce by templates: ON"]
+Model3["model_3<br>Templates: OFF<br>Extra MSA: 5120"]
+Model4["model_4<br>Templates: OFF<br>Extra MSA: 5120"]
+Model5["model_5<br>Templates: OFF<br>Extra MSA: 1024"]
+TemplateEmbedder["TemplateEmbedder"]
+ExtraMSAStack["ExtraMSAStack<br>(depth varies)"]
+
+Model1 --> TemplateEmbedder
+Model2 --> TemplateEmbedder
+Model1 --> ExtraMSAStack
+Model2 --> ExtraMSAStack
+Model3 --> ExtraMSAStack
+Model4 --> ExtraMSAStack
+Model5 --> ExtraMSAStack
+
+subgraph subGraph1 ["Template-Free Models"]
+    Model3
+    Model4
+    Model5
+end
+
+subgraph subGraph0 ["Template-Based Models"]
+    Model1
+    Model2
+end
 ```
 
 **Sources:** [fastfold/config.py L41-L64](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L41-L64)
@@ -138,8 +208,41 @@ All PTM models follow the same pattern:
 2. Enable the TM prediction head: `c.model.heads.tm.enabled = True`
 3. Add TM loss weight: `c.loss.tm.weight = 0.1`
 
-```
+```mermaid
+flowchart TD
 
+M1["model_1"]
+M2["model_2"]
+M3["model_3"]
+M4["model_4"]
+M5["model_5"]
+M1PTM["model_1_ptm<br>+ tm.enabled = True<br>+ tm.weight = 0.1"]
+M2PTM["model_2_ptm<br>+ tm.enabled = True<br>+ tm.weight = 0.1"]
+M3PTM["model_3_ptm<br>+ tm.enabled = True<br>+ tm.weight = 0.1"]
+M4PTM["model_4_ptm<br>+ tm.enabled = True<br>+ tm.weight = 0.1"]
+M5PTM["model_5_ptm<br>+ tm.enabled = True<br>+ tm.weight = 0.1"]
+
+M1 --> M1PTM
+M2 --> M2PTM
+M3 --> M3PTM
+M4 --> M4PTM
+M5 --> M5PTM
+
+subgraph subGraph1 ["PTM Variants"]
+    M1PTM
+    M2PTM
+    M3PTM
+    M4PTM
+    M5PTM
+end
+
+subgraph subGraph0 ["Base Models"]
+    M1
+    M2
+    M3
+    M4
+    M5
+end
 ```
 
 **Sources:** [fastfold/config.py L65-L93](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L65-L93)
@@ -202,8 +305,29 @@ Multimer presets configure the model for protein complex prediction. Any preset 
 
 ### Multimer Configuration Updates
 
-```
+```mermaid
+flowchart TD
 
+MultimerCheck["name contains<br>'multimer'?"]
+GlobalUpdate["globals.is_multimer = True"]
+DataUpdate["data.predict.max_msa_clusters = 252<br>(vs 128 for monomer)"]
+StructUpdate["structure_module.trans_scale_factor = 20<br>(vs 10 for monomer)"]
+ModelUpdate["Apply multimer_model_config_update"]
+FeatUpdate["Add multimer features:<br>msa_mask, seq_mask,<br>asym_id, entity_id, sym_id"]
+
+MultimerCheck --> GlobalUpdate
+
+subgraph subGraph0 ["Multimer Updates"]
+    GlobalUpdate
+    DataUpdate
+    StructUpdate
+    ModelUpdate
+    FeatUpdate
+    GlobalUpdate --> DataUpdate
+    DataUpdate --> StructUpdate
+    StructUpdate --> ModelUpdate
+    ModelUpdate --> FeatUpdate
+end
 ```
 
 **Sources:** [fastfold/config.py L96-L111](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L96-L111)
@@ -228,24 +352,24 @@ The `multimer_model_config_update` dictionary at [fastfold/config.py L535-L606](
 
 #### Input Embedder Modifications
 
-```
-
+```css
+"input_embedder": {    "tf_dim": 21,           # vs 22 for monomer    "msa_dim": 49,    "c_z": c_z,    "c_m": c_m,    "relpos_k": 32,    "max_relative_chain": 2,        # NEW: chain-relative encoding    "max_relative_idx": 32,         # NEW: index encoding    "use_chain_relative": True,     # NEW: enable chain features}
 ```
 
 **Sources:** [fastfold/config.py L536-L545](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L536-L545)
 
 #### Template Embedder Modifications
 
-```
-
+```css
+"template": {    "template_pair_embedder": {        "c_z": c_z,        "c_out": 64,       # vs c_t for monomer        "c_dgram": 39,     # NEW: distogram channels        "c_aatype": 22,    # NEW: amino acid type channels    },    "template_single_embedder": {  # NEW: single template embedder        "c_in": 34,        "c_m": c_m,    },    # ... other template settings}
 ```
 
 **Sources:** [fastfold/config.py L546-L581](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L546-L581)
 
 #### Heads Modifications
 
-```
-
+```css
+"heads": {    "tm": {        "c_z": c_z,        "no_bins": aux_distogram_bins,        "enabled": True,    # TM head always enabled for multimer    },    "masked_msa": {        "c_m": c_m,        "c_out": 22,       # vs 23 for monomer    },    # ... other heads}
 ```
 
 **Sources:** [fastfold/config.py L582-L605](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L582-L605)

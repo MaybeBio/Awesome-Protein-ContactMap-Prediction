@@ -22,8 +22,63 @@ The configuration system is built on three core components: **FieldReferences** 
 
 **Configuration Generation Flow**
 
-```
+```mermaid
+flowchart TD
 
+UserCode["User Code<br>(inference.py, train.py)"]
+ModelConfig["model_config(name, train, low_prec)<br>fastfold/config.py:30"]
+CopyBase["copy.deepcopy(config)<br>fastfold/config.py:31"]
+BaseConfig["config = ConfigDict{...}<br>fastfold/config.py:146"]
+FieldRefs["FieldReferences<br>c_z, c_m, c_s, eps, etc.<br>fastfold/config.py:128-139"]
+PresetSwitch["name?"]
+NoMod["No modifications"]
+Finetuning["Set max_extra_msa=5120<br>crop_size=384, etc.<br>fastfold/config.py:36-40"]
+Model1["Enable templates<br>max_extra_msa=5120<br>fastfold/config.py:41-47"]
+PTM["Enable TM head<br>tm.weight=0.1<br>fastfold/config.py:65-93"]
+Multimer["Apply multimer_model_config_update<br>is_multimer=True<br>fastfold/config.py:96-111"]
+TrainFlag["train=True?"]
+LowPrecFlag["low_prec=True?"]
+TrainMod["blocks_per_ckpt=1<br>chunk_size=None<br>fastfold/config.py:116-117"]
+LowPrecMod["eps=1e-4<br>set_inf(c, 1e4)<br>fastfold/config.py:119-123"]
+FinalConfig["Final ConfigDict"]
+
+UserCode --> ModelConfig
+ModelConfig --> CopyBase
+CopyBase --> BaseConfig
+CopyBase --> PresetSwitch
+PresetSwitch --> TrainFlag
+LowPrecFlag --> FinalConfig
+FinalConfig --> UserCode
+
+subgraph subGraph2 ["Optional Flags"]
+    TrainFlag
+    LowPrecFlag
+    TrainMod
+    LowPrecMod
+    TrainFlag --> TrainMod
+    LowPrecFlag --> LowPrecMod
+    TrainFlag --> LowPrecFlag
+end
+
+subgraph subGraph1 ["Preset Selection"]
+    PresetSwitch
+    NoMod
+    Finetuning
+    Model1
+    PTM
+    Multimer
+    PresetSwitch --> NoMod
+    PresetSwitch --> Finetuning
+    PresetSwitch --> Model1
+    PresetSwitch --> PTM
+    PresetSwitch --> Multimer
+end
+
+subgraph subGraph0 ["Base Configuration"]
+    BaseConfig
+    FieldRefs
+    FieldRefs --> BaseConfig
+end
 ```
 
 Sources: [fastfold/config.py L1-L607](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L1-L607)
@@ -36,8 +91,68 @@ FieldReferences enable centralized parameter management by creating shared refer
 
 **FieldReference Propagation Mechanism**
 
-```
+```mermaid
+flowchart TD
 
+c_z["c_z = FieldReference(128)<br>fastfold/config.py:128"]
+c_m["c_m = FieldReference(256)<br>fastfold/config.py:129"]
+c_s["c_s = FieldReference(384)<br>fastfold/config.py:132"]
+eps["eps = FieldReference(1e-8)<br>fastfold/config.py:137"]
+chunk_size["chunk_size = FieldReference(None)<br>fastfold/config.py:134"]
+GlobalsZ["globals.c_z: c_z<br>fastfold/config.py:307"]
+GlobalsM["globals.c_m: c_m<br>fastfold/config.py:308"]
+GlobalsS["globals.c_s: c_s<br>fastfold/config.py:311"]
+GlobalsEps["globals.eps: eps<br>fastfold/config.py:312"]
+GlobalsChunk["globals.chunk_size: chunk_size<br>fastfold/config.py:306"]
+InputEmb["input_embedder.c_z: c_z<br>fastfold/config.py:320"]
+InputEmbM["input_embedder.c_m: c_m<br>fastfold/config.py:321"]
+EvoZ["evoformer_stack.c_z: c_z<br>fastfold/config.py:402"]
+EvoM["evoformer_stack.c_m: c_m<br>fastfold/config.py:401"]
+StructS["structure_module.c_s: c_s<br>fastfold/config.py:420"]
+LossEps["distogram.eps: eps<br>fastfold/config.py:473"]
+LossEps2["lddt.eps: eps<br>fastfold/config.py:501"]
+
+c_z --> GlobalsZ
+c_z --> InputEmb
+c_z --> EvoZ
+c_m --> GlobalsM
+c_m --> InputEmbM
+c_m --> EvoM
+c_s --> GlobalsS
+c_s --> StructS
+eps --> GlobalsEps
+eps --> LossEps
+eps --> LossEps2
+chunk_size --> GlobalsChunk
+
+subgraph subGraph3 ["Usage in loss"]
+    LossEps
+    LossEps2
+end
+
+subgraph subGraph2 ["Usage in model components"]
+    InputEmb
+    InputEmbM
+    EvoZ
+    EvoM
+    StructS
+end
+
+subgraph subGraph1 ["Usage in globals"]
+    GlobalsZ
+    GlobalsM
+    GlobalsS
+    GlobalsEps
+    GlobalsChunk
+end
+
+subgraph subGraph0 ["FieldReference Definitions"]
+    c_z
+    c_m
+    c_s
+    eps
+    chunk_size
+end
 ```
 
 **Defined FieldReferences**
@@ -65,8 +180,110 @@ Sources: [fastfold/config.py L128-L139](https://github.com/hpcaitech/FastFold/bl
 
 The base configuration dictionary contains six major sections, each controlling a different aspect of the system.
 
-```
+```mermaid
+flowchart TD
 
+RootConfig["config = ConfigDict<br>fastfold/config.py:146"]
+Data["data<br>fastfold/config.py:148-301"]
+Globals["globals<br>fastfold/config.py:304-314"]
+Model["model<br>fastfold/config.py:315-460"]
+Relax["relax<br>fastfold/config.py:461-467"]
+Loss["loss<br>fastfold/config.py:468-530"]
+EMA["ema<br>fastfold/config.py:531"]
+DataCommon["common<br>Feature shapes, MSA params<br>fastfold/config.py:149-244"]
+DataSupervised["supervised<br>Ground truth features<br>fastfold/config.py:245-254"]
+DataPredict["predict<br>Inference settings<br>fastfold/config.py:255-266"]
+DataEval["eval<br>Evaluation settings<br>fastfold/config.py:267-278"]
+DataTrain["train<br>Training settings<br>fastfold/config.py:279-294"]
+DataModule["data_module<br>DataLoader params<br>fastfold/config.py:295-301"]
+GlobalBlocksCkpt["blocks_per_ckpt: FieldRef"]
+GlobalChunk["chunk_size: FieldRef"]
+GlobalChannels["c_z, c_m, c_t, c_e, c_s"]
+GlobalEps["eps: FieldRef"]
+GlobalMultimer["is_multimer: False"]
+ModelInput["input_embedder<br>fastfold/config.py:317-323"]
+ModelRecycle["recycling_embedder<br>fastfold/config.py:324-331"]
+ModelTemplate["template<br>fastfold/config.py:332-374"]
+ModelExtraMSA["extra_msa<br>fastfold/config.py:375-399"]
+ModelEvo["evoformer_stack<br>fastfold/config.py:400-418"]
+ModelStruct["structure_module<br>fastfold/config.py:419-435"]
+ModelHeads["heads (lddt, distogram, tm, etc.)<br>fastfold/config.py:436-459"]
+LossDistogram["distogram: 0.3 weight"]
+LossFAPE["fape: 1.0 weight"]
+LossLDDT["lddt: 0.01 weight"]
+LossMaskedMSA["masked_msa: 2.0 weight"]
+LossChi["supervised_chi: 1.0 weight"]
+LossViolation["violation: 0.0 weight"]
+LossTM["tm: 0.0 weight (enabled by preset)"]
+
+RootConfig --> Data
+RootConfig --> Globals
+RootConfig --> Model
+RootConfig --> Relax
+RootConfig --> Loss
+RootConfig --> EMA
+Data --> DataCommon
+Data --> DataSupervised
+Data --> DataPredict
+Data --> DataEval
+Data --> DataTrain
+Data --> DataModule
+Globals --> GlobalBlocksCkpt
+Globals --> GlobalChunk
+Globals --> GlobalChannels
+Globals --> GlobalEps
+Globals --> GlobalMultimer
+Model --> ModelInput
+Model --> ModelRecycle
+Model --> ModelTemplate
+Model --> ModelExtraMSA
+Model --> ModelEvo
+Model --> ModelStruct
+Model --> ModelHeads
+Loss --> LossDistogram
+Loss --> LossFAPE
+Loss --> LossLDDT
+Loss --> LossMaskedMSA
+Loss --> LossChi
+Loss --> LossViolation
+Loss --> LossTM
+
+subgraph LossSection ["Loss Components"]
+    LossDistogram
+    LossFAPE
+    LossLDDT
+    LossMaskedMSA
+    LossChi
+    LossViolation
+    LossTM
+end
+
+subgraph ModelSection ["Model Architecture"]
+    ModelInput
+    ModelRecycle
+    ModelTemplate
+    ModelExtraMSA
+    ModelEvo
+    ModelStruct
+    ModelHeads
+end
+
+subgraph GlobalsSection ["Global Parameters"]
+    GlobalBlocksCkpt
+    GlobalChunk
+    GlobalChannels
+    GlobalEps
+    GlobalMultimer
+end
+
+subgraph DataSection ["Data Configuration"]
+    DataCommon
+    DataSupervised
+    DataPredict
+    DataEval
+    DataTrain
+    DataModule
+end
 ```
 
 Sources: [fastfold/config.py L146-L533](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L146-L533)
@@ -79,8 +296,35 @@ The `model_config()` function supports 18 named presets that modify the base con
 
 **Preset Decision Tree**
 
-```
+```mermaid
+flowchart TD
 
+Start["model_config(name)"]
+CheckName["name value?"]
+InitTrain["Initial Training<br>Base config unchanged<br>fastfold/config.py:32-34"]
+Finetune["Finetuning<br>max_extra_msa=5120<br>crop_size=384<br>max_msa_clusters=512<br>violation.weight=1.0<br>fastfold/config.py:35-40"]
+M1["Model 1<br>Templates enabled<br>max_extra_msa=5120<br>reduce_clusters_by_templates=True<br>fastfold/config.py:41-47"]
+M2["Model 2<br>Templates enabled<br>reduce_clusters_by_templates=True<br>(no max_extra_msa change)<br>fastfold/config.py:48-53"]
+M3["Model 3<br>Templates disabled<br>max_extra_msa=5120<br>fastfold/config.py:54-57"]
+M4["Model 4<br>Templates disabled<br>max_extra_msa=5120<br>fastfold/config.py:58-61"]
+M5["Model 5<br>Templates disabled<br>(no max_extra_msa change)<br>fastfold/config.py:62-64"]
+PTM["PTM Variants<br>Same as base model_X<br>+ TM head enabled<br>+ tm.weight=0.1<br>fastfold/config.py:65-93"]
+Multimer["Multimer Models<br>is_multimer=True<br>max_msa_clusters=252<br>trans_scale_factor=20<br>Apply multimer_model_config_update<br>Add unsupervised features<br>fastfold/config.py:96-111"]
+RelaxOnly["Relax Only<br>Base config unchanged<br>fastfold/config.py:94-95"]
+Error["ValueError<br>'Invalid model name'<br>fastfold/config.py:113"]
+
+Start --> CheckName
+CheckName --> InitTrain
+CheckName --> Finetune
+CheckName --> M1
+CheckName --> M2
+CheckName --> M3
+CheckName --> M4
+CheckName --> M5
+CheckName --> PTM
+CheckName --> Multimer
+CheckName --> RelaxOnly
+CheckName --> Error
 ```
 
 **Model Preset Summary**
@@ -105,8 +349,8 @@ The `model_config()` function supports 18 named presets that modify the base con
 
 When `"multimer"` appears in the model name, the following changes are applied in addition to base model settings:
 
-```
-
+```markdown
+# Key multimer configuration updates (fastfold/config.py:96-111)c.globals.is_multimer = Truec.data.predict.max_msa_clusters = 252  # vs 128 for monomerc.model.structure_module.trans_scale_factor = 20  # vs 10 for monomer # Multimer-specific model architecture (fastfold/config.py:535-606)- Input embedder: uses chain-relative positional encoding- Template embedder: separate single/pair template embedders- Unsupervised features: adds asym_id, entity_id, sym_id for chain tracking- TM head: always enabled for multimer
 ```
 
 Sources: [fastfold/config.py L30-L125](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/config.py#L30-L125)
@@ -119,8 +363,8 @@ Sources: [fastfold/config.py L30-L125](https://github.com/hpcaitech/FastFold/blo
 
 **Basic Configuration Retrieval**
 
-```
-
+```javascript
+from fastfold.config import model_config # Get configuration for a specific modelconfig = model_config("model_1") # Training mode: disables chunking, enables gradient checkpointingconfig = model_config("model_1", train=True) # Low precision mode: reduces epsilon, sets inf to 1e4config = model_config("model_1", low_prec=True)
 ```
 
 Sources: [inference.py L129](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L129-L129)
@@ -129,16 +373,16 @@ Sources: [inference.py L129](https://github.com/hpcaitech/FastFold/blob/eba49680
 
 **Runtime Configuration Modification**
 
-```
-
+```javascript
+# Modify chunk size for memory optimization (inference.py:130-131)if args.chunk_size:    config.globals.chunk_size = args.chunk_size # Enable/disable features (inference.py:136-137)config.globals.inplace = args.inplaceconfig.globals.is_multimer = args.model_preset == 'multimer' # Set triangle multiplication mode (inference.py:133-134)if "v3" in args.param_path:    from fastfold.model.nn.triangular_multiplicative_update import set_fused_triangle_multiplication    set_fused_triangle_multiplication()
 ```
 
 Sources: [inference.py L129-L145](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L129-L145)
 
 **Accessing Configuration Values**
 
-```
-
+```markdown
+# Access nested configuration valuesmsa_dim = config.model.input_embedder.msa_dim  # 49c_z = config.globals.c_z  # 128 (FieldReference value)num_blocks = config.model.evoformer_stack.no_blocks  # 48 # Access data processing settingsmax_templates = config.data.predict.max_templates  # 4max_msa_clusters = config.data.predict.max_msa_clusters  # 128 or 252 # Access loss weightsfape_weight = config.loss.fape.weight  # 1.0distogram_weight = config.loss.distogram.weight  # 0.3
 ```
 
 ---
@@ -149,14 +393,14 @@ Sources: [inference.py L129-L145](https://github.com/hpcaitech/FastFold/blob/eba
 
 To add a new model preset, extend the `model_config()` function:
 
-```
-
+```markdown
+# In fastfold/config.py, add a new elif branchelif name == "custom_model":    c.data.common.max_extra_msa = 2048    c.model.evoformer_stack.no_blocks = 24    c.loss.distogram.weight = 0.5    # Additional customizations...
 ```
 
 **Defining New FieldReferences**
 
-```
-
+```css
+# Add new shared parameter (fastfold/config.py:128-139 pattern)custom_dim = mlc.FieldReference(512, field_type=int) # Use in configurationconfig = mlc.ConfigDict({    "globals": {        "custom_dim": custom_dim,    },    "model": {        "custom_module": {            "c_custom": custom_dim,  # References same value        }    }})
 ```
 
 **Configuration Validation**
@@ -273,8 +517,8 @@ Sources: [fastfold/config.py L146-L533](https://github.com/hpcaitech/FastFold/bl
 
 When `train=True` is passed to `model_config()`, specific changes are made:
 
-```
-
+```markdown
+# Training mode modifications (fastfold/config.py:116-117)c.globals.blocks_per_ckpt = 1      # Enable gradient checkpointing per blockc.globals.chunk_size = None        # Disable chunking (full batch processing)
 ```
 
 This ensures gradient computation is memory-efficient during training while allowing full-speed inference with chunking.
@@ -283,8 +527,8 @@ This ensures gradient computation is memory-efficient during training while allo
 
 When `low_prec=True` is specified, the configuration adapts for reduced precision:
 
-```
-
+```markdown
+# Low precision modifications (fastfold/config.py:119-123)c.globals.eps = 1e-4               # Larger epsilon for stabilityset_inf(c, 1e4)                    # Reduce infinity values to prevent overflow
 ```
 
 The `set_inf()` function recursively replaces all `"inf"` fields in the configuration with the specified value to prevent numerical overflow in lower precision arithmetic.
@@ -293,8 +537,8 @@ The `set_inf()` function recursively replaces all `"inf"` fields in the configur
 
 The system uses a deep copy pattern to ensure preset modifications don't affect the base configuration:
 
-```
-
+```python
+def model_config(name, train=False, low_prec=False):    c = copy.deepcopy(config)      # Create independent copy    # Apply modifications...    return c
 ```
 
 This allows multiple configurations to coexist without interference.

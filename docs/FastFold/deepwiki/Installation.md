@@ -40,8 +40,49 @@ FastFold requires the following system dependencies:
 
 ## Installation Methods Overview
 
-```
+```mermaid
+flowchart TD
 
+Start["User Begins Installation"]
+CondaChoice["Choose Installation<br>Method"]
+CondaPath["Conda Installation"]
+DockerPath["Docker Installation"]
+ManualPath["Manual Installation"]
+CondaEnv["conda env create<br>--name=fastfold<br>-f environment.yml"]
+CondaActivate["conda activate fastfold"]
+CondaSetup["python setup.py install"]
+DockerBuild["docker build<br>-t fastfold ./docker"]
+DockerRun["docker run -ti<br>--gpus all fastfold"]
+ManualPip["pip install<br>dependencies"]
+ManualSetup["python setup.py install"]
+CUDACheck["CUDA_HOME<br>exists?"]
+CompileCUDA["Compile CUDA Extensions:<br>fastfold_layer_norm_cuda<br>fastfold_softmax_cuda"]
+CPUOnly["CPU-only installation<br>(limited functionality)"]
+OptionalTriton["Install Triton?<br>(CUDA 11.4+)"]
+Complete["Installation Complete"]
+InstallTriton["pip install -U --pre triton"]
+
+Start --> CondaChoice
+CondaChoice --> CondaPath
+CondaChoice --> DockerPath
+CondaChoice --> ManualPath
+CondaPath --> CondaEnv
+CondaEnv --> CondaActivate
+CondaActivate --> CondaSetup
+DockerPath --> DockerBuild
+DockerBuild --> DockerRun
+ManualPath --> ManualPip
+ManualPip --> ManualSetup
+CondaSetup --> CUDACheck
+ManualSetup --> CUDACheck
+CUDACheck --> CompileCUDA
+CUDACheck --> CPUOnly
+CompileCUDA --> OptionalTriton
+CPUOnly --> Complete
+OptionalTriton --> InstallTriton
+OptionalTriton --> Complete
+InstallTriton --> Complete
+DockerRun --> Complete
 ```
 
 **Diagram: FastFold Installation Decision Flow**
@@ -59,7 +100,7 @@ The conda-based installation provides a reproducible environment with all depend
 ### Step 1: Clone Repository
 
 ```
-
+git clone https://github.com/hpcaitech/FastFoldcd FastFold
 ```
 
 ### Step 2: Create Conda Environment
@@ -68,8 +109,8 @@ The [environment.yml L1-L33](https://github.com/hpcaitech/FastFold/blob/eba49680
 
  file defines all required dependencies:
 
-```
-
+```sql
+conda env create --name=fastfold -f environment.ymlconda activate fastfold
 ```
 
 **Key Dependencies Installed:**
@@ -86,7 +127,7 @@ The [environment.yml L1-L33](https://github.com/hpcaitech/FastFold/blob/eba49680
 ### Step 3: Install FastFold Package
 
 ```
-
+python setup.py install
 ```
 
 This triggers CUDA extension compilation if `CUDA_HOME` is detected (see [CUDA Extension Build Process](https://github.com/hpcaitech/FastFold/blob/eba49680/CUDA Extension Build Process)
@@ -109,8 +150,23 @@ The [docker/Dockerfile L1-L14](https://github.com/hpcaitech/FastFold/blob/eba496
 
  implements a multi-stage build process:
 
-```
+```mermaid
+flowchart TD
 
+BaseImage["Base Image:<br>hpcaitech/pytorch-cuda:1.12.0-11.3.0"]
+CondaTools["conda install:<br>openmm=7.7.0<br>pdbfixer<br>hmmer==3.3.2<br>hhsuite=3.3.0<br>kalign2=2.04"]
+PipDeps["pip install:<br>biopython==1.79<br>dm-tree==0.1.6<br>ml-collections==0.1.0<br>scipy==1.7.1<br>ray pyarrow pandas<br>einops"]
+InstallColossal["pip install colossalai"]
+CloneRepo["git clone<br>FastFold repository"]
+BuildExtensions["python setup.py install<br>(builds CUDA extensions)"]
+FinalImage["FastFold Docker Image"]
+
+BaseImage --> CondaTools
+CondaTools --> PipDeps
+PipDeps --> InstallColossal
+InstallColossal --> CloneRepo
+CloneRepo --> BuildExtensions
+BuildExtensions --> FinalImage
 ```
 
 **Diagram: Docker Build Pipeline**
@@ -120,13 +176,13 @@ The [docker/Dockerfile L1-L14](https://github.com/hpcaitech/FastFold/blob/eba496
 **Important:** Building from scratch requires GPU support. Use Nvidia Docker Runtime as default:
 
 ```
-
+cd FastFolddocker build -t fastfold ./docker
 ```
 
 ### Running the Container
 
 ```
-
+docker run -ti --gpus all --rm --ipc=host fastfold bash
 ```
 
 **Runtime Flags:**
@@ -149,8 +205,39 @@ The [setup.py L1-L144](https://github.com/hpcaitech/FastFold/blob/eba49680/setup
 
 ### Build System Architecture
 
-```
+```mermaid
+flowchart TD
 
+SetupPy["setup.py"]
+VersionCheck["PyTorch Version Check:<br>require version >= 1.10"]
+CUDAHomeCheck["CUDA_HOME<br>environment variable<br>exists?"]
+ErrorExit["RuntimeError:<br>'FastFold requires<br>Pytorch 1.10 or newer'"]
+CPUInstall["CPU-only installation:<br>ext_modules = []<br>cmdclass = {}"]
+GetCUDAVersion["get_cuda_bare_metal_version:<br>extract nvcc version"]
+ComputeCapability["CUDA >= 11.0?"]
+SetCC80["Add Ampere support:<br>-gencode arch=compute_80,code=sm_80"]
+SetCC70["Use Volta/Turing:<br>-gencode arch=compute_70,code=sm_70"]
+BuildLayerNorm["Build fastfold_layer_norm_cuda:<br>layer_norm_cuda.cpp<br>layer_norm_cuda_kernel.cu"]
+BuildSoftmax["Build fastfold_softmax_cuda:<br>softmax_cuda.cpp<br>softmax_cuda_kernel.cu"]
+Pybind["Generate Pybind11 bindings"]
+CompileExtensions["CUDAExtension compilation<br>with nvcc"]
+InstallPackage["Package installation<br>with compiled .so files"]
+
+SetupPy --> VersionCheck
+VersionCheck --> CUDAHomeCheck
+VersionCheck --> ErrorExit
+CUDAHomeCheck --> CPUInstall
+CUDAHomeCheck --> GetCUDAVersion
+GetCUDAVersion --> ComputeCapability
+ComputeCapability --> SetCC80
+ComputeCapability --> SetCC70
+SetCC80 --> BuildLayerNorm
+SetCC70 --> BuildLayerNorm
+BuildLayerNorm --> BuildSoftmax
+BuildSoftmax --> Pybind
+Pybind --> CompileExtensions
+CompileExtensions --> InstallPackage
+CPUInstall --> InstallPackage
 ```
 
 **Diagram: setup.py CUDA Extension Build Flow**
@@ -182,7 +269,7 @@ The CUDA extensions are compiled with optimizations at [setup.py L113-L116](http
 :
 
 ```
-
+extra_cuda_flags = [    '-std=c++14', '-maxrregcount=50', '-U__CUDA_NO_HALF_OPERATORS__',    '-U__CUDA_NO_HALF_CONVERSIONS__', '--expt-relaxed-constexpr',     '--expt-extended-lambda']
 ```
 
 **Flag Purposes:**
@@ -203,7 +290,7 @@ The CUDA extensions are compiled with optimizations at [setup.py L113-L116](http
 Triton enables optimized kernel execution for attention and softmax operations. **Requires CUDA 11.4 or later.**
 
 ```
-
+pip install -U --pre triton
 ```
 
 **Performance Impact:**
@@ -220,8 +307,8 @@ Triton enables optimized kernel execution for attention and softmax operations. 
 
 For Intel Habana Gaudi/Gaudi2 accelerators, additional setup is required:
 
-```
-
+```markdown
+cd fastfold/habana/fastnn/custom_op/python setup.py build  # For Gaudi# ORpython setup2.py build  # For Gaudi2cd -
 ```
 
 See [Habana Platform Support](/hpcaitech/FastFold/9.3-habana-platform-support) for detailed configuration.
@@ -236,24 +323,24 @@ See [Habana Platform Support](/hpcaitech/FastFold/9.3-habana-platform-support) f
 
 After installation, verify that CUDA extensions loaded successfully:
 
-```
-
+```javascript
+import torchimport fastfold # Check CUDA extension availabilitytry:    from fastfold_layer_norm_cuda import layer_norm_fw, layer_norm_bw    from fastfold_softmax_cuda import softmax_fw, softmax_bw    print("✓ CUDA extensions loaded successfully")except ImportError as e:    print(f"✗ CUDA extensions not available: {e}")    print("  Running in CPU-only mode (limited functionality)")
 ```
 
 ### Verify Core Imports
 
 Test that core FastFold modules are accessible:
 
-```
-
+```javascript
+from fastfold.model.hub import AlphaFoldfrom fastfold.utils.inject_fastnn import inject_fastnnfrom fastfold.distributed import init_dapfrom fastfold.config import model_configfrom fastfold.data import data_pipeline print("✓ All core modules imported successfully")
 ```
 
 ### Verify Bioinformatics Tools
 
 Ensure external tools are accessible (if installed via conda):
 
-```
-
+```markdown
+which jackhmmer  # Should output path to binarywhich hhblits    # Should output path to binarywhich hhsearch   # Should output path to binarywhich kalign     # Should output path to binary
 ```
 
 **Expected Output:**
@@ -288,7 +375,7 @@ Ensure external tools are accessible (if installed via conda):
 For CPU-only or development environments without GPU:
 
 ```
-
+CUDA_HOME="" python setup.py install
 ```
 
 This installs FastFold without CUDA extensions. Performance optimizations will be disabled, but the core model architecture remains functional.

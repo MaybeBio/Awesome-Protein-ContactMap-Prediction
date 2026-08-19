@@ -23,8 +23,84 @@ The output is a `FeatureDict` containing approximately 50 different numpy arrays
 
 ## Feature Generation Architecture
 
-```
+```mermaid
+flowchart TD
 
+FASTA["FASTA File<br>(target.fasta)"]
+AlignDir["Alignment Directory<br>(uniref90_hits.a3m,<br>mgnify_hits.a3m,<br>bfd_uniref_hits.a3m)"]
+TemplateDir["Template Directory<br>(pdb70_hits.hhr)"]
+MMCIF["Template Structures<br>(mmCIF files)"]
+DP["DataPipeline<br>data_pipeline.py:784-1080"]
+ParseFasta["parse_fasta()<br>parsers.py"]
+ParseMSA["_parse_msa_data()<br>data_pipeline.py:792-843"]
+ParseTempl["_parse_template_hits()<br>data_pipeline.py:845-890"]
+MSAFiles["Parse A3M/Stockholm<br>parsers.parse_a3m()<br>parsers.parse_stockholm()"]
+HHRFiles["Parse HHR files<br>parsers.parse_hhr()"]
+MakeMSA["make_msa_features()<br>data_pipeline.py:205-242"]
+MakeSeq["make_sequence_features()<br>data_pipeline.py:90-109"]
+TF["TemplateHitFeaturizer<br>templates.py"]
+MakeTempl["make_template_features()<br>data_pipeline.py:57-87"]
+FeatDict["FeatureDict<br>{msa, deletion_matrix,<br>num_alignments, ...}"]
+FP["FeaturePipeline<br>feature_pipeline.py"]
+Crop["Crop/Subsample MSA<br>(max_msa_clusters)"]
+Mask["Create Masks<br>(seq_mask, msa_mask)"]
+Cast["Type Conversion<br>(numpy → tensors)"]
+Processed["Processed FeatureDict"]
+ModelInput["Model Input Batch<br>(ready for inference_model)"]
+
+FASTA --> DP
+AlignDir --> ParseMSA
+TemplateDir --> ParseTempl
+MMCIF --> TF
+FeatDict --> FP
+Processed --> ModelInput
+
+subgraph subGraph2 ["FeaturePipeline Processing"]
+    FP
+    Crop
+    Mask
+    Cast
+    Processed
+    FP --> Crop
+    FP --> Mask
+    FP --> Cast
+    Crop --> Processed
+    Mask --> Processed
+    Cast --> Processed
+end
+
+subgraph subGraph1 ["DataPipeline Processing"]
+    DP
+    ParseFasta
+    ParseMSA
+    ParseTempl
+    MSAFiles
+    HHRFiles
+    MakeMSA
+    MakeSeq
+    TF
+    MakeTempl
+    FeatDict
+    DP --> ParseFasta
+    DP --> ParseMSA
+    DP --> ParseTempl
+    ParseMSA --> MSAFiles
+    ParseTempl --> HHRFiles
+    MSAFiles --> MakeMSA
+    ParseFasta --> MakeSeq
+    HHRFiles --> TF
+    TF --> MakeTempl
+    MakeMSA --> FeatDict
+    MakeSeq --> FeatDict
+    MakeTempl --> FeatDict
+end
+
+subgraph subGraph0 ["Input Data Sources"]
+    FASTA
+    AlignDir
+    TemplateDir
+    MMCIF
+end
 ```
 
 **Sources:** [inference.py L340-L437](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L340-L437)
@@ -37,8 +113,8 @@ The `DataPipeline` class is the primary interface for converting raw biological 
 
 ### Initialization
 
-```
-
+```markdown
+# From inference.py:360data_processor = data_pipeline.DataPipeline(    template_featurizer=template_featurizer)
 ```
 
 The pipeline requires a `TemplateHitFeaturizer` instance that handles conversion of template structure hits into numerical features.
@@ -51,8 +127,37 @@ The pipeline requires a `TemplateHitFeaturizer` instance that handles conversion
 
 The main entry point is `process_fasta()`, which orchestrates all feature generation steps:
 
-```
+```mermaid
+flowchart TD
 
+PF["process_fasta()<br>data_pipeline.py:918-960"]
+ReadFASTA["Read FASTA file<br>parse_fasta()"]
+ValidateSeq["Validate single sequence"]
+ParseTemplHits["_parse_template_hits()<br>data_pipeline.py:845-890"]
+ProcessMSA["_process_msa_feats()<br>data_pipeline.py:892-916"]
+MakeTempl["make_template_features()<br>data_pipeline.py:57-87"]
+MakeMSA["make_msa_features()<br>data_pipeline.py:205-242"]
+MakeSeq["make_sequence_features()<br>data_pipeline.py:90-109"]
+TemplFeats["template_aatype,<br>template_all_atom_positions,<br>template_all_atom_mask,<br>template_sum_probs"]
+MSAFeats["msa,<br>deletion_matrix_int,<br>num_alignments,<br>msa_species_identifiers"]
+SeqFeats["aatype,<br>residue_index,<br>seq_length,<br>sequence,<br>domain_name,<br>between_segment_residues"]
+Merge["Merge Dictionaries<br>{**seq_features,<br>**msa_features,<br>**template_features}"]
+Output["Final FeatureDict"]
+
+PF --> ReadFASTA
+ReadFASTA --> ValidateSeq
+ValidateSeq --> ParseTemplHits
+ValidateSeq --> ProcessMSA
+ParseTemplHits --> MakeTempl
+ProcessMSA --> MakeMSA
+ValidateSeq --> MakeSeq
+MakeTempl --> TemplFeats
+MakeMSA --> MSAFeats
+MakeSeq --> SeqFeats
+TemplFeats --> Merge
+MSAFeats --> Merge
+SeqFeats --> Merge
+Merge --> Output
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L918-L960](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L918-L960)
@@ -88,8 +193,45 @@ MSA features are extracted from alignment files (`.a3m` for A3M format, `.sto` f
 
 Template features represent structural information from known protein structures:
 
-```
+```mermaid
+flowchart TD
 
+HHR["HHR Files<br>(pdb70_hits.hhr)"]
+ParseHHR["parse_hhr()<br>parsers.py"]
+Hits["List of TemplateHit<br>objects"]
+TF["TemplateHitFeaturizer<br>templates.py"]
+ReadMMCIF["Read mmCIF files<br>from template_mmcif_dir"]
+Prefilter["Prefilter by date,<br>quality, duplicates"]
+ExtractAtoms["Extract atom positions<br>and masks"]
+Realign["Handle sequence<br>mismatches with Kalign"]
+MapQuery["Map to query<br>sequence"]
+TemplFeats["template_aatype,<br>template_all_atom_positions,<br>template_all_atom_mask,<br>template_sum_probs"]
+
+Hits --> TF
+
+subgraph subGraph1 ["Template Featurization"]
+    TF
+    ReadMMCIF
+    Prefilter
+    ExtractAtoms
+    Realign
+    MapQuery
+    TemplFeats
+    TF --> ReadMMCIF
+    ReadMMCIF --> Prefilter
+    Prefilter --> ExtractAtoms
+    ExtractAtoms --> Realign
+    Realign --> MapQuery
+    MapQuery --> TemplFeats
+end
+
+subgraph subGraph0 ["Template Hit Parsing"]
+    HHR
+    ParseHHR
+    Hits
+    HHR --> ParseHHR
+    ParseHHR --> Hits
+end
 ```
 
 **Template Feature Array Shapes:**
@@ -137,8 +279,8 @@ Sequence features encode the target protein's primary structure and metadata:
 
 The `FeaturePipeline` class transforms raw feature dictionaries into model-ready batches by applying cropping, masking, and type conversions:
 
-```
-
+```markdown
+# From inference.py:235-237 and 369feature_processor = feature_pipeline.FeaturePipeline(config.data)processed_feature_dict = feature_processor.process_features(    feature_dict, mode='predict')
 ```
 
 **Key Transformations:**
@@ -183,8 +325,52 @@ For multimer predictions, additional assembly features are added via `add_assemb
 
 FastFold provides separate pipelines for monomer and multimer predictions:
 
-```
+```mermaid
+flowchart TD
 
+MultiFASTA["Multi-chain FASTA<br>(>chainA<br>SEQ1<br>>chainB<br>SEQ2)"]
+MultiAlign["Per-chain alignment<br>(AlignmentRunnerMultimer<br>or FastFoldMultimerDataWorkFlow)"]
+MultiDP["DataPipelineMultimer"]
+PerChain["Process each chain<br>_process_single_chain()"]
+Convert["convert_monomer_features()<br>data_pipeline.py:678-702"]
+Assembly["add_assembly_features()<br>data_pipeline.py:727-769"]
+Pairing["MSA Pairing<br>pair_and_merge()"]
+MultiFeat["Multimer FeatureDict"]
+MonoFASTA["Single-chain FASTA"]
+MonoAlign["AlignmentRunner or<br>FastFoldDataWorkFlow"]
+MonoDP["DataPipeline"]
+MonoProc["process_fasta()"]
+MonoFeat["Monomer FeatureDict"]
+
+subgraph subGraph1 ["Multimer Pipeline"]
+    MultiFASTA
+    MultiAlign
+    MultiDP
+    PerChain
+    Convert
+    Assembly
+    Pairing
+    MultiFeat
+    MultiFASTA --> MultiAlign
+    MultiAlign --> MultiDP
+    MultiDP --> PerChain
+    PerChain --> Convert
+    Convert --> Assembly
+    Assembly --> Pairing
+    Pairing --> MultiFeat
+end
+
+subgraph subGraph0 ["Monomer Pipeline"]
+    MonoFASTA
+    MonoAlign
+    MonoDP
+    MonoProc
+    MonoFeat
+    MonoFASTA --> MonoAlign
+    MonoAlign --> MonoDP
+    MonoDP --> MonoProc
+    MonoProc --> MonoFeat
+end
 ```
 
 ### Key Differences
@@ -219,14 +405,31 @@ FastFold provides separate pipelines for monomer and multimer predictions:
 
 The complete inference workflow integrates feature generation between alignment and model execution:
 
-```
+```mermaid
+flowchart TD
 
+FASTA["Input FASTA"]
+Align["Alignment Stage<br>(AlignmentRunner or<br>Ray Workflow)"]
+AlignDir["Alignment Directory<br>(*.a3m, *.sto, *.hhr)"]
+DataPipe["DataPipeline.<br>process_fasta()"]
+RawFeat["Raw FeatureDict"]
+FeatPipe["FeaturePipeline.<br>process_features()"]
+Batch["Model Input Batch"]
+Spawn["torch.multiprocessing.spawn<br>inference_model()"]
+
+FASTA --> Align
+Align --> AlignDir
+AlignDir --> DataPipe
+DataPipe --> RawFeat
+RawFeat --> FeatPipe
+FeatPipe --> Batch
+Batch --> Spawn
 ```
 
 **Invocation Pattern:**
 
-```
-
+```python
+# Monomer example from inference.py:428-437feature_dict = data_processor.process_fasta(    fasta_path=fasta_path,    alignment_dir=local_alignment_dir) processed_feature_dict = feature_processor.process_features(    feature_dict,    mode='predict',) batch = processed_feature_dict
 ```
 
 The resulting `batch` dictionary is passed to `inference_model()` via multiprocessing, where it is converted to CUDA tensors and fed into the AlphaFold model.

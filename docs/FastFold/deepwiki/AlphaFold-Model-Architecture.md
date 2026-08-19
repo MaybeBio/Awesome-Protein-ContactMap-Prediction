@@ -30,8 +30,49 @@ The AlphaFold model consists of a sequential pipeline of embedding layers, the E
 
 ### High-Level Architecture Flow
 
-```
+```mermaid
+flowchart TD
 
+Input["Input Features<br>target_feat, msa_feat,<br>template_*, extra_msa_*"]
+InputEmbed["InputEmbedder<br>Algorithm 3"]
+TemplEmbed["TemplateEmbedder<br>Algorithm 2 line 7-9"]
+ExtraEmbed["ExtraMSAEmbedder<br>Algorithm 2 line 15"]
+RecycEmbed["RecyclingEmbedder<br>Algorithm 32"]
+ExtraMSAStack["ExtraMSAStack<br>4 blocks"]
+Evoformer["EvoformerStack<br>48 blocks"]
+StructMod["StructureModule<br>Algorithm 20"]
+AuxHeads["AuxiliaryHeads<br>LDDT, Distogram, TM, etc."]
+Output["Outputs<br>positions, frames,<br>auxiliary predictions"]
+PrevM["Previous m_1<br>[*, N, C_m]"]
+PrevZ["Previous z<br>[*, N, N, C_z]"]
+PrevX["Previous positions<br>[*, N, 3]"]
+MergeRecyc["Merge with<br>Recycling"]
+MergeTempl["Add to z"]
+ConcatMSA["Concat to m"]
+
+Input --> InputEmbed
+Input --> TemplEmbed
+Input --> ExtraEmbed
+PrevM --> RecycEmbed
+PrevZ --> RecycEmbed
+PrevX -->|"Save for recycling"| RecycEmbed
+InputEmbed --> MergeRecyc
+RecycEmbed --> MergeRecyc
+TemplEmbed --> MergeTempl
+TemplEmbed --> ConcatMSA
+MergeRecyc --> MergeTempl
+MergeTempl --> ConcatMSA
+ExtraEmbed --> ExtraMSAStack
+ConcatMSA --> Evoformer
+MergeTempl --> ExtraMSAStack
+ExtraMSAStack --> Evoformer
+Evoformer --> StructMod
+StructMod --> Output
+StructMod --> AuxHeads
+AuxHeads --> Output
+StructMod --> PrevM
+StructMod --> PrevZ
+StructMod --> PrevX
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L46-L534](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L46-L534)
@@ -42,8 +83,67 @@ The AlphaFold model consists of a sequential pipeline of embedding layers, the E
 
 The `AlphaFold` class orchestrates multiple neural network modules. The following diagram maps architectural concepts to actual code entities:
 
-```
+```mermaid
+flowchart TD
 
+MainClass["AlphaFold(nn.Module)<br>fastfold/model/hub/alphafold.py:46"]
+IE["InputEmbedder:35<br>or InputEmbedderMultimer"]
+RE["RecyclingEmbedder:140"]
+TE["TemplateEmbedder:235<br>or TemplateEmbedderMultimer"]
+EE["ExtraMSAEmbedder:414"]
+EMS["ExtraMSAStack<br>fastfold/model/nn/evoformer.py"]
+EVO["EvoformerStack<br>fastfold/model/nn/evoformer.py"]
+SM["StructureModule<br>fastfold/model/nn/structure_module.py"]
+AH["AuxiliaryHeads<br>fastfold/model/nn/heads.py"]
+Cfg["model_config()<br>fastfold/config.py:30"]
+GlobCfg["globals ConfigDict<br>c_z=128, c_m=256, c_s=384"]
+
+MainClass --> IE
+MainClass --> RE
+MainClass --> TE
+MainClass --> EE
+MainClass --> EMS
+MainClass --> EVO
+MainClass --> SM
+MainClass --> AH
+Cfg --> MainClass
+GlobCfg --> MainClass
+IE --> EVO
+RE --> EVO
+TE --> EVO
+EE --> EMS
+EVO --> SM
+SM --> AH
+
+subgraph Configuration ["Configuration"]
+    Cfg
+    GlobCfg
+end
+
+subgraph subGraph4 ["Auxiliary Outputs"]
+    AH
+end
+
+subgraph subGraph3 ["Structure Prediction"]
+    SM
+end
+
+subgraph subGraph2 ["Processing Stacks"]
+    EMS
+    EVO
+    EMS --> EVO
+end
+
+subgraph subGraph1 ["Embedders - fastfold/model/nn/embedders.py"]
+    IE
+    RE
+    TE
+    EE
+end
+
+subgraph subGraph0 ["AlphaFold Class"]
+    MainClass
+end
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L53-L106](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L53-L106)
@@ -58,8 +158,35 @@ The model's forward pass implements a recycling loop where predictions from prev
 
 ### Recycling Loop Structure
 
-```
+```mermaid
+flowchart TD
 
+Start["forward(batch)"]
+Init["Initialize:<br>m_1_prev = None<br>z_prev = None<br>x_prev = None"]
+DisableCP["Disable activation<br>checkpointing"]
+LoopStart["For cycle_no in<br>range(num_iters)"]
+SelectFeats["Select features:<br>feats = batch[..., cycle_no]"]
+CheckFinal["Is final iteration?<br>cycle_no == num_iters - 1"]
+EnableCP["Enable activation<br>checkpointing"]
+Iteration["iteration(feats, m_1_prev,<br>z_prev, x_prev, _recycle)"]
+UpdatePrev["Update:<br>m_1_prev = m[..., 0, :, :]<br>z_prev = z<br>x_prev = final_atom_positions"]
+LoopEnd["More iterations?"]
+AuxHeads["Run auxiliary heads:<br>LDDT, distogram, TM, etc."]
+Return["Return outputs"]
+
+Start --> Init
+Init --> DisableCP
+DisableCP --> LoopStart
+LoopStart --> SelectFeats
+SelectFeats --> CheckFinal
+CheckFinal --> EnableCP
+CheckFinal --> Iteration
+EnableCP --> Iteration
+Iteration --> UpdatePrev
+UpdatePrev --> LoopEnd
+LoopEnd --> LoopStart
+LoopEnd --> AuxHeads
+AuxHeads --> Return
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L444-L534](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L444-L534)
@@ -247,8 +374,24 @@ The `model_config()` function provides preset configurations matching AlphaFold2
 
 The model supports both monomer and multimer prediction through conditional initialization:
 
-```
+```mermaid
+flowchart TD
 
+Config["config.globals.is_multimer"]
+MonomerInput["InputEmbedder<br>tf_dim=22"]
+MonomerTempl["TemplateEmbedder<br>Standard processing"]
+MultimerInput["InputEmbedderMultimer<br>tf_dim=21<br>+chain relative features"]
+MultimerTempl["TemplateEmbedderMultimer<br>Multichain masking"]
+EvoShared["Shared Evoformer/<br>Structure Module"]
+
+Config --> MonomerInput
+Config --> MonomerTempl
+Config --> MultimerInput
+Config --> MultimerTempl
+MonomerInput --> EvoShared
+MonomerTempl --> EvoShared
+MultimerInput --> EvoShared
+MultimerTempl --> EvoShared
 ```
 
 **Key differences:**
@@ -295,13 +438,13 @@ For memory efficiency, the model supports inplace update mode controlled by `con
 **Standard mode (inplace=False):**
 
 ```
-
+z = self.extra_msa_stack(extra_msa_feat, z, ...)m, z, s = self.evoformer(m, z, ...)
 ```
 
 **Inplace mode (inplace=True):**
 
 ```
-
+extra_msa_feat = [extra_msa_feat]z = [z]z = self.extra_msa_stack.inplace(extra_msa_feat, z, ...)[0] m = [m]z = [z]m, z, s = self.evoformer.inplace(m, z, ...)m = m[0]z = z[0]
 ```
 
 The inplace mode wraps tensors in lists to enable in-place mutation, reducing memory allocations. This is particularly beneficial for large sequences.

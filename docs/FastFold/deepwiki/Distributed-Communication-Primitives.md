@@ -29,8 +29,64 @@ The communication primitives operate on tensors sharded across GPUs using PyTorc
 
 ### Communication Primitive Categories
 
-```
+```mermaid
+flowchart TD
 
+Scatter["scatter()<br>Split tensor across GPUs"]
+Gather["gather()<br>Concatenate shards from GPUs"]
+Reduce["reduce()<br>Sum tensors across GPUs"]
+Copy["copy()<br>Identity with gradient reduction"]
+AllToAll["col_to_row() / row_to_col()<br>Transpose tensor distribution"]
+_split["_split()<br>Local tensor split"]
+_gather["_gather()<br>dist.all_gather"]
+_reduce["_reduce()<br>dist.all_reduce"]
+_all_to_all["_all_to_all()<br>dist.all_to_all"]
+ScatterClass["Scatter.apply()<br>Forward: _split<br>Backward: _gather"]
+GatherClass["Gather.apply()<br>Forward: _gather<br>Backward: _split"]
+ReduceClass["Reduce.apply()<br>Forward: _reduce<br>Backward: identity"]
+CopyClass["Copy.apply()<br>Forward: identity<br>Backward: _reduce"]
+AllToAllClass["All_to_All.apply()<br>Forward: all_to_all(in_dim, out_dim)<br>Backward: all_to_all(out_dim, in_dim)"]
+gpc["ColossalAI gpc<br>global_context"]
+
+Scatter --> ScatterClass
+Gather --> GatherClass
+Reduce --> ReduceClass
+Copy --> CopyClass
+AllToAll --> AllToAllClass
+ScatterClass --> _split
+ScatterClass --> _gather
+GatherClass --> _gather
+GatherClass --> _split
+ReduceClass --> _reduce
+CopyClass --> _reduce
+AllToAllClass --> _all_to_all
+_split --> gpc
+_gather --> gpc
+_reduce --> gpc
+_all_to_all --> gpc
+
+subgraph subGraph2 ["Autograd Wrappers"]
+    ScatterClass
+    GatherClass
+    ReduceClass
+    CopyClass
+    AllToAllClass
+end
+
+subgraph subGraph1 ["Underlying Implementations"]
+    _split
+    _gather
+    _reduce
+    _all_to_all
+end
+
+subgraph subGraph0 ["Primitive Operations"]
+    Scatter
+    Gather
+    Reduce
+    Copy
+    AllToAll
+end
 ```
 
 **Diagram: Communication Primitive Architecture**
@@ -47,8 +103,41 @@ The architecture separates concerns into three layers:
 
 A key design principle is that each primitive's backward pass invokes the "inverse" operation. This ensures correct gradient propagation through distributed computations.
 
-```
+```mermaid
+flowchart TD
 
+F_Scatter["scatter: Split"]
+F_Gather["gather: Concatenate"]
+F_Reduce["reduce: Sum"]
+F_Copy["copy: Identity"]
+F_A2A["all_to_all: Transpose"]
+B_Gather["Backward: gather"]
+B_Split["Backward: split"]
+B_Identity["Backward: identity"]
+B_Reduce["Backward: reduce"]
+B_A2A_Inv["Backward: all_to_all(inverted dims)"]
+
+F_Scatter --> B_Gather
+F_Gather --> B_Split
+F_Reduce --> B_Identity
+F_Copy --> B_Reduce
+F_A2A --> B_A2A_Inv
+
+subgraph subGraph1 ["Backward Pass Operations"]
+    B_Gather
+    B_Split
+    B_Identity
+    B_Reduce
+    B_A2A_Inv
+end
+
+subgraph subGraph0 ["Forward Pass Operations"]
+    F_Scatter
+    F_Gather
+    F_Reduce
+    F_Copy
+    F_A2A
+end
 ```
 
 **Diagram: Forward-Backward Operation Pairs**
@@ -190,8 +279,41 @@ The backward pass performs the inverse transpose: swaps `in_dim` and `out_dim`.
 * Special case optimization for `out_dim=1` to pre-allocate buffer [fastfold/distributed/comm.py L154-L162](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/distributed/comm.py#L154-L162)
 * Backward swaps dimensions: `_all_to_all(grad_output, in_dim=saved_out_dim, out_dim=saved_in_dim)` [fastfold/distributed/comm.py L202-L203](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/distributed/comm.py#L202-L203)
 
-```
+```mermaid
+flowchart TD
 
+G3_Before["Rows 3N/4-N<br>Cols 0-M"]
+G3_After["Rows 0-N<br>Cols 3M/4-M"]
+G2_Before["Rows 2N/4-3N/4<br>Cols 0-M"]
+G2_After["Rows 0-N<br>Cols 2M/4-3M/4"]
+G1_Before["Rows N/4-2N/4<br>Cols 0-M"]
+G1_After["Rows 0-N<br>Cols M/4-2M/4"]
+G0_Before["Rows 0-N/4<br>Cols 0-M"]
+G0_After["Rows 0-N<br>Cols 0-M/4"]
+
+subgraph subGraph3 ["GPU 3"]
+    G3_Before
+    G3_After
+    G3_Before --> G3_After
+end
+
+subgraph subGraph2 ["GPU 2"]
+    G2_Before
+    G2_After
+    G2_Before --> G2_After
+end
+
+subgraph subGraph1 ["GPU 1"]
+    G1_Before
+    G1_After
+    G1_Before --> G1_After
+end
+
+subgraph subGraph0 ["GPU 0"]
+    G0_Before
+    G0_After
+    G0_Before --> G0_After
+end
 ```
 
 **Diagram: All-to-All Transpose Distribution (4 GPUs, row_to_col example)**
@@ -227,7 +349,7 @@ Communication primitives rely on `init_dap` [fastfold/distributed/core.py L17-L4
 All primitives check if `world_size == 1` and return immediately without communication:
 
 ```
-
+if gpc.get_world_size(ParallelMode.TENSOR) == 1:    return tensor
 ```
 
 This optimization appears in:
@@ -247,8 +369,8 @@ This ensures zero overhead when tensor parallelism is not enabled.
 
 The most common pattern is sharding sequences across GPUs for memory efficiency:
 
-```
-
+```markdown
+# Shard sequence dimension across GPUsm_sharded = scatter(m, dim=1)  # [batch, msa_len, seq_len/N, c_m] # Compute on local shardm_out = some_operation(m_sharded) # Gather if full sequence neededm_full = gather(m_out, dim=1)  # [batch, msa_len, seq_len, c_m]
 ```
 
 **Sources:** Usage pattern inferred from DAP design in [benchmark/perf.py L37-L41](https://github.com/hpcaitech/FastFold/blob/eba49680/benchmark/perf.py#L37-L41)
@@ -257,8 +379,8 @@ The most common pattern is sharding sequences across GPUs for memory efficiency:
 
 For attention operations that need different sharding patterns:
 
-```
-
+```markdown
+# Input: sharded along columnsq = ...  # [batch, seq_len/N, heads, dim] # Convert to row sharding for different attention patternq = col_to_row(q)  # [batch, seq_len, heads/N, dim] # Compute attentionattn_out = attention(q, k, v) # Convert back to column shardingattn_out = row_to_col(attn_out)
 ```
 
 **Sources:** [fastfold/distributed/comm.py L176-L189](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/distributed/comm.py#L176-L189)
@@ -267,8 +389,8 @@ For attention operations that need different sharding patterns:
 
 When broadcasting tensors that need gradient aggregation:
 
-```
-
+```markdown
+# Broadcast value to all GPUsbias = copy(bias_full)  # Forward: identity, Backward: all-reduce sum # Use in computationoutput = input + bias # During backward, bias gradients are summed across GPUs
 ```
 
 **Sources:** [fastfold/distributed/comm.py L68-L82](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/distributed/comm.py#L68-L82)
@@ -282,7 +404,7 @@ When broadcasting tensors that need gradient aggregation:
 Validates that tensor dimensions are evenly divisible by the number of GPUs:
 
 ```
-
+assert numerator % denominator == 0, '{} is not divisible by {}'.format(numerator, denominator)
 ```
 
 **`divide`** [fastfold/distributed/comm.py L13-L15](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/distributed/comm.py#L13-L15)
@@ -290,7 +412,7 @@ Validates that tensor dimensions are evenly divisible by the number of GPUs:
 Safely computes integer division after checking divisibility:
 
 ```
-
+ensure_divisibility(numerator, denominator)return numerator // denominator
 ```
 
 **Sources:** [fastfold/distributed/core.py L7-L9](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/distributed/core.py#L7-L9)

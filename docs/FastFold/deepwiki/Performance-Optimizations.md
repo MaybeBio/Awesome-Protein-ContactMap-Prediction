@@ -45,8 +45,74 @@ Sources: [README.md L19-L29](https://github.com/hpcaitech/FastFold/blob/eba49680
 
 FastFold's optimizations operate at four hierarchical levels, each targeting different performance bottlenecks:
 
-```
+```mermaid
+flowchart TD
 
+AppOpt["Application Optimizations"]
+DAP["Dynamic Axial Parallelism<br>init_dap()"]
+ChunkConfig["Chunk Size Configuration<br>config.globals.chunk_size"]
+InplaceFlag["Inplace Operations<br>config.globals.inplace"]
+ModOpt["Module Optimizations"]
+InjectFastNN["inject_fastnn()<br>Replace Evoformer"]
+ExtraMSA["ExtraMSAStack"]
+ChunkMSA["ChunkMSARowAttentionWithPairBias"]
+AsyncTri["AsyncChunkTriangleMultiplication"]
+KernelOpt["Kernel Optimizations"]
+FusedSoftmax["fused_softmax<br>CUDA/Triton"]
+FusedAttn["Attention Core<br>Triton"]
+FusedLN["LayerNorm<br>CUDA"]
+CommOpt["Communication Optimizations"]
+GatherAsync["gather_async<br>gather_async_opp"]
+BroadcastAsync["broadcast_async<br>broadcast_async_opp"]
+AllToAllAsync["All_to_All_Async<br>All_to_All_Async_Opp"]
+UserCode["User Code<br>model = inject_fastnn(model)"]
+
+AppOpt --> ModOpt
+ModOpt --> KernelOpt
+ModOpt --> CommOpt
+UserCode --> AppOpt
+
+subgraph subGraph3 ["Communication Level"]
+    CommOpt
+    GatherAsync
+    BroadcastAsync
+    AllToAllAsync
+    CommOpt --> GatherAsync
+    CommOpt --> BroadcastAsync
+    CommOpt --> AllToAllAsync
+end
+
+subgraph subGraph2 ["Kernel Level"]
+    KernelOpt
+    FusedSoftmax
+    FusedAttn
+    FusedLN
+    KernelOpt --> FusedSoftmax
+    KernelOpt --> FusedAttn
+    KernelOpt --> FusedLN
+end
+
+subgraph subGraph1 ["Module Level"]
+    ModOpt
+    InjectFastNN
+    ExtraMSA
+    ChunkMSA
+    AsyncTri
+    ModOpt --> InjectFastNN
+    InjectFastNN --> ExtraMSA
+    InjectFastNN --> ChunkMSA
+    InjectFastNN --> AsyncTri
+end
+
+subgraph subGraph0 ["Application Level"]
+    AppOpt
+    DAP
+    ChunkConfig
+    InplaceFlag
+    AppOpt --> DAP
+    AppOpt --> ChunkConfig
+    AppOpt --> InplaceFlag
+end
 ```
 
 **Application Level** enables breaking GPU memory limits and configuring memory-compute trade-offs. **Module Level** replaces standard Evoformer blocks with chunk-aware, distributed variants. **Kernel Level** fuses primitive operations to reduce memory bandwidth. **Communication Level** overlaps computation with data transfers in distributed settings.
@@ -86,8 +152,8 @@ Sources: [README.md L19-L29](https://github.com/hpcaitech/FastFold/blob/eba49680
 
 The primary interface for enabling FastFold optimizations is `inject_fastnn()`:
 
-```
-
+```javascript
+from fastfold.utils import inject_fastnnfrom fastfold.model.hub import AlphaFoldfrom fastfold.config import model_config config = model_config("model_1")model = AlphaFold(config) # Load weightsimport_jax_weights_(model, param_path, version="model_1") # Enable FastFold optimizations - single line!model = inject_fastnn(model)
 ```
 
 This function performs surgical replacement of standard Evoformer modules with optimized versions while preserving model weights and behavior.
@@ -100,8 +166,8 @@ Sources: [inference.py L104-L113](https://github.com/hpcaitech/FastFold/blob/eba
 
 For distributed inference across multiple GPUs:
 
-```
-
+```javascript
+from fastfold.distributed import init_dap # Initialize Dynamic Axial Parallelism# Must be called before model creation in each processinit_dap(tensor_model_parallel_size=2) # Model creation and inject_fastnn as above# Sequences are automatically sharded across GPUs
 ```
 
 When using `torch.multiprocessing.spawn`, each worker initializes DAP independently:
@@ -114,8 +180,8 @@ Sources: [inference.py L122-L160](https://github.com/hpcaitech/FastFold/blob/eba
 
 To reduce memory usage at the cost of some speed:
 
-```
-
+```javascript
+from fastfold.model.fastnn import set_chunk_size config = model_config("model_1")config.globals.chunk_size = 32  # Smaller = less memory, slower model = AlphaFold(config)model = inject_fastnn(model) # Also set globally for operations that checkset_chunk_size(config.globals.chunk_size)
 ```
 
 **Chunk Size Guidelines**:
@@ -127,8 +193,8 @@ To reduce memory usage at the cost of some speed:
 
 For extreme sequences (>10K residues):
 
-```
-
+```javascript
+# Set PyTorch memory allocator configurationexport PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:15000 python inference.py ... --chunk_size 16 --inplace
 ```
 
 Sources: [inference.py L117-L164](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L117-L164)
@@ -137,8 +203,64 @@ Sources: [inference.py L117-L164](https://github.com/hpcaitech/FastFold/blob/eba
 
 ## Optimization Flow: inject_fastnn in Detail
 
-```
+```mermaid
+flowchart TD
 
+StdModel["AlphaFold<br>(OpenFold-style)"]
+StdEvo["EvoformerStack"]
+StdBlock["EvoformerBlock"]
+StdMSA["MSARowAttention<br>MSAColumnAttention"]
+StdTri["TriangleMultiplication<br>TriangleAttention"]
+InjectFunc["inject_fastnn(model)"]
+FindModules["Scan model tree<br>Find Evoformer instances"]
+ReplaceModules["Replace with FastNN<br>Copy weights"]
+OptModel["AlphaFold<br>(FastNN-injected)"]
+OptEvo["EvoformerStack<br>(fastfold.model.fastnn)"]
+OptBlock["Evoformer"]
+OptExtra["ExtraMSAStack"]
+OptMSA["ChunkMSARowAttentionWithPairBias"]
+OptTri["AsyncChunkTriangleMultiplication"]
+Kernels["Fused Kernels<br>fused_softmax<br>LayerNorm"]
+AsyncComm["Async Comm<br>gather_async<br>broadcast_async"]
+
+StdModel --> InjectFunc
+ReplaceModules --> OptModel
+OptMSA --> Kernels
+OptTri --> AsyncComm
+
+subgraph subGraph2 ["Optimized FastFold Model"]
+    OptModel
+    OptEvo
+    OptBlock
+    OptExtra
+    OptMSA
+    OptTri
+    OptModel --> OptEvo
+    OptEvo --> OptBlock
+    OptBlock --> OptExtra
+    OptExtra --> OptMSA
+    OptExtra --> OptTri
+end
+
+subgraph subGraph1 ["inject_fastnn Replacement"]
+    InjectFunc
+    FindModules
+    ReplaceModules
+    InjectFunc --> FindModules
+    FindModules --> ReplaceModules
+end
+
+subgraph subGraph0 ["Standard AlphaFold Model"]
+    StdModel
+    StdEvo
+    StdBlock
+    StdMSA
+    StdTri
+    StdModel --> StdEvo
+    StdEvo --> StdBlock
+    StdBlock --> StdMSA
+    StdBlock --> StdTri
+end
 ```
 
 The `inject_fastnn()` function traverses the model's module hierarchy, identifying standard Evoformer implementations and replacing them with optimized variants. Weight tensors are preserved, ensuring identical mathematical behavior while enabling chunk-aware processing, kernel fusion, and distributed communication.
@@ -151,8 +273,41 @@ Sources: [README.md L104-L113](https://github.com/hpcaitech/FastFold/blob/eba496
 
 Many FastFold operations use a chunking pattern to process large tensors in smaller blocks:
 
-```
+```mermaid
+flowchart TD
 
+LargeTensor["Large Tensor<br>[B, N, M, D]<br>N=sequence length"]
+CheckChunk["CHUNK_SIZE<br>is None?"]
+FullProcess["Process entire tensor<br>High memory"]
+ChunkLoop["for i in range(0, N, chunk_size)"]
+ProcessChunk["Process chunk<br>[B, chunk_size, M, D]"]
+Accumulate["Accumulate results"]
+Result["Output Tensor<br>[B, N, M, D]"]
+
+LargeTensor --> CheckChunk
+FullProcess --> Result
+Accumulate --> Result
+
+subgraph Output ["Output"]
+    Result
+end
+
+subgraph subGraph1 ["Chunking Logic"]
+    CheckChunk
+    FullProcess
+    ChunkLoop
+    ProcessChunk
+    Accumulate
+    CheckChunk --> FullProcess
+    CheckChunk --> ChunkLoop
+    ChunkLoop --> ProcessChunk
+    ProcessChunk --> Accumulate
+    Accumulate --> ChunkLoop
+end
+
+subgraph Input ["Input"]
+    LargeTensor
+end
 ```
 
 **Example from ChunkTransition**:
@@ -203,15 +358,45 @@ Sources: [fastfold/model/fastnn/ops.py L1-L631](https://github.com/hpcaitech/Fas
 
 ## Performance Tuning Workflow
 
-```
+```mermaid
+flowchart TD
 
+Start["Profile Baseline<br>Model"]
+CheckMem["GPU Memory<br>Sufficient?"]
+CheckSpeed["Speed<br>Acceptable?"]
+EnableDAP["Enable DAP<br>init_dap(gpus)"]
+EnableChunk["Enable Chunking<br>chunk_size=32"]
+EnableInplace["Enable Inplace<br>inplace=True"]
+EnableFastNN["Enable FastNN<br>inject_fastnn(model)"]
+CheckTriton["Triton<br>Available?"]
+InstallTriton["Install Triton<br>pip install triton"]
+Benchmark["Run Benchmark<br>benchmark/perf.py"]
+TuneChunk["Tune chunk_size<br>Binary search"]
+TuneDAPSize["Tune dap_size<br>Match GPU count"]
+Done["Optimized<br>Configuration"]
+
+Start --> CheckMem
+CheckMem --> EnableDAP
+CheckMem --> CheckSpeed
+CheckSpeed --> EnableFastNN
+CheckSpeed --> Done
+EnableDAP --> EnableChunk
+EnableChunk --> EnableInplace
+EnableInplace --> EnableFastNN
+EnableFastNN --> CheckTriton
+CheckTriton --> InstallTriton
+CheckTriton --> Benchmark
+InstallTriton --> Benchmark
+Benchmark --> TuneChunk
+TuneChunk --> TuneDAPSize
+TuneDAPSize --> Done
 ```
 
 **Recommended Starting Points**:
 
-1. **Single GPU, Standard Sequences (<3K residues)**: ``` ```
-2. **Single GPU, Long Sequences (3K-8K residues)**: ``` ```
-3. **Multi-GPU, Ultra-Long Sequences (>8K residues)**: ``` ```
+1. **Single GPU, Standard Sequences (<3K residues)**: ``` config.globals.chunk_size = Noneconfig.globals.inplace = Truemodel = inject_fastnn(model) ```
+2. **Single GPU, Long Sequences (3K-8K residues)**: ``` config.globals.chunk_size = 32config.globals.inplace = Truemodel = inject_fastnn(model) ```
+3. **Multi-GPU, Ultra-Long Sequences (>8K residues)**: ```markdown init_dap(tensor_model_parallel_size=2)  # or 4, 8config.globals.chunk_size = 16config.globals.inplace = Truemodel = inject_fastnn(model) ```
 
 Sources: [inference.py L122-L160](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L122-L160)
 
@@ -242,8 +427,8 @@ Sources: [README.md L32-L60](https://github.com/hpcaitech/FastFold/blob/eba49680
 
 FastFold includes a comprehensive benchmarking tool:
 
-```
-
+```markdown
+# Benchmark single GPUcd benchmarktorchrun --nproc_per_node=1 perf.py \    --msa-length 128 \    --res-length 256 \    --layers 12 # Benchmark with DAP (2 GPUs)torchrun --nproc_per_node=2 perf.py \    --msa-length 128 \    --res-length 256 \    --layers 12 \    --dap-size 2 # Compare with OpenFold (requires openfold installed)torchrun --nproc_per_node=1 perf.py \    --msa-length 128 \    --res-length 256 \    --openfold
 ```
 
 The benchmark measures forward and backward pass times per Evoformer layer, enabling direct comparison of optimization impact.

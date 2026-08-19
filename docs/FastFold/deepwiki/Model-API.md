@@ -21,8 +21,54 @@ The FastFold model implementation follows the AlphaFold2 architecture described 
 * **Structure Module**: Predicts 3D atomic coordinates from learned representations
 * **Auxiliary Heads**: Predict secondary outputs (pLDDT, PAE, etc.)
 
-```
+```mermaid
+flowchart TD
 
+AlphaFold["AlphaFold<br>(hub/alphafold.py)"]
+InputEmb["InputEmbedder<br>(nn/embedders.py)"]
+InputEmbMultimer["InputEmbedderMultimer<br>(nn/embedders_multimer.py)"]
+RecycEmb["RecyclingEmbedder<br>(nn/embedders.py)"]
+TemplEmb["TemplateEmbedder<br>(nn/embedders.py)"]
+TemplEmbMultimer["TemplateEmbedderMultimer<br>(nn/embedders_multimer.py)"]
+ExtraEmb["ExtraMSAEmbedder<br>(nn/embedders.py)"]
+Evoformer["EvoformerStack<br>(nn/evoformer.py)"]
+ExtraMSA["ExtraMSAStack<br>(nn/evoformer.py)"]
+StructMod["StructureModule<br>(nn/structure_module.py)"]
+AuxHeads["AuxiliaryHeads<br>(nn/heads.py)"]
+
+AlphaFold --> InputEmb
+AlphaFold --> InputEmbMultimer
+AlphaFold --> RecycEmb
+AlphaFold --> TemplEmb
+AlphaFold --> TemplEmbMultimer
+AlphaFold --> ExtraEmb
+AlphaFold --> Evoformer
+AlphaFold --> ExtraMSA
+AlphaFold --> StructMod
+AlphaFold --> AuxHeads
+
+subgraph subGraph3 ["Output Heads"]
+    AuxHeads
+end
+
+subgraph subGraph2 ["Core Processing"]
+    Evoformer
+    ExtraMSA
+    StructMod
+end
+
+subgraph subGraph1 ["Input Embedders"]
+    InputEmb
+    InputEmbMultimer
+    RecycEmb
+    TemplEmb
+    TemplEmbMultimer
+    ExtraEmb
+end
+
+subgraph subGraph0 ["Main Model Class"]
+    AlphaFold
+end
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L46-L105](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L46-L105)
@@ -36,7 +82,7 @@ The `AlphaFold` class is the top-level model class implementing Algorithm 2 with
 ### Constructor
 
 ```
-
+AlphaFold(config)
 ```
 
 | Parameter | Type | Description |
@@ -66,7 +112,7 @@ The constructor initializes all sub-modules based on the `globals.is_multimer` f
 ### Forward Method
 
 ```
-
+forward(batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]
 ```
 
 Main entry point for model inference and training.
@@ -116,7 +162,7 @@ Main entry point for model inference and training.
 ### Iteration Method
 
 ```
-
+iteration(feats, m_1_prev, z_prev, x_prev, _recycle=True)     -> Tuple[Dict, torch.Tensor, torch.Tensor, torch.Tensor]
 ```
 
 Executes a single iteration of the model (one pass through the network).
@@ -142,8 +188,48 @@ Executes a single iteration of the model (one pass through the network).
 
 **Processing Pipeline:**
 
-```
+```mermaid
+flowchart TD
 
+Input["Input Features<br>(feats)"]
+TypeCast["Convert to model dtype"]
+InitEmbed["Initialize Embeddings<br>input_embedder(feats)"]
+MSAPair["m: [, S_c, N, C_m]z: [, N, N, C_z]"]
+CheckRecycle["Previous<br>embeddings<br>exist?"]
+InitZero["Initialize zeros:<br>m_1_prev, z_prev, x_prev"]
+UseRecycle["Use existing embeddings"]
+RecycEmbed["RecyclingEmbedder<br>recycling_embedder(m_1_prev, z_prev, x_prev)"]
+AddRecycle["Add recycling to m and z"]
+TemplCheck["config.template<br>.enabled?"]
+TemplEmbed["TemplateEmbedder<br>template_embedder(template_feats, z, ...)"]
+ExtraCheck["config.extra_msa<br>.enabled?"]
+AddTempl["z += template_pair_embedding<br>m = cat(m, template_single_embedding)"]
+ExtraEmbed["ExtraMSAEmbedder + ExtraMSAStack<br>extra_msa_embedder(extra_msa_feat)"]
+Evoformer["EvoformerStack<br>evoformer(m, z, ...)"]
+ExtraStack["extra_msa_stack(extra_msa_feat, z, ...)"]
+StructMod["StructureModule<br>structure_module(s, z, aatype, ...)"]
+Output["Output Dictionary<br>+ recycling embeddings"]
+
+Input --> TypeCast
+TypeCast --> InitEmbed
+InitEmbed --> MSAPair
+MSAPair --> CheckRecycle
+CheckRecycle --> InitZero
+CheckRecycle --> UseRecycle
+InitZero --> RecycEmbed
+UseRecycle --> RecycEmbed
+RecycEmbed --> AddRecycle
+AddRecycle --> TemplCheck
+TemplCheck --> TemplEmbed
+TemplCheck --> ExtraCheck
+TemplEmbed --> AddTempl
+AddTempl --> ExtraCheck
+ExtraCheck --> ExtraEmbed
+ExtraCheck --> Evoformer
+ExtraEmbed --> ExtraStack
+ExtraStack --> Evoformer
+Evoformer --> StructMod
+StructMod --> Output
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L173-L424](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L173-L424)
@@ -187,7 +273,7 @@ Embeds target features, MSA features, and relative positional encodings for mono
 **Constructor:**
 
 ```
-
+InputEmbedder(tf_dim, msa_dim, c_z, c_m, relpos_k)
 ```
 
 | Parameter | Type | Description |
@@ -211,7 +297,7 @@ Embeds target features, MSA features, and relative positional encodings for mono
 **Forward Method:**
 
 ```
-
+forward(tf, ri, msa) -> Tuple[torch.Tensor, torch.Tensor]
 ```
 
 | Parameter | Shape | Description |
@@ -267,7 +353,7 @@ Embeds outputs from the previous iteration for use in the current iteration (Alg
 **Constructor:**
 
 ```
-
+RecyclingEmbedder(c_m, c_z, min_bin, max_bin, no_bins, inf=1e8)
 ```
 
 | Parameter | Type | Description |
@@ -282,7 +368,7 @@ Embeds outputs from the previous iteration for use in the current iteration (Alg
 **Forward Method:**
 
 ```
-
+forward(m, z, x) -> Tuple[torch.Tensor, torch.Tensor]
 ```
 
 | Parameter | Shape | Description |
@@ -316,7 +402,7 @@ Processes template structures for monomer predictions. Orchestrates template ang
 **Constructor:**
 
 ```
-
+TemplateEmbedder(config)
 ```
 
 The config dictionary should contain:
@@ -329,7 +415,7 @@ The config dictionary should contain:
 **Forward Method:**
 
 ```
-
+forward(batch, z, pair_mask, templ_dim, chunk_size, _mask_trans=True)    -> Dict[str, torch.Tensor]
 ```
 
 | Parameter | Type | Description |
@@ -350,8 +436,38 @@ The config dictionary should contain:
 
 **Processing Pipeline:**
 
-```
+```mermaid
+flowchart TD
 
+Input["Template Batch"]
+Loop["For each template t in N_templ:"]
+Extract["Extract single template features<br>index_select(batch, templ_dim, t)"]
+AngleCheck["config.embed_angles?"]
+AngleFeat["build_template_angle_feat<br>(utils/feats.py)"]
+PairFeat["build_template_pair_feat<br>(utils/feats.py)"]
+AngleEmbed["TemplateAngleEmbedder<br>template_angle_embedder(angle_feat)"]
+PairEmbed["TemplatePairEmbedder<br>template_pair_embedder(pair_feat)"]
+Collect["Collect embeddings"]
+Cat["Concatenate along templ_dim"]
+PairStack["TemplatePairStack<br>template_pair_stack(pair_emb, mask, ...)"]
+PointAttn["TemplatePointwiseAttention<br>template_pointwise_att(stack_out, z, ...)"]
+MaskCheck["Multiply by template_mask sum > 0"]
+Return["Return template_pair_embedding<br>(+ template_single_embedding if angles)"]
+
+Input --> Loop
+Loop --> Extract
+Extract --> AngleCheck
+AngleCheck --> AngleFeat
+AngleCheck --> PairFeat
+AngleFeat --> AngleEmbed
+AngleEmbed --> PairFeat
+PairFeat --> PairEmbed
+PairEmbed --> Collect
+Collect --> Cat
+Cat --> PairStack
+PairStack --> PointAttn
+PointAttn --> MaskCheck
+MaskCheck --> Return
 ```
 
 **Sources:** [fastfold/model/nn/embedders.py L235-L324](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/nn/embedders.py#L235-L324)
@@ -365,7 +481,7 @@ Embeds template torsion angle features (Algorithm 2, line 7).
 **Constructor:**
 
 ```
-
+TemplateAngleEmbedder(c_in, c_out)
 ```
 
 | Parameter | Type | Description |
@@ -384,7 +500,7 @@ linear_1 (c_in -> c_out, init='relu')
 **Forward:**
 
 ```
-
+forward(x) -> torch.Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -404,7 +520,7 @@ Embeds template pair features (Algorithm 2, line 9).
 **Constructor:**
 
 ```
-
+TemplatePairEmbedder(c_in, c_out)
 ```
 
 | Parameter | Type | Description |
@@ -419,7 +535,7 @@ Single linear projection: `linear(c_in -> c_out, init='relu')`
 **Forward:**
 
 ```
-
+forward(x) -> torch.Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -457,7 +573,7 @@ Embeds unclustered MSA sequences (Algorithm 2, line 15).
 **Constructor:**
 
 ```
-
+ExtraMSAEmbedder(c_in, c_out)
 ```
 
 | Parameter | Type | Description |
@@ -472,7 +588,7 @@ Single linear projection: `linear(c_in -> c_out)`
 **Forward:**
 
 ```
-
+forward(x) -> torch.Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -483,8 +599,8 @@ Returns: `[*, N_extra_seq, N_res, c_out]` embeddings
 
 **Usage in AlphaFold:**
 
-```
-
+```markdown
+extra_msa_feat = build_extra_msa_feat(feats)  # or multimer versionextra_msa_feat = self.extra_msa_embedder(extra_msa_feat)z = self.extra_msa_stack(extra_msa_feat, z, ...)
 ```
 
 **Sources:** [fastfold/model/nn/embedders.py L414-L451](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/nn/embedders.py#L414-L451)
@@ -500,7 +616,7 @@ Stack of blocks for processing template pair representations (Algorithm 16).
 **Constructor:**
 
 ```
-
+TemplatePairStack(c_t, c_hidden_tri_att, c_hidden_tri_mul, no_blocks,                   no_heads, pair_transition_n, dropout_rate, blocks_per_ckpt, inf=1e9)
 ```
 
 | Parameter | Type | Description |
@@ -518,7 +634,7 @@ Stack of blocks for processing template pair representations (Algorithm 16).
 **Forward Method:**
 
 ```
-
+forward(t, mask, chunk_size, _mask_trans=True) -> torch.Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -565,7 +681,7 @@ Single block in the template pair stack.
 **Forward:**
 
 ```
-
+forward(z, mask, chunk_size=None, _mask_trans=True) -> torch.Tensor
 ```
 
 Processes each template independently (unbinds along template dimension).
@@ -581,7 +697,7 @@ Aggregates template embeddings into the pair representation using pointwise atte
 **Constructor:**
 
 ```
-
+TemplatePointwiseAttention(c_t, c_z, c_hidden, no_heads, inf)
 ```
 
 | Parameter | Type | Description |
@@ -595,7 +711,7 @@ Aggregates template embeddings into the pair representation using pointwise atte
 **Forward Method:**
 
 ```
-
+forward(t, z, template_mask=None, chunk_size=None) -> torch.Tensor
 ```
 
 | Parameter | Shape | Description |
@@ -637,8 +753,8 @@ Computes auxiliary predictions from model outputs. Located in `fastfold/model/nn
 
 Called at the end of `AlphaFold.forward()`:
 
-```
-
+```sql
+outputs.update(self.aux_heads(outputs))
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L101-L103](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L101-L103)
@@ -651,8 +767,8 @@ Called at the end of `AlphaFold.forward()`:
 
 Typical configuration structure for the model:
 
-```
-
+```css
+config = {    "globals": {        "is_multimer": False,        "chunk_size": 4,        "inplace": False,    },    "model": {        "input_embedder": {            "tf_dim": 21,            "msa_dim": 49,            "c_z": 128,            "c_m": 256,            "relpos_k": 32,        },        "recycling_embedder": {            "c_m": 256,            "c_z": 128,            "min_bin": 3.25,            "max_bin": 20.75,            "no_bins": 15,        },        "template": {            "enabled": True,            "embed_angles": True,            # ... template configs        },        "extra_msa": {            "enabled": True,            # ... extra MSA configs        },        "evoformer_stack": {            # ... evoformer configs        },        "structure_module": {            # ... structure module configs        },        "heads": {            # ... auxiliary head configs        },    }}
 ```
 
 For complete configuration details, see [Configuration System](/hpcaitech/FastFold/3-configuration-system).
@@ -665,8 +781,40 @@ For complete configuration details, see [Configuration System](/hpcaitech/FastFo
 
 High-level data flow through the model:
 
-```
+```mermaid
+flowchart TD
 
+Batch["Input Batch<br>(with recycling dim)"]
+Forward["AlphaFold.forward(batch)"]
+RecycleLoop["For cycle in range(N_recycle):"]
+SelectFeats["Select features for cycle<br>feats = batch[..., cycle]"]
+Iteration["iteration(feats, m_1_prev, z_prev, x_prev)"]
+InitEmbed["Unsupported markdown: list"]
+Recycle["Unsupported markdown: list"]
+Template["Unsupported markdown: list"]
+ExtraMSA["Unsupported markdown: list"]
+Evo["Unsupported markdown: list"]
+Struct["Unsupported markdown: list"]
+Save["Unsupported markdown: list"]
+CheckFinal["Final iteration?"]
+AuxHeads["Unsupported markdown: list"]
+Return["Return outputs"]
+
+Batch --> Forward
+Forward --> RecycleLoop
+RecycleLoop --> SelectFeats
+SelectFeats --> Iteration
+Iteration --> InitEmbed
+InitEmbed --> Recycle
+Recycle --> Template
+Template --> ExtraMSA
+ExtraMSA --> Evo
+Evo --> Struct
+Struct --> Save
+Save --> CheckFinal
+CheckFinal --> RecycleLoop
+CheckFinal --> AuxHeads
+AuxHeads --> Return
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L173-L534](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L173-L534)
@@ -680,7 +828,7 @@ High-level data flow through the model:
 The model supports an `inplace` mode for memory optimization:
 
 ```
-
+if self.globals.inplace:    m = [m]    z = [z]    m, z, s = self.evoformer.inplace(m, z, ...)    m = m[0]    z = z[0]else:    m, z, s = self.evoformer(m, z, ...)
 ```
 
 Inplace mode wraps tensors in lists to enable mutation without creating new tensors.
@@ -718,8 +866,8 @@ This is managed by `_disable_activation_checkpointing()` and `_enable_activation
 
 The model includes conditional Habana (Intel Gaudi) performance profiling:
 
-```
-
+```javascript
+if habana.is_habana():    from habana.hpuhelper import hpu_perf    perf = hpu_perf("iteration", sync=False)    # ... checkpoints throughout iteration    perf.checkahead("step description")
 ```
 
 **Sources:** [fastfold/model/hub/alphafold.py L177-L179](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L177-L179)

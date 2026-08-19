@@ -21,8 +21,45 @@ This page provides comprehensive API documentation for FastFold's public interfa
 
 FastFold's API is organized into four primary modules:
 
-```
+```mermaid
+flowchart TD
 
+Model["fastfold.model<br>AlphaFold model implementation"]
+Data["fastfold.data<br>Data processing pipeline"]
+Utils["fastfold.utils<br>Utilities and optimization"]
+Distributed["fastfold.distributed<br>Parallelism primitives"]
+AlphaFoldClass["AlphaFold"]
+Embedders["InputEmbedder<br>RecyclingEmbedder<br>TemplateEmbedder<br>ExtraMSAEmbedder"]
+Evoformer["EvoformerStack<br>ExtraMSAStack"]
+Structure["StructureModule"]
+Pipeline["DataPipeline<br>DataPipelineMultimer"]
+Alignment["AlignmentRunner<br>AlignmentRunnerMultimer"]
+Features["make_sequence_features<br>make_msa_features<br>make_template_features"]
+Inject["inject_fastnn"]
+Import["import_jax_weights_"]
+FastNN["FastNN Operations"]
+DAP["init_dap"]
+Comm["scatter, gather<br>reduce, all_to_all"]
+
+Model --> AlphaFoldClass
+Model --> Embedders
+Model --> Evoformer
+Model --> Structure
+Data --> Pipeline
+Data --> Alignment
+Data --> Features
+Utils --> Inject
+Utils --> Import
+Utils --> FastNN
+Distributed --> DAP
+Distributed --> Comm
+
+subgraph subGraph0 ["fastfold Package"]
+    Model
+    Data
+    Utils
+    Distributed
+end
 ```
 
 **Sources**: [README.md L82-L113](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L82-L113)
@@ -48,7 +85,7 @@ Main model class implementing the AlphaFold architecture (Algorithm 2 from the p
 **Constructor Signature**:
 
 ```
-
+AlphaFold(config: ml_collections.ConfigDict)
 ```
 
 | Parameter | Type | Description |
@@ -106,8 +143,8 @@ Runs forward pass through the model.
 
 **Example Usage**:
 
-```
-
+```javascript
+from fastfold.model.hub import AlphaFoldfrom fastfold.config import model_config # Initialize modelconfig = model_config("model_1")model = AlphaFold(config) # Forward passoutputs = model(batch)positions = outputs["final_atom_positions"]  # [*, N_res, 37, 3]plddt = outputs["plddt"]  # [*, N_res]
 ```
 
 ##### iteration(feats, m_1_prev, z_prev, x_prev, _recycle=True)
@@ -263,8 +300,55 @@ Embeds unclustered MSA sequences (Algorithm 2, line 15).
 
 ### Model Component Hierarchy
 
-```
+```mermaid
+flowchart TD
 
+AlphaFold["AlphaFold"]
+InputEmb["input_embedder:<br>InputEmbedder"]
+RecycEmb["recycling_embedder:<br>RecyclingEmbedder"]
+TempEmb["template_embedder:<br>TemplateEmbedder"]
+ExtraEmb["extra_msa_embedder:<br>ExtraMSAEmbedder"]
+ExtraStack["extra_msa_stack:<br>ExtraMSAStack"]
+Evo["evoformer:<br>EvoformerStack"]
+SM["structure_module:<br>StructureModule"]
+Heads["aux_heads:<br>AuxiliaryHeads"]
+TempAngle["template_angle_embedder"]
+TempPair["template_pair_embedder"]
+TempStack["template_pair_stack:<br>TemplatePairStack"]
+TempAttn["template_pointwise_att:<br>TemplatePointwiseAttention"]
+ExtraBlocks["blocks: ModuleList<br>ExtraMSABlock x N"]
+EvoBlocks["blocks: ModuleList<br>EvoformerBlock x N"]
+IPA["ipa: InvariantPointAttention"]
+BBUpdate["bb_update: BackboneUpdate"]
+AngleResnet["angle_resnet: AngleResnet"]
+PLDDT["plddt: PerResidueLDDTCaPredictor"]
+Distogram["distogram: DistogramHead"]
+TM["tm: TMScoreHead"]
+Masked["masked_msa: MaskedMSAHead"]
+ExpRes["experimentally_resolved"]
+
+AlphaFold --> InputEmb
+AlphaFold --> RecycEmb
+AlphaFold --> TempEmb
+AlphaFold --> ExtraEmb
+AlphaFold --> ExtraStack
+AlphaFold --> Evo
+AlphaFold --> SM
+AlphaFold --> Heads
+TempEmb --> TempAngle
+TempEmb --> TempPair
+TempEmb --> TempStack
+TempEmb --> TempAttn
+ExtraStack --> ExtraBlocks
+Evo --> EvoBlocks
+SM --> IPA
+SM --> BBUpdate
+SM --> AngleResnet
+Heads --> PLDDT
+Heads --> Distogram
+Heads --> TM
+Heads --> Masked
+Heads --> ExpRes
 ```
 
 **Sources**: [fastfold/model/hub/alphafold.py L46-L106](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/model/hub/alphafold.py#L46-L106)
@@ -440,8 +524,8 @@ Similar to monomer version but uses hmmsearch for template search instead of hhs
 
 **Location**: [fastfold/data/data_pipeline.py L90-L109](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L90-L109)
 
-```
-
+```python
+def make_sequence_features(    sequence: str,     description: str,     num_res: int) -> FeatureDict
 ```
 
 Constructs basic sequence features.
@@ -463,8 +547,8 @@ Constructs basic sequence features.
 
 **Location**: [fastfold/data/data_pipeline.py L205-L242](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L205-L242)
 
-```
-
+```python
+def make_msa_features(    msas: Sequence[parsers.Msa]) -> FeatureDict
 ```
 
 Constructs MSA features from parsed alignment objects.
@@ -488,8 +572,8 @@ Constructs MSA features from parsed alignment objects.
 
 **Location**: [fastfold/data/data_pipeline.py L57-L87](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L57-L87)
 
-```
-
+```python
+def make_template_features(    input_sequence: str,    hits: Sequence[Any],    template_featurizer: Union[TemplateHitFeaturizer, HmmsearchHitFeaturizer],    query_pdb_code: Optional[str] = None,    query_release_date: Optional[str] = None,) -> FeatureDict
 ```
 
 Processes template hits into template features.
@@ -509,8 +593,43 @@ Processes template hits into template features.
 
 ### Data Pipeline Workflow
 
-```
+```mermaid
+flowchart TD
 
+FASTA["FASTA File"]
+AR["AlignmentRunner.run"]
+Jackhmmer1["jackhmmer<br>→ uniref90_hits.a3m"]
+Jackhmmer2["jackhmmer<br>→ mgnify_hits.a3m"]
+HHBlits["hhblits<br>→ bfd_uniref_hits.a3m"]
+HHSearch["hhsearch<br>→ pdb70_hits.hhr"]
+AlignDir["alignment_dir/"]
+DP["DataPipeline.process_fasta"]
+ParseMSA["parse MSAs<br>make_msa_features"]
+ParseTemplates["parse templates<br>make_template_features"]
+MakeSeq["make_sequence_features"]
+FeatDict["FeatureDict<br>~50 NumPy arrays"]
+FeatProc["FeaturePipeline.process_features"]
+Batch["Model Input Batch<br>PyTorch tensors"]
+
+FASTA --> AR
+AR --> Jackhmmer1
+AR --> Jackhmmer2
+AR --> HHBlits
+AR --> HHSearch
+Jackhmmer1 --> AlignDir
+Jackhmmer2 --> AlignDir
+HHBlits --> AlignDir
+HHSearch --> AlignDir
+AlignDir --> DP
+FASTA --> DP
+DP --> ParseMSA
+DP --> ParseTemplates
+DP --> MakeSeq
+ParseMSA --> FeatDict
+ParseTemplates --> FeatDict
+MakeSeq --> FeatDict
+FeatDict --> FeatProc
+FeatProc --> Batch
 ```
 
 **Sources**: [fastfold/data/data_pipeline.py L263-L947](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L263-L947)
@@ -535,8 +654,8 @@ The FastNN Kernel API provides optimized implementations of core operations with
 
 )
 
-```
-
+```python
+def inject_fastnn(model: nn.Module) -> nn.Module
 ```
 
 Replaces standard Evoformer blocks with optimized FastNN implementations.
@@ -559,8 +678,8 @@ Replaces standard Evoformer blocks with optimized FastNN implementations.
 
 **Usage**:
 
-```
-
+```javascript
+from fastfold.model.hub import AlphaFoldfrom fastfold.utils import inject_fastnn model = AlphaFold(config)model = inject_fastnn(model)  # In-place replacement
 ```
 
 **Performance Impact**: Typically 2-5x speedup on forward/backward passes.
@@ -581,8 +700,8 @@ Replaces standard Evoformer blocks with optimized FastNN implementations.
 
 )
 
-```
-
+```python
+def set_chunk_size(chunk_size: Optional[int]) -> None
 ```
 
 Sets global chunk size for memory-efficient processing.
@@ -611,8 +730,8 @@ Sets global chunk size for memory-efficient processing.
 
 **Usage**:
 
-```
-
+```javascript
+from fastfold.model.fastnn import set_chunk_size set_chunk_size(128)  # Enable chunking with size 128model = inject_fastnn(model)
 ```
 
 **Sources**: [inference.py L36-L145](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L36-L145)
@@ -631,8 +750,8 @@ Sets global chunk size for memory-efficient processing.
 
 )
 
-```
-
+```python
+def set_fused_triangle_multiplication() -> None
 ```
 
 Enables fused triangle multiplication kernels (required for AlphaFold v3 weights).
@@ -655,8 +774,55 @@ into a single CUDA kernel.
 
 ### Kernel Architecture
 
-```
+```mermaid
+flowchart TD
 
+MSAAttn["MSA Row/Column Attention"]
+TriMul["Triangle Multiplication"]
+PairTrans["Pair Transition"]
+ChunkMSA["ChunkMSARowAttentionWithPairBias"]
+AsyncTri["AsyncChunkTriangleMultiplication"]
+ChunkPair["ChunkedPairTransition"]
+SoftmaxKernel["Softmax Kernel<br>CUDA/Triton"]
+AttnCore["Attention Core<br>Triton (online softmax)"]
+LayerNorm["LayerNorm Kernel<br>CUDA/Triton"]
+Gather["gather / gather_async"]
+Scatter["scatter"]
+AllToAll["All_to_All_Async"]
+
+MSAAttn --> ChunkMSA
+TriMul --> AsyncTri
+PairTrans --> ChunkPair
+ChunkMSA --> AttnCore
+ChunkMSA --> SoftmaxKernel
+ChunkMSA --> LayerNorm
+AsyncTri --> Gather
+AsyncTri --> Scatter
+ChunkPair --> LayerNorm
+
+subgraph subGraph3 ["Distributed Primitives"]
+    Gather
+    Scatter
+    AllToAll
+end
+
+subgraph subGraph2 ["Fused Kernels"]
+    SoftmaxKernel
+    AttnCore
+    LayerNorm
+end
+
+subgraph subGraph1 ["FastNN Operations"]
+    ChunkMSA
+    AsyncTri
+    ChunkPair
+end
+
+subgraph subGraph0 ["High-Level Operations"]
+    MSAAttn
+    TriMul
+    PairTrans
+end
 ```
 
 **Sources**: README.md, System Architecture diagrams
@@ -679,8 +845,8 @@ The Distributed API enables parallelism across multiple GPUs for ultra-long sequ
 
 )
 
-```
-
+```python
+def init_dap(tensor_model_parallel_size: int = 1) -> None
 ```
 
 Initializes Dynamic Axial Parallelism for distributed execution.
@@ -707,8 +873,8 @@ Initializes Dynamic Axial Parallelism for distributed execution.
 
 **Usage in Inference**:
 
-```
-
+```javascript
+import torch.multiprocessing as mpfrom fastfold.distributed import init_dap def worker(rank, world_size):    os.environ['RANK'] = str(rank)    os.environ['LOCAL_RANK'] = str(rank)    os.environ['WORLD_SIZE'] = str(world_size)        init_dap(tensor_model_parallel_size=world_size)    # ... model inference ... # Spawn processesmp.spawn(worker, nprocs=2, args=(2,))
 ```
 
 **Sources**: [README.md L89-L95](https://github.com/hpcaitech/FastFold/blob/eba49680/README.md?plain=1#L89-L95)
@@ -727,8 +893,8 @@ All primitives are autograd-aware and handle gradient synchronization automatica
 
  (inferred from architecture)
 
-```
-
+```python
+def scatter(    input: torch.Tensor,    dim: int = 0) -> torch.Tensor
 ```
 
 Scatters tensor along dimension across GPUs in tensor model parallel group.
@@ -752,8 +918,8 @@ Scatters tensor along dimension across GPUs in tensor model parallel group.
 
  (inferred)
 
-```
-
+```python
+def gather(    input: torch.Tensor,    dim: int = 0) -> torch.Tensor
 ```
 
 Gathers sharded tensor from all GPUs.
@@ -772,14 +938,14 @@ Gathers sharded tensor from all GPUs.
 
 Asynchronous gather enabling computation-communication overlap.
 
-```
-
+```python
+def gather_async(input: torch.Tensor, dim: int = 0) -> torch.Tensordef gather_async_opp(input: torch.Tensor) -> torch.Tensor
 ```
 
 **Pattern**:
 
-```
-
+```markdown
+# Start gather (non-blocking)x_gathering = gather_async(x, dim=0) # Do independent computationy = some_computation(other_data) # Wait for gather to completex_full = gather_async_opp(x_gathering)
 ```
 
 **Performance**: 20-30% speedup when computation overlaps with communication.
@@ -788,8 +954,8 @@ Asynchronous gather enabling computation-communication overlap.
 
 #### reduce
 
-```
-
+```python
+def reduce(    input: torch.Tensor,    op: str = 'sum') -> torch.Tensor
 ```
 
 Reduces tensor across all GPUs (sum, mean, max, etc.).
@@ -804,8 +970,8 @@ Reduces tensor across all GPUs (sum, mean, max, etc.).
 
  (inferred)
 
-```
-
+```python
+def All_to_All_Async(    input: torch.Tensor,    dim: int = 0) -> torch.Tensor
 ```
 
 Performs all-to-all exchange (transposes distributed dimension).
@@ -818,8 +984,33 @@ Performs all-to-all exchange (transposes distributed dimension).
 
 ### Distributed Execution Patterns
 
-```
+```mermaid
+sequenceDiagram
+  participant Main Process
+  participant Worker GPU 0
+  participant Worker GPU 1
+  participant Worker GPU N
 
+  Main Process->>Main Process: torch.multiprocessing.spawn(worker, nprocs=N)
+  Main Process->>Worker GPU 0: Launch with rank=0
+  Main Process->>Worker GPU 1: Launch with rank=1
+  Main Process->>Worker GPU N: Launch with rank=N-1
+  Worker GPU 0->>Worker GPU 0: init_dap(N)
+  Worker GPU 1->>Worker GPU 1: init_dap(N)
+  Worker GPU N->>Worker GPU N: init_dap(N)
+  note over Worker GPU 0,Worker GPU N: All workers load model
+  Worker GPU 0->>Worker GPU 0: Load full batch
+  Worker GPU 0->>Worker GPU 1: scatter(batch)
+  Worker GPU 0->>Worker GPU N: scatter(batch)
+  note over Worker GPU 0,Worker GPU N: Each GPU processes local shard
+  Worker GPU 0->>Worker GPU 0: forward(local_batch)
+  Worker GPU 1->>Worker GPU 1: forward(local_batch)
+  Worker GPU N->>Worker GPU N: forward(local_batch)
+  note over Worker GPU 0,Worker GPU N: Synchronize via gather/reduce
+  Worker GPU 0->>Worker GPU 1: gather(results)
+  Worker GPU 1->>Worker GPU 0: gather(results)
+  Worker GPU N->>Worker GPU 0: gather(results)
+  Worker GPU 0->>Main Process: Return via Queue
 ```
 
 **Sources**: [inference.py L122-L160](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L122-L160)
@@ -832,8 +1023,8 @@ Performs all-to-all exchange (transposes distributed dimension).
 
 **Location**: [fastfold/utils/import_weights.py L588-L618](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/utils/import_weights.py#L588-L618)
 
-```
-
+```python
+def import_jax_weights_(    model: nn.Module,    npz_path: str,    version: str = "model_1") -> None
 ```
 
 Imports DeepMind's JAX-format AlphaFold weights into PyTorch model.
@@ -856,8 +1047,8 @@ Imports DeepMind's JAX-format AlphaFold weights into PyTorch model.
 
 **Usage**:
 
-```
-
+```javascript
+from fastfold.model.hub import AlphaFoldfrom fastfold.config import model_configfrom fastfold.utils.import_weights import import_jax_weights_ config = model_config("model_1")model = AlphaFold(config)import_jax_weights_(model, "data/params/params_model_1.npz", version="model_1")
 ```
 
 **Weight Transformations**:
@@ -882,8 +1073,8 @@ Imports DeepMind's JAX-format AlphaFold weights into PyTorch model.
 
 )
 
-```
-
+```python
+def model_config(    name: str,    train: bool = False,    low_prec: bool = False) -> ml_collections.ConfigDict
 ```
 
 Returns configuration for specified model variant.
@@ -924,8 +1115,8 @@ Returns configuration for specified model variant.
 
 **Example**:
 
-```
-
+```javascript
+from fastfold.config import model_config config = model_config("model_1")config.globals.chunk_size = 128  # Override chunk sizeconfig.globals.inplace = True    # Enable in-place ops
 ```
 
 **Sources**: [inference.py L35-L342](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L35-L342)
@@ -975,8 +1166,8 @@ Dictionary mapping feature names to NumPy arrays. Used throughout data pipeline.
 
 ### Complete Inference Pipeline
 
-```
-
+```javascript
+import torchfrom fastfold.model.hub import AlphaFoldfrom fastfold.config import model_configfrom fastfold.data import data_pipeline, feature_pipelinefrom fastfold.utils import inject_fastnnfrom fastfold.utils.import_weights import import_jax_weights_from fastfold.distributed import init_dap # 1. Setup data pipelinetemplate_featurizer = templates.TemplateHitFeaturizer(    mmcif_dir="data/pdb_mmcif/mmcif_files/",    max_template_date="2022-01-01",    max_hits=4,    kalign_binary_path="kalign",)data_proc = data_pipeline.DataPipeline(template_featurizer=template_featurizer) # 2. Process input datafeature_dict = data_proc.process_fasta(    fasta_path="target.fasta",    alignment_dir="alignments/") # 3. Prepare features for modelconfig = model_config("model_1_ptm")feat_proc = feature_pipeline.FeaturePipeline(config.data)batch = feat_proc.process_features(feature_dict, mode='predict') # 4. Initialize modelmodel = AlphaFold(config)import_jax_weights_(model, "data/params/params_model_1_ptm.npz", version="model_1_ptm")model = inject_fastnn(model)  # Enable FastNN optimizationsmodel = model.eval().cuda() # 5. Run inferencewith torch.no_grad():    batch = {k: torch.as_tensor(v).cuda() for k, v in batch.items()}    outputs = model(batch)    positions = outputs["final_atom_positions"]  # [N_res, 37, 3]plddt = outputs["plddt"]  # [N_res]
 ```
 
 **Sources**: [inference.py L122-L439](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L122-L439)
@@ -985,8 +1176,8 @@ Dictionary mapping feature names to NumPy arrays. Used throughout data pipeline.
 
 ### Distributed Multi-GPU Inference
 
-```
-
+```javascript
+import osimport torchimport torch.multiprocessing as mpfrom fastfold.distributed import init_dap def inference_worker(rank, world_size, batch):    # Set environment variables    os.environ['RANK'] = str(rank)    os.environ['LOCAL_RANK'] = str(rank)    os.environ['WORLD_SIZE'] = str(world_size)        # Initialize DAP    init_dap(tensor_model_parallel_size=world_size)    torch.cuda.set_device(rank)        # Load model (same code as above)    config = model_config("model_1")    config.globals.chunk_size = 64  # Lower memory usage    model = AlphaFold(config).cuda()    import_jax_weights_(model, "params.npz")    model = inject_fastnn(model)        # Run inference    with torch.no_grad():        batch = {k: torch.as_tensor(v).cuda() for k, v in batch.items()}        outputs = model(batch)        # Synchronize    torch.distributed.barrier()    return outputs # Spawn workersmanager = mp.Manager()result_queue = manager.Queue()mp.spawn(inference_worker, nprocs=4, args=(4, batch))
 ```
 
 **Sources**: [inference.py L122-L160](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L122-L160)

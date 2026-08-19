@@ -25,8 +25,88 @@ For using the pipeline during inference: see [Feature Generation for Inference](
 
 The data processing pipeline consists of three major stages: alignment/search, parsing, and feature assembly. FastFold provides both sequential and Ray-accelerated execution paths.
 
-```
+```mermaid
+flowchart TD
 
+FASTA["FASTA file<br>(protein sequence)"]
+PDB["PDB/mmCIF/ProteinNet<br>(structure)"]
+AR["AlignmentRunner<br>(sequential)"]
+FFWF["FastFoldDataWorkFlow<br>(Ray-accelerated)"]
+JH_UR90["jackhmmer → UniRef90"]
+JH_MGN["jackhmmer → MGnify"]
+HHB_BFD["hhblits → BFD/UniRef30"]
+HHS_PDB["hhsearch → PDB70"]
+A3M["Parse A3M files<br>parsers.parse_a3m"]
+STO["Parse Stockholm files<br>parsers.parse_stockholm"]
+HHR["Parse HHR files<br>parsers.parse_hhr"]
+MMCIF["Parse mmCIF files<br>mmcif_parsing"]
+DP["DataPipeline.process_fasta<br>DataPipeline.process_mmcif<br>DataPipeline.process_pdb"]
+SEQ["make_sequence_features"]
+MSA["make_msa_features"]
+TMPL["make_template_features"]
+FD["FeatureDict<br>(NumPy arrays)"]
+
+FASTA --> AR
+FASTA --> FFWF
+PDB --> DP
+JH_UR90 --> A3M
+JH_MGN --> A3M
+HHB_BFD --> A3M
+HHS_PDB --> HHR
+A3M --> DP
+STO --> DP
+HHR --> DP
+MMCIF --> DP
+
+subgraph subGraph5 ["Feature Assembly Stage"]
+    DP
+    FD
+    DP --> SEQ
+    DP --> MSA
+    DP --> TMPL
+    SEQ --> FD
+    MSA --> FD
+    TMPL --> FD
+    DP --> FD
+
+subgraph subGraph4 ["Feature Generation"]
+    SEQ
+    MSA
+    TMPL
+end
+end
+
+subgraph subGraph3 ["Parsing Stage"]
+    A3M
+    STO
+    HHR
+    MMCIF
+end
+
+subgraph subGraph2 ["Alignment & Search Stage"]
+    AR
+    FFWF
+    AR --> JH_UR90
+    AR --> JH_MGN
+    AR --> HHB_BFD
+    AR --> HHS_PDB
+    FFWF --> JH_UR90
+    FFWF --> JH_MGN
+    FFWF --> HHB_BFD
+    FFWF --> HHS_PDB
+
+subgraph subGraph1 ["Database Searches"]
+    JH_UR90
+    JH_MGN
+    HHB_BFD
+    HHS_PDB
+end
+end
+
+subgraph subGraph0 ["Input Stage"]
+    FASTA
+    PDB
+end
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L263-L457](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L263-L457)
@@ -46,8 +126,21 @@ FastFold provides two execution paths for data processing, each with distinct pe
 
 The sequential path executes database searches serially using the `AlignmentRunner` class. Each tool runs to completion before the next begins.
 
-```
+```mermaid
+flowchart TD
 
+Input["FASTA Input"]
+Step1["jackhmmer<br>UniRef90"]
+Step2["hhsearch<br>PDB70"]
+Step3["jackhmmer<br>MGnify"]
+Step4["hhblits/jackhmmer<br>BFD"]
+Output["Alignment Files"]
+
+Input --> Step1
+Step1 --> Step2
+Step2 --> Step3
+Step3 --> Step4
+Step4 --> Output
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L263-L457](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L263-L457)
@@ -56,8 +149,30 @@ The sequential path executes database searches serially using the `AlignmentRunn
 
 The Ray workflow executes independent database searches in parallel, with dependency management for sequential steps (e.g., template search depends on UniRef90 results).
 
-```
+```mermaid
+flowchart TD
 
+Input["FASTA Input"]
+Ray["Ray Workflow<br>Initialization"]
+Node1["jackhmmer → UniRef90<br>(required for templates)"]
+Node2["jackhmmer → MGnify<br>(independent)"]
+Node3["hhblits/jackhmmer → BFD<br>(independent)"]
+Node4["hhsearch → PDB70<br>(depends on UniRef90)"]
+Collect["batch_run<br>(collect results)"]
+Output["Alignment Files"]
+
+Input --> Ray
+Node1 --> Node4
+Node2 --> Collect
+Node3 --> Collect
+Node4 --> Collect
+Collect --> Output
+
+subgraph Parallel ["Parallel"]
+    Node1
+    Node2
+    Node3
+end
 ```
 
 **Sources:** [fastfold/workflow/template/fastfold_data_workflow.py L121-L169](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/workflow/template/fastfold_data_workflow.py#L121-L169)
@@ -83,8 +198,8 @@ FastFold accepts multiple input formats, each processed by specialized methods:
 
 The `AlignmentRunner` class orchestrates sequential database searches for monomer predictions:
 
-```
-
+```markdown
+# Key initialization parametersAlignmentRunner(    jackhmmer_binary_path=...,    hhblits_binary_path=...,    hhsearch_binary_path=...,    uniref90_database_path=...,    mgnify_database_path=...,    bfd_database_path=...,    pdb70_database_path=...,    use_small_bfd=False,    no_cpus=None,    uniref_max_hits=10000,    mgnify_max_hits=5000,)
 ```
 
 The `run()` method executes the complete alignment workflow and writes output files to the specified directory.
@@ -95,8 +210,8 @@ The `run()` method executes the complete alignment workflow and writes output fi
 
 Extends the monomer runner with additional databases for multimer prediction:
 
-```
-
+```markdown
+AlignmentRunnerMultimer(    # Standard databases    jackhmmer_binary_path=...,    hhblits_binary_path=...,    hmmsearch_binary_path=...,      # For PDB structure search    hmmbuild_binary_path=...,       # For HMM profile building    # Additional multimer databases    uniprot_database_path=...,      # For MSA pairing    pdb_seqres_database_path=...,   # For template search    uniprot_max_hits=50000,)
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L461-L668](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L461-L668)
@@ -118,8 +233,25 @@ The `DataPipeline` class assembles features from alignment results and input str
 
 **Internal Processing:**
 
-```
+```mermaid
+flowchart TD
 
+Input["Input File"]
+Parse["_parse_msa_data<br>_parse_template_hits"]
+MSA["make_msa_features<br>• msa<br>• deletion_matrix<br>• num_alignments"]
+Seq["make_sequence_features<br>• aatype<br>• residue_index<br>• seq_length"]
+Tmpl["make_template_features<br>• template_aatype<br>• template_all_atom_positions<br>• template_all_atom_mask"]
+Merge["Feature Dict<br>Merge"]
+Output["FeatureDict"]
+
+Input --> Parse
+Parse --> MSA
+Parse --> Seq
+Parse --> Tmpl
+MSA --> Merge
+Seq --> Merge
+Tmpl --> Merge
+Merge --> Output
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L784-L1080](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L784-L1080)
@@ -143,7 +275,7 @@ FastFold provides specialized functions for generating different feature categor
 ### Sequence Features
 
 ```
-
+make_sequence_features(sequence: str, description: str, num_res: int) -> FeatureDict
 ```
 
 Generates basic sequence information:
@@ -159,7 +291,7 @@ Generates basic sequence information:
 ### MSA Features
 
 ```
-
+make_msa_features(msas: Sequence[parsers.Msa]) -> FeatureDict
 ```
 
 Processes multiple sequence alignments:
@@ -176,7 +308,7 @@ Processes multiple sequence alignments:
 ### Template Features
 
 ```
-
+make_template_features(    input_sequence: str,    hits: Sequence[Any],    template_featurizer: Union[TemplateHitFeaturizer, HmmsearchHitFeaturizer],    query_pdb_code: Optional[str] = None,    query_release_date: Optional[str] = None,) -> FeatureDict
 ```
 
 Generates structural template features:
@@ -193,7 +325,7 @@ Generates structural template features:
 ### Structure Features
 
 ```
-
+make_mmcif_features(mmcif_object: mmcif_parsing.MmcifObject, chain_id: str) -> FeatureDictmake_pdb_features(protein_object: protein.Protein, description: str, ...) -> FeatureDict
 ```
 
 For structure-based inputs, additional features include:
@@ -251,8 +383,42 @@ The Ray-accelerated workflows use factory classes to generate executable workflo
 
 ### Workflow Factories
 
-```
+```mermaid
+flowchart TD
 
+JHF["JackHmmerFactory"]
+HHF["HHBlitsFactory"]
+HHSF["HHSearchFactory"]
+HMSF["HmmSearchFactory"]
+Config["Factory Config:<br>• binary_path<br>• database_path(s)<br>• n_cpu<br>• max_hits"]
+GenNode["gen_node(input, output, after=[])"]
+Node["Executable Ray Node"]
+
+Config --> JHF
+Config --> HHF
+Config --> HHSF
+Config --> HMSF
+JHF --> GenNode
+HHF --> GenNode
+HHSF --> GenNode
+HMSF --> GenNode
+
+subgraph subGraph2 ["Node Generation"]
+    GenNode
+    Node
+    GenNode --> Node
+end
+
+subgraph subGraph1 ["Workflow Configuration"]
+    Config
+end
+
+subgraph subGraph0 ["Factory Pattern"]
+    JHF
+    HHF
+    HHSF
+    HMSF
+end
 ```
 
 **Node Dependencies:** The `after` parameter specifies dependencies, ensuring sequential execution when required (e.g., template search must wait for UniRef90 MSA).
@@ -261,8 +427,8 @@ The Ray-accelerated workflows use factory classes to generate executable workflo
 
 ### Workflow Execution
 
-```
-
+```markdown
+# FastFoldDataWorkFlow.run()workflow_id = 'fastfold_data_workflow ' + str(localtime) # Generate workflow nodesuniref90_node = self.jackhmmer_uniref90_factory.gen_node(fasta_path, uniref90_out_path)hhs_node = self.hhsearch_pdb_factory.gen_node(uniref90_out_path, pdb70_out_path, after=[uniref90_node])mgnify_node = self.jackhmmer_mgnify_factory.gen_node(fasta_path, mgnify_out_path)bfd_node = self.hhblits_bfd_factory.gen_node(fasta_path, bfd_out_path) # Execute workflow with dependency managementbatch_run(workflow_id=workflow_id, dags=[hhs_node, mgnify_node, bfd_node])
 ```
 
 The `batch_run()` function manages parallel execution and handles workflow cleanup.
@@ -299,14 +465,14 @@ The pipeline handles multiple alignment and structure file formats:
 
 ### Monomer Processing
 
-```
-
+```javascript
+from fastfold.data import data_pipeline, templates # Initialize template featurizertemplate_featurizer = templates.TemplateHitFeaturizer(    mmcif_dir="data/pdb_mmcif/mmcif_files",    max_template_date="2021-01-01",    max_hits=20,    kalign_binary_path="kalign",    obsolete_pdbs_path="data/pdb_mmcif/obsolete.dat",) # Initialize pipelinepipeline = data_pipeline.DataPipeline(    template_featurizer=template_featurizer) # Process FASTAfeatures = pipeline.process_fasta(    fasta_path="target.fasta",    alignment_dir="alignments/target/",) # features is now a FeatureDict ready for model input
 ```
 
 ### Multimer Processing
 
-```
-
+```sql
+# Create monomer pipelinemonomer_pipeline = data_pipeline.DataPipeline(    template_featurizer=template_featurizer) # Create multimer pipelinemultimer_pipeline = data_pipeline.DataPipelineMultimer(    monomer_data_pipeline=monomer_pipeline) # Process multimer FASTA (multiple chains)features = multimer_pipeline.process_fasta(    fasta_path="complex.fasta",    alignment_dir="alignments/complex/",  # Contains per-chain subdirectories) # features includes assembly and pairing information
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L784-L790](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L784-L790)

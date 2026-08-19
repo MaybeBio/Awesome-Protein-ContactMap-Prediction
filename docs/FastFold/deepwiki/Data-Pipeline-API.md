@@ -21,8 +21,112 @@ For end-to-end data processing workflows and conceptual overviews, see [Data Pro
 
 The Data Pipeline API consists of several layers that work together to produce model-ready features:
 
-```
+```mermaid
+flowchart TD
 
+FASTA["FASTA Files<br>(raw sequences)"]
+PDB["PDB/mmCIF Files<br>(structures)"]
+MSA_Files["MSA Files<br>(.a3m, .sto, .hhr)"]
+Jackhmmer["Jackhmmer<br>jackhmmer.py"]
+HHBlits["HHBlits<br>hhblits.py"]
+HHSearch["HHSearch<br>hhsearch.py"]
+Hmmsearch["Hmmsearch<br>hmmsearch.py"]
+Hmmbuild["Hmmbuild<br>hmmbuild.py"]
+Kalign["Kalign<br>kalign.py"]
+ParseFasta["parse_fasta()<br>parsers.py"]
+ParseA3M["parse_a3m()<br>parsers.py"]
+ParseStockholm["parse_stockholm()<br>parsers.py"]
+ParseHHR["parse_hhr()<br>parsers.py"]
+ParseHmmsearch["parse_hmmsearch_sto()<br>parsers.py"]
+ParseMMCIF["mmcif_parsing.parse()<br>mmcif_parsing.py"]
+MakeSeq["make_sequence_features()<br>data_pipeline.py:90-109"]
+MakeMSA["make_msa_features()<br>data_pipeline.py:205-242"]
+MakeTempl["make_template_features()<br>data_pipeline.py:57-87"]
+MakeMMCIF["make_mmcif_features()<br>data_pipeline.py:112-145"]
+MakePDB["make_pdb_features()<br>data_pipeline.py:185-202"]
+AlignRunner["AlignmentRunner<br>data_pipeline.py:263-457"]
+AlignRunnerMulti["AlignmentRunnerMultimer<br>data_pipeline.py:461-668"]
+DataPipe["DataPipeline<br>data_pipeline.py:784-1038"]
+DataPipeMulti["DataPipelineMultimer<br>data_pipeline.py:1041-1319"]
+TemplFeat["TemplateHitFeaturizer<br>templates.py:733-1036"]
+FeatDict["FeatureDict<br>(NumPy arrays)"]
+
+FASTA --> AlignRunner
+FASTA --> AlignRunnerMulti
+AlignRunner --> Jackhmmer
+AlignRunner --> HHBlits
+AlignRunner --> HHSearch
+AlignRunnerMulti --> Jackhmmer
+AlignRunnerMulti --> HHBlits
+AlignRunnerMulti --> Hmmsearch
+Jackhmmer --> ParseStockholm
+HHBlits --> ParseA3M
+HHSearch --> ParseHHR
+Hmmsearch --> ParseHmmsearch
+MSA_Files --> ParseA3M
+MSA_Files --> ParseStockholm
+MSA_Files --> ParseHHR
+PDB --> ParseMMCIF
+ParseA3M --> MakeMSA
+ParseStockholm --> MakeMSA
+ParseHHR --> MakeTempl
+ParseHmmsearch --> MakeTempl
+ParseMMCIF --> MakeMMCIF
+ParseFasta --> MakeSeq
+MakeMSA --> DataPipe
+MakeTempl --> DataPipe
+MakeSeq --> DataPipe
+MakeMMCIF --> DataPipe
+MakePDB --> DataPipe
+DataPipe --> FeatDict
+DataPipeMulti --> FeatDict
+
+subgraph subGraph5 ["Output Layer"]
+    FeatDict
+end
+
+subgraph subGraph4 ["Pipeline Orchestration Layer"]
+    AlignRunner
+    AlignRunnerMulti
+    DataPipe
+    DataPipeMulti
+    TemplFeat
+    AlignRunner --> DataPipe
+    AlignRunnerMulti --> DataPipeMulti
+    TemplFeat --> DataPipe
+end
+
+subgraph subGraph3 ["Feature Generation Layer"]
+    MakeSeq
+    MakeMSA
+    MakeTempl
+    MakeMMCIF
+    MakePDB
+end
+
+subgraph subGraph2 ["Parser Layer"]
+    ParseFasta
+    ParseA3M
+    ParseStockholm
+    ParseHHR
+    ParseHmmsearch
+    ParseMMCIF
+end
+
+subgraph subGraph1 ["Tool Wrapper Layer"]
+    Jackhmmer
+    HHBlits
+    HHSearch
+    Hmmsearch
+    Hmmbuild
+    Kalign
+end
+
+subgraph subGraph0 ["Input Layer"]
+    FASTA
+    PDB
+    MSA_Files
+end
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L1-L1556](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L1-L1556)
@@ -42,7 +146,7 @@ Type alias for the primary data structure passed between pipeline stages and int
 **Definition:** [fastfold/data/data_pipeline.py L44](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L44-L44)
 
 ```
-
+FeatureDict = Mapping[str, np.ndarray]
 ```
 
 A `FeatureDict` is a dictionary mapping feature names (strings) to NumPy arrays. Standard features include:
@@ -65,8 +169,8 @@ Dataclass representing a protein structure with atomic coordinates and metadata.
 
 **Definition:** [fastfold/common/protein.py L36-L70](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/common/protein.py#L36-L70)
 
-```
-
+```python
+@dataclasses.dataclass(frozen=True)class Protein:    atom_positions: np.ndarray  # [num_res, num_atom_type, 3]    aatype: np.ndarray          # [num_res]    atom_mask: np.ndarray       # [num_res, num_atom_type]    residue_index: np.ndarray   # [num_res]    chain_index: np.ndarray     # [num_res]    b_factors: np.ndarray       # [num_res, num_atom_type]
 ```
 
 **Key Functions:**
@@ -84,8 +188,8 @@ Dataclass representing a parsed multiple sequence alignment.
 
 **Definition:** [fastfold/data/parsers.py L28-L53](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/parsers.py#L28-L53)
 
-```
-
+```python
+@dataclasses.dataclass(frozen=True)class Msa:    sequences: Sequence[str]    deletion_matrix: DeletionMatrix    descriptions: Optional[Sequence[str]]        def truncate(self, max_seqs: int) -> Msa:        # Truncate to max_seqs sequences
 ```
 
 **Sources:** [fastfold/data/parsers.py L28-L53](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/parsers.py#L28-L53)
@@ -96,8 +200,8 @@ Dataclass representing a template search hit from HHsearch or hmmsearch.
 
 **Definition:** [fastfold/data/parsers.py L56-L68](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/parsers.py#L56-L68)
 
-```
-
+```python
+@dataclasses.dataclass(frozen=True)class TemplateHit:    index: int    name: str    aligned_cols: int    sum_probs: Optional[float]    query: str    hit_sequence: str    indices_query: List[int]    indices_hit: List[int]
 ```
 
 **Sources:** [fastfold/data/parsers.py L56-L68](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/parsers.py#L56-L68)
@@ -112,8 +216,8 @@ Primary class for processing monomer protein data into model features.
 
 **Class Definition:** [fastfold/data/data_pipeline.py L784-L1038](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L784-L1038)
 
-```
-
+```python
+class DataPipeline:    def __init__(        self,        template_featurizer: Optional[templates.TemplateHitFeaturizer],    )
 ```
 
 **Methods:**
@@ -122,8 +226,8 @@ Primary class for processing monomer protein data into model features.
 
 Process a FASTA file and alignment directory into features.
 
-```
-
+```python
+def process_fasta(    self,    fasta_path: str,    alignment_dir: str,    _alignment_index: Optional[str] = None,) -> FeatureDict
 ```
 
 **Workflow:**
@@ -142,8 +246,8 @@ Process a FASTA file and alignment directory into features.
 
 Process an mmCIF object and alignment directory.
 
-```
-
+```python
+def process_mmcif(    self,    mmcif: mmcif_parsing.MmcifObject,    alignment_dir: str,    chain_id: Optional[str] = None,    _alignment_index: Optional[str] = None,) -> FeatureDict
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L962-L998](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L962-L998)
@@ -152,8 +256,8 @@ Process an mmCIF object and alignment directory.
 
 Process a PDB file and alignment directory.
 
-```
-
+```python
+def process_pdb(    self,    pdb_path: str,    alignment_dir: str,    is_distillation: bool = True,    chain_id: Optional[str] = None,    _structure_index: Optional[str] = None,    _alignment_index: Optional[str] = None,) -> FeatureDict
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L1000-L1038](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L1000-L1038)
@@ -166,8 +270,8 @@ Extended pipeline for processing multimer complexes with MSA pairing.
 
 **Class Definition:** [fastfold/data/data_pipeline.py L1041-L1319](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L1041-L1319)
 
-```
-
+```python
+class DataPipelineMultimer(DataPipeline):    def __init__(        self,        monomer_data_pipeline: DataPipeline,        num_predictions_per_model: int = 5,    )
 ```
 
 **Key Method:**
@@ -176,14 +280,40 @@ Extended pipeline for processing multimer complexes with MSA pairing.
 
 Process multiple chains with MSA pairing.
 
-```
-
+```python
+def process_fasta(    self,    fasta_path: str,    alignment_dir: str,    _is_prokaryotic: Optional[bool] = None,) -> FeatureDict
 ```
 
 **Multimer Processing Workflow:**
 
-```
+```mermaid
+flowchart TD
 
+Input["FASTA with multiple chains"]
+Split["Parse chains<br>parse_fasta()"]
+PerChain["For each chain:"]
+MonomerFeats["Generate monomer features<br>_process_single_chain()"]
+ConvertFeats["Convert to multimer format<br>convert_monomer_features()"]
+AssemblyFeats["Add assembly features<br>add_assembly_features()"]
+PairCheck["Is homomer/monomer?"]
+PairMSA["Pair MSA sequences<br>create_paired_features()"]
+Dedupe["Deduplicate sequences<br>deduplicate_unpaired_sequences()"]
+MergeChains["Merge chain features<br>merge_chain_features()"]
+FinalProcess["Final processing<br>process_final()"]
+Output["Multimer FeatureDict"]
+
+Input --> Split
+Split --> PerChain
+PerChain --> MonomerFeats
+MonomerFeats --> ConvertFeats
+ConvertFeats --> AssemblyFeats
+AssemblyFeats --> PairCheck
+PairCheck --> MergeChains
+PairCheck --> PairMSA
+PairMSA --> Dedupe
+Dedupe --> MergeChains
+MergeChains --> FinalProcess
+FinalProcess --> Output
 ```
 
 **Sources:** [fastfold/data/data_pipeline.py L1041-L1319](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L1041-L1319)
@@ -202,8 +332,8 @@ Orchestrates running bioinformatics tools (jackhmmer, hhblits, hhsearch) for MSA
 
 **Class Definition:** [fastfold/data/data_pipeline.py L263-L457](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L263-L457)
 
-```
-
+```python
+class AlignmentRunner:    def __init__(        self,        jackhmmer_binary_path: Optional[str] = None,        hhblits_binary_path: Optional[str] = None,        hhsearch_binary_path: Optional[str] = None,        uniref90_database_path: Optional[str] = None,        mgnify_database_path: Optional[str] = None,        bfd_database_path: Optional[str] = None,        uniref30_database_path: Optional[str] = None,        pdb70_database_path: Optional[str] = None,        use_small_bfd: Optional[bool] = None,        no_cpus: Optional[int] = None,        uniref_max_hits: int = 10000,        mgnify_max_hits: int = 5000,    )
 ```
 
 **Method:**
@@ -212,8 +342,8 @@ Orchestrates running bioinformatics tools (jackhmmer, hhblits, hhsearch) for MSA
 
 Execute all configured alignment tools and save results.
 
-```
-
+```python
+def run(    self,    fasta_path: str,    output_dir: str,)
 ```
 
 **Execution Order:**
@@ -243,8 +373,8 @@ Extended alignment runner for multimer complexes, adds UniProt and PDB seqres se
 
 **Class Definition:** [fastfold/data/data_pipeline.py L461-L668](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L461-L668)
 
-```
-
+```python
+class AlignmentRunnerMultimer:    def __init__(        self,        jackhmmer_binary_path: Optional[str] = None,        hhblits_binary_path: Optional[str] = None,        hmmsearch_binary_path: Optional[str] = None,        hmmbuild_binary_path: Optional[str] = None,        uniref90_database_path: Optional[str] = None,        mgnify_database_path: Optional[str] = None,        bfd_database_path: Optional[str] = None,        uniref30_database_path: Optional[str] = None,        uniprot_database_path: Optional[str] = None,        pdb_seqres_database_path: Optional[str] = None,        use_small_bfd: Optional[bool] = None,        no_cpus: Optional[int] = None,        uniref_max_hits: int = 10000,        mgnify_max_hits: int = 5000,        uniprot_max_hits: int = 50000,    )
 ```
 
 **Additional Databases:**
@@ -256,8 +386,8 @@ Extended alignment runner for multimer complexes, adds UniProt and PDB seqres se
 
 #### run
 
-```
-
+```python
+def run(    self,    fasta_path: str,    output_dir: str,)
 ```
 
 **Execution Order:**
@@ -282,8 +412,8 @@ These functions convert parsed data structures into NumPy arrays suitable for mo
 
 Generate basic sequence-level features.
 
-```
-
+```python
+def make_sequence_features(    sequence: str,     description: str,     num_res: int) -> FeatureDict
 ```
 
 **Generated Features:**
@@ -305,8 +435,8 @@ Generate basic sequence-level features.
 
 Convert parsed MSA objects into numerical features.
 
-```
-
+```python
+def make_msa_features(msas: Sequence[parsers.Msa]) -> FeatureDict
 ```
 
 **Generated Features:**
@@ -332,8 +462,8 @@ Convert parsed MSA objects into numerical features.
 
 Generate template features from search hits.
 
-```
-
+```python
+def make_template_features(    input_sequence: str,    hits: Sequence[Any],    template_featurizer: Union[        templates.TemplateHitFeaturizer,         templates.HmmsearchHitFeaturizer    ],    query_pdb_code: Optional[str] = None,    query_release_date: Optional[str] = None,) -> FeatureDict
 ```
 
 **Generated Features:**
@@ -361,8 +491,8 @@ If no hits or featurizer is None, returns `empty_template_feats(len(input_sequen
 
 Extract features from parsed mmCIF structure.
 
-```
-
+```python
+def make_mmcif_features(    mmcif_object: mmcif_parsing.MmcifObject,     chain_id: str) -> FeatureDict
 ```
 
 **Generated Features:**
@@ -380,8 +510,8 @@ Extract features from parsed mmCIF structure.
 
 Extract features from PDB Protein object with confidence filtering.
 
-```
-
+```python
+def make_pdb_features(    protein_object: protein.Protein,    description: str,    confidence_threshold: float = 0.5,    is_distillation: bool = True,) -> FeatureDict
 ```
 
 **Confidence Filtering:**
@@ -407,22 +537,56 @@ Class for processing HHsearch template hits into numerical features.
 
 **Class Definition:** [fastfold/data/templates.py L733-L1036](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/templates.py#L733-L1036)
 
-```
-
+```python
+class TemplateHitFeaturizer:    def __init__(        self,        mmcif_dir: str,        max_template_date: str,        max_hits: int,        kalign_binary_path: str,        release_dates_path: Optional[str] = None,        obsolete_pdbs_path: Optional[str] = None,        strict_error_check: bool = False,    )
 ```
 
 **Key Method:**
 
 #### get_templates
 
-```
-
+```python
+def get_templates(    self,    query_sequence: str,    hits: Sequence[parsers.TemplateHit],    query_pdb_code: Optional[str] = None,    query_release_date: Optional[datetime.datetime] = None,) -> TemplateSearchResult
 ```
 
 **Processing Pipeline:**
 
-```
+```mermaid
+flowchart TD
 
+Hits["Template Hits<br>(from HHsearch)"]
+Prefilter["Prefilter Hits<br>_assess_hhsearch_hit()"]
+FilterDate["Filter by date"]
+FilterPDB["Filter PDB ID match"]
+FilterAlign["Filter align ratio"]
+FilterDup["Filter duplicates"]
+ObsoleteMap["Map obsolete PDBs<br>to current PDBs"]
+MMCIFParse["Parse mmCIF file<br>mmcif_parsing.parse()"]
+ExtractFeats["Extract features<br>_extract_template_features()"]
+FindChain["Find template chain<br>_find_template_in_pdb()"]
+Realign["Sequence<br>mismatch?"]
+Kalign["Realign with Kalign<br>_realign_pdb_template_to_query()"]
+GetAtoms["Get atom positions<br>_get_atom_positions()"]
+MapToQuery["Map to query sequence"]
+Aggregate["Aggregate templates<br>(up to max_hits)"]
+Result["TemplateSearchResult"]
+
+Hits --> Prefilter
+Prefilter --> FilterDate
+FilterDate --> FilterPDB
+FilterPDB --> FilterAlign
+FilterAlign --> FilterDup
+FilterDup --> ObsoleteMap
+ObsoleteMap --> MMCIFParse
+MMCIFParse --> ExtractFeats
+ExtractFeats --> FindChain
+FindChain --> Realign
+Realign --> Kalign
+Realign --> GetAtoms
+Kalign --> GetAtoms
+GetAtoms --> MapToQuery
+MapToQuery --> Aggregate
+Aggregate --> Result
 ```
 
 **Prefiltering Criteria:**
@@ -443,16 +607,16 @@ Specialized featurizer for hmmsearch-based template hits (used in multimers).
 
 **Class Definition:** [fastfold/data/templates.py L1039-L1244](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/templates.py#L1039-L1244)
 
-```
-
+```python
+class HmmsearchHitFeaturizer:    def __init__(        self,        mmcif_dir: str,        max_template_date: str,        max_hits: int,        kalign_binary_path: str,        release_dates_path: Optional[str] = None,        obsolete_pdbs_path: Optional[str] = None,    )
 ```
 
 **Key Method:**
 
 #### get_templates
 
-```
-
+```python
+def get_templates(    self,    query_sequence: str,    hits: Sequence[parsers.TemplateHit],) -> TemplateSearchResult
 ```
 
 **Differences from TemplateHitFeaturizer:**
@@ -473,8 +637,8 @@ Specialized featurizer for hmmsearch-based template hits (used in multimers).
 
 Parse FASTA format into sequences and descriptions.
 
-```
-
+```python
+def parse_fasta(fasta_string: str) -> Tuple[Sequence[str], Sequence[str]]
 ```
 
 **Returns:** `(sequences, descriptions)` where descriptions are from comment lines (without `>`)
@@ -489,8 +653,8 @@ Parse FASTA format into sequences and descriptions.
 
 Parse Stockholm format MSA with deletion matrix.
 
-```
-
+```python
+def parse_stockholm(stockholm_string: str) -> Msa
 ```
 
 **Format:** Stockholm (.sto) files from jackhmmer
@@ -504,8 +668,8 @@ Parse Stockholm format MSA with deletion matrix.
 
 Parse A3M format MSA with lowercase deletions.
 
-```
-
+```python
+def parse_a3m(a3m_string: str) -> Msa
 ```
 
 **Format:** A3M files from hhblits
@@ -519,8 +683,8 @@ Parse A3M format MSA with lowercase deletions.
 
 Convert Stockholm MSA to A3M format.
 
-```
-
+```python
+def convert_stockholm_to_a3m(    stockholm_format: str,    max_sequences: Optional[int] = None,    remove_first_row_gaps: bool = True,) -> str
 ```
 
 **Sources:** [fastfold/data/parsers.py L209-L268](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/parsers.py#L209-L268)
@@ -533,8 +697,8 @@ Convert Stockholm MSA to A3M format.
 
 Parse HHsearch output (.hhr file) into template hits.
 
-```
-
+```python
+def parse_hhr(hhr_string: str) -> Sequence[TemplateHit]
 ```
 
 **Extracts:**
@@ -550,8 +714,8 @@ Parse HHsearch output (.hhr file) into template hits.
 
 Parse hmmsearch Stockholm output for multimer templates.
 
-```
-
+```python
+def parse_hmmsearch_sto(    sto_string: str,    query_sequence: str,) -> Sequence[TemplateHit]
 ```
 
 **Sources:** [fastfold/data/parsers.py L585-L664](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/parsers.py#L585-L664)
@@ -566,8 +730,8 @@ Python wrapper for jackhmmer MSA search tool.
 
 **Class Definition:** [fastfold/data/tools/jackhmmer.py L30-L249](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/tools/jackhmmer.py#L30-L249)
 
-```
-
+```python
+class Jackhmmer:    def __init__(        self,        *,        binary_path: str,        database_path: str,        n_cpu: int = 8,        n_iter: int = 1,        e_value: float = 0.0001,        z_value: Optional[int] = None,        get_tblout: bool = False,        filter_f1: float = 0.0005,        filter_f2: float = 0.00005,        filter_f3: float = 0.0000005,        incdom_e: Optional[float] = None,        dom_e: Optional[float] = None,        num_streamed_chunks: Optional[int] = None,        streaming_callback: Optional[Callable[[int], None]] = None,    )
 ```
 
 **Method:**
@@ -576,8 +740,8 @@ Python wrapper for jackhmmer MSA search tool.
 
 Run jackhmmer search and return results.
 
-```
-
+```python
+def query(    self,    input_fasta_path: str,     max_sequences: Optional[int] = None) -> Sequence[Mapping[str, Any]]
 ```
 
 **Returns:** List of result dictionaries with keys:
@@ -604,8 +768,8 @@ Wrapper for HHBlits (profile-profile search).
 
 #### query
 
-```
-
+```python
+def query(self, input_fasta_path: str) -> Mapping[str, Any]
 ```
 
 **Returns:** Dictionary with key `a3m` containing A3M format alignment
@@ -624,8 +788,8 @@ Wrapper for HHsearch (HMM-HMM comparison for template search).
 
 #### query
 
-```
-
+```python
+def query(self, msa: str) -> str
 ```
 
 **Input:** A3M format MSA
@@ -645,8 +809,8 @@ Wrapper for hmmsearch (profile search for multimer templates).
 
 #### query
 
-```
-
+```python
+def query(    self,     msa_sto: str,     output_dir: str) -> str
 ```
 
 **Workflow:**
@@ -669,8 +833,8 @@ Wrapper for hmmbuild (HMM profile construction).
 
 #### build_profile_from_sto
 
-```
-
+```python
+def build_profile_from_sto(    self,     sto: str,     model_construction: str = 'fast') -> str
 ```
 
 **Model Construction Modes:**
@@ -692,8 +856,8 @@ Wrapper for hmmbuild (HMM profile construction).
 
 Pair MSA sequences across chains based on species co-occurrence.
 
-```
-
+```python
+def create_paired_features(    chains: Iterable[Mapping[str, np.ndarray]],) -> List[Mapping[str, np.ndarray]]
 ```
 
 **Algorithm:**
@@ -707,8 +871,8 @@ Pair MSA sequences across chains based on species co-occurrence.
 
 Core pairing logic that matches MSA rows across chains.
 
-```
-
+```python
+def pair_sequences(    examples: List[Mapping[str, np.ndarray]],) -> Dict[int, np.ndarray]
 ```
 
 **Returns:** Dictionary mapping `num_chains_paired` to array of paired row indices
@@ -723,8 +887,8 @@ Core pairing logic that matches MSA rows across chains.
 
 Merge features from multiple chains into single FeatureDict for multimer.
 
-```
-
+```python
+def merge_chain_features(    np_chains_list: List[Mapping[str, np.ndarray]],    pair_msa_sequences: bool,    max_templates: int) -> Mapping[str, np.ndarray]
 ```
 
 **Processing Steps:**
@@ -754,8 +918,8 @@ Merge features from multiple chains into single FeatureDict for multimer.
 
 Add chain assembly identifiers (entity_id, asym_id, sym_id).
 
-```
-
+```python
+def add_assembly_features(    all_chain_features: MutableMapping[str, FeatureDict],) -> MutableMapping[str, FeatureDict]
 ```
 
 **Generated Features:**
@@ -772,8 +936,8 @@ Add chain assembly identifiers (entity_id, asym_id, sym_id).
 
 Convert integer to reverse spreadsheet-style string ID.
 
-```
-
+```python
+def int_id_to_str_id(num: int) -> str
 ```
 
 **Examples:** `1 → "A"`, `2 → "B"`, `27 → "AA"`, `28 → "BA"`
@@ -790,8 +954,8 @@ Convert integer to reverse spreadsheet-style string ID.
 
 Convert monomer features to multimer format.
 
-```
-
+```python
+def convert_monomer_features(    monomer_features: FeatureDict,    chain_id: str) -> FeatureDict
 ```
 
 **Key Transformations:**
@@ -811,8 +975,8 @@ Convert monomer features to multimer format.
 
 Generate empty template features for sequences without templates.
 
-```
-
+```python
+def empty_template_feats(n_res: int) -> FeatureDict
 ```
 
 **Returns:** Dictionary with zero-filled arrays:
