@@ -1,0 +1,29 @@
+# HeliXonProtein/OmegaFold
+
+Source: https://zread.ai/HeliXonProtein/OmegaFold
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/输入与输出格式](3-input-and-output-formats.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/循环与迭代精炼](11-recycling-and-iterative-refinement.md)
+- [深入解析/置信度评估 (pLDDT)](12-confidence-estimation-plddt.md)
+- [深入解析/配置参考](13-configuration-reference.md)
+- [深入解析/内存优化策略](14-memory-optimization-strategies.md)
+### 核心流水线
+
+- [深入解析/核心流水线/OmegaPLM 语言模型](5-omegaplm-language-model.md)
+- [深入解析/核心流水线/GeoFormer Transformer](6-geoformer-transformer.md)
+- [深入解析/核心流水线/结构模块与 IPA](7-structure-module-and-ipa.md)
+
+### 神经网络基础组件
+
+- [深入解析/神经网络基础组件/注意力与子批次](8-attention-and-subbatching.md)
+- [深入解析/神经网络基础组件/嵌入与 RoPE](9-embeddings-and-rope.md)
+- [深入解析/神经网络基础组件/几何注意力](10-geometric-attention.md)
+

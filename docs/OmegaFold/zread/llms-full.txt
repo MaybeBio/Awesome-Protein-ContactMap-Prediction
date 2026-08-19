@@ -1,0 +1,2928 @@
+# HeliXonProtein/OmegaFold
+
+Source: https://zread.ai/HeliXonProtein/OmegaFold
+
+# 入门
+
+- [入门/概述](https://zread.ai/HeliXonProtein/OmegaFold/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**OmegaFold** 是一个高分辨率 *de novo* 蛋白质结构预测系统，它直接从初级氨基酸序列推导出 3D 原子坐标——无需多序列比对（MSA）、同源模板或任何外部进化信息。OmegaFold 由 HeliXon Limited 发布，并以 *"High-resolution de novo structure prediction from primary sequence"* (Wu et al., 2022) 为题发表论文，通过将其定制的蛋白质语言模型与几何感知 Transformer 及迭代结构解码器配对，实现了极具竞争力的准确度。
+
+![OmegaFold Header](https://github.com/HeliXonProtein/OmegaFold/blob/main/figure.png?raw=true)
+
+来源: [README.md](/README.md#L1-L143), [model.py](/omegafold/model.py#L1-L272)
+
+---
+
+## OmegaFold 的功能
+
+给定一个包含一条或多条蛋白质序列的 FASTA 文件，OmegaFold 会预测每条链的全原子 3D 结构，并将结果写为 **PDB 文件**。在输出坐标的同时，它还会输出一个**残基级置信度分数**（pLDDT），该分数存储在 B 因子列中，因此你可以立即评估预测中哪些区域是可靠的。整个流程在每次循环迭代中仅通过单次前向传播即可完成——无需外部数据库、无需 MSA 搜索、无需模板挖掘。
+
+| 功能 | 详情 |
+|---|---|
+| **输入** | 标准 FASTA 文件（一条或多条序列） |
+| **输出** | 每条序列对应一个 PDB 文件，B 因子列中包含 pLDDT |
+| **是否需要 MSA** | 否——使用已学习到的蛋白质语言模型替代 |
+| **可用模型** | 模型 1（默认），模型 2（`--model 2`） |
+| **最大序列长度** | 在 80 GB A100 上最高约 4096 个残基（使用 `--subbatch_size 448`） |
+| **硬件** | NVIDIA CUDA、Apple MPS (Silicon) 或 CPU 回退 |
+| **许可证** | Apache 2.0 |
+
+来源: [README.md](/README.md#L1-L143), [pipeline.py](/omegafold/pipeline.py#L300-L398)
+
+---
+
+## 工作原理 — 架构概览
+
+OmegaFold 的推理流水线是封装在迭代循环中的三阶段架构。每个阶段履行不同的职责：将序列**嵌入**为已学习的表征、对几何关系进行**推理**，以及将这些关系**解码**为 3D 坐标。
+
+```mermaid
+flowchart TB
+    subgraph Input
+        FASTA["FASTA File"]
+        PM["Pseudo-MSA<br/>Generation"]
+    end
+
+    subgraph Stage1["① OmegaPLM — 蛋白质语言模型"]
+        GAU["Gated Attention Units<br/>×66 layers"]
+        EMB["Token Embedding<br/>+ RoPE + RelPos"]
+    end
+
+    subgraph Stage2["② GeoFormer — 几何 Transformer"]
+        GFB["GeoFormerBlock × 50"]
+        AEB["Attention w/ Edge Bias"]
+        CA["Column Attention"]
+        GA["Geometric Attention"]
+        TR["Transition Layers"]
+    end
+
+    subgraph Stage3["③ 结构模块"]
+        IPA["Invariant Point Attention"]
+        TORSION["Torsion Angle Head<br/>→ φ, ψ, ω angles"]
+        FRAME["Backbone Frame Update"]
+    end
+
+    subgraph Output
+        PDB["PDB + pLDDT"]
+        CONF["Confidence Head"]
+    end
+
+    FASTA --> PM
+    PM --> EMB
+    EMB --> GAU
+    GAU -->|"node + edge<br/>representations"| GFB
+    GFB --> AEB --> CA --> TR
+    TR --> GA --> TR
+    GFB -->|"enriched node + edge"| IPA
+    IPA --> TORSION --> FRAME
+    FRAME -->|"3D atom positions"| PDB
+    FRAME --> CONF
+    CONF -->|"pLDDT scores"| PDB
+    FRAME -.->|"recycle"| GAU
+
+    style Stage1 fill:#e8f0fe,stroke:#1a73e8
+    style Stage2 fill:#fef7e0,stroke:#f9ab00
+    style Stage3 fill:#fce8e6,stroke:#d93025
+```
+
+**① OmegaPLM** — 一个基于 **门控注意力单元 (GAU)** 构建的 66 层蛋白质语言模型。GAU 是标准多头注意力的继任者，它将查询-键-值投影统一到单个门控操作中。每一层应用 pre-LayerNorm → GAU → 残差连接。该模型生成**节点表征**（每个残基）和**边表征**（残基对），从原始序列中捕获进化和上下文模式。旋转位置嵌入和相对位置嵌入提供了位置感知能力。
+
+**② GeoFormer** — 核心几何推理引擎，由 50 个堆叠的 `GeoFormerBlock` 模块组成。每个模块执行带边偏置的行注意力、列注意力（转置）、节点和边过渡层、从节点到边的外积映射，以及对成对空间关系进行推理的**几何注意力**层。此阶段正是模型优化其对残基在 3D 空间中相互关系理解的地方。
+
+**③ 结构模块** — 使用改编自 AlphaFold2 的**等变点注意力 (IPA)**，对蛋白质骨架的 SE(3) 帧表征进行操作。IPA 以 SE(3) 等变的方式结合了标量、点和边对数。随后，扭转角头预测骨架二面角 (φ, ψ, ω)，并通过帧更新将其转换为原子位置。**ConfidenceHead** 估计每个残基的 pLDDT。
+
+**循环** — 整个周期（GeoFormer → 结构模块 → 置信度）运行多次（默认 10 次）。每个周期的输出——前一次的节点/边表征、原子位置和骨架帧——作为**循环嵌入**反馈到下一次迭代中。选择具有最高整体置信度的周期作为最终预测。
+
+来源: [model.py](/omegafold/model.py#L87-L195), [omegaplm.py](/omegafold/omegaplm.py#L1-L251), [geoformer.py](/omegafold/geoformer.py#L1-L188), [decode.py](/omegafold/decode.py#L1-L200), [confidence.py](/omegafold/confidence.py#L1-L154)
+
+---
+
+## 项目结构
+
+代码库刻意保持紧凑——整个模型存放在一个 Python 包中，且外部依赖极少（PyTorch + Biopython）。
+
+```
+OmegaFold/
+├── main.py                          # CLI 入口点
+├── setup.py                         # 包安装 & 依赖
+├── requirements.txt                 # 固定的依赖
+├── figure.png                       # 项目头图
+│
+├── omegafold/                       # ── 核心包 ──
+│   ├── __init__.py                  #   暴露 OmegaFold, make_config
+│   ├── __main__.py                  #   CLI 编排: 加载 → 预测 → 保存
+│   ├── config.py                    #   静态模型配置 (维度, 超参数)
+│   ├── pipeline.py                  #   FASTA I/O, PDB 输出, 参数解析, 权重加载
+│   │
+│   ├── omegaplm.py                  #   ① OmegaPLM 语言模型 (GAU 层)
+│   ├── geoformer.py                 #   ② GeoFormer Transformer (50 块)
+│   ├── decode.py                    #   ③ 结构模块 (IPA + 扭转角 → 3D)
+│   ├── confidence.py                #   pLDDT 置信度估计
+│   ├── embedders.py                 #   RoPE, RelPos, 边, 循环嵌入
+│   ├── modules.py                   #   共享神经构建块 (注意力, 过渡层等)
+│   │
+│   └── utils/                       # ── 工具 ──
+│       ├── __init__.py              #   重新导出: normalize, mask2bias, AAFrame 等
+│       ├── torch_utils.py           #   PyTorch 辅助函数 (归一化, 掩码)
+│       └── protein_utils/           #   蛋白质特定工具
+│           ├── aaframe.py           #     SE(3) 氨基酸帧操作
+│           ├── functions.py         #     几何辅助函数
+│           └── residue_constants.py #     氨基酸查找表 & 原子映射
+```
+
+来源: [setup.py](/setup.py#L1-L39), [requirements.txt](/requirements.txt#L1-L3), [__init__.py](/omegafold/__init__.py#L1-L40)
+
+---
+
+## 关键设计决策
+
+OmegaFold 在几个基本方面不同于依赖 MSA 的方法（如 AlphaFold2 的完整流水线）。理解这些选择对于掌握模型的优势及其操作特性至关重要。
+
+| 设计选择 | 理由 | 实现 |
+|---|---|---|
+| **无外部 MSA** | 消除了 AF2 中最耗时的步骤；使无同源物的孤立序列预测成为可能 | OmegaPLM 的已学习表征替代了进化信息 |
+| **伪 MSA** | 模型的输入格式仍然期望类似 MSA 的数据，因此流水线通过随机掩码从单一序列中合成“伪 MSA”行 | `pipeline.py` 中的 `fasta2inputs()` 以可配置比率（默认 12%）生成掩码副本 |
+| **门控注意力单元** | GAU 将 Q/K/V 投影和门控统一到一个操作中，相比标准多头注意力提高了参数效率 | `omegaplm.py` 中的 `GatedAttentionUnit` — 单个线性投影被拆分为门控、值和基底 |
+| **子批处理** | 通过分块注意力计算来控制 GPU 显存；以时间换空间 | `--subbatch_size` 标志；值越小 = 速度越慢但显存占用越少 |
+| **循环** | 迭代优化——每个周期接收上一轮的结构反馈 | `OmegaFold.forward()` 循环遍历周期数据；选择置信度最高的周期 |
+| **两种模型变体** | 模型 2 包含结构嵌入器 (`struct_embedder=True`) 以提供额外的表达能力 | `config.py` 中的 `make_config()` 根据 `model_idx` 切换 `cfg.struct_embedder` |
+
+<CgxTip>**伪 MSA** 并非真正的多序列比对——它是将单个输入序列重复 N 次（默认 15 次）并应用随机残基掩码。这为模型提供了其训练时所用的 MSA 形状输入，同时需要零次数据库查询。</CgxTip>
+
+来源: [model.py](/omegafold/model.py#L197-L272), [pipeline.py](/omegafold/pipeline.py#L82-L165), [config.py](/omegafold/config.py#L41-L122), [omegaplm.py](/omegafold/omegaplm.py#L77-L148)
+
+---
+
+## 依赖与要求
+
+OmegaFold 刻意保持轻量级。除标准库外，仅需两个运行时依赖：
+
+| 依赖 | 用途 | 版本 |
+|---|---|---|
+| **PyTorch** | 张量操作，CUDA/MPS 加速，模型权重 | 1.12.0+cu113 (固定) |
+| **Biopython** | 通过 `Bio.PDB.StructureBuilder` 进行 PDB 文件 I/O | 最新版 |
+
+需要 Python **3.8、3.9 或 3.10**。安装脚本会自动检测你的 Python 版本和平台，以获取正确的 PyTorch wheel。
+
+来源: [setup.py](/setup.py#L1-L39), [requirements.txt](/requirements.txt#L1-L3)
+
+---
+
+## 接下来去哪
+
+现在你已经了解了 OmegaFold 是什么及其架构如何组合，以下是文档的逻辑阅读路径：
+
+1. **[快速入门](2-quick-start)** — 在两分钟内运行你的第一次预测
+2. **[输入和输出格式](3-input-and-output-formats)** — 详细了解 FASTA 输入和 PDB 输出
+3. **[架构概览](4-architecture-overview)** — 完整流水线的深度架构解析
+4. **[OmegaPLM 语言模型](5-omegaplm-language-model)** — 基于 GAU 的语言建模如何替代 MSA
+5. **[GeoFormer Transformer](6-geoformer-transformer)** — 残基对的几何推理
+6. **[结构模块与 IPA](7-structure-module-and-ipa)** — SE(3) 等变解码至 3D 坐标
+7. **[循环与迭代优化](11-recycling-and-iterative-refinement)** — 反馈循环如何改进预测
+8. **[置信度估计 (pLDDT)](12-confidence-estimation-plddt)** — 解读预测可靠性
+9. **[配置参考](13-configuration-reference)** — 所有 CLI 标志和模型超参数
+10. **[显存优化策略](14-memory-optimization-strategies)** — 在受限的 GPU 显存上运行
+
+---
+
+- [入门/快速开始](https://zread.ai/HeliXonProtein/OmegaFold/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+五7??2GB?D>=81@2655//-5E2&:$69E5!=, .,3*"+5分钟'$ 分钟内让 OmegaFold 跑起来 — 从安装到预测你的第一个蛋白质结构。本页将引导你完成每一个具体步骤：配置环境、安装软件包、准备输入、运行推理以及解读输出。无需深度学习专业知识。
+
+## 前置要求
+
+OmegaFold 的**依赖极简** — 仅需 PyTorch 和 BioPython — 但版本限制非常严格。安装前，请确认你的环境符合以下要求。
+
+| 要求 | 规格 | 备注 |
+|---|---|---|
+| **Python** | 3.8、3.9 或 3.10 | **不**支持其他版本 |
+| **PyTorch** | 1.12.0+cu113 | 通过 `setup.py` 绑定；CUDA 11.3 构建版本 |
+| **BioPython** | 最新版 | 用于 PDB 文件 I/O |
+| **GPU** | 支持 CUDA 的 NVIDIA GPU | 也支持 CPU 和 Apple MPS（速度较慢） |
+| **GPU 显存** | 建议 ≥16 GB | A100 80 GB 最高可处理 4096 个残基 |
+
+安装时，配置脚本会将 PyTorch 固定为 CUDA 11.3 的 wheel 包，因此系统中必须已安装兼容的 NVIDIA 驱动（≥465.19）。在 macOS 上，需安装**最新的 PyTorch nightly 版本**以启用 MPS（Apple Silicon）加速。
+
+来源: [setup.py](setup.py#L7-L23), [requirements.txt](requirements.txt#L1-L3)
+
+## 安装
+
+有两条安装路径，请根据你的工作流选择合适的方式。
+
+```mermaid
+flowchart TD
+    A[开始] --> B{你想如何安装?}
+    B -->|一行命令| C["pip install git+https://github.com/HeliXonProtein/OmegaFold.git"]
+    B -->|克隆以控制代码| D["git clone https://github.com/HeliXonProtein/OmegaFold"]
+    D --> E["cd OmegaFold"]
+    E --> F["python setup.py install"]
+    C --> G["✅ omegafold CLI 可用"]
+    F --> G
+    G --> H{安装失败?}
+    H -->|是| I["手动安装 PyTorch + BioPython"]
+    I --> J["python main.py INPUT.fasta OUTPUT/"]
+    H -->|否| K["omegafold INPUT.fasta OUTPUT/"]
+```
+
+### 选项 A — 通过 pip 安装（推荐）
+
+```bash
+pip install git+https://github.com/HeliXonProtein/OmegaFold.git
+```
+
+此命令会全局注册 `omegafold` 控制台脚本，你可以在任何目录下调用它。
+
+### 选项 B — 克隆并安装
+
+```bash
+git clone https://github.com/HeliXonProtein/OmegaFold
+cd OmegaFold
+python setup.py install
+```
+
+### 选项 C — 手动回退（若安装失败）
+
+由于 OmegaFold 仅使用 PyTorch 和 BioPython，你完全可以跳过正式的安装流程：
+
+```bash
+pip install torch biopython   # 根据你的 CUDA 版本调整 torch 的安装
+git clone https://github.com/HeliXonProtein/OmegaFold
+cd OmegaFold
+python main.py INPUT_FILE.fasta OUTPUT_DIRECTORY
+```
+
+这也是**推荐 macOS 用户使用的路径**，他们可能需要 PyTorch nightly 构建版本来支持 MPS。`main.py` 入口会直接委托给与 CLI 相同的 `main()` 函数。
+
+来源: [README.md](README.md#L43-L94), [main.py](main.py#L1-L7), [setup.py](setup.py#L25-L38)
+
+## 准备输入
+
+OmegaFold 接受标准的 **FASTA 文件**作为输入。每个序列条目由一个标题行（以 `>` 或 `:` 为前缀）和随后的若干行氨基酸字母组成。单个 FASTA 文件可以包含多个序列 — OmegaFold 将为所有序列预测结构。
+
+创建一个名为 `my_proteins.fasta` 的文件：
+
+```fasta
+>Protein_A
+MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAVYLQTFFIVQEFVVT
+>Protein_B
+GGGSGGGSGGGSGGGS
+:Custom_Header_Protein
+ACDEFGHIKLMNPQRSTVWY
+```
+
+**FASTA 文件的核心规则：**
+
+| 规则 | 详情 |
+|---|---|
+| 标题前缀 | 必须以 `>` 或 `:` 开头 |
+| 氨基酸字母 | 标准 20 种残基；未知残基映射为 `X`（索引 20） |
+| 模糊代码 | `Z→E`、`B→D`、`U→C`（内部自动替换） |
+| 间隔字符 | `-` 被视为未知（索引 21） |
+| 多行序列 | 允许 — 连续的非标题行将被拼接 |
+| 多条序列 | 允许 — 每条序列生成独立的输出 PDB 文件 |
+
+来源: [pipeline.py](omegafold/pipeline.py#L93-L180)
+
+## 运行你的第一次预测
+
+### 基本命令
+
+```bash
+omegafold my_proteins.fasta output_results/
+```
+
+这样就完成了。OmegaFold 将会：
+
+1. **首次运行时自动下载模型权重**（保存至 `~/.cache/omegafold_ckpt/model.pt`）
+2. 从 FASTA 文件中**读取所有序列**，按长度排序（最短的优先）
+3. 带置信度分数**预测 3D 结构**
+4. 将每个序列的**写入一个 PDB 文件**至输出目录
+
+### 从源码运行（未通过 pip 安装）
+
+```bash
+python main.py my_proteins.fasta output_results/
+```
+
+### 使用模型 2
+
+OmegaFold 提供两种模型变体。模型 2 额外启用了一个结构嵌入器，并使用不同的预训练权重：
+
+```bash
+omegafold my_proteins.fasta output_results/ --model 2
+```
+
+来源: [omegafold/__main__.py](omegafold/__main__.py#L40-L98), [pipeline.py](omegafold/pipeline.py#L396-L412)
+
+## 命令行选项
+
+除了两个位置参数外，所有选项均为可选。以下是完整参考：
+
+| 标志 | 默认值 | 类型 | 描述 |
+|---|---|---|---|
+| `input_file` | *(必填)* | 路径 | 输入 FASTA 文件的路径（支持 `~` 展开） |
+| `output_dir` | *(必填)* | 路径 | PDB 文件的输出目录（若不存在则会创建） |
+| `--model` | `1` | int | 模型变体：`1` 或 `2` |
+| `--num_cycle` | `10` | int | 循环迭代次数（越多 = 质量越好，速度越慢） |
+| `--subbatch_size` | *序列长度* | int | 用于内存-时间权衡的子批次大小（越低 = 显存占用越少，速度越慢） |
+| `--device` | *自动检测* | str | 强制指定设备：`cuda`、`cpu`、`mps` 或 `cuda:N` |
+| `--weights_file` | `~/.cache/omegafold_ckpt/model.pt` | str | 模型权重的本地路径 |
+| `--weights` | S3 URL | str | 下载权重的 URL |
+| `--num_pseudo_msa` | `15` | int | 每次循环生成的伪 MSA 行数 |
+| `--pseudo_msa_mask_rate` | `0.12` | float | 伪 MSA 生成的掩码率 |
+| `--allow_tf32` | `True` | bool | 在 Ampere+ GPU 上启用 TF32 以加速矩阵乘法 |
+
+来源: [pipeline.py](omegafold/pipeline.py#L304-L392)
+
+## 理解输出
+
+对于 FASTA 文件中的每条序列，OmegaFold 会在输出目录中生成一个 **PDB 文件**。文件名源自 FASTA 标题（路径分隔符会被替换为 `-`）。
+
+**每个 PDB 文件包含的内容：**
+
+- **原子坐标** — atom14 表示中所有重原子的预测 3D 坐标
+- **B 因子列** — 被重新用于保存 **pLDDT 置信度分数 × 100**（范围 0–100）。数值越高，表示预测越可信
+
+置信度解读遵循标准的 pLDDT 评估尺度：
+
+| pLDDT 范围 | 置信度水平 | 典型区域 |
+|---|---|---|
+| 90–100 | 极高 | 高度有序的核心，稳定的二级结构 |
+| 70–90 | 可信 | 整体可靠的局部结构 |
+| 50–70 | 较低 | 可能无结构或无序 |
+| 0–50 | 极低 | 极可能无序或预测失败 |
+
+来源: [pipeline.py](omegafold/pipeline.py#L183-L239), [omegafold/__main__.py](omegafold/__main__.py#L86-L93)
+
+## 内存与性能调优
+
+最常见的实际挑战是处理长序列时 GPU 显存不足。OmegaFold 提供了两个调节杠杆：
+
+```mermaid
+flowchart LR
+    A["🔴 显存不足"] --> B{哪个杠杆?}
+    B -->|降低显存占用| C["--subbatch_size N"]
+    B -->|降低质量/时间| D["--num_cycle N"]
+    C --> E["更低的 N → 更少显存<br/>但推理更慢"]
+    D --> F["更低的 N → 更少循环轮次<br/>但预测质量更低"]
+    E --> G["✅ 预测成功"]
+    F --> G
+```
+
+### 子批次大小 — 显存旋钮
+
+`--subbatch_size` 控制单个注意力子批次中处理的残基对数量。默认值等于完整序列长度（速度最快，显存占用最大）。如果遇到 OOM（显存不足）：
+
+1. 将子批次大小从默认值**减半**后重试
+2. 继续减半，直到预测成功
+3. 在 A100 80 GB 显存上，设置 `--subbatch_size 448` 可以处理高达 **4096 个残基**的序列
+
+### 循环次数 — 质量旋钮
+
+`--num_cycle` 控制循环迭代次数。更多循环通常会提升结构质量，但会增加运行时间。默认值 10 是一个很好的平衡；若进行探索性运行，将其减少至 4–6 可加快推理速度。
+
+**示例：在显存受限的 GPU 上预测长序列**
+
+```bash
+omegafold long_protein.fasta results/ --subbatch_size 224 --num_cycle 6
+```
+
+来源: [README.md](README.md#L17-L34), [pipeline.py](omegafold/pipeline.py#L343-L357)
+
+## 设备选择
+
+OmegaFold 会按以下优先级自动检测最佳可用加速器：**CUDA → MPS → CPU**。你可以使用 `--device` 覆盖此设置：
+
+| 命令 | 目标设备 |
+|---|---|
+| `omegafold ... --device cuda` | 第一个可用 GPU |
+| `omegafold ... --device cuda:1` | 第二个 GPU |
+| `omegafold ... --device mps` | Apple Silicon MPS |
+| `omegafold ... --device cpu` | 仅使用 CPU（速度慢，无显存限制） |
+
+<CgxTip>首次运行时，模型权重（约 1 GB）会从 AWS S3 下载到 `~/.cache/omegafold_ckpt/`。后续运行将从缓存中加载。若要使用自定义权重，请传入 `--weights_file /path/to/model.pt`。</CgxTip>
+
+来源: [pipeline.py](omegafold/pipeline.py#L271-L301), [pipeline.py](omegafold/pipeline.py#L242-L268)
+
+## 故障排除
+
+| 问题 | 原因 | 解决方案 |
+|---|---|---|
+| `Python X.X is not supported` | Python 版本不在 3.8–3.10 范围内 | 使用 Python 3.8、3.9 或 3.10 |
+| `Device cuda is not available` | CUDA/PyTorch 不匹配 | 重新安装正确 CUDA 版本的 PyTorch |
+| 预测期间出现 `RuntimeError` | GPU 显存不足 | 降低 `--subbatch_size`（减半后重试） |
+| 权重下载失败 | 网络/防火墙问题 | 手动下载：`wget <url>`，然后使用 `--weights_file` |
+| CPU 推理缓慢 | CPU 本身速度较慢 | 使用 GPU；或降低 `--num_cycle` 以获得更快（但质量较低）的结果 |
+| 未找到 `omegafold` 命令 | pip 安装未注册 | 改为在代码库根目录下使用 `python main.py` |
+
+## 接下来去哪里
+
+现在你已经能够预测结构了，接下来可以深入了解该流水线：
+
+- **[输入和输出格式](3-input-and-output-formats)** — 详细的 FASTA 解析规则与 PDB 输出结构
+- **[架构概览](4-architecture-overview)** — OmegaPLM、GeoFormer 和结构模块如何构成完整的流水线
+- **[配置参考](13-configuration-reference)** — 每个模型组件的详尽参数参考
+- **[内存优化策略](14-memory-optimization-strategies)** - 在有限显存中装载大蛋白质的高级技巧
+
+---
+
+- [入门/输入与输出格式](https://zread.ai/HeliXonProtein/OmegaFold/3-input-and-output-formats)
+
+---
+slug:3-input-and-output-formats
+blog_type:normal
+---
+
+
+OmegaFold 通过两个定义明确的格式边界，在原始蛋白质序列与原子级分辨率的 3D 结构之间架起了桥梁：你提供的 **FASTA 输入**与模型生成的 **PDB 输出**。理解这些格式——包括它们的约束条件、两者之间发生的内部转换，以及置信度信息的编码方式——对于有效使用 OmegaFold 并正确解释其预测结果至关重要。
+
+## 输入格式：FASTA 文件
+
+OmegaFold 接受标准 **FASTA 格式**的蛋白质序列，这是生物信息学中最常见的文件格式之一。每个序列条目由一个以 `>` 或 `:` 为前缀的**首行**，以及随后的一行或多行氨基酸字母组成。解析器会将首行读取为链标识符（用于命名输出文件），并将后续所有非首行拼接成一个单一的序列字符串。
+
+```
+>protein_A
+MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDL
+SGSAQVKGHGKKVADALTNAVAHVDDMPNALSALSDLHAHKLRVDPVNFK
+:protein_B
+MKVAPVLGFTAVHPVIEQVNGRFAQYYVEQGPAEAAVLKTGAK
+```
+
+首行前缀决定了输出文件名——对于上面的示例，OmegaFold 会在输出目录中生成 `protein_A.pdb` 和 `protein_B.pdb`。当首行超过文件系统的名称长度限制（通过 `os.pathconf` 检测）时，OmegaFold 会回退到诸如 `0th chain.pdb` 这样的通用名称。序列在处理前会**按长度排序**（最短的优先），这可能会影响预测结果出现的顺序。
+
+来源：[pipeline.py](omegafold/pipeline.py#L118-L180)，[__main__.py](omegafold/__main__.py#L57-L67)
+
+### 支持的氨基酸字符
+
+OmegaFold 根据其内部的 22 符号字母表对每个残基字符进行分词：**20 种标准氨基酸**（索引 0–19）、代表未知残基的 **X**（索引 20），以及代表缺口的 **`-`**（索引 21，在掩码处理时与 X 同等对待）。在分词之前，三个模糊的 IUPAC 编码会进行自动替换：
+
+| 模糊编码 | 映射为 | 原因 |
+|---|---|---|
+| **Z** (Glu/Gln) | **E** (Glu) | 选择谷氨酸作为代表 |
+| **B** (Asp/Asn) | **D** (Asp) | 选择天冬氨酸作为代表 |
+| **U** (硒半胱氨酸) | **C** (Cys) | 以半胱氨酸作为最接近的结构类似物 |
+
+任何不属于 20 种标准氨基酸的字符都将被映射到索引 20 的 **X**（未知）。硬断言保证所有词元都落在有效范围 0–21 内；包含完全无法识别字符的序列将在输入时报错。
+
+来源：[pipeline.py](omegafold/pipeline.py#L150-L157)，[residue_constants.py](omegafold/utils/protein_utils/residue_constants.py#L374-L385)
+
+### 从 FASTA 到伪 MSA：内部输入转换
+
+OmegaFold 并不直接将原始 FASTA 序列输入模型。相反，`fasta2inputs` 会构建一个**伪多重序列比对（pseudo-MSA）**——一种合成 MSA，用于模拟进化耦合信息，而无需进行真实的 MSA 数据库搜索。这是 OmegaFold 的一项核心架构决策。转换过程如下：
+
+```mermaid
+flowchart TD
+    A["FASTA 序列<br/>(例如, MVLSPAD...)"] --> B["分词为整数索引<br/>A→0, R→1, ... X→20, -→21"]
+    B --> C["对于每个循环周期：<br/>重复 num_pseudo_msa 次"]
+    C --> D["创建 MSA 行：<br/>原始词元的副本"]
+    D --> E["应用随机掩码<br/>以 pseudo_msa_mask_rate 概率 (默认 0.12)"]
+    E --> F["被掩码的位置 → 21 (未知)"]
+    F --> G["前置首行 (未掩码)<br/>作为 '查询' 序列"]
+    G --> H["生成字典，包含<br/>p_msa 和 p_msa_mask 张量"]
+    H --> I["对所有周期重复<br/>(默认: 10 个周期)"]
+```
+
+每条链最终生成的数据结构是一个**字典列表**（每个循环周期对应一个字典），每个字典包含：
+
+| 键 | 形状 | 描述 |
+|---|---|---|
+| `p_msa` | `[num_pseudo_msa + 1, num_res]` | 分词后的 MSA。第 0 行是未掩码的查询序列；第 1–N 行是随机掩码后的副本。 |
+| `p_msa_mask` | `[num_pseudo_msa + 1, num_res]` | 二进制掩码。第 0 行全为 1（查询始终有效）；第 1–N 行指示未掩码的位置。 |
+
+在默认设置下（`num_pseudo_msa=15`、`pseudo_msa_mask_rate=0.12`、`num_cycle=10`），每条链生成 10 个周期输入，每个周期包含一个 16 行的伪 MSA（1 行查询 + 15 行掩码副本）。掩码操作**默认是确定性的**——以序列长度为种子的 `torch.Generator` 确保了对于相同输入，不同运行间的结果可复现。
+
+<CgxTip>伪 MSA 是使 OmegaFold 成为**单序列预测器**的核心创新：与需要从序列数据库中获取真实 MSA 的 AlphaFold2 不同，OmegaFold 通过 OmegaPLM 语言模型在内部合成 MSA。`num_pseudo_msa` 和 `pseudo_msa_mask_rate` 参数控制着这种合成信号的丰富度。</CgxTip>
+
+来源：[pipeline.py](omegafold/pipeline.py#L93-L180)，[model.py](omegafold/model.py#L153-L165)
+
+## 输出格式：PDB 文件
+
+对于输入 FASTA 中的每条链，OmegaFold 会向输出目录写入一个 **PDB 文件**。PDB 格式是结构生物学中用于原子坐标的标准格式，OmegaFold 的输出与下游工具（PyMOL、Chimera、Rosetta 等）完全兼容。
+
+### 坐标表示：Atom14
+
+OmegaFold 的结构模块以 **atom14 表示**生成坐标——这是一种紧凑的逐残基编码，为每种氨基酸类型分配最多 14 个原子槽位。这比完整的 atom37 表示（为所有残基中每种可能的原子名称都分配一个槽位）更密集，但比 atom14 常见的替代方案更明确。从残基类型到 atom14 名称的映射定义在 `restype_name_to_atom14_names` 中：
+
+| 残基 | Atom14 原子（非空槽位） | 数量 |
+|---|---|---|
+| GLY | N, CA, C, O | 4 |
+| ALA | N, CA, C, O, CB | 5 |
+| SER | N, CA, C, O, CB, OG | 6 |
+| VAL | N, CA, C, O, CB, CG1, CG2 | 7 |
+| TRP | N, CA, C, O, CB, CG, CD1, CD2, NE1, CE2, CE3, CZ2, CZ3, CH2 | 14 |
+| UNK | *(全为空)* | 0 |
+
+空的原子槽位（在名称列表中表示为 `""`）会被直接省略，不写入 PDB 输出——`save_pdb` 函数仅写入名称为非空字符串的原子。这意味着 PDB 文件精确包含了每种残基类型具有物理意义的原子。
+
+来源：[residue_constants.py](omegafold/utils/protein_utils/residue_constants.py#L300-L368)，[pipeline.py](omegafold/pipeline.py#L183-L239)
+
+### 置信度分数作为 B 因子
+
+OmegaFold 将逐残基的置信度编码为 PDB 文件中的 **B 因子**（也称为温度因子）。这也是 AlphaFold2 使用的标准惯例。流水线在写入前会将原始 pLDDT 置信度值乘以 100：
+
+```python
+b_factors = output["confidence"] * 100
+```
+
+pLDDT（预测局部距离差异测试）分数在输出 PDB 中的范围为 **0 到 100**，其中：
+
+| pLDDT 范围 | 置信度水平 | 典型解释 |
+|---|---|---|
+| 90–100 | 极高 | 实验级质量的骨架，可靠的侧链 |
+| 70–90 | 较高 | 总体良好的骨架，部分侧链存在不确定性 |
+| 50–70 | 较低 | 不可靠——可能是无序或未结构化的区域 |
+| 0–50 | 极低 | 可能是无序的；不要信任该预测 |
+
+pLDDT 由 `ConfidenceHead` 模块按残基计算，该模块对分桶的逻辑值应用 softmax，并计算期望的分桶中心——这与 AlphaFold2 的方法直接类似。系统还会通过 `get_all_confidence` 计算一个**整体置信度**分数，该方法以 15Å 内 Cα 邻居的数量为权重，聚合逐残基的 pLDDT 值。此整体分数在内部用于在循环迭代中选择最佳预测。
+
+来源：[pipeline.py](omegafold/pipeline.py#L86-L93)，[confidence.py](omegafold/confidence.py#L39-L117)
+
+### PDB 文件结构细节
+
+`save_pdb` 函数使用 BioPython 的 `StructureBuilder` 构建 PDB 文件，遵循以下约定：
+
+- **结构 ID**：`0`
+- **模型 ID**：可通过 `model` 参数配置（默认为 `0`）
+- **链 ID**：`A`（可通过 `init_chain` 配置）
+- **残基编号**：从 0 开始顺序编号，与输入序列顺序一致
+- **插入码**：空格字符（`" "`）
+- **占用率**：所有原子均为 `1.0`
+- **元素**：原子名称的首字符（例如，氮为 `N`，碳为 `C`）
+
+掩码值为 `False` 或氨基酸索引为 21（未知/缺口）的残基会被**跳过**——它们根本不会出现在输出 PDB 中。这确保了 PDB 仅包含有效的、已预测的残基。
+
+来源：[pipeline.py](omegafold/pipeline.py#L208-L239)
+
+## 完整数据流总结
+
+下图展示了从 FASTA 输入到 PDB 输出的端到端转换，包括所有中间表示：
+
+```mermaid
+flowchart LR
+    subgraph Input
+        F["FASTA 文件<br/>>首行<br/>序列"]
+    end
+    subgraph Parsing["解析与分词"]
+        T["整数分词<br/>A→0, R→1, ..., X→20, -→21"]
+        PMSA["伪 MSA 构建<br/>[16 行 × N_res]"]
+    end
+    subgraph Model["OmegaFold 模型"]
+        PLM["OmegaPLM<br/>语言模型"]
+        GF["GeoFormer<br/>几何 Transformer"]
+        SM["结构模块<br/>(IPA + 扭转角)"]
+        CH["ConfidenceHead<br/>逐残基 pLDDT"]
+    end
+    subgraph Output
+        A14["Atom14 位置<br/>[N_res, 14, 3]"]
+        PDB["PDB 文件<br/>+ B 因子 (pLDDT×100)"]
+    end
+    F --> T --> PMSA
+    PMSA --> PLM --> GF --> SM
+    SM --> A14
+    SM --> CH
+    A14 --> PDB
+    CH --> PDB
+```
+
+## CLI 输入/输出参数
+
+两个位置参数和关键的格式相关标志汇总如下：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_file` | 位置参数 | — | 输入 FASTA 文件的路径（支持 `~` 展开） |
+| `output_dir` | 位置参数 | — | 输出 PDB 文件的目录（若不存在则创建；支持 `~` 展开） |
+| `--num_pseudo_msa` | int | 15 | 伪 MSA 的行数（不含查询行） |
+| `--pseudo_msa_mask_rate` | float | 0.12 | 每行伪 MSA 中被掩码残基的比例 |
+| `--num_cycle` | int | 10 | 循环迭代次数（每次产生一个完整的伪 MSA 输入） |
+
+输出目录结构与输入相对应：每个 FASTA 首行成为 `output_dir` 中的一个 `.pdb` 文件名。如果 `output_dir` 不存在，则会自动创建。
+
+来源：[pipeline.py](omegafold/pipeline.py#L304-L429)，[README.md](README.md#L62-L119)
+
+## 常见陷阱与提示
+
+- **多行序列**：FASTA 解析器能正确处理分散在多行的序列——首行之后的所有非首行都会被拼接。然而，序列内部绝不能出现空行。
+- **小写字母**：所有序列字符在分词前都会被转换为**大写**，因此小写输入是有效的。
+- **缺口字符**：`-` 字符被视为未知（索引 21），并在输出 PDB 中被掩码排除。这对于输入带有缺口的已比对序列非常有用。
+- **输出覆盖**：如果输出目录中已存在同名 PDB 文件，它将被静默覆盖。
+- **内存与超长序列**：序列按长度排序（最短的优先）。如果长序列导致内存不足错误，OmegaFold 会记录该失败并跳至下一条链，而不会崩溃。
+
+<CgxTip>要检查预测结果的逐残基置信度，可在任意分子查看器中加载 PDB 文件并按 B 因子着色。B 因子低于 50（pLDDT < 0.5）的区域应被视为无序——这些区域通常对应于模型具有低确定性的本质上未结构化区域或环。</CgxTip>
+
+来源：[pipeline.py](omegafold/pipeline.py#L120-L134)，[__main__.py](omegafold/__main__.py#L73-L82)
+
+---
+
+**下一步**：现在你已经了解了输入与输出的内容，接下来可以探索 OmegaFold 如何将伪 MSA 转换为原子坐标，详见[架构概述](4-architecture-overview)；或者深入了解驱动单序列方法的语言模型，详见[OmegaPLM 语言模型](5-omegaplm-language-model)。关于伪 MSA 掩码率和循环次数如何影响预测质量的详细信息，请参阅[循环与迭代优化](11-recycling-and-iterative-refinement)和[置信度估计 (pLDDT)](12-confidence-estimation-plddt)。
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/HeliXonProtein/OmegaFold/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+OmegaFold 是一个蛋白质结构预测系统，它通过深度迭代的多阶段神经架构，将氨基酸序列直接映射到三维原子坐标。与 AlphaFold2 依赖从大型序列数据库中提取的共进化 MSA 输入不同，OmegaFold 仅使用**单序列蛋白质语言模型**，结合几何 Transformer 和不变点注意力（IPA）结构解码器，即可实现极具竞争力的准确率。这一架构决策消除了 MSA 搜索的计算瓶颈，从而实现更快的推理速度，且无需依赖外部数据库。系统通过四个主要阶段处理 FASTA 输入——嵌入、语言建模、几何推理和结构解码——并在多次循环迭代中重复执行，以迭代优化表征与三维坐标。
+
+来源: [model.py](omegafold/model.py#L118-L134), [__main__.py](omegafold/__main__.py#L40-L98)
+
+## 高层数据流
+
+端到端推理流程通过以下阶段将原始氨基酸序列转换为 PDB 文件。在顶层，`model.py` 中的 `OmegaFold` 类统筹整个计算过程：它首先运行预训练的 OmegaPLM 语言模型，以提取逐残基（节点）和成对（边）表征，随后进入循环回路，在每次迭代中，将前一轮的预测结果反馈给 GeoFormer 主干网络和 StructureModule 解码器。最终选择具有最高置信度得分（基于 pLDDT）的循环作为输出结果。
+
+```mermaid
+flowchart LR
+    A["FASTA<br/>序列"] --> B["伪 MSA<br/>生成器"]
+    B --> C["OmegaPLM<br/>语言模型"]
+    C --> D["循环<br/>嵌入器"]
+    D --> E["GeoFormer<br/>×50 块"]
+    E --> F["StructureModule<br/>IPA + 扭转角"]
+    F --> G["ConfidenceHead<br/>pLDDT"]
+    G --> H{"循环?"}
+    H -->|是| D
+    H -->|否| I["PDB 输出"]
+    style A fill:#e8f4fd,stroke:#2196F3
+    style C fill:#fff3e0,stroke:#FF9800
+    style E fill:#e8f5e9,stroke:#4CAF50
+    style F fill:#fce4ec,stroke:#E91E63
+    style I fill:#f3e5f5,stroke:#9C27B0
+```
+
+每次循环迭代从前一轮接收四个反馈信号：节点表征（`prev_node`）、边表征（`prev_edge`）、atom14 坐标（`prev_x`）和骨架帧（`prev_frames`）。在首次循环中，这些信号被初始化为零和恒等帧，随后在后续迭代中逐步携带结构先验信息。
+
+来源: [model.py](omegafold/model.py#L153-L203), [model.py](omegafold/model.py#L236-L264)
+
+## 核心架构组件
+
+OmegaFold 模型由五个紧密集成的组件构成，每个组件位于独立的模块文件中。下表总结了它们的功能、输入/输出签名以及配置驱动的超参数。
+
+| 组件 | 模块文件 | 主要功能 | 输入 | 输出 |
+|-----------|------------|--------------|-------|--------|
+| **OmegaPLM** | `omegaplm.py` | 单序列蛋白质语言模型 | 分词序列 + 掩码 | 节点表征 `[N, 1280]`，边表征 `[N, N, 66]` |
+| **GeoFormer** | `geoformer.py` | 几何 Transformer 主干网络 | 节点 + 边表征 | 更新后的节点 + 边表征 |
+| **StructureModule** | `decode.py` | 基于 IPA 的三维坐标解码 | 节点 + 边表征 + 帧 | Atom14 位置 `[N, 14, 3]` |
+| **ConfidenceHead** | `confidence.py` | 逐残基 pLDDT 预测 | 最终节点表征 | pLDDT 分数 `[N]` |
+| **RecycleEmbedder** | `embedders.py` | 反馈信号整合 | 上一轮循环输出 | 增强后的节点 + 边表征 |
+
+来源: [omegaplm.py](omegafold/omegaplm.py#L162-L219), [geoformer.py](omegafold/geoformer.py#L140-L180), [decode.py](omegafold/decode.py#L316-L392), [confidence.py](omegafold/confidence.py#L124-L146), [embedders.py](omegafold/embedders.py#L347-L408)
+
+## 组件交互图
+
+下图说明了单个 `OmegaFoldCycle` 内的类组合与方法调用关系。`OmegaFold` 父类持有 `omega_plm` 和 `OmegaFoldCycle`，而 `OmegaFoldCycle` 本身又组合了 `GeoFormer`、`StructureModule` 和 `ConfidenceHead`。箭头指示 forward 方法的调用方向和数据流。
+
+```mermaid
+classDiagram
+    class OmegaFold {
+        +omega_plm: OmegaPLM
+        +plm_node_embedder: Linear
+        +plm_edge_embedder: Linear
+        +input_embedder: EdgeEmbedder
+        +recycle_embedder: RecycleEmbedder
+        +omega_fold_cycle: OmegaFoldCycle
+        +forward(inputs)
+        +deep_sequence_embed(fasta, mask)
+        +create_initial_prev_dict(num_res)
+    }
+    class OmegaFoldCycle {
+        +geoformer: GeoFormer
+        +structure_module: StructureModule
+        +confidence_head: ConfidenceHead
+        +forward(fasta, mask, node, edge)
+    }
+    class OmegaPLM {
+        +input_embedding: Embedding
+        +layers: ModuleList~OmegaPLMLayer~
+        +output_norm: LayerNorm
+        +forward(tokens, mask)
+    }
+    class GeoFormer {
+        +blocks: ModuleList~GeoFormerBlock~
+        +node_final_proj: Linear
+        +forward(node, edge, mask)
+    }
+    class StructureModule {
+        +cycles: ModuleList~StructureCycle~
+        +torsion_angle_pred: TorsionAngleHead
+        +forward(node, edge, fasta, mask)
+    }
+    class ConfidenceHead {
+        +network: Sequential
+        +forward(node_repr)
+    }
+    class RecycleEmbedder {
+        +dgram: Val2Bins
+        +prev_pos_embed: Embedding
+        +forward(prev_node, prev_edge, prev_x, ...)
+    }
+    OmegaFold --> OmegaFoldCycle : 包含
+    OmegaFold --> OmegaPLM : 包含
+    OmegaFold --> RecycleEmbedder : 包含
+    OmegaFoldCycle --> GeoFormer : 包含
+    OmegaFoldCycle --> StructureModule : 包含
+    OmegaFoldCycle --> ConfidenceHead : 包含
+```
+
+来源: [model.py](omegafold/model.py#L52-L112), [model.py](omegafold/model.py#L118-L134)
+
+## OmegaFoldCycle：内循环架构
+
+单个 **OmegaFoldCycle** 封装了从几何到结构的核心转换过程。给定（已由语言模型和循环嵌入器丰富的）节点和边表征，它将依次经历三个阶段：(1) GeoFormer 通过 50 个交错的注意力、过渡和几何注意力块来精炼表征；(2) StructureModule 通过基于迭代 IPA 的骨架帧更新和扭转角预测来解码三维坐标；(3) ConfidenceHead 生成逐残基的 pLDDT 估计值。该循环返回结构输出（atom14 位置、帧、掩码）以及携带下一次循环迭代反馈信号的 `prev_dict`。
+
+`model.py` 中的 `OmegaFoldCycle.forward` 方法明确展示了这一数据流：GeoFormer 的输出被拆分为循环路径的节点表征和结构路径的节点表征（通过 `node_final_proj` 投影），StructureModule 消耗投影后的节点及边表征，而 ConfidenceHead 则对最终的节点表征进行评分。
+
+来源: [model.py](omegafold/model.py#L52-L112), [geoformer.py](omegafold/geoformer.py#L43-L180)
+
+## 表征轨道：节点与边
+
+两条并行的**表征轨道**贯穿整个架构，类似于 AlphaFold2 的配对和 MSA 表征，但具有根本不同的语义：
+
+- **节点表征**（`node_repr`）：维度为 `node_dim=256` 的逐残基特征向量。它编码每个氨基酸的局部化学和结构上下文。此轨道由 OmegaPLM 初始化，经循环机制丰富，并最终被 StructureModule 消耗。
+
+- **边表征**（`edge_repr`）：形状为 `[num_res, num_res, edge_dim]`（其中 `edge_dim=128`）的成对特征张量。它捕获残基对之间的关系信息——距离先验、接触模式和几何约束。此轨道由 OmegaPLM 的聚合注意力图加上 `EdgeEmbedder`（相对位置编码 + 氨基酸对嵌入）进行初始化，随后由 GeoFormer 块精炼。
+
+`deep_sequence_embed` 方法统筹此初始化过程：OmegaPLM 生成维度为 1280 的原始节点特征和维度为 66 的边特征，随后通过 `plm_node_embedder` 和 `plm_edge_embedder` 分别将其投影到目标维度 256 和 128，并在投影前应用层归一化。
+
+来源: [model.py](omegafold/model.py#L205-L234), [config.py](omegafold/config.py#L46-L111)
+
+## 伪 MSA：无需数据库的序列多样性
+
+一项关键的架构创新是**伪 MSA 生成**策略。OmegaFold 并不查询外部数据库以寻找同源序列，而是通过以 12% 的比率（`mask_rate=0.12`）随机掩码输入序列，在每个循环周期中生成 `num_pseudo_msa=15` 个掩码变体，从而构建出一个合成 MSA。每个变体将掩码位置替换为未知词元（索引 21），以此模拟真实 MSA 所提供的进化多样性。伪 MSA 的形状为 `[num_pseudo_msa + 1, num_res]`，其中第一行为未掩码的原始序列。
+
+此方法在 `pipeline.fasta2inputs` 中实现，它生成 `num_cycle` 组伪 MSA（每次循环迭代一组），每组均具有独立绘制的掩码。当 `deterministic=True` 时，使用设定种子的随机生成器以确保可复现性。
+
+来源: [pipeline.py](omegafold/pipeline.py#L93-L180), [config.py](omegafold/config.py#L57-L58)
+
+## 循环与迭代精炼
+
+循环机制是驱动逐步精炼的外层循环。在 `num_cycle=10` 次迭代中（可通过 `--num_cycle` 配置），完整的 OmegaFoldCycle 会使用上一轮迭代的反馈（通过 `RecycleEmbedder` 注入）重新执行。该嵌入器将三个反馈信号添加至当前循环的表征中：
+
+1. **上一轮节点表征**：通过 LayerNorm 添加至当前节点轨道，携带来自上一轮已学习的结构上下文。
+2. **上一轮边表征**：通过 LayerNorm 添加至当前边轨道，传播成对的结构先验。
+3. **上一轮位置距离直方图**：由上一轮的伪 beta 坐标计算出的残基间距离，通过 `Val2Bins` 进行分箱并嵌入，为边轨道提供显式的几何先验。
+
+对于模型变体 2（`struct_embedder=True`），额外的 `PairStructEmbedder` 将来自上一轮循环 atom14 位置和 8 帧表征的细粒度结构信息编码至边轨道中，包括成对距离分箱和局部帧坐标分箱。
+
+所有循环完成后，选择具有最高总体 pLDDT 置信度得分的迭代作为最终预测，实现最佳 N 选一策略。
+
+来源: [model.py](omegafold/model.py#L159-L203), [embedders.py](omegafold/embedders.py#L347-L408), [confidence.py](omegafold/confidence.py#L39-L93)
+
+## 配置与模型变体
+
+OmegaFold 通过 `make_config(model_idx)` 支持两种模型变体，主要通过 `struct_embedder` 标志进行区分：
+
+| 参数 | 模型 1 | 模型 2 | 描述 |
+|-----------|---------|---------|-------------|
+| `struct_embedder` | `False` | `True` | 在循环中启用 `PairStructEmbedder` |
+| `node_dim` | 256 | 256 | 节点表征维度 |
+| `edge_dim` | 128 | 128 | 边表征维度 |
+| `geo_num_blocks` | 50 | 50 | GeoFormer Transformer 块数 |
+| `plm.node` | 1280 | 1280 | OmegaPLM 隐藏层维度 |
+| `plm.edge` | 66 | 66 | OmegaPLM 层数（= 边维度） |
+| `struct.num_cycle` | 8 | 8 | IPA 结构循环次数 |
+| `struct.num_head` | 12 | 12 | IPA 注意力头数 |
+| `struct.node_dim` | 384 | 384 | StructureModule 节点维度 |
+
+模型 2 的 `PairStructEmbedder` 编码了来自上一轮循环的原子级几何细节——包括分箱至 64 个连续区间的成对原子距离、分箱至 64 个位置区间的局部帧坐标，以及氨基酸对嵌入——从而以额外的内存和计算开销为代价，提供了更丰富的结构先验。
+
+来源: [config.py](omegafold/config.py#L43-L111), [embedders.py](omegafold/embedders.py#L225-L345)
+
+## 项目结构
+
+```
+omegafold/
+├── __init__.py          # 包初始化，导出 OmegaFold & make_config
+├── __main__.py          # 入口点：模型构建 + 推理循环
+├── confidence.py        # ConfidenceHead (pLDDT) + 聚合评分
+├── config.py            # 静态配置 (make_config)
+├── decode.py            # StructureModule, IPA, TorsionAngleHead
+├── embedders.py         # EdgeEmbedder, RoPE, RelPos, RecycleEmbedder, StructEmbedder
+├── geoformer.py         # GeoFormer 主干网络 (50 块)
+├── model.py             # OmegaFold + OmegaFoldCycle (顶层统筹)
+├── modules.py           # 可复用神经构建块 (Attention, Transition, 等)
+├── omegaplm.py          # OmegaPLM 语言模型 (GAU 层)
+├── pipeline.py          # I/O：FASTA 解析，PDB 保存，CLI 参数，权重加载
+└── utils/
+    ├── __init__.py
+    ├── protein_utils/   # 残基常量，氨基酸映射
+    └── torch_utils.py   # 几何工具 (AAFrame, 归一化, 掩码)
+```
+
+来源: [model.py](omegafold/model.py#L1-L38), [pipeline.py](omegafold/pipeline.py#L1-L42)
+
+## 与 AlphaFold2 的关键设计差异
+
+将 OmegaFold 的架构与 AlphaFold2 进行对比最能加深理解：OmegaFold 从中汲取了重要灵感，但在关键之处有所分野：
+
+| 方面 | AlphaFold2 | OmegaFold |
+|--------|-----------|-----------|
+| **序列输入** | 来自 HHblits/Jackhmmer 的真实 MSA | 伪 MSA（掩码单序列） |
+| **语言模型** | 无（仅有 MSA + 配对表征） | OmegaPLM（基于 GAU，66 层） |
+| **主干网络** | Evoformer（48 块，MSA+配对注意力） | GeoFormer（50 块，节点+边+几何注意力） |
+| **位置编码** | 相对位置嵌入 | RoPE（旋转位置嵌入） |
+| **结构解码器** | IPA + 骨架更新 + 扭转角 | IPA + 骨架更新 + 扭转角（相同） |
+| **循环反馈** | 上一轮 MSA + 配对表征 + 位置 | 上一轮节点 + 边表征 + 位置 + 帧 |
+| **置信度** | pLDDT + PAE | 仅 pLDDT |
+| **外部依赖** | MSA 搜索数据库 | 无 |
+
+最具决定性的分野在于用预训练语言模型替代了真实的 MSA 输入。OmegaPLM 在预训练期间学习进化模式，并在推理时将其编码至节点和边表征中，从而消除了运行时数据库搜索的需要。OmegaPLM 内部的 GAU（门控注意力单元）架构进一步区别于标准的多头注意力，它将查询-键-值计算融合进带有 SiLU 门控的单次投影中，实现了更高的参数效率。
+
+<CgxTip>`deep_sequence_embed` 方法在对 OmegaPLM 输出进行线性投影前应用了**层归一化**——这是一个微妙但重要的设计选择，它稳定了从语言模型的 1280 维空间到 GeoFormer 的 256 维节点空间的表征转移。此归一化通过 `utils.normalize`（原地操作）及随后的 `plm_node_embedder` / `plm_edge_embedder` 线性层实现。</CgxTip>
+
+<CgxTip>`modules.attention` 中的**子批处理**机制将查询维度切分为 `subbatch_size` 大小的块，独立地针对完整的键值集处理每个块。这是主要的内存优化策略：降低 `subbatch_size` 会减少 GPU 峰值内存，代价是增加额外的内核启动。它由 `--subbatch_size` CLI 参数控制，并通过 `fwd_cfg` 传递至模型中的每次注意力调用。</CgxTip>
+
+来源: [model.py](omegafold/model.py#L205-L234), [omegaplm.py](omegafold/omegaplm.py#L56-L118), [modules.py](omegafold/modules.py#L104-L164)
+
+## 下一步
+
+现在你已了解整体架构，可以深入探索各个组件：
+
+- **[OmegaPLM 语言模型](5-omegaplm-language-model)** — 替代 MSA 输入的基于 GAU 的预训练语言模型
+- **[GeoFormer Transformer](6-geoformer-transformer)** — 具备行、列和几何注意力的 50 块几何主干网络
+- **[结构模块与 IPA](7-structure-module-and-ipa)** — 不变点注意力与扭转角解码
+- **[循环与迭代精炼](11-recycling-and-iterative-refinement)** — 反馈信号如何驱动渐进式精度提升
+- **[内存优化策略](14-memory-optimization-strategies)** — 子批处理及其他内存节省技术
+
+---
+
+- [深入解析/循环与迭代精炼](https://zread.ai/HeliXonProtein/OmegaFold/11-recycling-and-iterative-refinement)
+
+---
+slug:11-recycling-and-iterative-refinement
+blog_type:normal
+---
+
+
+OmegaFold 预测蛋白质结构并非通过单次前向传播完成，而是通过**迭代循环**——这是一个反馈循环，其中一个预测周期的输出将成为下一个周期的输入上下文。受 AlphaFold2 循环策略 (Jumper et al., 2021) 启发，该机制允许模型逐步细化其结构假设，利用自身的几何预测来改善后续迭代中的成对推理。其结果是一个自纠正循环：粗略的初始预测孕育出越来越精确的坐标输出，而置信度门控选择机制确保只返回最佳精化的结构。
+
+来源: [model.py](omegafold/model.py#L118-L203), [embedders.py](omegafold/embedders.py#L347-L408)
+
+## 循环循环架构
+
+循环机制位于 `OmegaFold.forward()` 方法中，它对每个周期的输入列表进行迭代。每个周期执行完整的预测栈——语言模型嵌入、GeoFormer、结构模块和置信度估计——同时通过 `RecycleEmbedder` 注入上一个周期的输出信息。在第一个周期，所有“先前”的信号均被零初始化，因此模型纯粹基于序列信息运行。从第二个周期开始，模型可以访问其先前的结构预测，从而能够纠正残基对距离和骨架几何中的误差。
+
+```mermaid
+flowchart TD
+    A["零初始化的 prev_dict<br/>(prev_node, prev_edge,<br/>prev_x, prev_frames)"] --> B
+
+    subgraph Cycle["循环周期 (重复 N 次)"]
+        B["深度序列嵌入<br/>(OmegaPLM → 节点/边表示)"] --> C["RecycleEmbedder<br/>(将 prev_dict 注入表示)"]
+        C --> D["GeoFormer<br/>(成对 + 单一更新)"]
+        D --> E["结构模块<br/>(IPA → 骨架帧 → atom14 坐标)"]
+        E --> F["置信度头<br/>(每个残基的 pLDDT)"]
+        F --> G["计算总体置信度"]
+        G --> H{"置信度 ><br/>max_confidence?"}
+        H -->|Yes| I["更新 final_result<br/>和 max_confidence"]
+        H -->|No| J["丢弃此周期的结果"]
+        I --> K["从周期输出构建新的 prev_dict"]
+        J --> K
+        E --> K
+    end
+
+    K -->|下一周期| B
+    I --> L["返回 final_result<br/>(最高置信度的预测)"]
+    J --> L
+```
+
+该循环由两个关键状态对象控制：**输入表示**（每个周期重新生成的伪 MSA 嵌入）和 **prev_dict**（承前启后的结构记忆）。每个周期生成一个新的 `prev_dict`，其中包含更新的节点表示、边表示、atom14 坐标和骨架帧——所有这些都将输入到下一次迭代的 `RecycleEmbedder` 中。
+
+来源: [model.py](omegafold/model.py#L153-L203), [model.py](omegafold/model.py#L52-L112)
+
+## prev_dict：结构记忆状态
+
+`prev_dict` 是在循环周期之间传递信息的中心数据结构。它由 `create_initial_prev_dict()` 用零填充张量和默认帧进行初始化，然后由每个 `OmegaFoldCycle` 用该周期的输出进行填充：
+
+| 字段 | 形状 | 来源 | 用途 |
+|-------|-------|--------|---------|
+| `prev_node` | `[num_res, node_dim]` | GeoFormer 输出 (单一表示) | 来自上一周期的残基级特征 |
+| `prev_edge` | `[num_res, num_res, edge_dim]` | GeoFormer 输出 (成对表示) | 来自上一周期的残基对特征 |
+| `prev_x` | `[num_res, 14, 3]` | 结构模块 `final_atom_positions` | 先前的 3D 原子坐标 |
+| `prev_frames` | `AAFrame[num_res, 8]` | 结构模块 `final_frames` | 先前的骨架 + 侧链刚体帧 |
+
+在第一个周期，`prev_node` 和 `prev_edge` 是零张量，`prev_x` 是零坐标张量，`prev_frames` 被初始化为埃克斯刻度下的默认（单位）帧。这确保了第一次传播纯粹由序列驱动，没有任何几何先验。在每个周期之后，`OmegaFoldCycle.forward()` 从其自身的输出中组装一个新的 `prev_dict`——具体来说，是 GeoFormer 的单一表示、更新后的边表示、解码后的 atom14 位置，以及包含由扭转角导出的侧链帧的扩展 8 帧表示。
+
+来源: [model.py](omegafold/model.py#L236-L264), [model.py](omegafold/model.py#L106-L112)
+
+## RecycleEmbedder：注入先验知识
+
+`RecycleEmbedder` 是将上一周期的结构知识合并到当前周期的表示中的机制。它执行三种不同的注入路径，每种路径基于先前预测的不同方面：
+
+**节点注入** — 上一周期的单一表示 (`prev_node`) 经过 `LayerNorm` 后直接加到当前周期的节点表示中。这种残差连接允许模型“记住”它先前学习到的每个残基的特征，而 LayerNorm 防止了各周期间幅度的漂移：
+
+```
+node_repr[..., 0, :, :] += LayerNorm(prev_node)
+```
+
+**基于距离克矩阵的边注入** — 上一周期的 atom14 坐标被缩减为伪 β 位置（每个残基的一个代表性点，通常是 Cβ 原子）。计算这些伪 β 位置之间的成对距离，通过 `Val2Bins` 离散化到区间中（配置为 `prev_pos` 个区间：3.25Å–20.75Å 跨越 16 个区间），并通过一个学习到的 `nn.Embedding` 进行嵌入。这为模型提供了关于残基对距离的直接几何先验：
+
+```
+prev_beta = create_pseudo_beta(prev_x, atom_mask)
+d = ||prev_beta_i - prev_beta_j||₂
+edge_repr += Embedding(DGram(d))
+```
+
+**基于先前成对表示的边注入** — 上一周期的边表示 (`prev_edge`) 经过 LayerNorm 后加到当前边表示中，保留了学习到的成对关系：
+
+```
+edge_repr += LayerNorm(prev_edge)
+```
+
+**可选的结构嵌入器（仅限模型 2）** — 当启用 `struct_embedder`（模型索引 2）时，额外的 `PairStructEmbedder` 将完整的成对 atom14 距离矩阵和局部帧相对位置编码到边表示中。相比于仅使用距离克矩阵，这提供了更丰富的几何信号，但代价是额外的计算量。
+
+来源: [embedders.py](omegafold/embedders.py#L347-L408), [embedders.py](omegafold/embedders.py#L225-L328)
+
+## 置信度门控选择
+
+并非每个循环周期都能产生更好的预测。为了解决这个问题，OmegaFold 实现了**置信度门控选择**：在每个周期之后，根据每个残基的 pLDDT 预测和 Cα 距离矩阵计算总体置信度分数。模型仅保留具有最高总体置信度的周期的结果，而不是盲目使用最后一个周期的输出。
+
+这由 `OmegaFold.forward()` 中的 `predict_with_confidence` 标志控制。启用时（默认情况），模型会跨所有周期跟踪 `max_confidence`，并且仅当某个周期的置信度超过当前最大值时才更新 `final_result`。禁用时，则无条件使用最后一个周期的结果。总体置信度由 `confidence.get_all_confidence()` 计算，该方法近似一个加权的 lDDT 分数，仅考虑 15Å 截断距离内的残基对。
+
+<CgxTip>置信度门控选择意味着在收益递减点之后增加 `num_cycle` 是安全的——模型将简单地忽略更差的周期。然而，每个周期仍然需要完整的计算开销，因此存在一个时间与精度的权衡。</CgxTip>
+
+来源: [model.py](omegafold/model.py#L190-L201), [confidence.py](omegafold/confidence.py#L39-L93)
+
+## 跨周期的伪 MSA 多样性
+
+每个循环周期接收一个**不同的伪 MSA**——即输入序列的随机掩码版本。流水线中的 `fasta2inputs()` 函数预先生成 `num_cycle` 个独立的伪 MSA 副本，每个副本是通过以配置的 `mask_rate`（默认 12%）随机掩码残基，并用未知词元（索引 21）替换被掩码的位置而生成的。这种随机变化意味着每个周期处理的输入略有不同，这起到了测试时增强的作用，有助于防止模型循环陷入退化的固定点。
+
+当 `deterministic=True` 时，随机数生成器以序列长度为种子进行初始化，确保同一输入在不同运行间的可复现性。
+
+来源: [pipeline.py](omegafold/pipeline.py#L93-L180)
+
+## 周期计数配置
+
+循环迭代的次数在两个层面上进行配置：
+
+| 配置点 | 参数 | 默认值 | 作用域 |
+|---------------------|-----------|---------|-------|
+| CLI 参数 | `--num_cycle` | 10 | 控制循环迭代次数 + 伪 MSA 数量 |
+| 前向传播配置 | `num_recycle` | 由 `--num_cycle` 设定 | 作为 `fwd_cfg` 传递给模型 |
+| 结构模块 | `cfg.struct.num_cycle` | 8 | 内部 IPA 迭代（独立机制） |
+
+区分**循环周期**（`OmegaFold.forward()` 中的外循环）和**结构模块周期**（`StructureModule` 中通过 IPA 迭代细化骨架帧的内循环）至关重要。循环周期是本页讨论的从粗到细的细化过程；结构模块周期是单个结构预测步骤内的内部坐标细化。
+
+来源: [pipeline.py](omegafold/pipeline.py#L343-L346), [pipeline.py](omegafold/pipeline.py#L422-L425), [config.py](omegafold/config.py#L94-L108)
+
+## 两级迭代细化：循环周期 vs. 结构模块周期
+
+OmegaFold 在两种不同的粒度上采用迭代细化，理解它们之间的关系是掌握整体架构的关键：
+
+```mermaid
+flowchart LR
+    subgraph Outer["外循环：循环周期 (默认 10)"]
+        direction TB
+        OC1["周期 1:<br/>零 prev_dict"] --> OC2["周期 2:<br/>注入周期 1 输出"]
+        OC2 --> OC3["周期 3:<br/>注入周期 2 输出"]
+        OC3 --> OCN["... 周期 N"]
+    end
+
+    subgraph Inner["内循环：结构模块周期 (默认 8)"]
+        direction TB
+        IC1["IPA + 转换<br/>+ 帧更新 1"] --> IC2["IPA + 转换<br/>+ 帧更新 2"]
+        IC2 --> ICN["... 帧更新 8"]
+    end
+
+    Outer -->|"每次周期触发"| Inner
+```
+
+**外循环循环**在全模型传播的层面上运行：每次迭代通过语言模型重新编码序列，使用循环上下文重新运行 GeoFormer，并生成一个完整的结构。**内结构模块循环**在骨架帧更新的层面上运行：在单个结构预测中，IPA 更新被迭代应用（默认 8 次）以逐渐对齐骨架帧。循环循环在每个周期重置内循环，但通过 `RecycleEmbedder` 提供逐步更好的起始表示。
+
+来源: [model.py](omegafold/model.py#L159-L203), [decode.py](omegafold/decode.py#L316-L392)
+
+## 循环数据流总结
+
+下表追溯了通过一个循环周期的完整数据流，展示了周期 *k-1* 的 `prev_dict` 如何影响周期 *k* 的输出：
+
+| 阶段 | 输入 | 输出 | 循环信号 |
+|-------|-------|--------|-----------------|
+| 深度序列嵌入 | 伪 MSA, 掩码 | `node_repr`, `edge_repr` | 无 (仅序列) |
+| RecycleEmbedder | node_repr, edge_repr, prev_dict | 更新的 node_repr, edge_repr | LayerNorm(prev_node) → 节点; DGram(prev_x) + LayerNorm(prev_edge) → 边 |
+| GeoFormer | node_repr, edge_repr, 掩码 | prev_node, edge_repr, node_repr | 通过丰富的输入隐式传递 |
+| 结构模块 | node_repr, edge_repr, fasta, 掩码 | atom14 位置, 帧 | 通过 GeoFormer 输出隐式传递 |
+| 置信度头 | node_repr | 每个残基的 pLDDT | 无 |
+| prev_dict 组装 | GeoFormer + 结构输出 | 新的 prev_dict | 无 (生成下一周期的输入) |
+
+来源: [model.py](omegafold/model.py#L163-L188), [model.py](omegafold/model.py#L106-L112)
+
+## 实践指南
+
+**选择周期计数** — 默认的 10 个循环周期在大多数序列的精度和速度之间提供了良好的平衡。短序列（<200 个残基）通常在 3-5 个周期内收敛，而长序列可能受益于完整的 10 个甚至更多周期。由于置信度门控选择保留了最佳结果，增加额外的周期绝不会损害精度，只会增加运行时间。
+
+**模型 2 结构嵌入器** — 当使用模型索引 2 (`--model 2`) 时，`PairStructEmbedder` 为 RecycleEmbedder 提供了额外的几何上下文。它编码完整的成对距离矩阵和局部帧相对位置，提供了比仅使用距离克矩阵更丰富的信号。期望以每个周期额外的内存和计算开销为代价，获得适度的精度提升。
+
+**内存考量** — 每个循环周期复用相同的模型参数（无参数复制），因此内存随每周期的激活大小缩放，而不是随周期数缩放。然而，`prev_dict` 必须在周期间保留，增加了大约 `(num_res × node_dim) + (num_res² × edge_dim) + (num_res × 14 × 3)` 个浮点数的固定开销。对于非常长的序列，`prev_edge` 项占主导地位。有关管理此开销的技术，请参阅[内存优化策略](14-memory-optimization-strategies)。
+
+来源: [pipeline.py](omegafold/pipeline.py#L343-L346), [embedders.py](omegafold/embedders.py#L362-L363), [config.py](omegafold/config.py#L110-L111)
+
+<CgxTip>OmegaFold 中的循环循环在架构上比 AlphaFold2 更简单——没有单独的模板或 MSA 循环路径。所有循环信号都通过单个 `RecycleEmbedder` 流动，使得该机制更易于推理，但表达力不如 AF2 的多源循环。</CgxTip>
+
+## 相关页面
+
+- [架构概览](4-architecture-overview) — 获取完整的模型架构上下文
+- [GeoFormer Transformer](6-geoformer-transformer) — 了解被循环的成对/单一表示的详细信息
+- [结构模块与 IPA](7-structure-module-and-ipa) — 了解内部迭代细化机制
+- [置信度估计 (pLDDT)](12-confidence-estimation-plddt) — 了解 pLDDT 分数如何驱动周期选择
+- [配置参考](13-configuration-reference) — 获取所有与循环相关的配置参数
+
+---
+
+- [深入解析/置信度评估 (pLDDT)](https://zread.ai/HeliXonProtein/OmegaFold/12-confidence-estimation-plddt)
+
+---
+slug:12-confidence-estimation-plddt
+blog_type:normal
+---
+
+
+OmegaFold 为预测结构中的每个氨基酸生成一个**逐残基置信度分数 pLDDT**（predicted Local Distance Difference Test，预测局部距离差异测试），此外还提供一个单一的**全局置信度**标量，用于总结整条链的预测质量。这些分数是模型对结构可靠性的自我评估——高 pLDDT 区域可能折叠正确，而低分区域则标记了不确定的环或无序片段。该实现遵循 AlphaFold2 的置信度头设计，适配至 OmegaFold 的模块层级结构中，并与循环环集成，以便在迭代精化周期中选取最佳结构。
+
+来源：[confidence.py](/omegafold/confidence.py#L1-L154), [model.py](/omegafold/model.py#L52-L113)
+
+## pLDDT 概念
+
+**LDDT** 指标（Mariani et al., 2013）在不要求全局叠加的情况下测量局部结构的一致性——它评估的是局部邻域内成对距离的一致性，而非整体坐标系的对齐。OmegaFold 的 **pLDDT** 是该指标的*预测*版本：神经网络学习在推理时根据模型的内部表征来估算真实的 LDDT 值。每个残基的分数范围从 0 到 1（写入 PDB B 因子列时缩放至 0–100），常规解释总结如下。
+
+| pLDDT 范围 (×100) | 置信度水平 | 典型结构区域 |
+|---|---|---|
+| 90 – 100 | 非常高 | 良好有序的核心（α-螺旋，β-折叠） |
+| 70 – 90 | 置信 | 基本正确的局部几何形状 |
+| 50 – 70 | 低 | 可能无结构或解析较差 |
+| 0 – 50 | 非常低 | 可能无序 / 本质上无结构 |
+
+<CgxTip>pLDDT 会被直接写入输出 PDB 文件的 B 因子列（乘以 100），因此 PyMOL 和 ChimeraX 等标准分子查看器可以开箱即用地按置信度对结构进行着色。</CgxTip>
+
+来源：[confidence.py](/omegafold/confidence.py#L96-L117), [__main__.py](/omegafold/__main__.py#L86-L93)
+
+## ConfidenceHead 架构
+
+`ConfidenceHead` 是一个轻量级 MLP，它将**结构模块的最终节点表征**映射到 LDDT 分箱上的离散概率分布，然后将该分布折叠为逐残基置信度标量。整体流程如下所示。
+
+```mermaid
+flowchart TD
+    A["node_repr<br/>[num_res, 384]"] --> B["LayerNorm<br/>(no learned params)"]
+    B --> C["Linear → 384→128"]
+    C --> D["ReLU"]
+    D --> E["Linear → 128→128"]
+    E --> F["ReLU"]
+    F --> G["Linear → 128→50"]
+    G --> H["logits<br/>[num_res, 50]"]
+    H --> I["Softmax → probs<br/>[num_res, 50]"]
+    I --> J["Expected value over<br/>bin centers"]
+    J --> K["pLDDT per residue<br/>[num_res]"]
+
+    style A fill:#e8f0fe,stroke:#4285f4
+    style K fill:#ceead6,stroke:#34a853
+    style H fill:#fef7e0,stroke:#f9ab00
+```
+
+**逐步的数据流：**
+
+1. **层归一化**使用无权重的 `normalize` 工具应用于输入节点表征（形状为 `[num_res, 384]`）——这稳定了 MLP 输入，而无需引入可学习的缩放/偏移参数。
+2. 带有 ReLU 激活函数的 **3 层 MLP**（384 → 128 → 128 → 50）在 50 个离散箱上生成原始 logits。
+3. `_compute_confidence` 函数通过在均匀间隔的箱中心上执行 **softmax → 期望值**，将 logits 转换为 pLDDT（见下一节）。
+
+来源：[confidence.py](/omegafold/confidence.py#L124-L146), [config.py](/omegafold/config.py#L94-L108), [torch_utils.py](/omegafold/utils/torch_utils.py#L53-L83)
+
+## 从 Logits 到 pLDDT：分箱期望值
+
+`_compute_confidence` 中的核心计算将置信度估计视为**基于分箱的离散分类**，而非直接回归。当 `num_bins = 50` 时，[0, 1] 区间被划分为 50 个等宽的箱，每个箱的中心为：
+
+```
+bin_center[k] = (k + 0.5) / num_bins,  对于 k = 0, 1, ..., 49
+```
+
+这会生成 0.01, 0.03, 0.05, …, 0.99 的中心点。logits 的 softmax 在这些箱上生成类别概率分布，而**每个残基的 pLDDT** 是该分布下的期望值——通过矩阵-向量乘积 `torch.mv(probs, bin_centers)` 实现。与直接标量回归相比，这种分箱方法有两个优点：它自然地将输出约束在 [0, 1] 范围内，并且捕获了模型**对自身置信度的不确定性**（平坦的 softmax = 高不确定性，尖峰的 softmax = 高确定性）。
+
+| 参数 | 值 | 来源 |
+|---|---|---|
+| `num_bins` | 50 | `cfg.struct.num_bins` |
+| `bin_width` | 0.02 | `1.0 / num_bins` |
+| `bin_centers` | 0.01, 0.03, …, 0.99 | `arange(0.5×width, 1.0, width)` |
+| 输出范围 | 每个残基 (0, 1) | Softmax 保证 |
+
+来源：[confidence.py](/omegafold/confidence.py#L96-L117)
+
+## 全局置信度：加权序列级聚合
+
+虽然逐残基 pLDDT 提供了局部质量评估，`get_all_confidence` 计算出一个**单一标量**来代表整体预测质量。该聚合是逐残基分数的**邻居加权平均**，其中每个残基的权重与 15 Å 截断半径内其他 Cα 原子的数量成正比。这反映了 LDDT 的哲学：拥有更多局部邻居的残基对全局分数的贡献更大，因为 LDDT 本身就是基于局部距离邻域定义的。
+
+计算过程如下：
+
+1. 根据预测坐标计算成对 Cα 距离矩阵 `dmat_true`。
+2. 构建一个**评分掩码** `dists_to_score`，用于选择满足以下条件的残基对： 真实距离低于 15 Å， 两个残基均有效（通过 `ca_mask` 验证），以及 该对不是自相互作用。
+3. 全局分数是**（逐残基 pLDDT × 邻居数）之和**除以**已评分对的总数**，产生一个单精度浮点数。
+
+```python
+# 简化自实际实现
+score = (lddt_per_residue * neighbor_counts).sum() / total_scored_pairs
+```
+
+| 参数 | 值 | 描述 |
+|---|---|---|
+| `cutoff` | 15.0 Å | 邻居包含的距离阈值 |
+| `ca_coordinates` | `final_atom_positions[..., 1, :]` | Cα 原子位置（atom14 中的索引 1） |
+| `ca_mask` | `p_msa_mask[..., 0, :]` | 来自输入的有效性掩码 |
+| 返回值 | Python `float` | 单一全局置信度标量 |
+
+来源：[confidence.py](/omegafold/confidence.py#L39-L93), [model.py](/omegafold/model.py#L190-L195)
+
+## 与循环环的集成
+
+置信度系统与 OmegaFold 的迭代精化深度集成。在每个循环周期内，`OmegaFoldCycle` 模块运行 GeoFormer → 结构模块 → ConfidenceHead，将逐残基 pLDDT 存储在 `ret['confidence']` 中。外部 `OmegaFold` 模型随后计算全局置信度，并且当 `predict_with_confidence=True`（默认值）时，**仅保留具有最高全局置信度分数的周期结构**。这意味着最终输出不一定来自最后一个周期，而是来自*最可信*的周期。
+
+```mermaid
+sequenceDiagram
+    participant OF as OmegaFold
+    participant Cycle as OmegaFoldCycle
+    participant CH as ConfidenceHead
+    participant GA as get_all_confidence
+
+    OF->>Cycle: 周期 1: node_repr, edge_repr
+    Cycle->>CH: 来自 StructureModule 的 node_repr
+    CH-->>Cycle: 逐残基 pLDDT
+    Cycle-->>OF: result, prev_dict
+    OF->>GA: pLDDT + Cα 坐标 → global_score
+    GA-->>OF: confidence_overall_1
+
+    OF->>Cycle: 周期 2: 循环表征
+    Cycle->>CH: node_repr
+    CH-->>Cycle: 逐残基 pLDDT
+    Cycle-->>OF: result, prev_dict
+    OF->>GA: pLDDT + Cα 坐标 → global_score
+    GA-->>OF: confidence_overall_2
+
+    Note over OF: 保留具有最大全局置信度的<br/>周期的结果
+```
+
+<CgxTip>如果 `predict_with_confidence=False`，模型将返回**最后一个**周期的结果，而不是最可信的周期。这对于调试或当你想观察预测在各周期间的演化过程时非常有用。</CgxTip>
+
+来源：[model.py](/omegafold/model.py#L135-L203)
+
+## PDB 文件中的置信度输出
+
+当 OmegaFold 将预测结果保存为 PDB 格式时，逐残基 pLDDT 在乘以 100（从 [0, 1] 转换为 [0, 100]）后被写入 **B 因子列**。这与 AlphaFold2 使用的约定相同，从而实现了与按 B 因子着色的可视化工具的即时兼容。流水线中的 `save_pdb` 函数接收 `b_factors = output["confidence"] * 100`，并将每个残基的 B 因子写入 PDB ATOM 记录中。
+
+| 输出字段 | 来源 | 转换 |
+|---|---|---|
+| PDB B 因子 | `output["confidence"]` | `× 100` (0–1 → 0–100) |
+| `result["confidence"]` | `ConfidenceHead.forward()` | 原始 pLDDT，形状 `[num_res]` |
+| `result["confidence_overall"]` | `get_all_confidence()` | 标量浮点数，不保存至 PDB |
+
+来源：[__main__.py](/omegafold/__main__.py#L86-L93), [pipeline.py](/omegafold/pipeline.py#L183-L239)
+
+## 配置参考
+
+`ConfidenceHead` 继承自 `cfg.struct`（结构模块的配置命名空间）的配置。相关参数如下：
+
+| 配置键 | 默认值 | 在 ConfidenceHead 中的作用 |
+|---|---|---|
+| `struct.node_dim` | 384 | 输入维度（来自结构模块输出） |
+| `struct.hidden_dim` | 128 | 3 层 MLP 中的隐藏层宽度 |
+| `struct.num_bins` | 50 | 输出分布的 LDDT 箱数 |
+
+这些参数在 `make_config()` 中定义，并在结构模块和置信度头之间共享，因为置信度头直接消费结构模块的输出。更改 `num_bins` 会改变置信度分布的粒度——箱数越多分辨率越高，但也要求模型学习更精细的概率分布。
+
+来源：[config.py](/omegafold/config.py#L94-L108), [confidence.py](/omegafold/confidence.py#L131-L139)
+
+## AlphaFold2 谱系
+
+OmegaFold 的置信度估计明确源自 AlphaFold2 的实现。源代码引用了两个 AF2 来源：
+
+- `_compute_confidence` 采用了来自 [`alphafold/common/confidence.py`](https://github.com/deepmind/alphafold/blob/0be2b30b98f0da7aecb973bde04758fae67eb913/alphafold/common/confidence.py#L22) 的 logit 到 pLDDT 逻辑
+- `get_all_confidence` 采用了来自 [`alphafold/model/lddt.py`](https://github.com/deepmind/alphafold/blob/1109480e6f38d71b3b265a4a25039e51e2343368/alphafold/model/lddt.py#L19) 的距离差异测试聚合
+
+关键的架构适配在于，OmegaFold 在推理时不使用 MSA（而是使用伪 MSA），因此置信度头仅依赖结构模块的节点表征——而 AF2 的头还可以利用 MSA 派生的特征。尽管存在这种输入差异，分箱策略和聚合逻辑依然被忠实移植。
+
+来源：[confidence.py](/omegafold/confidence.py#L39-L55), [confidence.py](/omegafold/confidence.py#L96-L109)
+
+---
+
+**下一步**：要理解输入至 ConfidenceHead 的节点表征是如何生成的，请参阅[结构模块与 IPA](7-structure-module-and-ipa)。关于置信度选择所运作的迭代上下文，请参阅[循环与迭代精化](11-recycling-and-iterative-refinement)。有关所有可配置参数，请参阅[配置参考](13-configuration-reference)。
+
+---
+
+- [深入解析/配置参考](https://zread.ai/HeliXonProtein/OmegaFold/13-configuration-reference)
+
+---
+slug:13-configuration-reference
+blog_type:normal
+---
+
+
+OmegaFold 的行为由两个不同的配置层控制：**静态模型配置**定义神经网络架构（在加载权重时固定），**运行时配置**控制推理执行过程（可在每次预测时调整）。理解这两个配置层之间的边界至关重要——未经重新训练而修改静态配置将产生无效输出，而运行时配置则提供了权衡速度、内存和质量的合法手段。
+
+## 配置架构
+
+系统通过两条独立的管线生成配置，并在模型实例化时汇合。**静态配置**由 [`make_config()`](omegafold/config.py#L43-L111) 根据模型索引生成，产生一个 `argparse.Namespace` 树，并向下层叠传递至每个子模块。**运行时配置**由 [`get_args()`](omegafold/pipeline.py#L304-L429) 从命令行参数组装而成，产生一个扁平的 `argparse.Namespace`，并以 `fwd_cfg` 的形式流入前向传播过程。
+
+```mermaid
+flowchart TD
+    subgraph Static["Static Model Configuration"]
+        MC["make_config(model_idx)"] --> TopLevel["Top-level params<br/>node_dim, edge_dim, ..."]
+        MC --> PLM["cfg.plm<br/>OmegaPLM params"]
+        MC --> PrevPos["cfg.prev_pos<br/>Prev-position binning"]
+        MC --> RoughDist["cfg.rough_dist_bin<br/>Rough dist binning"]
+        MC --> DistBin["cfg.dist_bin<br/>Distance binning"]
+        MC --> PosBin["cfg.pos_bin<br/>Position binning"]
+        MC --> Struct["cfg.struct<br/>Structure module params"]
+    end
+
+    subgraph Runtime["Runtime Configuration"]
+        GA["get_args()"] --> FwdCfg["forward_config<br/>{subbatch_size, num_recycle}"]
+        GA --> Device["device selection"]
+        GA --> Weights["weights loading"]
+        GA --> MSA["pseudo-MSA params"]
+    end
+
+    FwdCfg --> Model["OmegaFold.forward()"]
+    TopLevel --> Model
+    PLM --> PLMMod["OmegaPLM"]
+    Struct --> StructMod["StructureModule + IPA"]
+    TopLevel --> GeoMod["GeoFormer"]
+```
+
+每个 OmegaFold 模块均继承自 [`OFModule`](omegafold/modules.py#L171-L190)，该基类将 `self.cfg` 存储为 `argparse.Namespace`。子模块接收完整配置的*局部*子集——例如，`OmegaPLM` 接收 `cfg.plm`，`StructureModule` 接收 `cfg.struct`——确保每个组件仅可见与其自身架构相关的参数。
+
+来源：[config.py](omegafold/config.py#L1-L122), [modules.py](omegafold/modules.py#L171-L190), [pipeline.py](omegafold/pipeline.py#L304-L429)
+
+## 静态模型配置
+
+函数 [`make_config(model_idx)`](omegafold/config.py#L43-L111) 构建完整的架构命名空间。该函数接受 `model_idx` ∈ {1, 2}，其中模型 2 额外启用结构嵌入器（`struct_embedder=True`），用于在循环期间基于模板进行边特征增强。两个模型的其他所有参数均相同。
+
+### 顶层参数
+
+这些参数定义了主要的表征维度和 GeoFormer 主干行为，并在 `OmegaFold`、`GeoFormer` 及各嵌入模块间共享。
+
+| 参数 | 默认值 | 类型 | 消费者 | 描述 |
+|---|---|---|---|---|
+| `alphabet_size` | 21 | int | `EdgeEmbedder` | 氨基酸标记数量（20种标准氨基酸 + 1种未知） |
+| `node_dim` | 256 | int | `GeoFormer`, `RecycleEmbedder`, `OmegaFold` | 节点（单一表征）隐藏维度 |
+| `edge_dim` | 128 | int | `GeoFormer`, `RecycleEmbedder`, `OmegaFold` | 边（成对表征）隐藏维度 |
+| `relpos_len` | 32 | int | `EdgeEmbedder` | 单侧相对位置编码窗口（总计 = 2×32+1 = 65 个分箱） |
+| `c` | 16 | int | `StructEmbedder` | 结构嵌入的基础通道维度 |
+| `geo_num_blocks` | 50 | int | `GeoFormer` | 主干中 GeoFormer 块的数量 |
+| `gating` | True | bool | `GeoFormerBlock` | 启用门控注意力输出投影 |
+| `attn_c` | 32 | int | `GeoFormerBlock` | 每个头的注意力键/查询维度 |
+| `attn_n_head` | 8 | int | `GeoFormerBlock` | GeoFormer 中的注意力头数 |
+| `transition_multiplier` | 4 | int | `GeoFormerBlock` | 转换层内部维度 = `node_dim × multiplier` |
+| `activation` | `"ReLU"` | str | `GeoFormerBlock` | 转换层的激活函数 |
+| `opm_dim` | 32 | int | `GeoFormerBlock` | 外积（Node2Edge）的投影维度 |
+| `geom_count` | 2 | int | `GeoFormerBlock` | 每个块的几何注意力层数 |
+| `geom_c` | 32 | int | `GeoFormerBlock` | 每个头的几何注意力通道维度 |
+| `geom_head` | 4 | int | `GeoFormerBlock` | 几何注意力头数 |
+| `struct_embedder` | `model_idx == 2` | bool | `RecycleEmbedder` | 为模板结构输入启用 `PairStructEmbedder` |
+
+来源：[config.py](omegafold/config.py#L46-L111), [geoformer.py](omegafold/geoformer.py#L49-L87), [embedders.py](omegafold/embedders.py#L116-L138)
+
+### OmegaPLM 参数 (`cfg.plm`)
+
+这些参数控制预训练的蛋白质语言模型——一个门控注意力单元（GAU）编码器。该 PLM 在循环开始前运行**一次**，生成维度为 `node=1280` 的节点嵌入，随后将其线性投影至主干的 `node_dim=256`。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `alphabet_size` | 23 | 标记词汇表大小（20种氨基酸 + gap + 未知 + mask） |
+| `node` | 1280 | PLM 隐藏维度（嵌入及层间宽度） |
+| `padding_idx` | 21 | `nn.Embedding` 的填充标记索引 |
+| `edge` | 66 | GAU 层数（亦决定堆叠的边输出通道数） |
+| `proj_dim` | 2560 | GAU 中值/门控分割的投影维度（`1280 × 2`） |
+| `attn_dim` | 256 | GAU 注意力键/查询维度 |
+| `num_head` | 1 | GAU 注意力头数 |
+| `num_relpos` | 129 | GAU 注意力偏置的相对位置编码分箱数 |
+| `masked_ratio` | 0.12 | 训练时的掩码率，用于微调的 dropout 缩放 |
+
+PLM 的层数通过 `cfg.plm.edge = 66` 设置，这看起来可能有悖直觉——它控制的是 [`OmegaPLMLayer`](omegafold/omegaplm.py#L121-L159) 实例的数量，每个实例包含一个 [`GatedAttentionUnit`](omegafold/omegaplm.py#L56-L118)。`masked_ratio` 在推理时不应用，但用于通过 [`_get_finetuning_scale()`](omegafold/omegaplm.py#L222-L243) 计算标记 dropout 校正缩放比例。
+
+来源：[config.py](omegafold/config.py#L48-L58), [omegaplm.py](omegafold/omegaplm.py#L162-L219)
+
+### 分箱参数
+
+OmegaFold 将连续的几何量离散化为软分箱以进行嵌入。三个独立的分箱配置控制着不同的输入模态：
+
+| 配置组 | 参数 | 默认值 | 消费者 | 用途 |
+|---|---|---|---|---|
+| `cfg.prev_pos` | `first_break`, `last_break`, `num_bins`, `ignore_index` | 3.25, 20.75, 16, 0 | `RecycleEmbedder.dgram` | 将上一循环的残基间距离离散化，用于循环边输入 |
+| `cfg.rough_dist_bin` | `x_min`, `x_max`, `x_bins` | 3.25, 20.75, 16 | `StructEmbedder.rough_dist_bin` | 结构嵌入器中的粗粒度成对距离编码（模型 2） |
+| `cfg.dist_bin` | `x_min`, `x_max`, `x_bins` | 2, 65, 64 | `StructEmbedder.dist_bin` | 结构嵌入器中的细粒度成对距离编码（模型 2） |
+| `cfg.pos_bin` | `x_min`, `x_max`, `x_bins` | -32, 32, 64 | `StructEmbedder.pos_bin` | 结构嵌入器中的局部坐标系位置编码（模型 2） |
+
+注意，`prev_pos` 使用 [`Val2Bins`](omegafold/embedders.py#L347-L364)（硬分箱，对超出范围的值使用 `ignore_index`），而结构嵌入器分箱使用 `Val2ContBins`（软连续分箱）。设计上，`prev_pos.first_break` 和 `prev_pos.last_break` 与 `rough_dist_bin.x_min` 和 `rough_dist_bin.x_max` 相匹配——两者捕获相同的粗距离区间。
+
+来源：[config.py](omegafold/config.py#L62-L82), [embedders.py](omegafold/embedders.py#L225-L328)
+
+### 结构模块参数 (`cfg.struct`)
+
+这些参数控制不变点注意力（IPA）结构模块和扭转角预测头。结构模块接收 `cfg.struct` 作为其局部配置，实例化为 [`StructureModule(cfg.struct)`](omegafold/decode.py#L316-L329)。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `node_dim` | 384 | 结构模块内部的节点表征维度（与主干的 256 不同） |
+| `edge_dim` | 128 | 边表征维度（与主干匹配） |
+| `num_cycle` | 8 | 每次循环迭代中 IPA 结构循环的次数 |
+| `num_transition` | 3 | 每次 IPA 结构循环中的转换层数 |
+| `num_head` | 12 | IPA 注意力头数 |
+| `num_point_qk` | 4 | 每个头的点查询/键向量数（3D 几何注意力） |
+| `num_point_v` | 8 | 每个头的点值向量数 |
+| `num_scalar_qk` | 16 | 每个头的标量查询/键维度 |
+| `num_scalar_v` | 16 | 每个头的标量值维度 |
+| `num_channel` | 128 | 扭转角残差块的隐藏通道维度 |
+| `num_residual_block` | 2 | `TorsionAngleHead` 中的残差块数量 |
+| `hidden_dim` | 128 | 隐藏维度（保留参数，当前在主路径中未使用） |
+| `num_bins` | 50 | 置信度/距离图预测的分箱数 |
+
+结构模块的 `node_dim=384` 大于 GeoFormer 主干的 `node_dim=256`——一个 [`node_final_proj`](omegafold/geoformer.py#L146) 线性层在 GeoFormer 输出处弥合了这一维度差异。
+
+来源：[config.py](omegafold/config.py#L94-L108), [decode.py](omegafold/decode.py#L44-L90), [decode.py](omegafold/decode.py#L200-L252), [decode.py](omegafold/decode.py#L316-L392)
+
+## 运行时（前向）配置
+
+前向配置控制执行行为而不改变模型权重。它在 [`get_args()`](omegafold/pipeline.py#L422-L425) 中构造为扁平命名空间，并作为 `fwd_cfg` 关键字参数贯穿整个调用栈。
+
+| 参数 | 命令行标志 | 默认值 | 描述 |
+|---|---|---|---|
+| `subbatch_size` | `--subbatch_size` | `None`（完整序列） | 沿查询维度将注意力计算分块为指定大小的块。较小的值会降低 GPU 内存占用，但代价是速度变慢。为 `None` 时，使用完整序列长度。 |
+| `num_recycle` | `--num_cycle` | 10 | 循环迭代次数。每次迭代重新运行 GeoFormer 主干 + 结构模块，并反馈上一次的预测结果。更多的循环次数可提升质量，但运行时间也会线性增加。 |
+
+<CgxTip>`subbatch_size` 参数是处理长序列时控制内存的主要手段。将其设置为 256 或 512 允许在 16GB 显存的 GPU 上预测超过 1000 个残基的序列，但速度会降低约 2-3 倍。此参数由 [`attention()`](omegafold/modules.py#L104-L164) 函数中对查询拆分的分块循环所消费。</CgxTip>
+
+来源：[pipeline.py](omegafold/pipeline.py#L422-L425), [modules.py](omegafold/modules.py#L104-L164)
+
+## 命令行界面
+
+所有命令行参数均在 [`get_args()`](omegafold/pipeline.py#L316-L429) 中定义。下表记录了每个标志、其默认值及作用。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_file` | 位置参数 | — | 输入 FASTA 文件的路径（支持 `~` 展开） |
+| `output_dir` | 位置参数 | — | 输出 PDB 文件的目录（若不存在则创建；支持 `~` 展开） |
+| `--num_cycle` | int | 10 | 循环迭代次数（映射为 `fwd_cfg.num_recycle`） |
+| `--subbatch_size` | int | None | 节省内存的注意力计算的子批次大小（映射为 `fwd_cfg.subbatch_size`） |
+| `--device` | str | auto | 计算设备：`cpu`、`cuda`、`cuda:N`、`mps` 或自动检测 |
+| `--weights_file` | str | `~/.cache/omegafold_ckpt/model.pt` | 缓存模型权重的本地路径 |
+| `--weights` | str | `https://helixon.s3.amazonaws.com/release1.pt` | 下载权重的 URL |
+| `--model` | int | 1 | 模型变体：**1** = 标准，**2** = 带结构嵌入器 |
+| `--pseudo_msa_mask_rate` | float | 0.12 | 生成伪 MSA 行的掩码率 |
+| `--num_pseudo_msa` | int | 15 | 每次循环迭代生成的伪 MSA 序列数 |
+| `--allow_tf32` | bool | True | 在 Ampere+ 架构 GPU 上启用 TF32 精度以加速矩阵乘法 |
+
+### 设备自动检测逻辑
+
+当未指定 `--device` 时，[`_get_device()`](omegafold/pipeline.py#L271-L301) 按优先级顺序选择加速器：**CUDA** → **MPS** (Apple Silicon) → **CPU**。指定不可用的设备将引发 `ValueError`。
+
+### 模型变体路由
+
+`--model` 标志同时控制两件事：
+
+1. **权重下载 URL**：模型 1 → `release1.pt`，模型 2 → `release2.pt`
+2. **静态配置**：`make_config(model_idx)` 设置 `struct_embedder = (model_idx == 2)`
+
+模型 2 在 `RecycleEmbedder` 内启用 [`PairStructEmbedder`](omegafold/embedders.py#L331-L344)，该模块将上一循环预测的坐标和帧中的成对结构信息编码进边表征。这因额外的嵌入路径会显著增加内存开销。
+
+### 精度控制
+
+[`_set_precision()`](omegafold/pipeline.py#L59-L75) 基于 PyTorch 版本配置 TF32 行为。对于 PyTorch < 1.12，它直接设置 `cuda.matmul.allow_tf32` 和 `cudnn.allow_tf32`。对于 PyTorch ≥ 1.12，当启用 TF32 时，它调用 `torch.set_float32_matmul_precision("high")`，否则调用 `"highest"` 以使用严格 FP32。
+
+<CgxTip>当 `--allow_tf32=True`（默认）时，Ampere+ 架构 GPU 使用 TF32 进行矩阵乘法，速度提升约 3 倍，但尾数从 23 位减少至 10 位。对于数值精度要求严格的敏感基准测试，请使用 `--allow_tf32=False` 禁用此功能。</CgxTip>
+
+来源：[pipeline.py](omegafold/pipeline.py#L59-L75), [pipeline.py](omegafold/pipeline.py#L316-L429), [pipeline.py](omegafold/pipeline.py#L271-L301)
+
+## 配置在架构中的流转
+
+下图展示了每个配置作用域如何从根 `OmegaFold` 模块向下分发至叶组件。每个箭头代表一个配置子命名空间被传递至子模块的构造函数中。
+
+```mermaid
+flowchart LR
+    Root["make_config(1)<br/>Full cfg"] --> OF["OmegaFold(cfg)"]
+    
+    OF -->|"cfg.plm"| PLM["OmegaPLM(cfg.plm)"]
+    OF -->|"cfg"| EdgeEmb["EdgeEmbedder(cfg)"]
+    OF -->|"cfg"| RecEmb["RecycleEmbedder(cfg)"]
+    OF -->|"cfg"| Cycle["OmegaFoldCycle(cfg)"]
+    
+    Cycle -->|"cfg"| GF["GeoFormer(cfg)"]
+    Cycle -->|"cfg.struct"| SM["StructureModule(cfg.struct)"]
+    Cycle -->|"cfg.struct"| CH["ConfidenceHead(cfg.struct)"]
+    
+    GF -->|"cfg"| GFB["GeoFormerBlock(cfg) ×50"]
+    
+    SM -->|"cfg"| IPA["IPA(cfg)"]
+    SM -->|"cfg"| SC["StructureCycle(cfg) ×8"]
+    SM -->|"cfg"| TA["TorsionAngleHead(cfg)"]
+    
+    PLM -->|"cfg"| GAU["GatedAttentionUnit(cfg) ×66"]
+```
+
+注意 `cfg.struct` 是如何在 `StructureModule` 和 `ConfidenceHead` 之间共享的，而 `cfg`（完整命名空间）被传递给 `GeoFormer`、`EdgeEmbedder` 和 `RecycleEmbedder`——这些模块直接访问 `node_dim`、`edge_dim` 和 `struct_embedder` 等顶层键。
+
+来源：[model.py](omegafold/model.py#L52-L133), [config.py](omegafold/config.py#L43-L111)
+
+## 按模块划分的参数汇总
+
+为便于快速参考，下表将每个静态配置参数映射至消费它的模块。
+
+| 参数 | 消费模块 |
+|---|---|
+| `alphabet_size` | `EdgeEmbedder`, (顶层) |
+| `node_dim` | `OmegaFold`, `GeoFormerBlock`, `RecycleEmbedder`, `EdgeEmbedder` |
+| `edge_dim` | `OmegaFold`, `GeoFormerBlock`, `RecycleEmbedder`, `EdgeEmbedder` |
+| `relpos_len` | `EdgeEmbedder` |
+| `c` | `StructEmbedder`, `PairStructEmbedder` |
+| `geo_num_blocks` | `GeoFormer` |
+| `gating` | `GeoFormerBlock` (注意力门控) |
+| `attn_c` | `GeoFormerBlock` (注意力每头维度) |
+| `attn_n_head` | `GeoFormerBlock` |
+| `transition_multiplier` | `GeoFormerBlock` |
+| `activation` | `GeoFormerBlock` |
+| `opm_dim` | `GeoFormerBlock` (外积模块) |
+| `geom_count` | `GeoFormerBlock` |
+| `geom_c` | `GeoFormerBlock` |
+| `geom_head` | `GeoFormerBlock` |
+| `struct_embedder` | `RecycleEmbedder` |
+| `plm.*` | `OmegaPLM`, `GatedAttentionUnit` |
+| `prev_pos.*` | `RecycleEmbedder` (距离图) |
+| `rough_dist_bin.*` | `StructEmbedder` |
+| `dist_bin.*` | `StructEmbedder` |
+| `pos_bin.*` | `StructEmbedder` |
+| `struct.*` | `StructureModule`, `IPA`, `StructureCycle`, `TorsionAngleHead`, `ConfidenceHead` |
+
+来源：[config.py](omegafold/config.py#L46-L111), [model.py](omegafold/model.py#L118-L133), [geoformer.py](omegafold/geoformer.py#L43-L87), [omegaplm.py](omegafold/omegaplm.py#L56-L76), [decode.py](omegafold/decode.py#L44-L90), [embedders.py](omegafold/embedders.py#L225-L364)
+
+---
+
+**下一步**：关于调整 `subbatch_size` 及设备内存的策略，请参阅[内存优化策略](14-memory-optimization-strategies)。关于 `num_recycle` 如何驱动迭代精炼，请参阅[循环与迭代精炼](11-recycling-and-iterative-refinement)。
+
+---
+
+- [深入解析/内存优化策略](https://zread.ai/HeliXonProtein/OmegaFold/14-memory-optimization-strategies)
+
+---
+slug:14-memory-optimization-strategies
+blog_type:normal
+---
+
+
+OmegaFold 旨在单 GPU 环境下进行推理，此类环境中 GPU 内存（VRAM）是最稀缺的资源。代码库采用了分层防御策略——架构层的**子批次处理**、内核层的**原地算术**以及硬件层的**精度控制**——从而能够在不发生 OOM（内存不足）错误的情况下，折叠包含多达数千个残基的蛋白质。本文将剖析每种策略，追溯其在代码库中的传播路径，并量化涉及的权衡取舍。
+
+## 内存压力全景
+
+蛋白质结构预测的计算复杂度与序列长度呈二次方关系：仅边表示就占据 O(N²) 的内存，而注意力逻辑值又以额外的 O(N²·H) 因子加剧了这一消耗，其中 H 为头数。对于具有默认配置（`edge_dim=128`，`attn_n_head=8`）的 1000 残基链，在 fp32 精度下仅边张量就消耗约 488 MB 内存，每个头单次注意力逻辑值矩阵额外增加约 30 MB。50 块 GeoFormer 通过在顺序块评估期间保持节点和边张量同时活跃，进一步放大了这种压力。以下策略构成了针对此压力特征的协同应对方案。
+
+```mermaid
+graph TB
+    subgraph "内存压力来源"
+        A["边表示<br/>O(N² · d_edge)"]
+        B["注意力逻辑值<br/>O(N² · n_head)"]
+        C["GeoFormer 块 ×50<br/>顺序累积"]
+        D["IPA 空间项<br/>O(N² · n_head · 3)"]
+    end
+    subgraph "优化策略"
+        E["子批次处理<br/>降低每块峰值"]
+        F["原地操作<br/>消除临时变量"]
+        G["TF32 精度<br/>减半矩阵乘法内存"]
+        H["预分配缓冲区<br/>避免拼接开销"]
+        I["非持久化缓冲区<br/>从 state_dict 中排除"]
+    end
+    A --> E
+    B --> E
+    B --> F
+    C --> E
+    D --> E
+    D --> F
+    A --> H
+    A --> I
+    B --> G
+```
+
+来源：[config.py](/omegafold/config.py#L46-L109)，[modules.py](/omegafold/modules.py#L69-L164)，[geoformer.py](/omegafold/geoformer.py#L89-L137)
+
+## 子批次处理：核心杠杆
+
+**子批次处理**是 OmegaFold 的核心内存缩减机制。该机制并非一次性计算完整查询长度 N 的注意力，而是将查询维度拆分为大小为 `subbatch_size` 的块，并独立处理每个块。这会将峰值注意力内存从 O(N²) 降低至 O(subbatch_size × N)，当 `subbatch_size ≪ N` 时，这将带来显著的内存缩减。
+
+### 子批次循环机制
+
+核心实现位于 `attention()` 函数中。它使用 `torch.empty` 预分配完整的输出张量，然后对由 `torch.Tensor.split()` 生成的查询块进行迭代：
+
+```python
+# 预分配输出——避免 列表-追加-拼接 模式
+output = torch.empty(*batch_shape, q_length, v_dim, **factory_kwargs)
+
+for i, q_i in enumerate(query.split(subbatch_size, dim=-2)):
+    start, end = i * subbatch_size, (i + 1) * subbatch_size
+    # 切片对应的偏置行
+    if bias.shape[-2] != q_length:
+        b_i = bias
+    else:
+        b_i = bias[..., start:end, :]
+    # 仅计算此块的注意力
+    res, attn = _attention(q_i, key, scale, value, b_i, ...)
+    output[..., start:end, :] = res  # 写入预分配缓冲区
+```
+
+其核心洞见在于**键和值张量永不拆分**——仅查询被分块。这意味着每个子批次仍会关注完整的键值上下文，从而在数学上保持与非子批次计算的等价性。偏置张量沿查询维度进行切片以与之匹配。
+
+来源：[modules.py](/omegafold/modules.py#L104-L164)
+
+### 子批次在架构中的传播
+
+子批次处理并非仅在单点应用；它通过一个承载 `subbatch_size` 的 `fwd_cfg` 命名空间对象，从 CLI 一路传播至每个注意力和过渡调用中：
+
+| 组件 | 子批次目标 | 机制 |
+|---|---|---|
+| `Attention._get_attn_out` | QKV 注意力的查询维度 | `fwd_cfg.subbatch_size` 传递给 `modules.attention()` |
+| `Transition.forward` | 前馈网络的残基维度 | `x.split(subbatch_size, dim=0)` 循环 |
+| `GeometricAttention._get_attended` | 通过 `_get_sharded_stacked` 处理的边行 | 边表示的嵌套分片 |
+| `GeometricAttention._get_gated` | 行与列双维度 | **双重嵌套**分片循环 |
+| `GatedAttentionUnit.forward` | OmegaPLM 中的 GAU 注意力 | `subbatch_size=fwd_cfg.subbatch_size` |
+
+`Transition` 类同样将子批次处理应用于其前馈网络：沿残基维度拆分输入，并在将其传入共享线性层之前独立归一化每个块。
+
+来源：[modules.py](/omegafold/modules.py#L204-L216)，[modules.py](/omegafold/modules.py#L466-L494)，[modules.py](/omegafold/modules.py#L607-L669)，[omegaplm.py](/omegafold/omegaplm.py#L96-L118)
+
+### GeometricAttention 中的双重嵌套分片
+
+`GeometricAttention` 模块引入了一种尤为精妙的模式。由于边表示的形状为 `[N, N, d_edge]`——在两个维度上均呈二次方增长——简单的查询侧子批次处理已不敷使用。取而代之，`_get_sharded_stacked` 生成将行切片及其转置进行堆叠的块：
+
+```python
+def _get_sharded_stacked(edge_repr, subbatch_size):
+    while start < edge_repr.shape[-2]:
+        yield start, end, torch.stack(
+            [edge_repr[start:end],
+             edge_repr.transpose(-2, -3)[start:end]], dim=-1
+        )
+```
+
+随后，`_get_gated` 方法采用**双重嵌套循环**：外层循环对行分片，内层循环对列分片。每对 (row_chunk, col_chunk) 计算门控输出的一个分块，直接写入预分配的 `gated` 张量的 `[s_row:e_row, s_col:e_col]` 位置。这会将门控计算的峰值内存从 O(N²·d) 降低至 O(subbatch_size²·d)——该计算是整个模型中内存消耗最大的路径。
+
+来源：[modules.py](/omegafold/modules.py#L551-L567)，[modules.py](/omegafold/modules.py#L638-L669)
+
+### CLI 控制与默认值
+
+`subbatch_size` 参数作为 CLI 参数暴露，默认值为 `None`，解析为完整的序列长度（即不进行子批次处理）。参数帮助文本明确陈述了此权衡：*"越小越慢，GRAM 需求越低"*：
+
+```
+--subbatch_size SUBBATCH_SIZE
+    子批次大小，越小越慢，
+    GRAM 需求越低。默认为整个
+    序列长度。
+```
+
+当 `subbatch_size` 为 `None` 时，每个调用点都会回退至 `q_length`（完整的查询维度），从而有效禁用分块并以最大内存全速运行。
+
+来源：[pipeline.py](/omegafold/pipeline.py#L347-L357)，[pipeline.py](/omegafold/pipeline.py#L422-L425)
+
+## 原地操作
+
+子批次处理缩减了峰值分配大小，而**原地操作**则通过复用现有张量存储来减少总分配次数。OmegaFold 在两种粒度上应用原地语义：逐元素算术和激活函数。
+
+### 原地 Softmax
+
+`modules.py` 中的 `softmax()` 函数在 `in_place=True` 时实现了一条完全原地的路径：
+
+```python
+if in_place:
+    max_val = torch.max(x, dim=dim, keepdim=True)[0]
+    torch.sub(x, max_val, out=x)       # x -= max_val
+    torch.exp(x, out=x)                # x = exp(x)
+    summed = torch.sum(x, dim=dim, keepdim=True)
+    x /= summed                        # x /= sum
+    return x
+```
+
+每一步都会回写至原始张量 `x`，而非分配新张量。此逻辑在标准注意力路径中 `return_edge=False`（即计算后不再需要注意力权重）时被调用，这是推理期间的常见情况。当 `return_edge=True` 时，则改用非原地的 `torch.softmax()`，因为必须保留原始逻辑值以用于边缩减。
+
+来源：[modules.py](/omegafold/modules.py#L39-L66)，[modules.py](/omegafold/modules.py#L93-L101)
+
+### 原地层归一化
+
+`torch_utils.py` 中的 `normalize()` 工具提供了一条原地路径，无需分配单独的输出张量即可计算层归一化：
+
+```python
+if in_place:
+    dim = list(range(len(inputs.shape))[-len(normalized_shape):])
+    inputs -= inputs.mean(dim=dim, keepdim=True)
+    inputs *= torch.rsqrt(inputs.var(dim=dim, keepdim=True) + 1e-5)
+    return inputs
+```
+
+此方法在 `OmegaFold.deep_sequence_embed()` 中以 `in_place=True` 被调用，用于在投影前归一化 PLM 节点和边表示——此时原始未归一化的值已不再需要。
+
+来源：[utils/torch_utils.py](/omegafold/utils/torch_utils.py#L53-L83)，[model.py](/omegafold/model.py#L225-L231)
+
+### Transition 中的原地激活
+
+`Transition` 模块尝试以 `inplace=True` 创建其激活函数：
+
+```python
+try:
+    act = getattr(nn, activation)(inplace=True)
+except TypeError:
+    act = getattr(nn, activation)()
+```
+
+`try/except` 处理了不支持 `inplace` 参数的激活类。对于 `ReLU`（默认值），此操作成功，启用了融合的原地 ReLU，从而避免为激活分配单独的输出张量。
+
+来源：[modules.py](/omegafold/modules.py#L198-L202)
+
+### 原地 IPA Softmax
+
+结构解码器中的 `InvariantPointAttention` 模块在其注意力权重计算中显式请求原地 softmax：
+
+```python
+attn_w = modules.softmax(logits, dim=-2, in_place=True)
+```
+
+此操作是安全的，因为 IPA 不返回边级别的注意力信息——逻辑值纯粹是中间结果。
+
+来源：[decode.py](/omegafold/decode.py#L135-L135)
+
+## 预分配输出缓冲区
+
+代码库中的一种常见模式是使用 `torch.empty()` **预分配输出张量**，并通过切片将结果写入其中，而非在 Python 列表中累积块后再调用 `torch.cat()`。这避免了两个内存陷阱：(1) 拼接前同时存储多个块张量的开销；(2) `cat()` 期间发生的双倍分配（源数据与目标数据同时驻留内存）。
+
+此模式出现在三种不同上下文中：
+
+| 位置 | 分配 | 写入模式 |
+|---|---|---|
+| `attention()` | `torch.empty(*batch_shape, q_length, v_dim)` | `output[..., start:end, :] = res` |
+| `GeometricAttention._get_attended` | `torch.empty(*shape, n_axis)` | `attended[s:e] = result` |
+| `GeometricAttention._get_gated` | `torch.empty(*shape[:2], n_axis, d_edge)` | `gated[s_row:e_row, s_col:e_col] = tile` |
+
+来源：[modules.py](/omegafold/modules.py#L137-L163)，[modules.py](/omegafold/modules.py#L613-L636)，[modules.py](/omegafold/modules.py#L639-L669)
+
+## 非持久化缓冲区
+
+`Val2ContBins` 和 `Val2Bins` 模块对其预计算的查找表（偏移量和断点）使用带有 `persistent=False` 的 `register_buffer`。这将其从 `state_dict()` 中排除，减小了模型检查点的大小，更重要的是，确保了这些张量在权重序列化期间不会被重复创建：
+
+```python
+self.register_buffer(
+    "x_offset", torch.linspace(...), persistent=False
+)
+```
+
+这些缓冲区在实例化时从配置常量重新推导，因此将它们存储在检查点中是冗余的。
+
+来源：[modules.py](/omegafold/modules.py#L289-L295)，[modules.py](/omegafold/modules.py#L319-L323)
+
+## 精度控制：TF32 与权重加载
+
+### TF32 矩阵乘法精度
+
+流水线暴露了 `--allow_tf32` 标志（默认为 `True`），在 Ampere+ GPU 上为矩阵乘法启用 TensorFloat-32 精度。TF32 使用 10 位尾数和 7 位指数，与 fp32 相比将矩阵乘法内存带宽减少约 2 倍，同时保持对推理而言可接受的数值行为：
+
+```python
+def _set_precision(allow_tf32: bool) -> None:
+    if int(torch.__version__.split(".")[1]) < 12:
+        cuda.matmul.allow_tf32 = allow_tf32
+        cudnn.allow_tf32 = allow_tf32
+    else:
+        precision = "high" if allow_tf32 else "highest"
+        torch.set_float32_matmul_precision(precision)
+```
+
+版本条件逻辑适应了 PyTorch 在 v1.12 中的 API 变更，当时各后端专属标志被 `torch.set_float32_matmul_precision()` 所取代。
+
+来源：[pipeline.py](/omegafold/pipeline.py#L59-L76)，[pipeline.py](/omegafold/pipeline.py#L388-L391)
+
+### CPU 优先权重加载
+
+模型权重以 `map_location='cpu'` 加载，以避免在反序列化期间 GPU 内存出现潜在灾难性激增：
+
+```python
+return torch.load(weights_file, map_location='cpu')
+```
+
+若非如此，PyTorch 会直接在当前 CUDA 设备上反序列化，导致内存使用量暂时翻倍（读取期间 CPU 上的权重 + 传输期间 GPU 上的权重）。优先加载至 CPU 允许随后的 `model.load_state_dict()` 逐个传输参数，从而保持较低的峰值 GPU 利用率。
+
+来源：[pipeline.py](/omegafold/pipeline.py#L268-L268)
+
+## 策略交互与权衡总结
+
+这些策略并非独立的开关——它们以复合收益的方式交互作用。下表概述了关键权衡：
+
+| 策略 | 节省内存 | 速度代价 | 数学等价性 | 作用域 |
+|---|---|---|---|---|
+| 子批次处理 (注意力) | O(N²) → O(S·N) | 循环开销 + 内核启动 | **精确**（分块而非近似） | 所有注意力层 |
+| 子批次处理 (Transition) | 每块 O(N·d·n) | 较小的循环开销 | **精确**（残基独立） | 前馈块 |
+| 双重嵌套分片 | O(N²·d) → O(S²·d) | 多 O(N²/S²) 次内核启动 | **精确**（分块回写） | 仅 GeometricAttention |
+| 原地 softmax | 约 50% 的逻辑值张量 | 可忽略 | **精确** | 当 `return_edge=False` 时 |
+| 原地归一化 | 约 50% 的输入张量 | 可忽略 | ~数值（存在微小差异） | PLM 输出归一化 |
+| 原地 ReLU | 约 50% 的激活张量 | 可忽略 | **精确** | Transition 块 |
+| TF32 矩阵乘法 | 约 2 倍带宽缩减 | 无（更快） | ~1e-3 相对误差 | Ampere+ 上的所有矩阵乘法 |
+| 预分配缓冲区 | 消除拼接开销 | 无 | **精确** | 注意力，GeometricAttention |
+| CPU 权重加载 | 避免初始化时 GPU 激增 | 略慢的加载速度 | **精确** | 模型初始化 |
+| 非持久化缓冲区 | 更小的检查点体积 | 无 | **精确** | Val2Bins，Val2ContBins |
+
+<CgxTip>在选择 `subbatch_size` 时，最佳甜点通常介于 N/4 到 N/8 之间：此值足以将峰值 VRAM 减半或减至四分之一，同时又足够大以保持高 GPU 占用率。若设置低于 ~32，可能会因内核启动开销主导实际计算时间而导致显著减速。</CgxTip>
+
+<CgxTip>原地归一化路径存在微小的数值差异（代码中通过注释 *"这似乎会在结果中产生微小差异"* 承认了这一点）。对于推理而言这是可接受的，但若你需要逐位精确的可复现性，请确保对所有归一化调用使用 `in_place=False`。</CgxTip>
+
+来源：[modules.py](/omegafold/modules.py#L39-L164)，[modules.py](/omegafold/modules.py#L551-L669)，[utils/torch_utils.py](/omegafold/utils/torch_utils.py#L53-L83)，[pipeline.py](/omegafold/pipeline.py#L59-L76)，[pipeline.py](/omegafold/pipeline.py#L268-L268)，[pipeline.py](/omegafold/pipeline.py#L347-L357)
+
+## 综合运用：推理内存流
+
+下图追溯了在长度为 N、子批次大小为 S 的蛋白质单次前向传播期间，这些策略如何协同工作：
+
+```mermaid
+sequenceDiagram
+    participant CLI as CLI (--subbatch_size=S)
+    participant PLM as OmegaPLM
+    participant GF as "GeoFormer (×50 blocks)"
+    participant SM as StructureModule
+
+    CLI->>PLM: fwd_cfg.subbatch_size = S
+    Note over PLM: GAU 注意力: 将查询拆分为 ⌈N/S⌉ 块<br/>原地 softmax "(此处 return_edge=True)"<br/>预分配输出缓冲区
+    CLI->>GF: fwd_cfg.subbatch_size = S
+    Note over GF: 每块:<br/>1. AttentionWEdgeBias: ⌈N/S⌉ 个查询块<br/>2. ColumnAttention: ⌈N/S⌉ 个查询块<br/>3. Transition: ⌈N/S⌉ 个残基块<br/>4. Node2Edge: 完整 "O(N·d)" 输出<br/>5. GeometricAttention: 双重嵌套<br/>   ⌈N/S⌉ 行 × ⌈N/S⌉ 列分块<br/>6. EdgeTransition: ⌈N/S⌉ 个残基块
+    CLI->>SM: 无子批次处理 "(IPA 为单循环)"
+    Note over SM: IPA 中的原地 softmax<br/>TF32 加速的矩阵乘法
+```
+
+StructureModule 未接收子批次处理，因为 IPA 在单一残基序列上操作（无批次维度可供拆分），且 8 个结构循环是顺序执行而非并行——内存会在迭代间自然释放。
+
+来源：[model.py](/omegafold/model.py#L135-L203)，[geoformer.py](/omegafold/geoformer.py#L89-L137)，[decode.py](/omegafold/decode.py#L255-L313)
+
+## 按序列长度推荐配置
+
+基于边表示的 O(N²) 内存特征和子批次注意力的 O(S·N) 特征，下表提供了实用指南：
+
+| 序列长度 | 推荐 `--subbatch_size` | 近似 VRAM (fp32) | 近似 VRAM (TF32) | 备注 |
+|---|---|---|---|---|
+| < 300 | 默认 | ~4 GB | ~3 GB | 无需子批次处理 |
+| 300–600 | 128 | ~6 GB | ~4.5 GB | 轻度子批次处理 |
+| 600–1000 | 64 | ~8 GB | ~6 GB | 中度子批次处理 |
+| 1000–2000 | 32 | ~10 GB | ~7.5 GB | 激进子批次处理；预计 2–3× 减速 |
+| > 2000 | 16 | ~12 GB | ~9 GB | 极限子批次处理；显著减速 |
+
+以上为 V100/A100 级 GPU 的近似数值。实际消耗取决于具体的模型变体（模型 1 与模型 2）及回收迭代次数（`--num_cycle`）。
+
+有关进一步的配置细节，请参阅[配置参考](13-configuration-reference)。子批次机制本身的算法视角详见[注意力与子批次](8-attention-and-subbatching)，而 GeometricAttention 的双重嵌套分片则在[几何注意力](10-geometric-attention)中解释。
+
+---
+
+## 核心流水线
+
+- [深入解析/核心流水线/OmegaPLM 语言模型](https://zread.ai/HeliXonProtein/OmegaFold/5-omegaplm-language-model)
+
+---
+slug:5-omegaplm-language-model
+blog_type:normal
+---
+
+
+**OmegaPLM** 是 OmegaFold 流程核心的蛋白质语言模型主干网络——一个预训练编码器，将原始氨基酸 token 序列转换为丰富的逐残基（节点）和成对（边）表示。与传统的多头自注意力 Transformer 不同，OmegaPLM 基于 **门控注意力单元 (Gated Attention Units, GAU)** 构建，这是一种单头注意力变体，它将门控、投影和相对位置编码融合到一个精简的模块中。最终形成一个 66 层的编码器，生成供下游 [GeoFormer Transformer](6-geoformer-transformer) 使用的序列和成对表示。
+
+## 架构概述
+
+OmegaPLM 遵循三层类继承结构，每一层封装了不同级别的抽象：
+
+```mermaid
+graph TD
+    subgraph "OmegaPLM (顶级编码器)"
+        A["nn.Embedding<br/>alphabet_size → node_dim"]
+        B["OmegaPLMLayer × 66"]
+        C["nn.LayerNorm (output_norm)"]
+    end
+
+    subgraph "OmegaPLMLayer (Pre-LayerNorm 模块)"
+        D["utils.normalize (pre-LN)"]
+        E["GatedAttentionUnit (GAU)"]
+        F["残差相加"]
+    end
+
+    subgraph "GatedAttentionUnit (核心机制)"
+        G["gva_proj: Linear+SiLU<br/>→ gates, values, base"]
+        H["MultiHeadedScaling (2 头)<br/>+ RoPE 回调"]
+        I["relpos: RelPosEmbedder"]
+        J["modules.attention<br/>(subbatched)"]
+        K["Gate 乘法 + output_proj"]
+    end
+
+    A --> B --> C
+    D --> E --> F
+    G --> H --> J
+    I --> J
+    J --> K
+```
+
+**数据流**：输入 token → 嵌入查找 → 66 个带有残差连接的堆叠 GAU 层 → 输出 LayerNorm → (node, edges) 元组。
+
+来源：[omegaplm.py](/omegafold/omegaplm.py#L162-L219), [modules.py](/omegafold/modules.py#L104-L164)
+
+## GatedAttentionUnit — 核心机制
+
+`GatedAttentionUnit` 是每个 OmegaPLM 层的计算引擎。它摒弃了标准的 Q/K/V 投影模式，通过单一融合线性投影后接 SiLU 激活函数，生成 **门控**、**值** 和 **基础** 向量：
+
+```
+[gates, values, base] = SiLU(Linear(node))  →  拆分为 (proj_dim, proj_dim, attn_dim)
+```
+
+随后，`base` 张量通过具有 2 个头的 `MultiHeadedScaling` 被拆分为 **查询** 和 **键**。关键的是，**旋转位置嵌入** 作为回调 (`on_out_ready`) 直接注入到 `MultiHeadedScaling` 内部，因此查询和键在进入注意力内核之前就已经进行了旋转编码。这种设计确保了位置信息融入注意力 logits 中，而无需为 Q 和 K 添加独立的位置偏置项。
+
+注意力计算本身接收：
+
+| 输入 | 来源 | 用途 |
+|-------|--------|---------|
+| `query`, `key` | MultiHeadedScaling + RoPE | 内容与位置混合的 Q 和 K |
+| `value` | 直接来自 gva_proj 拆分 | 待聚合的信息 |
+| `scale` | `_get_qk_scaling` (依赖序列长度) | 按序列长度进行 Logit 缩放 |
+| `bias` | `mask2bias` + `RelPosEmbedder` | 掩码 + 相对位置偏置 |
+
+输出按元素进行门控（`node = attention_output * gates`），然后通过 `output_proj` 投影回节点维度。这种门控机制允许模型按特征通道动态抑制或放大注意力输出——这是对标准线性输出投影的一种更具表达力的替代方案。
+
+来源：[omegaplm.py](/omegafold/omegaplm.py#L56-L118), [embedders.py](/omegafold/embedders.py#L141-L200)
+
+## Pre-LayerNorm 和残差结构
+
+每个 `OmegaPLMLayer` 实现了 **pre-LayerNorm** 配置——即在 GAU 计算之前应用归一化，而非之后：
+
+```
+shortcut = node
+node = normalize(node)          # pre-LayerNorm (无权重)
+node, edge = GAU(node, ...)     # 核心计算
+node = node + shortcut          # 残差连接
+```
+
+所使用的归一化是 **无权重 LayerNorm**（无可学习的 γ/β 参数），通过调用 `F.layer_norm` 并将 weight 和 bias 设为 `None` 的 `utils.normalize` 实现。此设计选择减少了参数量，并与在深度 Transformer 编码器中观察到的 pre-norm 训练稳定性优势相一致。
+
+来源：[omegaplm.py](/omegafold/omegaplm.py#L121-L159), [torch_utils.py](/omegafold/utils/torch_utils.py#L53-L83)
+
+## 依赖序列长度的 QK 缩放
+
+OmegaPLM 采用了源自 Su 等人理论分析的 **序列长度感知的 logit 缩放** 策略（参考自 `kexue.fm/archives/8823`）。缩放因子计算如下：
+
+```
+scale = log(clamp(N, min=4e-5)) / (log(512) × √attn_dim)
+```
+
+其中 `N` 是有效（未掩码）残基的数量。该公式用考虑了随序列长度增加而导致的注意力 logits 熵增的缩放，取代了标准的 `1/√d` 缩放。其实际效果是 **较长的序列获得更平缓的注意力分布**，从而防止所有权重集中在少数位置上的注意力崩塌现象。
+
+缩放因子被广播为 `[..., 1, 1]` 形状，因此它在一个序列内的所有查询-键对中均匀应用。
+
+来源：[omegaplm.py](/omegafold/omegaplm.py#L39-L50)
+
+## 用于微调的 Token Dropout 缩放
+
+当 OmegaPLM 处理掩码输入时（如推理期间的伪 MSA 方案），会对嵌入的 token 应用一个 **补偿性缩放** 因子，以抵消由掩码引起的分布偏移。遵循 Rives 等人 (2021) 的方法，缩放公式为：
+
+```
+scale = (1 - masked_ratio_train) / (1 - masked_ratio_observed)
+```
+
+其中 `masked_ratio_train` 是训练时的掩码率（默认 0.12），`masked_ratio_observed` 是推理时实际观察到的掩码率。索引等于 21 的 token 被计为掩码。当所有 token 均被掩码时，保护机制将观察到的比率钳制为 0.99，以防止除零错误。这确保了即使掩码模式与训练时不同，嵌入仍能保持在原有分布上。
+
+来源：[omegaplm.py](/omegafold/omegaplm.py#L222-L243)
+
+## 输出：节点和边表示
+
+OmegaPLM 产生两个输出，作为所有下游处理的基础：
+
+- **节点表示** — 形状为 `[seq_len, 1280]`。一种逐残基嵌入，捕获来自完整序列的上下文信息。在最终的 `output_norm` LayerNorm 之后生成。
+- **边表示** — 形状为 `[66, seq_len, seq_len]`。一堆成对的注意力图，每层一个。每层的边是批次维度上的 **求和规约的注意力 logits**（通过 `edge_reduction='sum'`）。在所有层之后，边在批次维度上求平均：`edges /= (mask.any(-1).sum() + 1e-5)`。
+
+边表示尤其值得注意——OmegaPLM 不是从外积构造成对特征，而是从每一层 **直接提取注意力矩阵**。这些矩阵捕获了模型在每个深度最强烈关注哪些残基对，提供了丰富的类进化耦合信号。
+
+来源：[omegaplm.py](/omegafold/omegaplm.py#L184-L219)
+
+## 配置和默认参数
+
+OmegaPLM 在 `cfg.plm` 命名空间下进行配置。下表列出了所有参数及其默认值：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `alphabet_size` | 23 | Token 词表大小 (20 种氨基酸 + 间隔 + 未知 + 掩码) |
+| `node` | 1280 | 节点（逐残基）嵌入维度 |
+| `padding_idx` | 21 | 嵌入填充索引 (间隔 token) |
+| `edge` | 66 | GAU 层数 (也是边输出堆叠大小) |
+| `proj_dim` | 2560 | 门控和值投影维度 (2 × node) |
+| `attn_dim` | 256 | 注意力 Q/K 维度 |
+| `num_head` | 1 | 在当前 GAU 设计中未使用 (遗留参数) |
+| `num_relpos` | 129 | 相对位置嵌入词表大小 |
+| `masked_ratio` | 0.12 | 训练时的 token 掩码率 |
+
+<CgxTip>`proj_dim` 为 2560 (2×node) 意味着 GVA 投影在 SiLU 拆分之前总共输出 `2560 + 2560 + 256 = 5376` 个通道。这个单一的大型投影替代了标准注意力的三个独立 Q/K/V 线性层，减少了内核启动开销，同时增加了每层的参数量。</CgxTip>
+
+来源：[config.py](/omegafold/config.py#L48-L58)
+
+## 集成至 OmegaFold 流程
+
+在 `OmegaFold.deep_sequence_embed` 中，OmegaPLM 的输出通过两个投影步骤桥接到下游的 [GeoFormer Transformer](6-geoformer-transformer)：
+
+1. **节点投影**：`plm_node_embedder` — 一个线性层，将 `1280 → 256` (node_dim) 映射，在无权重归一化之后应用。
+2. **边投影**：`plm_edge_embedder` — 一个线性层，将边张量从 `[layers, seq, seq]` 重排为 `[seq, seq, layers]` 并归一化后，映射 `66 → 128` (edge_dim)。
+
+投影之后，`EdgeEmbedder` 进一步用氨基酸对嵌入和相对位置编码增强边表示。这种从 PLM 的高维空间 (1280/2560) 到 GeoFormer 工作空间 (256/128) 的降维是一个经过深思熟虑的设计——PLM 在编码期间提取最大的表征能力，而结构模块则在更精简的、聚焦于几何的空间中运行。
+
+<CgxTip>边重排 `.permute(1, 2, 0)` 将层堆叠的注意力图重新排列为逐对特征向量，允许线性投影学习 *所有层注意力模式的压缩摘要*，而不是独立处理每一层。</CgxTip>
+
+来源：[model.py](/omegafold/model.py#L205-L234), [model.py](/omegafold/model.py#L126-L133)
+
+## 对比：GAU 与标准多头注意力
+
+| 方面 | 标准多头注意力 (MHA) | OmegaPLM GAU |
+|--------|-------------|--------------|
+| 投影 | 3 个独立的线性层 (Q, K, V) | 1 个融合线性层 + 拆分 |
+| 门控 | 可选 (通常缺失) | 必需 (SiLU 门控输出) |
+| 位置编码 | 加至 Q/K 或作为偏置 | Q/K 上应用 RoPE + RelPos 偏置 |
+| 输出 | 线性投影 | 门控乘法 + 线性投影 |
+| 头数 | 多个 (通常为 4–16) | 2 (仅用于 Q/K 拆分) |
+| QK 缩放 | `1/√d` (常数) | `log(N) / (log(512)·√d)` (长度自适应) |
+| 边输出 | 通常不产生 | 每层提取注意力 logits |
+| 归一化 | Post-LN 或 Pre-LN | Pre-LN (无权重) |
+
+来源：[omegaplm.py](/omegafold/omegaplm.py#L56-L118), [modules.py](/omegafold/modules.py#L69-L101)
+
+---
+
+**下一步**：了解 OmegaPLM 的节点和边输出如何由 [GeoFormer Transformer](6-geoformer-transformer) 处理，以细化用于结构解码的成对表示。有关驱动 GAU 注意力的神经构建块，请参见 [注意力与子批处理](8-attention-and-subbatching) 和 [嵌入与 RoPE](9-embeddings-and-rope)。
+
+---
+
+- [深入解析/核心流水线/GeoFormer Transformer](https://zread.ai/HeliXonProtein/OmegaFold/6-geoformer-transformer)
+
+---
+slug:6-geoformer-transformer
+blog_type:normal
+---
+
+
+**GeoFormer** 是 OmegaFold 的核心几何 Transformer 主干网络——它是连接蛋白质语言模型序列理解与结构模块 3D 坐标生成的桥梁。它运行在双轨表示（节点表示残基，边表示残基对）之上，并通过精心编排的注意力、几何推理和前馈变换序列，迭代优化这两种表示。在默认配置下包含 **50 个重复块**，GeoFormer 构成了 OmegaFold 计算深度的主体，也是从序列嵌入中学习成对空间关系的主要机制。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L17-L19), [model.py](/omegafold/model.py#L52-L58)
+
+## 在 OmegaFold 中的架构角色
+
+GeoFormer 位于每个 `OmegaFoldCycle` 的核心。语言模型 [OmegaPLM](5-omegaplm-language-model) 生成初始的节点和边表示，这些表示在进入 GeoFormer 之前由嵌入器进行投影和丰富。随后，GeoFormer 在其内部块中迭代优化这些表示，产生三个输出：**循环节点**和**循环边**表示（在后续的循环迭代中反馈回去），以及**最终节点**表示（投影至结构模块的维度，用于通过 [Structure Module and IPA](7-structure-module-and-ipa) 进行 3D 坐标预测）。
+
+```mermaid
+flowchart TB
+    subgraph OmegaFoldCycle
+        direction TB
+        PLM["OmegaPLM<br/>(node, edge embeddings)"]
+        EMB["Embedders<br/>(project + enrich)"]
+        GF["GeoFormer<br/>(50 blocks)"]
+        SM["Structure Module<br/>(IPA → coordinates)"]
+        CH["Confidence Head<br/>(pLDDT)"]
+        RECYCLE["Recycle Embedder"]
+
+        PLM --> EMB --> GF
+        GF -->|"final_node"| SM
+        GF -->|"node, edge<br/>(for recycling)"| RECYCLE
+        SM --> CH
+    end
+
+    style GF fill:#4a90d9,stroke:#2c5f8a,color:#fff,stroke-width:3px
+```
+
+`OmegaFoldCycle.forward` 中的调用约定展示了三路输出拆分：`prev_node, edge_repr, node_repr = self.geoformer(...)`，其中 `prev_node` 和 `edge_repr` 喂入循环，而 `node_repr`（投影后）喂入结构模块。
+
+来源: [model.py](/omegafold/model.py#L90-L95), [model.py](/omegafold/model.py#L57-L58)
+
+## 双轨表示
+
+GeoFormer 运行在两个互补的表示轨道上，编码不同层级的结构信息：
+
+| 轨道 | 张量形状 | 语义 | 维度（默认） |
+|-------|-------------|-----------|---------------------|
+| **Node** | `[num_res, node_dim]` | 逐残基特征（局部结构、溶剂暴露度、二级结构信号） | 256 |
+| **Edge** | `[num_res, num_res, edge_dim]` | 成对特征（残基对之间的距离、方向、接触信息） | 128 |
+
+**节点轨道**捕捉每个残基“对自身的认知”，而**边轨道**捕捉每对残基“对彼此关系的认知”。这两个轨道之间的交互——节点通知边，边偏置节点的注意力——是 GeoFormer 设计的决定性特征。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L89-L106), [config.py](/omegafold/config.py#L59-L60)
+
+## GeoFormerBlock：核心迭代单元
+
+每个 `GeoFormerBlock` 是一个完整的优化步骤。前向传播遵循严格的**节点优先，边其次**的顺序，其中节点表示通过三个子阶段更新后，边表示再通过三个子阶段更新：
+
+```mermaid
+flowchart LR
+    subgraph "GeoFormerBlock Forward Pass"
+        direction TB
+        subgraph "Node Update"
+            N1["Row Attention<br/>w/ Edge Bias"]
+            N2["Column Attention<br/>(transposed)"]
+            N3["Node Transition<br/>(MLP)"]
+            N1 --> N2 --> N3
+        end
+        subgraph "Edge Update"
+            E1["Outer Product<br/>(Node → Edge)"]
+            E2["Geometric Attention<br/>(×2 layers)"]
+            E3["Edge Transition<br/>(MLP)"]
+            E1 --> E2 --> E3
+        end
+        N3 -.->|"node feeds edge"| E1
+    end
+```
+
+### 阶段 1：带边偏置的行注意力
+
+第一个操作是 `AttentionWEdgeBias`，这是一种多头注意力机制，其中**边表示作为注意力逻辑值的成对偏置**。这是关键的耦合点，成对空间信息直接调制哪些残基彼此关注。边张量通过线性层从 `edge_dim` (128) 投影到 `n_head` (8) 维，然后与掩码偏置一起作为偏置加到注意力逻辑值上。注意力本身使用**门控**（基于并行查询投影的 sigmoid）来控制信息流。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L51-L57), [modules.py](/omegafold/modules.py#L497-L548)
+
+### 阶段 2：列注意力
+
+在行注意力之后，第二次注意力传递在**转置的**节点表示上操作。转置交换了序列维度轴，有效地计算残基矩阵“列”方向的注意力。节点张量和掩码均被转置，计算注意力后，结果转置回来并作为残差相加。这种双向注意力模式确保每个残基从成对表示的两个方向获取信息，增强了模型捕捉对称关系的能力。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L128-L137), [geoformer.py](/omegafold/geoformer.py#L58-L66)
+
+### 阶段 3：节点过渡
+
+一个带有 4× 扩展因子 (256 → 1024 → 256) 和 ReLU 激活的两层前馈网络（过渡）独立处理每个残基的表示。过渡在 MLP 之前应用层归一化，并支持 [subbatching](8-attention-and-subbatching) 以实现长序列的内存高效处理。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L67-L71), [modules.py](/omegafold/modules.py#L193-L216)
+
+### 阶段 4：外积（节点 → 边通信）
+
+`Node2Edge` 模块将信息从节点轨道转移到边轨道。它计算投影节点表示的学习外积：每个节点被投影到 `opm_dim * 2` (64) 维，拆分为左右因子，并通过 einsum 计算它们与形状为 `[proj_dim, proj_dim, out_dim]` 的学习权重张量的外积。通过掩码乘积的归一化（ε = 1e-3 以保证稳定性）确保输出尺度适中。这是将局部逐残基信息组合以更新成对特征的机制。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L72-L74), [modules.py](/omegafold/modules.py#L341-L372)
+
+### 阶段 5：几何注意力
+
+这是架构上最具特色的组件。由 `geom_count`（默认为 2）层 `GeometricAttention` 堆叠作用于边表示。每层 `GeometricAttention` 结合了**两种互补机制**：
+
+1. **注意力路径**：在边矩阵上的标准多头注意力（具有 2 个轴用于行/列对称性），其中偏置项由边表示本身计算得出。输出通过加上其转置来对称化（`attended[..., 0] + attended[..., 1].T`）。
+
+2. **门控路径**：GLU 门控的外积机制。边表示被拆分为行和列激活（通过带有切片权重的独立 GLU 投影），计算它们的外积，进行投影，并由 sigmoid 控制的信号进行门控。该路径提供了行方向与列方向边特征之间的学习乘法交互。
+
+两条路径的和作为几何注意力的输出返回。这种双路径设计允许几何注意力同时捕捉全局上下文（通过注意力）和局部成对结构（通过门控外积）。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L75-L82), [modules.py](/omegafold/modules.py#L569-L706)
+
+### 阶段 6：边过渡
+
+结构与节点过渡相同：一个带有 ReLU 激活和层归一化的两层 MLP (128 → 512 → 128)，独立应用于每个边表示，并支持子批处理。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L83-L87)
+
+## 完整的 GeoFormer：块堆叠与输出投影
+
+顶层 `GeoFormer` 类按顺序堆叠了 `geo_num_blocks`（默认 **50**）个 `GeoFormerBlock` 实例。在所有块完成后，最终的线性投影（`node_final_proj`）将节点表示从 `node_dim` (256) 映射到 `struct.node_dim` (384)，即结构模块期望的维度。三个返回值用于不同目的：
+
+| 输出 | 形状 | 目的地 | 用途 |
+|--------|-------|-------------|---------|
+| `node_repr` | `[num_res, node_dim]` | 循环嵌入器 | 用于下一次循环迭代的节点状态 |
+| `edge_repr` | `[num_res, num_res, edge_dim]` | 循环嵌入器 + 结构模块 | 用于循环和 IPA 的成对状态 |
+| `final_node` | `[num_res, struct.node_dim]` | 结构模块 | 用于 3D 坐标预测的投影节点 |
+
+来源: [geoformer.py](/omegafold/geoformer.py#L140-L180)
+
+## 配置参考
+
+所有 GeoFormer 超参数均定义在顶层配置命名空间中：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `node_dim` | 256 | 节点（逐残基）表示的维度 |
+| `edge_dim` | 128 | 边（成对）表示的维度 |
+| `geo_num_blocks` | 50 | `GeoFormerBlock` 迭代的次数 |
+| `attn_n_head` | 8 | 行/列注意力中的注意力头数 |
+| `attn_c` | 32 | 行/列注意力中每个头的维度 |
+| `gating` | True | 是否在注意力输出上应用 sigmoid 门控 |
+| `transition_multiplier` | 4 | 过渡层中的 MLP 扩展因子 |
+| `activation` | "ReLU" | 过渡层中的激活函数 |
+| `opm_dim` | 32 | 外积 (Node2Edge) 中的投影维度 |
+| `geom_count` | 2 | 每个块中 GeometricAttention 的层数 |
+| `geom_c` | 32 | 几何注意力中每个头的维度 |
+| `geom_head` | 4 | 几何注意力中的头数 |
+| `struct.node_dim` | 384 | `node_final_proj` 的输出维度 |
+
+来源: [config.py](/omegafold/config.py#L46-L109)
+
+## 残差连接与归一化策略
+
+GeoFormerBlock 全程采用一致的**残差连接**模式：每个子模块的输出被*相加*到其输入中（`node_repr += self.attention_w_edge_bias(...)`），而不是替换。这创建了一条深残差高速公路，使梯度能够流经所有 50 个块。关键的是，**无权重层归一化**（`utils.normalize`，即没有学习缩放/偏移的 `F.layer_norm`）应用于每个子模块计算*之前*——在注意力输入处、过渡之前以及外积内部。这种“预归一化”残差设计在不增加每层可学习归一化参数的情况下，稳定了极深架构的训练。
+
+<CgxTip>普遍使用无权重的 `normalize()` 而非 `nn.LayerNorm` 是一个有意的设计选择：它减少了 50 个块中的参数量，同时仍提供归一化带来的数值稳定性益处。如果需要，学习到的缩放可以被吸收到随后的线性投影中。</CgxTip>
+
+来源: [geoformer.py](/omegafold/geoformer.py#L108-L126), [utils/torch_utils.py](/omegafold/utils/torch_utils.py#L53-L83)
+
+## 内存感知计算：子批处理
+
+GeoFormerBlock 中的多个操作支持**子批处理**——沿序列维度将计算拆分为更小的块，以限制峰值内存使用。`Transition.forward` 沿 `dim=0` 拆分输入，独立处理每个子批。`GeometricAttention` 模块使用 `_get_sharded_stacked` 对注意力路径和门控路径进行分片，以内存高效的块生成边张量的堆叠行/列视图。子批大小在推理时通过 `fwd_cfg.subbatch_size` 控制，允许用户在长序列上权衡吞吐量与内存，而无需修改模型架构。
+
+<CgxTip>在 GeometricAttention 中，子批处理尤为重要，因为边张量在序列长度上是 O(n²) 的。`_get_sharded_stacked` 生成器产出形状为 `[subbatch_size, num_res, edge_dim, 2]` 的块（堆叠的行 + 列视图），从而避免了完整 n²×n² 注意力矩阵的具体化。</CgxTip>
+
+来源: [modules.py](/omegafold/modules.py#L551-L566), [modules.py](/omegafold/modules.py#L607-L636), [modules.py](/omegafold/modules.py#L193-L216)
+
+## 数据流总结
+
+穿过单个 `GeoFormerBlock` 的完整数据流，附有张量维度注释（对于具有 *N* 个残基的蛋白质）：
+
+```
+Input:  node [N, 256],  edge [N, N, 128],  mask [N]
+
+── Node Track ──
+1. Row Attention w/ Edge Bias:  node += Attn(normalize(node), bias=proj(normalize(edge)))
+2. Column Attention:            node += Attn(normalize(nodeᵀ), mask=maskᵀ)ᵀ
+3. Node Transition:             node += MLP(normalize(node))            [256→1024→256]
+
+── Edge Track ──
+4. Outer Product:               edge += OuterProd(normalize(node), mask) [256→64→128]
+5. Geometric Attention (×2):    edge += GeomAttn(normalize(edge), mask)
+6. Edge Transition:             edge += MLP(normalize(edge))            [128→512→128]
+
+Output: node [N, 256],  edge [N, N, 128]
+```
+
+在 50 个此类块之后，`GeoFormer` 应用 `node_final_proj`：一个将 `[N, 256] → [N, 384]` 映射到结构模块的线性层，并返回三元组 `(node, edge, final_node)`。
+
+来源: [geoformer.py](/omegafold/geoformer.py#L89-L126), [geoformer.py](/omegafold/geoformer.py#L174-L180)
+
+## 后续去向
+
+GeoFormer 的子模块均值得深入探究。带有边偏置和子批处理的注意力机制在 [Attention and Subbatching](8-attention-and-subbatching) 中涵盖，几何注意力的双路径架构在 [Geometric Attention](10-geometric-attention) 中详述，归一化/嵌入基础在 [Embeddings and RoPE](9-embeddings-and-rope) 中。要了解 GeoFormer 的输出如何喂入 3D 结构预测，请前往 [Structure Module and IPA](7-structure-module-and-ipa)。有关跨多个循环重新运行 GeoFormer 的迭代优化循环，请参见 [Recycling and Iterative Refinement](11-recycling-and-iterative-refinement)。
+
+---
+
+- [深入解析/核心流水线/结构模块与 IPA](https://zread.ai/HeliXonProtein/OmegaFold/7-structure-module-and-ipa)
+
+---
+slug:7-structure-module-and-ipa
+blog_type:normal
+---
+
+
+**结构模块**是 OmegaFold 的最终解码阶段——该组件将抽象的隐式表征转换为具体的 3D 原子坐标。其核心是**不变点注意力**，这是一种具备几何感知能力的注意力机制，直接在 SE(3) 坐标系上运算，确保模型的预测对蛋白质的全局旋转和平移具有等变性。这些组件共同实现了 Jumper et al. (2021) 补充材料算法 20 中描述的迭代主链精修与扭转角解码。
+
+来源：[decode.py](omegafold/decode.py#L1-L399), [aaframe.py](omegafold/utils/protein_utils/aaframe.py#L1-L973)
+
+## 架构概述
+
+结构模块位于每个 OmegaFold 循环周期的末端，消费由 [GeoFormer Transformer](6-geoformer-transformer) 生成的节点与边表征。它的职责有两个：(1) 通过 IPA 驱动的更新，迭代精修一组逐残基的主链坐标系（旋转 + 平移）；(2) 预测逐残基的扭转角，这些扭转角与主链坐标系结合后，可生成完整的 atom14 坐标。
+
+```mermaid
+graph TD
+    subgraph "Structure Module"
+        LN["LayerNorm<br/>(node + edge)"] --> InitProj["Init Projection<br/>Linear(node_dim → node_dim)"]
+        InitProj --> FrameInit["Frame Initialization<br/>AAFrame.default_init<br/>(identity rotation, zero translation)"]
+        FrameInit --> Cycle1["StructureCycle 1"]
+        Cycle1 --> Cycle2["StructureCycle 2"]
+        Cycle2 --> CycleN["StructureCycle N"]
+        CycleN --> TorsionHead["TorsionAngleHead"]
+        TorsionHead --> FrameExpand["expand_w_torsion<br/>(backbone × χ angles)"]
+        FrameExpand --> Atom14["expanded_to_pos<br/>→ atom14 positions"]
+    end
+
+    subgraph "StructureCycle (×N)"
+        IPA["InvariantPointAttention"] --> NL1["LayerNorm"]
+        NL1 --> Trans["Transition MLP<br/>(num_transition layers)"]
+        Trans --> NL2["LayerNorm"]
+        NL2 --> Affine["affine_update<br/>Linear(node_dim → 6)"]
+        Affine --> FrameCompose["Frame Composition<br/>backbone *= update"]
+    end
+
+    NodeRepr["node_repr"] --> LN
+    EdgeRepr["edge_repr"] --> LN
+    IPA --> NodeRepr
+    IPA --> EdgeRepr
+    IPA --> BackboneFrames["backbone_frames"]
+```
+
+来源：[decode.py](omegafold/decode.py#L316-L392), [decode.py](omegafold/decode.py#L255-L313)
+
+## 不变点注意力 (IPA)
+
+IPA 在标准多头注意力的基础上扩展了一个**几何通道**，该通道以坐标系等变的方式推理 3D 空间关系。原始注意力纯粹从标量查询和键计算 logit 项，而 IPA 引入了第三个 logit 来源：将查询点和键点映射到共享全局坐标系后，它们之间的**欧几里得距离的平方**。
+
+### 三分量 Logit 架构
+
+注意力 logits 是三个独立缩放项的总和：
+
+| Logit 项 | 计算方式 | 权重 | 不变性 |
+|---|---|---|---|
+| **标量** | 每个头的 ⟨q_scalar, k_scalar⟩ | √(1 / (3 · num_scalar_qk)) | 置换等变 |
+| **边 (2D 偏置)** | 每个头的 Linear(edge_repr) | √(1/3) | 依赖配对 |
+| **点** | 每个头的 −‖q_point − k_point‖² | √(1 / (3 · ⁹⁄₂ · num_point_qk)) | SE(3) 不变 |
+
+**点项**是关键创新。查询和键向量被投影为 3D 点，然后通过 `AAFrame.transform()` 从其局部残基坐标系转换至**全局坐标系**。由于全局坐标系中点之间的平方距离对该全局坐标系的选择具有不变性（应用于所有坐标系的任何 SE(3) 变换都会相消），因此所得的 logits——以及随后的注意力权重——对蛋白质的**全局刚性运动具有不变性**。
+
+来源：[decode.py](omegafold/decode.py#L44-L152)
+
+### 点 Logit 计算详解
+
+点投影将每个残基的节点表征映射为 `num_head × num_point_qk` 个 3D 向量。这些向量最初定义在残基的**局部坐标系**中（以 Cα 为中心，以主链方向为轴）。`AAFrame.transform()` 方法应用残基的旋转矩阵和平移向量，将这些局部点转换为全局坐标：
+
+```
+global_point = R_local→global · local_point + t_local→global
+```
+
+然后在所有头和点维度上计算平方距离 `‖q_point_i − k_point_j‖²`。一个**可训练的逐头权重**（经 `softplus` 处理以确保为正）调制每个头的点 logit 贡献，允许模型学习每个头应执行多少空间推理。
+
+来源：[decode.py](omegafold/decode.py#L124-L130), [aaframe.py](omegafold/utils/protein_utils/aaframe.py#L414-L479)
+
+### 多通道输出聚合
+
+在对键进行 softmax 操作后，IPA 在最终投影前聚合**四个不同的输出通道**：
+
+1. **标量值** — 标量值投影的注意力加权求和，形状为 `[num_res, num_head, num_scalar_v]`
+2. **点值** — 点值投影的注意力加权求和，通过 `AAFrame.position_in_frame()` **重新表达在查询残基的局部坐标系中**，形状为 `[num_res, num_head, num_point_v, 3]`
+3. **点范数** — 局部坐标系点值的 L2 范数，形状为 `[num_res, num_head, num_point_v]`
+4. **边值** — 边表征的注意力加权求和，形状为 `[num_res, num_head, edge_dim]`
+
+这四个通道沿特征维度展平并拼接，产生大小为 `num_head × (num_scalar_v + num_point_v × 4 + edge_dim)` 的向量，随后通过输出线性层投影回 `node_dim`。同时包含点坐标及其范数，确保输出能够捕获基于方向和距离的信息。
+
+来源：[decode.py](omegafold/decode.py#L138-L152)
+
+### 方差归一化
+
+每个 logit 项都通过其方差的逆平方根进行缩放，遵循 Vaswani et al. (2017) 的原则。点项的方差设为 `9/2 · num_point_qk`（9/2 因子源于 3D 中高斯平方距离的方差），标量项的方差设为 `num_scalar_qk`，边项的方差设为 1。整体的 `1/√3` 因子解释了对三个 logit 项求和的情况，防止组合后的 logit 幅度随项数增加而增长。
+
+来源：[decode.py](omegafold/decode.py#L84-L89)
+
+## AAFrame 几何原语
+
+`AAFrame` 类封装了一个 **SE(3) 变换**——一个旋转矩阵和一个平移向量——并带有一个指示坐标系有效性的关联掩码。它是 IPA 和结构模块共同依赖的几何骨架。
+
+### 核心操作
+
+| 操作 | 实现 | 描述 |
+|---|---|---|
+| **变换** | `R · p + t` | 将坐标系应用于局部点 → 全局点 |
+| **组合** | `R₁R₂, t₁ + R₁t₂` | 通过 `__mul__` 链接两个坐标系 |
+| **在坐标系中定位** | `R⁻ᵀ(p − t)` | 在局部坐标系中表示全局点 |
+| **从张量构建** | 6D → 四元数 → R, 3D → t | 将仿射更新解码为坐标系 |
+| **从扭转角构建** | sin/cos → R_x(θ) | 由扭转角生成绕 x 轴的旋转 |
+| **转 Å / nm** | 将平移缩放 10 或 0.1 | 坐标的单位转换 |
+
+**坐标系组合**操作 (`_combine_transformation`) 被广泛使用：在每个 `StructureCycle` 中用于更新主链坐标系 (`backbone_frames * frame_update`)，以及在 `expand_w_torsion` 中沿 χ 角梯子链式构建侧链坐标系。
+
+<CgxTip>`from_tensor` 类方法将 6 维仿射更新向量解码为坐标系：前 3 个分量被解释为旋转（为数值稳定性通过 quaternion_to_matrix 转换），后 3 个分量作为以纳米为单位的平移。这正是 StructureCycle 的 `affine_update` 线性层生成坐标系更新的机制。</CgxTip>
+
+来源：[aaframe.py](omegafold/utils/protein_utils/aaframe.py#L57-L297), [aaframe.py](omegafold/utils/protein_utils/aaframe.py#L414-L479), [aaframe.py](omegafold/utils/protein_utils/aaframe.py#L610-L685)
+
+## StructureCycle：主链精修的单次迭代
+
+每个 `StructureCycle` 执行一次迭代主链更新。其流程严格按顺序执行：
+
+1. **IPA 更新**：`node_repr += IPA(node_repr, edge_repr, backbone_frames)` — 节点表征通过 IPA 输出进行原位更新，融入了对当前主链构型的几何推理
+2. **输入 LayerNorm**：对更新后的节点表征进行归一化
+3. **Transition MLP**：一堆 `num_transition` 个线性层，中间夹带 ReLU 激活函数，外加一个**残差连接** — `node_repr += transition(node_repr)` — 提供了无瓶颈的信息通路
+4. **更新 LayerNorm**：在 transition 后进行归一化
+5. **仿射更新**：从 `node_dim` 到 6 维的线性投影，通过 `AAFrame.from_tensor` 解码为 SE(3) 坐标系更新
+6. **坐标系组合**：`backbone_frames = backbone_frames * frame_update` — 当前主链坐标系与预测的更新进行组合，生成精修后的主链方向和位置
+
+IPA 步骤（步骤 1）中的残差连接至关重要：它确保初始节点表征永远不会被丢弃，IPA 充当**校正项**而非替代项。
+
+来源：[decode.py](omegafold/decode.py#L255-L313)
+
+## StructureModule：完整解码流水线
+
+`StructureModule` 编排了完整的坐标生成过程：
+
+### 初始化阶段
+
+该模块首先对节点和边表征应用 **LayerNorm**，然后通过 `init_proj` 投影节点表征。主链坐标系使用 `AAFrame.default_init` 进行初始化，该方法将每个残基置于原点并使用恒等旋转——即 Jumper et al. (2021) 提出的所谓“黑洞初始化”。这确保了第一次 IPA 迭代在一个退化但几何定义良好的状态下运行。
+
+来源：[decode.py](omegafold/decode.py#L316-L367)
+
+### 迭代精修阶段
+
+初始化后的主链坐标系和节点表征被传入 `num_cycle` 个顺序执行的 `StructureCycle` 层。每个循环同时精修表征和坐标系，逐步将蛋白质从退化的初始状态“展开”为物理上合理的主链轨迹。
+
+来源：[decode.py](omegafold/decode.py#L369-L372)
+
+### 扭转角预测
+
+在最后一个循环之后，`TorsionAngleHead` 为每个残基预测 **7 个 sin-cos 扭转角对**（ω, φ, ψ, χ₁–χ₄）。该预测头同时接收**最终**和**初始**节点表征——这种双输入设计允许网络推理精修期间发生的变化，同时保留对原始几何信息的访问。预测采用残差块架构：两个输入投影（每个表征一个），求和后接 `num_residual_block` 个残差块（每个：Linear → ReLU → Linear → ReLU + skip），最后经过一个线性层输出 14 个结果并重塑为 `[7, 2]`，再进行稳健归一化。
+
+来源：[decode.py](omegafold/decode.py#L200-L252), [decode.py](omegafold/decode.py#L374-L386)
+
+### 坐标系扩展与 Atom14 生成
+
+预测的扭转角用于通过 `expand_w_torsion` 将每个主链坐标系扩展为 **8 个逐残基子坐标系**（主链 + 7 个扭转角驱动的坐标系）。这实现了 AlphaFold2 补充材料中的算法 24：主链坐标系与残基类型特定的默认坐标系及扭转角旋转进行组合，并沿侧链依次链接（χ₁ → χ₂ → χ₃ → χ₄）。最后，`expanded_to_pos` 利用逐残基类型的原子到坐标系分配及刚体群位置，将这些坐标系映射为 **atom14 位置**。
+
+<CgxTip>`expand_w_torsion` 方法通过连续组合链接侧链坐标系：`chi2_frame_to_backb = chi1_frame_to_backb * chi2_frame_to_frame`。这种组合结构反映了侧链旋转异构体的物理现实——每个后续 χ 角都是相对于由所有先前角度建立的坐标系来定义的。</CgxTip>
+
+来源：[decode.py](omegafold/decode.py#L381-L392), [aaframe.py](omegafold/utils/protein_utils/aaframe.py#L716-L798)
+
+## 在 OmegaFold 流水线中的集成
+
+`StructureModule` 在 `OmegaFoldCycle` 内部被调用，紧接在 [GeoFormer Transformer](6-geoformer-transformer) 生成其更新的节点和边表征之后。该模块接收 `node_repr[..., 0, :, :]`（选择第一行 MSA）和完整的边表征。其输出——`final_atom_positions`、`final_atom_mask` 和 `final_frames`——被返回至循环回路，其中 `final_frames` 和 `final_atom_positions` 将作为下一个循环的 [回收与迭代精修](11-recycling-and-iterative-refinement) 的 `prev_frames` 和 `prev_x` 输入。
+
+| 输出 | 形状 | 消费者 |
+|---|---|---|
+| `final_atom_positions` | `[num_res, 14, 3]` | 循环回路 (`prev_x`)，置信度预测头 |
+| `final_atom_mask` | `[num_res, 14]` | 输出处理 |
+| `final_frames` | `[num_res, 8, ...]` | 循环回路 (`prev_frames`) |
+| `node_repr` | `[num_res, node_dim]` | [置信度估计 (pLDDT)](12-confidence-estimation-plddt) |
+
+来源：[model.py](omegafold/model.py#L52-L112)
+
+## 关键设计原则
+
+| 原则 | 实现 | 优势 |
+|---|---|---|
+| **SE(3) 等变性** | IPA logit 项是坐标系不变的；输出点被重新局部化 | 预测与坐标系无关 |
+| **迭代精修** | 从黑洞初始化开始进行多次 StructureCycles | 渐进展开避免陷入局部极小值 |
+| **双输入扭转角预测** | 最终 + 初始节点表征 | 保留精修前的信息 |
+| **方差缩放 logits** | 每个通道 1/√(variance · num_terms) | 防止通道间 logit 爆炸 |
+| **残差连接** | IPA 和 transition 均使用加性跳跃连接 | 深层循环中稳定的梯度流 |
+
+来源：[decode.py](omegafold/decode.py#L44-L392)
+
+## 后续步骤
+
+- 了解该模块的主链坐标系如何通过 [回收与迭代精修](11-recycling-and-iterative-refinement) 反馈回模型
+- 在 [几何注意力](10-geometric-attention) 中详细了解几何原语
+- 查看最终节点表征如何评分：[置信度估计 (pLDDT)](12-confidence-estimation-plddt)
+- 在 [配置参考](13-configuration-reference) 中配置结构模块参数
+
+---
+
+## 神经网络基础组件
+
+- [深入解析/神经网络基础组件/注意力与子批次](https://zread.ai/HeliXonProtein/OmegaFold/8-attention-and-subbatching)
+
+---
+slug:8-attention-and-subbatching
+blog_type:normal
+---
+
+
+OmegaFold 的注意力子系统是 **OmegaPLM 语言模型**和 **GeoFormer Transformer** 共享的计算骨干。该实现的独特之处在于紧密集成了**子批处理**——一种感知内存的执行策略，它将查询维度拆分为更小的块，依次计算每个块的注意力，从而无论序列长度如何，都能限制 GPU 峰值内存。本页将剖析其三层架构：底层 `_attention` 内核、子批处理 `attention` 调度器，以及将 QKV 投影、门控和多轴支持组合在一起的高层 `Attention` 模块。
+
+来源：[modules.py](omegafold/modules.py#L69-L164), [omegaplm.py](omegafold/omegaplm.py#L56-L118), [geoformer.py](omegafold/geoformer.py#L43-L137)
+
+## 注意力计算层级
+
+注意力实现遵循三层设计——每一层在将核心数学运算委托给下层的同时，增加特定功能：
+
+```mermaid
+graph TD
+    A["Attention (类)<br/>QKV 投影 + 门控 + 多轴"] --> B["attention (函数)<br/>查询块上的子批处理循环"]
+    B --> C["_attention (函数)<br/>原始 Q·K^T + softmax + V 聚合"]
+    C --> D["softmax (函数)<br/>原位或标准 softmax"]
+
+    style A fill:#4a90d9,color:#fff
+    style B fill:#2d6ca2,color:#fff
+    style C fill:#1a4a73,color:#fff
+    style D fill:#0d2e4a,color:#fff
+```
+
+| 层级 | 职责 | 内存范围 | 核心特性 |
+|---|---|---|---|
+| `_attention` | 带偏置的原始缩放点积 | 完整的 Q×K 注意力矩阵 | 原位 softmax 优化 |
+| `attention` | 子批处理调度器 | 每个块仅 `subbatch_size × K` | 沿序列维度拆分查询 |
+| `Attention` (类) | 完整模块：投影、注意力、门控、输出 | 委托给 `attention` | 多轴、门控、输出投影 |
+
+来源：[modules.py](omegafold/modules.py#L39-L164), [modules.py](omegafold/modules.py#L375-L494)
+
+## 核心内核：`_attention`
+
+基础计算是带有加性偏置项的标准**缩放点积注意力**。该实现使用 `einsum` 进行 QK 和 AV 收缩，这与 PyTorch 中的批量矩阵乘法内核完美对应：
+
+```
+logits[..., i, j] = (query[..., i, d] * scale) * key[..., j, d]  +  bias[..., i, j]
+attn   = softmax(logits, dim=-1)
+out    = attn[..., i, j] * value[..., j, d']
+```
+
+一个显著的优化：当 `return_edge=False`（常见情况）时，softmax 的计算是**原位**进行的——减去最大值、求指数和归一化均直接覆写 `logits` 张量，将注意力矩阵的中间内存减半。当请求边 logits 时（如在 OmegaPLM 中用于成对边表示），则改用标准 `torch.softmax` 以保留原始张量。
+
+<CgxTip>原位 softmax 路径 (`in_place=True`) 避免了为归一化注意力权重分配第二个张量。对于长度为 *N* 的序列，这节省了 O(N²) 个浮点数值——当 *N* 较大且不需要 `return_edge` 时，这一节省十分显著。</CgxTip>
+
+来源：[modules.py](omegafold/modules.py#L39-L101)
+
+## 子批处理：内存受限的注意力
+
+`attention` 函数将 `_attention` 封装在**查询拆分循环**中，这是 OmegaFold 中核心的内存优化。它不再一次性具化完整的 `[q_length, k_length]` 注意力矩阵，而是对查询序列的块进行迭代：
+
+```python
+for i, q_i in enumerate(query.split(subbatch_size, dim=-2)):
+    start, end = i * subbatch_size, (i + 1) * subbatch_size
+    b_i = bias[..., start:end, :]          # 为当前块切片偏置
+    res, attn = _attention(q_i, key, scale, value, b_i, ...)
+    output[..., start:end, :] = res        # 将结果写入预分配的输出
+```
+
+**键和值张量从未被拆分**——每个查询块都关注完整的键值集。这保持了与标准注意力的数学等价性，同时将中间注意力矩阵的大小限制在 `[subbatch_size, k_length]`。当 `subbatch_size` 等于 `q_length`（默认值）时，循环仅执行一次，其行为与非批处理注意力完全相同。
+
+### 代码库中的子批处理
+
+子批处理并不局限于注意力函数。相同的模式出现在多个模块中，每个模块都沿着对内存最关键的维度进行拆分：
+
+| 模块 | 拆分维度 | 预分配输出 | 使用位置 |
+|---|---|---|---|
+| `attention()` | 查询序列维度 (`-2`) | `torch.empty(..., q_length, v_dim)` | OmegaPLM, GeoFormer |
+| `Transition.forward()` | 批次维度 (`0`) | `torch.empty_like(x)` | GeoFormer 节点/边转换 |
+| `GeometricAttention._get_attended()` | 边行维度 | 通过分片循环 `torch.empty(..., n_axis)` | GeoFormer 几何注意力 |
+| `GeometricAttention._get_gated()` | 行 × 列 (嵌套) | 通过分片循环 `torch.empty(...)` | GeoFormer 门控路径 |
+
+`GeometricAttention._get_gated` 中的嵌套子批处理尤为重要：它拆分了边表示 `[num_res, num_res, d_edge]` 的行和列维度，为外积计算产生一个 **subbatch × subbatch** 的分块——这是 GeoFormer 块中内存消耗最大的操作。
+
+来源：[modules.py](omegafold/modules.py#L104-L164), [modules.py](omegafold/modules.py#L204-L216), [modules.py](omegafold/modules.py#L607-L669)
+
+## `Attention` 类：投影、门控与多轴
+
+`Attention` 类是 OmegaPLM 和 GeoFormer 都使用的全功能模块。它在子批处理 `attention` 函数的基础上增加了三项功能：
+
+### 1. 融合 QKV 投影与逐头偏置
+
+该类没有为 Q、K、V 分别使用线性层，而是使用**单一融合权重张量**，通过 `einsum` 将输入同时投影到所有头：
+
+- `qg_weights: [q_dim, n_axis, n_head, (1+gating) * c]` —— 生成查询（以及可选的门控）
+- `kv_weights: [kv_dim, n_axis, n_head, 2 * c]` —— 生成键和值
+- `qg_bias / kv_bias` —— 逐头、逐轴偏置（此处无逐位置偏置；位置信息通过 `bias` 参数传入）
+
+`n_axis` 维度实现了**多轴注意力**——同一模块可以通过将轴作为额外批次维度，在单次前向传播中处理多个几何轴（例如，几何注意力中的 3 个空间轴）。
+
+### 2. 门控机制
+
+当 `gating=True` 时，查询投影在生成实际查询的同时，还会生成一个额外的 `c` 维块。该块经过 sigmoid 函数形成逐元素门控：
+
+```python
+q, g = qg.split(self.c, dim=-1)    # 拆分查询-门控
+attn_out = attention(q, k, v, ...)  # 标准注意力
+attn_out *= torch.sigmoid(g)        # 应用门控
+```
+
+门控允许模型逐头和逐位置地动态抑制注意力输出，这对于结构模块的 IPA 以及并非所有头都应等权贡献的 GeoFormer 几何注意力至关重要。
+
+### 3. 带逐轴偏置的输出投影
+
+经注意力处理的输出通过 `o_weights: [n_axis, n_head, c, out_dim]` 和逐轴输出偏置 `o_bias: [out_dim, n_axis]` 投影回 `out_dim`。`einsum('...rhqc,rhco->...qor', attn_out, self.o_weights)` 跨头和逐头通道进行收缩，将多头输出合并为单一表示。
+
+### 形状流转图
+
+```mermaid
+graph LR
+    Q_IN["q_inputs<br/>(*, q_len, q_dim, n_axis)"] --> QG["qg_weights einsum<br/>(*, n_head, q_len, (1+g)·c)"]
+    KV_IN["kv_inputs<br/>(*, kv_len, kv_dim, n_axis)"] --> KV["kv_weights einsum<br/>(*, n_head, kv_len, 2·c)"]
+    QG --> SPLIT_QG["split → q, g"]
+    KV --> SPLIT_KV["split → k, v"]
+    SPLIT_QG --> ATT["attention(q, k, v)<br/>子批处理"]
+    SPLIT_KV --> ATT
+    BIAS["bias<br/>(*, n_head, q_len, kv_len)"] --> ATT
+    ATT --> GATE["× sigmoid(g)"]
+    GATE --> OPROJ["o_weights einsum<br/>+ o_bias"]
+    OPROJ --> OUT["output<br/>(*, q_len, out_dim, n_axis)"]
+
+    style ATT fill:#2d6ca2,color:#fff
+    style GATE fill:#4a90d9,color:#fff
+```
+
+来源：[modules.py](omegafold/modules.py#L375-L494)
+
+## 边偏置集成：`AttentionWEdgeBias`
+
+GeoFormer 的行和列注意力层使用 `AttentionWEdgeBias`，这是一个轻量级封装器，从两个来源构建注意力偏置：
+
+1. **边表示投影**：`proj_edge_bias` 将边特征 `[q_len, kv_len, d_edge]` 映射为 `[n_head, q_len, kv_len]`——这直接将成对结构信息编码进注意力 logits。
+2. **掩码偏置**：残基有效性掩码通过 `mask2bias`（将 1 映射为 0，0 映射为 −1e9）转换，并加到边偏置上，确保无效位置获得可忽略的注意力权重。
+
+这种模式——**习得的成对偏置 + 掩码偏置**——是蛋白质结构模型将几何先验注入注意力的标准方案。
+
+来源：[modules.py](omegafold/modules.py#L497-L548), [torch_utils.py](omegafold/utils/torch_utils.py#L39-L50)
+
+## 子批次大小配置
+
+`subbatch_size` 不是模型参数——它是通过 `fwd_cfg`（前向配置命名空间）传入的**运行时推理配置**。这种设计将模型的习得参数与其执行策略分离开来：
+
+| 上下文 | 默认值 | 覆盖路径 |
+|---|---|---|
+| `Attention._get_attn_out` | `q.shape[-4]` (完整序列) | `fwd_cfg.subbatch_size` |
+| CLI 参数 `--subbatch_size` | `None` (自动) | 推理时的命令行 |
+| `Transition.forward` | `x.shape[-2]` (完整长度) | `fwd_cfg.subbatch_size` |
+| `GeometricAttention` | 完整边长度 | `fwd_cfg.subbatch_size` |
+
+当 `fwd_cfg` 为 `None` 或 `subbatch_size` 未设置时，系统默认在一次传播中处理完整序列——这与标准注意力在数学上完全等价。CLI 标志 `--subbatch_size` 提供了用户级控制：较小的值以牺牲吞吐量为代价换取更低的 GPU 内存占用，从而能够在更长序列或内存受限的硬件上进行推理。
+
+<CgxTip>对于长度为 *N*、头维度为 *c* 的序列，峰值注意力内存为 O(subbatch_size × N × c)。设置 `subbatch_size = N // k` 会将峰值内存大约降低 *k* 倍，代价是 *k* 次顺序迭代。最优值需在可用显存与 Python 循环开销之间进行权衡。</CgxTip>
+
+来源：[modules.py](omegafold/modules.py#L478-L480), [pipeline.py](omegafold/pipeline.py#L348-L357)
+
+## 支持注意力的实用函数
+
+来自 `torch_utils.py` 的两个实用函数对注意力流程至关重要：
+
+**`mask2bias(mask, inf=1e9)`** 将二进制掩码（1=有效，0=无效）转换为加性偏置（0=有效，−1e9=无效）。这是在没有条件逻辑的情况下实现掩码注意力的标准技术——softmax 自然会将无效位置的权重趋近于零。该函数在 `AttentionWEdgeBias` 和 `OmegaPLM.forward` 中均有使用。
+
+**`normalize(inputs, in_place=False)`** 实现了无权重层归一化。原位变体直接在输入张量上减去均值并乘以标准差的倒数。这在 OmegaPLM（预归一化架构）和 GeoFormer 的每次注意力投影之前都会被调用，遵循预 LayerNorm Transformer 模式。
+
+来源：[torch_utils.py](omegafold/utils/torch_utils.py#L39-L83)
+
+## 消费者如何使用注意力 API
+
+两个主要消费者——**OmegaPLM** 和 **GeoFormer**——以不同方式调用注意力机制：
+
+**OmegaPLM** 在通过其 `GatedAttentionUnit` 手动投影 Q、K、V 之后，直接调用 `attention` *函数*（而非 `Attention` 类）。它还请求 `return_edge=True` 以提取成对注意力 logits 作为边表示供下游使用。QK 缩放遵循长度依赖公式：`log(num_res) / (log(512) * attn_dim^0.5)`，参考自 [Su 等人](https://kexue.fm/archives/8823)。
+
+**GeoFormer** 使用 `Attention` *类*（行注意力通过 `AttentionWEdgeBias`，列注意力直接使用），将所有投影逻辑委托给该模块。它不从注意力中返回边 logits——相反，边更新来自独立的 `Node2Edge` 外积模块和 `GeometricAttention`。
+
+来源：[omegaplm.py](omegafold/omegaplm.py#L56-L118), [geoformer.py](omegafold/geoformer.py#L43-L137)
+
+---
+
+理解注意力内核和子批处理机制，为探索两个相关主题奠定了基础：位置信息如何通过[嵌入与 RoPE](9-embeddings-and-rope) 进入注意力偏置，以及 `GeometricAttention` 如何在[几何注意力](10-geometric-attention)中将子批处理模式扩展至三角形边表示。有关子批次大小如何与其他运行时参数交互的全貌，请参阅[配置参考](13-configuration-reference)和[内存优化策略](14-memory-optimization-strategies)。
+
+---
+
+- [深入解析/神经网络基础组件/嵌入与 RoPE](https://zread.ai/HeliXonProtein/OmegaFold/9-embeddings-and-rope)
+
+---
+slug:9-embeddings-and-rope
+blog_type:normal
+---
+
+
+OmegaFold 的嵌入子系统通过四种互补策略，在原始氨基酸序列与学习到的几何表示之间建立了桥梁：**旋转位置嵌入** 将绝对位置结构注入到 OmegaPLM 语言模型的注意力机制中；**相对位置嵌入** 为 OmegaPLM 和边表示提供距离感知偏置；**EdgeEmbedder** 仅从一级序列构建残基对特征；**StructEmbedder/RecycleEmbedder** 将先前迭代的结构信号传递至后续循环。这些模块共同确保每个下游 Transformer 层的输入都已编码了空间与位置先验——这是从序列准确预测 3D 结构的先决条件。
+
+来源: [embedders.py](omegafold/embedders.py#L1-L31), [model.py](omegafold/model.py#L1-L30)
+
+## 旋转位置嵌入
+
+**旋转位置嵌入** 将 token 位置编码为特征空间中的旋转，从而产生在序列轴上自然具备平移等变性的注意力分数。与加性位置编码（正弦或学习式）不同，RoPE 在计算每个 token 的查询和键向量的点积之前，对其应用一个**旋转矩阵**，因此相对位置 *m − n* 直接从内积几何中产生，而非来自显式的位置信号。OmegaFold 实现了 Su 等人 (2021) 的公式，其中位置 *p* 在频率索引 *i* 处的旋转为：
+
+> θᵢ(p) = p · 10000^(−2i/d)
+
+`RoPE` 类在构造时预计算**逆频率**缓冲区 `inv_freq`，将 `i ∈ [0, d/2)` 的值 `10000^(−2i/d)` 存储为非持久化缓冲区（它会在设备转移时重新生成，而不是随模型权重一起序列化）。在前向传播时，该类为输入张量中的每个位置 *p* 导出正弦值 `p · inv_freq`，然后将实际旋转委托给 `_apply_embed`。
+
+```mermaid
+flowchart TD
+    A["Input tensor<br/>(seq_len × d)"] --> B["_get_pos<br/>Derive position indices"]
+    A --> C["_compute_sin_cos<br/>position × inv_freq"]
+    B --> C
+    C --> D["sin, cos tensors<br/>(seq_len × d/2)"]
+    A --> E["_apply_embed"]
+    D --> E
+    E --> F["Split into x₁, x₂<br/>each (seq_len × d/2)"]
+    F --> G["x₁·cos − x₂·sin ,<br/>x₂·cos + x₁·sin"]
+    G --> H["Rotated tensor<br/>(seq_len × d)"]
+
+    style A fill:#e8f4fd,stroke:#1a73e8
+    style H fill:#e8f4fd,stroke:#1a73e8
+    style C fill:#fff3e0,stroke:#e65100
+    style E fill:#fff3e0,stroke:#e65100
+```
+
+`_apply_embed` 中的核心旋转操作通过将输入向量 **x** ∈ ℝᵈ 拆分为两半 **x₁**, **x₂** ∈ ℝᵈ/² 并计算：
+
+| 输出部分 | 公式 |
+|---|---|
+| 前半部分 | **x₁** · cos(θ) − **x₂** · sin(θ) |
+| 后半部分 | **x₂** · cos(θ) + **x₁** · sin(θ) |
+
+这正是独立应用于 d/2 个二维子空间的 2D 旋转块 `[cos, −sin; sin, cos]`——这是 RoPE 的决定性特征。`seq_dim` 参数将旋转推广到多维空间索引（例如 2D 网格），这要求指定的维度在张量形状中是**连续的**。在旋转之前，`_apply_embed` 通过在空间轴周围插入单一维度来广播 sin/cos 张量，使其与输入的完整维度对齐。
+
+<CgxTip>RoPE 的 `inv_freq` 缓冲区通过 `persistent=False` 注册，这意味着它**不会**出现在 `state_dict()` 中。加载预训练检查点时，该缓冲区会从 `__init__` 重建——因此，如果在训练和推理之间更改了 `input_dim`，将隐式产生不正确的位置编码。务必确保 `attn_dim` 与检查点的配置相匹配。</CgxTip>
+
+来源: [embedders.py](omegafold/embedders.py#L141-L198), [embedders.py](omegafold/embedders.py#L67-L110)
+
+### 门控注意力单元中的 RoPE
+
+RoPE 并未应用于 OmegaFold 的每个注意力层——它专门用于 OmegaPLM 语言模型的**门控注意力单元 (GAU)** 中。`GatedAttentionUnit` 将其输入投影到维度为 `attn_dim`（默认 256）的 `base` 向量中，然后通过 `MultiHeadedScaling` 传递该向量，后者产生两个头（查询和键），并通过 `on_out_ready` 回调对每个头应用 RoPE：
+
+```python
+self.multi_headed_scaling = modules.MultiHeadedScaling(
+    cfg.attn_dim,
+    num_heads=2,
+    on_out_ready=lambda x: self.rope(x, x.ndim - 3)
+)
+self.rope = embedders.RoPE(cfg.attn_dim)
+```
+
+回调 `lambda x: self.rope(x, x.ndim - 3)` 指定**倒数第三**维为序列维度——这考虑了 `MultiHeadedScaling` 生成的 `(num_heads, seq_len, attn_dim)` 布局。由于 RoPE 在查询和键的点积*之前*应用于两者，因此产生的注意力逻辑仅依赖于 token 之间的**相对位置**，而非它们的绝对索引——这实现了无需重新训练的长度泛化。
+
+来源: [omegaplm.py](omegafold/omegaplm.py#L48-L66), [omegaplm.py](omegafold/omegaplm.py#L68-L103)
+
+## 相对位置嵌入
+
+虽然 RoPE 在 OmegaPLM 的 GAU 内提供隐式的相对位置信号，但 OmegaFold 还采用了一种**显式**的相对位置嵌入——`RelPosEmbedder`——它直接对注意力逻辑施加偏置。该类扩展了 `nn.Embedding` 并实现了 Jumper 等人 (2021，补充算法 4) 的 **relpos** 算法：计算相对残基索引 `j − i` 的矩阵，将每个值截断到 `[−one_side, +one_side]` 范围内，通过偏移 `one_side` 获得非负索引，最后查找相应的嵌入向量。
+
+```mermaid
+flowchart LR
+    A["num_res"] --> B["idx = arange(num_res)"]
+    B --> C["relative = idx[None,:] - idx[:,None]<br/>(num_res × num_res)"]
+    C --> D["Clamp to ±one_side"]
+    D --> E["Shift by +one_side<br/>(non-negative indices)"]
+    E --> F["nn.Embedding lookup<br/>→ (num_res × num_res × dim)"]
+
+    style A fill:#e8f4fd,stroke:#1a73e8
+    style F fill:#e8f4fd,stroke:#1a73e8
+    style D fill:#fff3e0,stroke:#e65100
+```
+
+`num_embeddings` 参数（在 OmegaPLM 中默认为 129，由 `num_relpos * 2 + 1` 派生）定义了截断范围。相隔超过 64 个位置的残基对都会映射到相同的边界嵌入——这提供了一种**局部性先验**，防止远距离对收到不同的位置信号，这在生物学上是合理的，因为蛋白质中的残基接触绝大多数沿序列是局部的。
+
+### RelPos 的双重用途
+
+`RelPosEmbedder` 在 OmegaFold 的架构中具有两种不同的作用：
+
+| 消费者 | 目的 | 维度 | 集成方式 |
+|---|---|---|---|
+| `EdgeEmbedder` | 将成对位置偏置注入边表示 | `edge_dim` (128) | 加至边张量 |
+| `GatedAttentionUnit` | 对 GAU 注意力逻辑施加偏置 | 1 (标量) | 加至注意力偏置 |
+
+在 GAU 中，`RelPosEmbedder` 产生一个**标量**偏置（`embedding_dim=1`），与掩码派生的偏置一起直接加到注意力逻辑中。与 RoPE 的全向量旋转相比，这是一种轻量级的位置信号——两者是互补的：RoPE 修改查询/键*向量*（影响相似度的计算方式），而 `RelPosEmbedder` 修改注意力*逻辑*（影响哪些位置先验地获得更多或更少的注意力）。
+
+来源: [embedders.py](omegafold/embedders.py#L201-L229), [omegaplm.py](omegafold/omegaplm.py#L58-L59)
+
+## 边表示嵌入器
+
+`EdgeEmbedder` 仅从一级氨基酸序列构建初始的成对边表示。它组合三个加性项来构建 `(num_res × num_res × edge_dim)` 张量：
+
+1. **行氨基酸嵌入** — `proj_i(fasta_sequence).unsqueeze(-2)` 将每个残基的嵌入在 *j* 轴上广播
+2. **列氨基酸嵌入** — `proj_j(fasta_sequence).unsqueeze(-3)` 在 *i* 轴上广播
+3. **相对位置嵌入** — `relpos(num_res)` 提供上述的距离依赖偏置
+
+这种构建方式类似于 AlphaFold2 的成对输入嵌入，但使用了**两个独立的嵌入表**（`proj_i` 和 `proj_j`）而不是单一共享表，允许模型学习非对称的残基对特征。生成的边张量是加性的——它作为 `out` 参数传递，并累加到已存在的任何边表示上，从而能够通过 `RecycleEmbedder` 与先前循环的特征无缝组合。
+
+来源: [embedders.py](omegafold/embedders.py#L116-L138)
+
+## 结构嵌入器
+
+`StructEmbedder`（及其对称变体 `PairStructEmbedder`）将来自上一预测周期的**3D 结构信息**编码到边表示中。当启用时（配置中 `model_idx == 2`），它处理三个几何通道：
+
+| 通道 | 输入 | 编码 | 目的 |
+|---|---|---|---|
+| 粗粒度距离 | 原子对距离 | `Val2ContBins` → `Linear` | 粗粒度距离信号 |
+| 细粒度距离 | 原子对距离 | `Val2ContBins` → `Linear` | 细粒度距离信号 |
+| 局部位置 | 局部坐标系中的原子位置 | `Val2ContBins` → `Linear` | 坐标系相对位置编码 |
+
+每个通道都使用 `Val2ContBins`——一种软分箱机制，通过高斯核将连续标量值转换为**基于分箱的概率分布**，而非硬量化。分箱中心从 `x_min` 到 `x_max` 均匀分布，每个输入值通过到分箱中心的指数化平方距离映射为 softmax（扩展系数为 `0.5 / (bin_size × 0.2)²`）。这种可微分箱保留了穿过距离特征的梯度流。
+
+这三个通道通过氨基酸对嵌入 `aa_embedding(fasta₁ × 21 + fasta₂)` 的双线性交互进行组合，随后通过一个学习到的双线性投影（`linear_z_weights`）从 `(c, c)` 映射到 `edge_dim`。这会产生一个 `(num_res × num_res × edge_dim)` 张量，在循环嵌入器中加到边表示上。
+
+来源: [embedders.py](omegafold/embedders.py#L232-L340), [modules.py](omegafold/modules.py#L279-L310)
+
+## 循环嵌入器
+
+`RecycleEmbedder` 将**先前预测周期**的信息融合到当前周期的节点和边表示中。它执行三个关键操作：
+
+1. **节点循环** — LayerNorm 归一化的先前节点特征被加到当前节点表示的**首个循环通道**（`node_repr[..., 0, :, :]`）中
+2. **距离 gram 嵌入** — 上一周期伪 β 位置的残基间距离通过 `Val2Bins`（硬量化）进行分箱，并通过 `prev_pos_embed` 查找
+3. **边循环** — LayerNorm 归一化的先前边特征被加到当前边表示中
+4. **可选结构嵌入** — 当 `cfg.struct_embedder` 为 `True` 时，`PairStructEmbedder` 根据先前的原子位置和坐标架计算几何特征
+
+```mermaid
+flowchart TD
+    subgraph Previous Cycle
+        P1["prev_node"]
+        P2["prev_edge"]
+        P3["prev_x (pseudo-β)"]
+        P4["prev_frames"]
+    end
+
+    subgraph RecycleEmbedder
+        R1["LayerNorm(prev_node)"]
+        R2["Distances from pseudo-β"]
+        R3["Val2Bins → Embedding"]
+        R4["LayerNorm(prev_edge)"]
+        R5["PairStructEmbedder<br/>(if enabled)"]
+    end
+
+    subgraph Current Cycle
+        C1["node_repr (channel 0)"]
+        C2["edge_repr"]
+    end
+
+    P1 --> R1 --> C1
+    P3 --> R2 --> R3 --> C2
+    P2 --> R4 --> C2
+    P3 --> R5
+    P4 --> R5
+    R5 --> C2
+
+    style R1 fill:#fff3e0,stroke:#e65100
+    style R3 fill:#fff3e0,stroke:#e65100
+    style R4 fill:#fff3e0,stroke:#e65100
+    style R5 fill:#fff3e0,stroke:#e65100
+```
+
+硬分箱（`Val2Bins`，用于距离 gram）和软分箱（`Val2ContBins`，用于 `StructEmbedder`）之间的区别是经过深思熟虑的：距离 gram 是仅有 16 个分箱的粗粒度信号（配置中 `num_bins=16`），而结构距离需要更细粒度且对梯度友好的表示。这种循环机制正是 OmegaFold 能够实现迭代精化的基础——完整的周期动态请参见[循环与迭代精化](11-recycling-and-iterative-refinement)。
+
+来源: [embedders.py](omegafold/embedders.py#L343-L414)
+
+## 完整流程中的嵌入数据流
+
+下图追溯了在 `OmegaFold.forward` 方法中所有嵌入模块的组合方式，从原始 FASTA token 直到结构模块的输入：
+
+```mermaid
+flowchart TD
+    FASTA["FASTA tokens"] --> PLM["OmegaPLM<br/>(RoPE + RelPos in GAU)"]
+    PLM --> |"node_repr"| NORM_N["normalize → Linear<br/>plm_node_embedder"]
+    PLM --> |"edge_repr"| NORM_E["normalize → permute → Linear<br/>plm_edge_embedder"]
+
+    FASTA --> EDGE["EdgeEmbedder<br/>(AA pair + RelPos)"]
+    NORM_N --> NODE["node_repr<br/>(num_res × 256)"]
+    NORM_E --> EDGE
+    EDGE --> EDGE_OUT["edge_repr<br/>(num_res × num_res × 128)"]
+
+    NODE --> RECYCLE["RecycleEmbedder<br/>+ StructEmbedder"]
+    EDGE_OUT --> RECYCLE
+    RECYCLE --> GEO["GeoFormer"]
+
+    style PLM fill:#e3f2fd,stroke:#1565c0
+    style EDGE fill:#fff3e0,stroke:#e65100
+    style RECYCLE fill:#f3e5f5,stroke:#7b1fa2
+```
+
+序列为：OmegaPLM 生成初始节点/边特征 → 将其归一化并投影到 GeoFormer 的维度 → `EdgeEmbedder` 添加氨基酸对和相对位置信号 → `RecycleEmbedder` 融合上一周期的信息 → 丰富的表示进入 GeoFormer。每种嵌入都贡献了独特的归纳偏置——RoPE 提供注意力中的序列顺序感知，RelPos 提供局部性先验，氨基酸对提供残基化学先验，结构嵌入提供跨周期的几何一致性。
+
+<CgxTip>`EdgeEmbedder.forward` 的签名将 `out` 作为**可变参数**（通过 `+=` 原地加法）。这意味着必须在调用 `EdgeEmbedder` **之前**分配 PLM 投影后的边表示，并且该方法返回的是同一个张量对象。调试时需注意，边表示会被原地修改——在调用前对其进行快照将无法保留原始值。</CgxTip>
+
+来源: [model.py](omegafold/model.py#L207-L237), [model.py](omegafold/model.py#L94-L107)
+
+## 配置摘要
+
+嵌入模块由以下配置参数控制（默认值来自 `make_config(model_idx=1)`）：
+
+| 参数 | 默认值 | 模块 | 描述 |
+|---|---|---|---|
+| `plm.attn_dim` | 256 | `RoPE` | 旋转嵌入的输入维度（必须为偶数） |
+| `plm.num_relpos` | 129 | `RelPosEmbedder` (GAU) | GAU 偏置中相对位置分箱的数量 |
+| `relpos_len` | 32 | `RelPosEmbedder` (Edge) | 单侧截断范围 → 总共 65 个分箱 |
+| `alphabet_size` | 21 | `EdgeEmbedder` | 氨基酸字母表（20 种标准氨基酸 + 1 种未知） |
+| `node_dim` | 256 | `RecycleEmbedder` | 节点表示的维度 |
+| `edge_dim` | 128 | `EdgeEmbedder`, `RecycleEmbedder` | 边表示的维度 |
+| `prev_pos.num_bins` | 16 | `RecycleEmbedder` | 距离 gram 的硬分箱数量 |
+| `struct_embedder` | `False` (模型 1) / `True` (模型 2) | `RecycleEmbedder` | 启用 3D 结构嵌入 |
+
+来源: [config.py](omegafold/config.py#L48-L112)
+
+## 设计原理：为何同时使用 RoPE 和 RelPos？
+
+一个自然的问题是，为什么 OmegaFold **同时**使用 RoPE（通过向量旋转的隐式相对位置）和 RelPos（通过逻辑偏置的显式相对位置），而不是只选其一。答案在于它们的互补效应：
+
+- **RoPE** 修改*表示空间*——它旋转查询和键向量，使它们的点积天然编码相对距离。这影响了相似度的**度量方式**，并且在注意力机制中完全可微。
+- **RelPos** 修改*注意力分布*——它添加一个标量偏置，直接改变哪些位置会获得更多或更少的注意力。这影响了模型**关注何处**，与内容无关。
+
+同时使用两者为模型提供了两个正交的位置感知自由度：RoPE 塑造了基于内容的相似度函数，而 RelPos 塑造了基于位置的注意力先验。经验表明，这种组合对于蛋白质序列尤为有效，其中局部相互作用（由 RelPos 的截断距离偏置捕获）在结构上很重要，但长程接触（由 RoPE 的全序列旋转捕获）在决定全局折叠方面同样发挥着关键作用。
+
+来源: [embedders.py](omegafold/embedders.py#L141-L198), [omegaplm.py](omegafold/omegaplm.py#L48-L66)
+
+## 下一步
+
+- 了解 GAU 如何将这些嵌入与注意力集成 → [OmegaPLM 语言模型](5-omegaplm-language-model)
+- 查看如何高效计算具有 RoPE 修改查询/键的注意力 → [注意力与子批处理](8-attention-and-subbatching)
+- 了解循环嵌入如何驱动迭代精化 → [循环与迭代精化](11-recycling-and-iterative-refinement)
+- 详细探索所有配置参数 → [配置参考](13-configuration-reference)
+
+---
+
+- [深入解析/神经网络基础组件/几何注意力](https://zread.ai/HeliXonProtein/OmegaFold/10-geometric-attention)
+
+---
+slug:10-geometric-attention
+blog_type:normal
+---
+
+
+几何注意力是 OmegaFold 的**配对级信息交换机制**——这是标准多头注意力的结构类比，它不在残基级（节点）表示上操作，而是在对所有残基对之间的两两几何关系进行编码的二次边表示张量上操作。与在序列中广播信息的节点级 [注意力与子批处理](8-attention-and-subbatching) 模块不同，几何注意力通过配对表示传播**几何约束**，使模型能够细化空间关系，例如残基间距离、方向和接触。它是每个 [GeoFormer Transformer](6-geoformer-transformer) 块内的核心计算原语，在每个块的边轨道上调用两次（`geom_count=2`）。
+
+来源: [modules.py](omegafold/modules.py#L569-L706), [geoformer.py](omegafold/geoformer.py#L75-L82)
+
+## 双路径架构
+
+GeometricAttention 分解为**两条加性路径**，并行处理归一化的边表示。前向传播应用无权重层归一化，然后对两条路径的输出求和：`out = _get_attended(normalized_edge) + _get_gated(normalized_edge)`。这种双重设计捕捉了配对级推理的互补方面——**注意力路径**通过学习到的查询-键-值投影在配对矩阵上全局传播信息，而**门控外积路径**则通过带有 Sigmoid 门控的行/列分解在局部构建两两交互。
+
+```mermaid
+flowchart TB
+    subgraph GeometricAttention
+        direction TB
+        INPUT["edge_repr<br/>(N, N, d_edge)"] --> NORM["LayerNorm<br/>(无权重)"]
+        NORM --> ATT_PATH["_get_attended<br/>注意力路径"]
+        NORM --> GATED_PATH["_get_gated<br/>门控外积路径"]
+        ATT_PATH --> SUM["⊕ 逐元素相加"]
+        GATED_PATH --> SUM
+        SUM --> OUT["output<br/>(N, N, d_edge)"]
+    end
+
+    subgraph AttentionPath
+        direction TB
+        STACK1["_get_sharded_stacked<br/>堆叠 edge & edgeᵀ"] --> BIAS["线性投影 → 偏置<br/>linear_b_weights"]
+        STACK1 --> ATTENTION["多头注意力<br/>(n_axis=2, gating=True)"]
+        BIAS --> ATTENTION
+        ATTENTION --> SYM["对称合并:<br/>out[..., 0] + out[..., 1]ᵀ"]
+    end
+
+    subgraph GatedPath
+        direction TB
+        ROW["_get_act_row<br/>GLU(sliced_w_row · edge)"] --> OUTER["外积:<br/>act_row ⊗ act_col"]
+        COL["_get_act_col<br/>GLU(sliced_w_col · edge)"] --> OUTER
+        OUTER --> PROJ["线性投影<br/>out_proj_w + out_proj_b"]
+        GATE["Sigmoid 门控<br/>σ(act_w[-d:] · edge)"] --> GPROD["逐元素 × gate"]
+        PROJ --> GPROD
+        GPROD --> SUMAXIS["沿 n_axis 求和"]
+    end
+```
+
+来源: [modules.py](omegafold/modules.py#L699-L706)
+
+## 分片堆叠原语
+
+两条路径都依赖于 `_get_sharded_stacked` 生成器，它作为配对级计算的基础子批处理机制。给定形状为 `(N, N, d_edge)` 的边表示和 `subbatch_size`，它会产出 `(start, end, stacked_chunk)` 元组，其中每个块沿一个新的末尾维度堆叠相同行的两个视图——原始行切片 `edge_repr[start:end]` 和对应的转置切片 `edge_repr.transpose(-2, -3)[start:end]`——生成形状为 `(subbatch_size, N, d_edge, 2)` 的张量。这种**双轴堆叠**使得整个模块中可以使用 `n_axis=2` 参数：轴 0 对应于原始（行）方向，轴 1 对应于转置（列）方向，从而允许在单次通过共享 `Attention` 模块时处理两个空间方向。生成器模式还确保每个子批的内存为 O(N) 而不是 O(N²)，这对于长序列至关重要。
+
+来源: [modules.py](omegafold/modules.py#L551-L566)
+
+## 注意力路径: `_get_attended`
+
+注意力路径在配对矩阵上应用多头注意力，将每行（及其转置列）视为 N 个残基对上的序列。计算在两个子批处理阶段中进行：
+
+**阶段 1 — 偏置构建**: 对于每个分片块，通过从堆叠边块投影的 `linear_b_weights`（形状 `[d_edge, n_axis, n_head]`）计算每个头的注意力偏置 `b`。该偏置累积到形状为 `(n_axis, n_head, N, N)` 的张量中，并加上掩码偏置。此偏置将位置特定的配对信息编码到注意力 logits 中——类似于 `AttentionWEdgeBias` 如何将边特征注入节点注意力，但在这里边本身是被关注的实体。
+
+**阶段 2 — 注意力应用**: 相同的分片块作为查询和键值输入传递给内部的 `Attention` 模块（其中 `gating=True`, `c=32`, `n_head=4`, `n_axis=2`）。输出形状为 `(N, N, d_edge, n_axis)`。
+
+**对称合并**: 最后一步——`attended[..., 0] + attended[..., 1].transpose(-2, -3)`——将行方向结果（轴 0）与列方向结果（轴 1）的转置相结合。这确保了输出遵循**配对表示的对称性**：如果残基 *i* 通过行注意力影响残基 *j*，则残基 *j* 同样通过带转置的列注意力影响残基 *i*。没有此合并，信息将通过配对矩阵不对称地传播。
+
+来源: [modules.py](omegafold/modules.py#L607-L636)
+
+## 门控外积路径: `_get_gated`
+
+门控路径实现了一个**分解的配对更新**，通过将交互分解为经由外积组合的行特征和列特征，避免了完整的 O(N²) 注意力。这种计算受到 `Node2Edge` 模块外积均值的启发，但在边级别上通过学习到的 GLU 激活和 Sigmoid 门控进行操作。
+
+计算在行和列上使用**双循环子批处理**策略：
+
+| 步骤 | 操作 | 形状（每个块） |
+|------|------|----------------|
+| 行激活 | `GLU(edge_row · sliced_w_row + sliced_b_row) × mask` | `(subbatch, N, n_axis, d_act)` |
+| 列激活 | `GLU(edge_col · sliced_w_col + sliced_b_col) × mask` | `(subbatch, N, n_axis, d_act)` |
+| 外积 | `einsum('...ikrd,...jkrd->...ijrd', act_row, act_col)` | `(subbatch_row, subbatch_col, n_axis, d_act)` |
+| 投影 | `outer_prod · out_proj_w + out_proj_b` | `(subbatch_row, subbatch_col, n_axis, d_edge)` |
+| Sigmoid 门控 | `σ(edge_row · act_w[-d_edge:] + act_b[-d_edge:])` | `(subbatch_row, N, n_axis, d_edge)` |
+| 门控运算 | `projected × gate` | `(subbatch_row, subbatch_col, n_axis, d_edge)` |
+
+行和列激活由 `_get_act_row` 和 `_get_act_col` 产生，它们共享相同的 `act_w` 和 `act_b` 参数张量，但通过 `_get_sliced_weight` 访问**不同的切片视图**。切片机制从前 `4 × d_edge` 个通道中提取交替的子张量（在为门控保留最后 `d_edge` 个通道之后），其中 `shift=0` 为行选择偶数索引切片，`shift=1` 为列选择奇数索引切片。这种带有交替访问的参数共享是一种**具有方向特异性的权重绑定**形式——相同的参数块同时编码行方向和列方向的变换，但各自访问不相交的子空间。
+
+计算外积后，在投影前应用层归一化。Sigmoid 门控（每个行块计算一次，然后跨列块广播）控制保留哪些边特征——这是一种类似于 [注意力与子批处理](8-attention-and-subbatching) 模块中门控的机制，但直接应用于配对输出。最后，对 `n_axis` 维度求和以生成形状为 `(N, N, d_edge)` 的输出。
+
+来源: [modules.py](omegafold/modules.py#L638-L669), [modules.py](omegafold/modules.py#L671-L697)
+
+## 参数架构
+
+`GeometricAttention` 的完整参数清单揭示了一种深思熟虑的分配策略。形状为 `[d_edge, n_axis, d_edge * 5]` 的 `act_w` 参数发挥三重作用：其前 `4 × d_edge` 个通道被分割为行/列切片权重（每个获得 `2 × d_edge` 个通道，分解为 4 组 `d_edge/2` 用于 GLU），而最后的 `d_edge` 个通道提供 Sigmoid 门控投影。这种多路复用减少了参数量，同时保持了方向表达能力。
+
+| 参数 | 形状 | 用途 |
+|------|------|------|
+| `linear_b_weights` | `[128, 2, 4]` | 注意力偏置投影（边 → 每头偏置） |
+| `linear_b_bias` | `[2, 4, 1, 1]` | 注意力偏置偏移量 |
+| `act_w` | `[128, 2, 640]` | 行/列激活 + 门控权重（多路复用） |
+| `act_b` | `[2, 640]` | 行/列激活 + 门控偏置（多路复用） |
+| `out_proj_w` | `[2, 128, 128]` | 外积输出投影 |
+| `out_proj_b` | `[2, 128]` | 外积输出偏置 |
+| 内部 `Attention` | — | Q/K/V/O 投影，参数为 `c=32, n_head=4, gating=True` |
+
+在默认配置（`d_edge=128, c=32, n_head=4, n_axis=2`）下，包括内部 Attention 模块在内的总参数量约为 282K。
+
+来源: [modules.py](omegafold/modules.py#L574-L605), [config.py](omegafold/config.py#L59-L93)
+
+## 在 GeoFormer 中的集成
+
+在每个 `GeoFormerBlock` 中，GeometricAttention 被实例化为长度为 `geom_count=2` 的 `ModuleList`，并在节点级注意力和转换**之后**应用，仅在边轨道上操作。调用约定严格为加性（残差）：
+
+```python
+edge_repr += self.out_product(node_repr, mask)        # node → edge
+for layer in self.geometric_attention:                 # edge → edge
+    edge_repr += layer(edge_repr, mask[..., 0, :], fwd_cfg=fwd_cfg)
+edge_repr += self.edge_transition(edge_repr, ...)      # edge MLP
+```
+
+`Node2Edge` 外积均值首先将更新的节点信息注入到边轨道中。然后，两个 GeometricAttention 层依次细化配对表示——第一层传播局部配对约束，第二层允许这些约束在整个矩阵中交互。`mask[..., 0, :]` 切片从多轴掩码张量中提取有效残基掩码，以匹配边表示所期望的一维掩码格式。
+
+来源: [geoformer.py](omegafold/geoformer.py#L89-L126)
+
+## 内存与计算复杂度
+
+边表示的 O(N²) 大小使 GeometricAttention 成为 OmegaFold 中的**主要内存瓶颈**。两条路径都采用子批处理来控制峰值内存：
+
+- **注意力路径**: 两个顺序子批循环——一个用于偏置构建，一个用于注意力计算——每次处理 `subbatch_size` 行。每个子批的内存为 O(subbatch_size × N × d_edge) 而不是 O(N² × d_edge)。
+- **门控路径**: 遍历行和列子批的嵌套双循环。外循环处理行块并计算一次 Sigmoid 门控；内循环遍历列块以计算外积。外积累积的峰值内存为 O(subbatch_size² × d_edge)。
+
+<CgxTip>`_get_gated` 中的双循环子批处理意味着，降低 `subbatch_size` 对门控路径的峰值内存具有**二次效应**（因为外积是在子批对之间计算的），但对注意力路径仅具有**线性效应**。对于极长的序列，门控路径通常主导内存使用。</CgxTip>
+
+<CgxTip>对称合并 `attended[..., 0] + attended[..., 1].transpose(-2, -3)` 不仅仅是为了方便——它在结构上是必要的。没有它，注意力输出将破坏 `edge_repr[i, j]` 和 `edge_repr[j, i]` 应携带几何一致信息的对称不变性，因为行注意力和列注意力处理配对矩阵的相反方向。</CgxTip>
+
+来源: [modules.py](omegafold/modules.py#L607-L669)
+
+## 相关模块
+
+GeometricAttention 是 OmegaFold 中三种不同注意力机制之一，每种机制在不同的表示级别上操作：
+
+| 模块 | 轨道 | 机制 | 页面 |
+|------|------|------|------|
+| `AttentionWEdgeBias` | 节点（单一） | 带有边注入偏置的多头注意力 | [注意力与子批处理](8-attention-and-subbatching) |
+| `Attention` (列) | 节点（配对轴） | 跨配对维度的多头注意力 | [注意力与子批处理](8-attention-and-subbatching) |
+| **`GeometricAttention`** | **边（配对）** | **双路径：配对注意力 + 门控外积** | **本页** |
+
+架构的演进反映了表示层次结构：节点注意力细化每个残基的特征，列注意力在 MSA/配对维度上混合信息，而 GeometricAttention 通过配对表示传播几何约束——这是 [结构模块与 IPA](7-structure-module-and-ipa) 解码 3D 坐标之前的最终表示层。
+
+---
