@@ -1,0 +1,2253 @@
+# Genentech/equifold
+
+Source: https://zread.ai/Genentech/equifold
+
+# 入门
+
+- [入门/概述](https://zread.ai/Genentech/equifold/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**EquiFold** 是一个用于**蛋白质结构预测**的 E3 等变深度学习系统，它引入了一种新颖的**粗粒化结构表示**。该系统由 Prescient Design（Genentech 加速器项目）开发，它摒弃了 AlphaFold2 的全原子或仅主链范式，转而将蛋白质建模为局部刚体的集合——每个刚体编码一组具有化学意义的原子——其位置通过等变神经网络进行迭代精修。最终形成了一个轻量且富有表达力的框架，在微型蛋白质和抗体结构预测任务上均取得了极具竞争力的准确度。
+
+来源: [README.md](/README.md#L1-L4), [models.py](/models.py#L249-L282)
+
+## EquiFold 的功能
+
+给定一段氨基酸序列（或一对重/轻抗体链），EquiFold 能够预测蛋白质的完整 3D 原子坐标，并将输出写入 **gzip 压缩的 PDB 文件**。该系统开箱即支持两种预训练模型配置：
+
+| 模型 | 目标域 | 配置 | 权重 | 输入格式 |
+|-------|--------------|--------|---------|--------------|
+| **`ab`** | 抗体（重链 + 轻链） | `ab_config.json` | `ab_weights.pt` | 包含 `uid, heavy, light` 列的 CSV |
+| **`science`** | 微型蛋白质（单链） | `science_config.json` | `science_weights.pt` | 包含 `uid, seq` 列的 CSV |
+
+这两种模型共享相同的神经网络架构；它们的区别在于超参数，例如迭代精修块的数量（抗体为 6，微型蛋白质为 4）、空间截断半径以及训练策略。
+
+来源: [run_inference.py](/run_inference.py#L48-L76), [models/ab_config.json](/models/ab_config.json#L1-L1), [models/science_config.json](/models/science_config.json#L1-L1)
+
+## 核心创新：粗粒化表示
+
+EquiFold 架构上的核心突破在于其对蛋白质几何结构的**粗粒化（CG）表示**。它不再独立地处理每个原子，而是将每个氨基酸残基分解为 **2–4 个原子组**（CG 节点），其中每个组共享一个共同的局部刚体坐标系（旋转 **R** + 平移 **T**）。例如：
+
+- **丙氨酸** → 2 个 CG 节点：`(C, CA, CB, N)` 和 `(C, CA, O)`
+- **苯丙氨酸** → 3 个 CG 节点：`(C, CA, CB, N)`、`(C, CA, O)` 和 `(CG, CD1, CD2, CE1, CE2, CZ)` —— 芳香环作为单一刚体组
+- **色氨酸** → 3 个 CG 节点，双环吲哚系统被归为一组
+
+这种设计在所有 20 种标准氨基酸中产生了 **43 种独特的 CG 节点类型**。每个节点存储模板局部坐标（`X0`），这些坐标通过其刚体坐标系转换为全局坐标：**X = R · X0 + T**。与全原子模型相比，这极大地减少了自由度，同时保留了关键的化学几何信息。
+
+来源: [cg.py](/cg.py#L1-L55), [utils_data.py](/utils_data.py#L14-L21)
+
+## 架构一览
+
+下图展示了 EquiFold 从序列输入到 PDB 输出的端到端流程：
+
+```mermaid
+flowchart TB
+    subgraph "Input"["输入阶段"]
+        SEQ["氨基酸序列<br/>(CSV 文件)"]
+        FEATS["特征提取<br/>sequence_to_feats()"]
+    end
+
+    subgraph "CG"["粗粒化映射"]
+        CG_MAP["CGNode 分配<br/>cg_dict → 43 种节点类型"]
+        X0["模板坐标<br/>cg_X0.npz (局部坐标系)"]
+        INIT["结构初始化<br/>(黑洞 / 随机)"]
+    end
+
+    subgraph "Refinement"["迭代精修 (num_blocks ×)"]
+        direction TB
+        EMB["嵌入层<br/>Emb: 节点类型 → (s, v)"]
+        E3NN["E3 等变块<br/>E3NN: Equiformer 层"]
+        UPDATE["刚体更新<br/>R ← dR·R, T ← T + dT"]
+    end
+
+    subgraph "Output"["输出阶段"]
+        ATOM["原子重建<br/>scatter: CG → 全原子坐标"]
+        PDB["PDB 写入<br/>x_to_pdb()"]
+    end
+
+    SEQ --> FEATS
+    FEATS --> CG_MAP
+    X0 --> INIT
+    CG_MAP --> INIT
+    INIT --> EMB
+    EMB --> E3NN
+    E3NN --> UPDATE
+    UPDATE --> EMB
+    UPDATE --> ATOM
+    ATOM --> PDB
+```
+
+来源: [models.py](/models.py#L343-L446), [run_inference.py](/run_inference.py#L17-L45), [utils_data.py](/utils_data.py#L209-L399)
+
+## 项目结构
+
+```
+equifold/
+├── run_inference.py          # 入口点：加载模型 → 预测 → 写入 PDB
+├── models.py                 # 核心神经网络：NN, E3NN, Equiformer, MLP 等
+├── cg.py                     # 粗粒化方案：每个残基的原子组定义
+├── utils.py                  # 几何操作：FAPE 损失，欧几里得变换，SLERP
+├── utils_data.py             # 数据流水线：CG 映射，PDB I/O，结构违规损失
+├── cg_X0.npz                 # 所有 CG 类型的预计算模板局部坐标
+├── models/                   # 预训练模型权重和配置
+│   ├── ab_config.json        #   抗体超参数
+│   ├── ab_weights.pt         #   抗体 PyTorch 权重
+│   ├── science_config.json   #   微型蛋白质超参数
+│   └── science_weights.pt    #   微型蛋白质 PyTorch 权重
+├── openfold_light/           # 轻量级 AlphaFold 实用程序（残基常数，解析器）
+└── tests/data/               # 示例推理输入
+    ├── inference_ab_input.csv
+    └── inference_science_input.csv
+```
+
+来源: [README.md](/README.md#L1-L11), [cg.py](/cg.py#L1-L10), [models.py](/models.py#L1-L18)
+
+## 关键技术支柱
+
+| 支柱 | 描述 | 核心模块 |
+|--------|-------------|------------|
+| **粗粒化表示** | 残基被分解为刚性原子组；每个组携带一个局部坐标系 (R, T) 和模板坐标 X0 | `cg.py` |
+| **E3 等变网络** | 具有标量/向量特征、球谐函数和深度张量积的 Equiformer 风格注意力机制 | `models.py` → `Equiformer`, `E3NN` |
+| **迭代精修** | 多个块逐步更新刚体变换；每个块在当前几何形状下重新嵌入节点 | `models.py` → `NN.forward()` |
+| **FAPE 损失** | 帧对齐点误差，用于衡量预测与真实原子位置之间的局部坐标系距离 | `utils.py` → `compute_FAPE_uv()` |
+| **SLERP 预热** | 训练通过四元数球面插值将预测初始化在真实值附近，逐渐退火至模型自身的预测 | `utils.py` → `quaternion_slerp()` |
+| **结构违规损失** | 针对键长、键角和空间位阻的物理感知惩罚项 | `utils.py` → `compute_struct_loss()` |
+
+<CgxTip>粗粒化表示正是 EquiFold 在架构上区别于 AlphaFold2 的关键所在。AF2 预测的是逐残基坐标系和侧链扭转角，而 EquiFold 预测的是逐 CG 节点的刚体变换——这赋予了对化学连贯原子组的直接几何控制能力，而非仅控制单个扭转自由度。</CgxTip>
+
+<CgxTip>每个精修块都会在**当前**的预测几何形状 (R_pred) 下重新嵌入节点特征，这意味着等变网络始终在反映最新结构估计的坐标系下运行。这形成了一个反馈循环：更优的几何形状 → 更优的嵌入 → 更优的更新。</CgxTip>
+
+来源: [models.py](/models.py#L832-L937), [utils.py](/utils.py#L13-L108), [cg.py](/cg.py#L10-L48)
+
+## 依赖与运行时
+
+EquiFold 基于 **PyTorch** 构建，使用 **PyTorch Geometric** 进行图操作，使用 **e3nn** 处理不可约表示和球谐函数。原始实验在 NVIDIA A100 GPU 上运行。关键依赖包括：
+
+- `pytorch` (1.11+) — 核心张量操作与自动求导
+- `e3nn` — E(3) 等变神经网络原语（不可约表示，球谐函数）
+- `torch_geometric` — 图构建与消息传递基础设施
+- `pytorch_lightning` — 训练循环编排
+- `einops` — 张量重塑工具
+
+来源: [README.md](/README.md#L12-L29), [models.py](/models.py#L5-L12)
+
+## 接下来去哪
+
+既然你已经对 EquiFold 的目标和架构有了宏观认知，可以遵循以下阅读路径进一步深入：
+
+1. **[快速上手](2-quick-start)** — 使用预训练模型运行你的首次推理
+2. **[架构概览](3-architecture-overview)** — 完整系统设计的详细剖析
+3. **[粗粒化表示](4-coarse-grained-representation)** — 原子组与刚体坐标系是如何定义的
+4. **[E3 等变神经网络](5-e3-equivariant-neural-network)** — Equiformer 交互块与张量积
+5. **[迭代结构精修](6-iterative-structure-refinement)** — 逐块更新循环与刚体组合
+6. **[推理与 PDB 输出](11-inference-and-pdb-output)** — 从预测结果到原子坐标
+
+---
+
+- [入门/快速开始](https://zread.ai/Genentech/equifold/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+几分钟内让 EquiFold 跑起来——从环境配置到预测你的第一个蛋白质结构。本指南将引导你完成安装、输入数据准备，以及本仓库内置的**抗体**和**微蛋白质**预测模式的推理流程。
+
+## 前提条件
+
+EquiFold 依赖 Python 3.9，以及 PyTorch 和 PyTorch Geometric 生态系统。本项目在配备 CUDA 11.3 的 **NVIDIA A100 GPU** 上开发并验证，同时也提供了仅 CPU 的回退配置。
+
+**启用 GPU 的环境**（推荐）：
+
+```bash
+conda create -n ef python=3.9 -y
+conda activate ef
+conda install pytorch=1.11 cudatoolkit=11.3 -c pytorch -y
+pip install torch-scatter torch-sparse torch-cluster torch-spline-conv torch-geometric -f https://data.pyg.org/whl/torch-1.11.0+cu113.html
+pip install e3nn pytorch-lightning biopython pandas tqdm einops
+```
+
+**仅 CPU 的环境**（用于无 GPU 环境下的测试）：
+
+```bash
+conda create -n ef python=3.9 -y
+conda activate ef
+conda install pytorch=1.12 -c pytorch -y
+conda install pyg -c pyg
+pip install e3nn pytorch-lightning biopython pandas tqdm einops
+```
+
+<CgxTip>安装 PyTorch Geometric 扩展库（`torch-scatter`、`torch-sparse` 等）时，`-f` 标志必须指向与你实际的 PyTorch + CUDA 版本相匹配的 URL。版本不匹配的构建会导致推理阶段的 scatter/gather 操作发生隐蔽的运行时故障。</CgxTip>
+
+来源: [README.md](/README.md#L10-L24)
+
+## 逐步工作流
+
+整个预测流水线——从原始序列到压缩的 PDB——遵循以下流程：
+
+```mermaid
+flowchart LR
+    A["📋 准备输入 CSV"] --> B["⚙️ 加载模型权重 + 配置"]
+    B --> C["🧬 将序列编码为 CG 特征"]
+    C --> D["🔄 运行 EquiFold 推理"]
+    D --> E["📦 写入 .pdb.gz 输出"]
+    
+    style A fill:#e8f4fd,stroke:#1a73e8
+    style B fill:#e8f4fd,stroke:#1a73e8
+    style C fill:#fef7e0,stroke:#f9ab00
+    style D fill:#fef7e0,stroke:#f9ab00
+    style E fill:#e6f4ea,stroke:#1e8e3e
+```
+
+每个步骤直接映射到 [run_inference.py](/run_inference.py) 中的代码：通过 pandas 读取输入 CSV，从 `models/` 目录加载模型权重，经由 `sequence_to_feats` 将序列编码为粗粒度特征，`NN` 模型执行迭代精修，最后将预测的原子坐标写为 gzip 压缩的 PDB 文件。
+
+来源: [run_inference.py](/run_inference.py#L1-L103), [utils_data.py](/utils_data.py#L424-L471)
+
+## 预打包模型权重
+
+本仓库在 `models/` 目录中提供了两种预训练模型变体，无需任何训练即可直接使用：
+
+| 模型 | 配置文件 | 权重文件 | 领域 | 迭代模块 |
+|-------|-------------|--------------|--------|-----------------|
+| `ab` | `ab_config.json` | `ab_weights.pt` | 抗体（重链 + 轻链） | 6 |
+| `science` | `science_config.json` | `science_weights.pt` | 微蛋白质（单链） | 4 |
+
+每个配置 JSON 都包含超参数（学习率、通道维度、交互类型等），在加载时会作为 `**kwargs` 直接传递给 `NN` 构造函数。关键的架构差异在于：抗体模型使用 **6 个迭代精修模块**，截断半径为 64Å；而 science 模型使用 **4 个模块**，截断半径为 32Å——这反映了两个领域不同的结构复杂度。
+
+来源: [models/ab_config.json](/models/ab_config.json#L1-L1), [models/science_config.json](/models/science_config.json#L1-L1), [run_inference.py](/run_inference.py#L60-L66)
+
+## 准备输入数据
+
+EquiFold 接受 **CSV 文件**作为输入序列。具体格式因模型而异：
+
+### 抗体模型（`--model ab`）
+
+| 列名 | 是否必需 | 描述 |
+|--------|----------|-------------|
+| `uid` | ✅ | 每个抗体的唯一标识符（用作输出文件名） |
+| `heavy` | ✅ | 重链的氨基酸序列 |
+| `light` | ✅ | 轻链的氨基酸序列 |
+
+**示例**（`tests/data/inference_ab_input.csv`）：
+
+```csv
+uid,heavy,light
+6mh2,EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS,DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK
+```
+
+对于抗体，重链和轻链序列会独立处理为粗粒度特征，然后以 `len(seq1) + MAX_DIST` 个残基的**空间偏移量**进行拼接，以防止两条链之间发生边缘重叠。
+
+### 微蛋白质模型（`--model science`）
+
+| 列名 | 是否必需 | 描述 |
+|--------|----------|-------------|
+| `uid` | ✅ | 每个蛋白质的唯一标识符 |
+| `seq` | ✅ | 氨基酸序列（单链） |
+
+**示例**（`tests/data/inference_science_input.csv`）：
+
+```csv
+uid,seq
+EHEE_rd3_0145,GSSEQTYTFDNSKQAKKFAKELKKKGIPFQLHQKNGKWQVTKQ
+```
+
+<CgxTip>在单个 CSV 中，所有 `uid` 值必须**唯一**——推理脚本会强制断言此约束。重复的 UID 将导致运行时崩溃并抛出 `AssertionError`。</CgxTip>
+
+来源: [tests/data/inference_ab_input.csv](/tests/data/inference_ab_input.csv#L1-L2), [tests/data/inference_science_input.csv](/tests/data/inference_science_input.csv#L1-L3), [run_inference.py](/run_inference.py#L68-L76)
+
+## 运行推理
+
+激活环境并准备好输入 CSV 后，使用 `run_inference.py` 入口脚本运行预测：
+
+**抗体预测：**
+
+```bash
+python run_inference.py \
+  --model ab \
+  --model_dir models \
+  --seqs tests/data/inference_ab_input.csv \
+  --ncpu 1 \
+  --out_dir out_tests
+```
+
+**微蛋白质预测：**
+
+```bash
+python run_inference.py \
+  --model science \
+  --model_dir models \
+  --seqs tests/data/inference_science_input.csv \
+  --ncpu 1 \
+  --out_dir out_tests
+```
+
+### CLI 参数
+
+| 参数 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `--model` | `ab` | 模型变体：`ab`（抗体）或 `science`（微蛋白质） |
+| `--model_dir` | `models` | 包含 `{model}_weights.pt` 和 `{model}_config.json` 的目录 |
+| `--seqs` | *(必需)* | 包含序列的输入 CSV 文件路径 |
+| `--ncpu` | `1` | 用于并行计算输入特征的 CPU 进程数 |
+| `--out_dir` | `out` | 预测 PDB 文件的输出目录 |
+
+### 底层运行机制
+
+推理脚本按顺序执行四个操作：
+
+1. **模型加载** — 将配置 JSON 反序列化，并作为关键字参数传递给 `NN(**config)`，然后通过 `model.load_state_dict()` 加载预训练权重，并将模型设置为可用设备（CUDA 或 CPU）上的评估模式。
+2. **特征计算** — 使用 `--ncpu` 个 worker 的多进程，将每条序列转换为粗粒度图特征（`cg_cgidx`、`cg_resnum`、scatter 索引、目标原子映射）。
+3. **批量推理** — 带有自定义 `collate_fn` 的 `DataLoader` 每次向模型输入一个结构，设置 `compute_loss=False` 且 `return_struct=True`，从而提取最终迭代预测的坐标。
+4. **PDB 输出** — 预测的原子坐标经由 `x_to_pdb()` 转换为 PDB 格式，并以 gzip 压缩文件（`{uid}.pred.pdb.gz`）的形式写入输出目录。
+
+来源: [run_inference.py](/run_inference.py#L57-L103)
+
+## 理解输出
+
+成功运行后，输出目录中每个输入序列都会对应生成一个 **gzip 压缩的 PDB 文件**：
+
+```
+out_tests/
+├── 6mh2.pred.pdb.gz          # 抗体预测
+└── EHEE_rd3_0145.pred.pdb.gz # 微蛋白质预测
+```
+
+使用 `gunzip` 或 `zcat` 解压：
+
+```bash
+zcat out_tests/6mh2.pred.pdb.gz > 6mh2.pred.pdb
+```
+
+每个 PDB 文件包含标准的 `ATOM` 记录，带有所有重原子的预测 3D 坐标，并组织为单个模型（`MODEL 1`）。残基编号、原子名称和残基类型均通过粗粒度 scatter 映射重建，从 EquiFold 的粗粒度预测中生成完整的原子级结构。
+
+> **已知局限**：该研究版本偶尔可能会产生具有非物理键几何结构或空间位阻冲突的结构。这些问题正着手在未来的版本中予以解决。
+
+来源: [run_inference.py](/run_inference.py#L94-L103), [utils_data.py](/utils_data.py#L155-L198), [README.md](/README.md#L6-L7)
+
+## 后续方向
+
+既然你已能够运行预测，接下来可以探索其架构与内部机制：
+
+- **[架构概述](3-architecture-overview)** — 了解完整的系统设计及各组件的连接方式
+- **[粗粒度表示](4-coarse-grained-representation)** — 深入探讨将每个残基定义为一组刚体的新型 CG 方案
+- **[输入数据流水线](10-input-data-pipeline)** — 了解原始序列如何转化为供神经网络使用的图结构特征
+- **[推理与 PDB 输出](11-inference-and-pdb-output)** — 推理循环及坐标重建的详细演练
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/Genentech/equifold/3-architecture-overview)
+
+---
+slug:3-architecture-overview
+blog_type:normal
+---
+
+
+EquiFold 是一个用于**从头蛋白质结构预测**的 E(3)-等变神经网络，它脱离了 AlphaFold2 的 MSA 与模板范式。相反，它引入了一种**新颖的粗粒化（CG）表示**，将每个残基分解为小的刚性原子簇，并通过一个**迭代等变精修循环**直接预测 SE(3) 坐标系更新，从而仅凭序列即可组装出完整的 3D 结构。本页映射了完整的系统架构——从输入序列到输出 PDB——明确了核心模块、数据流以及将它们绑定在一起的设计决策。
+
+## 项目结构
+
+```
+equifold/
+├── run_inference.py          # 入口点：加载模型、准备数据、运行预测
+├── models.py                 # 核心神经网络架构：NN, E3NN, Equiformer, 嵌入层
+├── cg.py                     # 粗粒化方案：残基 → CG 节点映射
+├── cg_X0.npz                 # CG 局部坐标系的模板坐标
+├── utils.py                  # 几何操作：FAPE 损失、欧几里得变换、结构损失
+├── utils_data.py             # 数据流水线：序列→特征、PDB 写入、结构违规预计算
+├── openfold_light/           # 轻量级 AlphaFold 残基常数与解析工具
+│   ├── residue_constants.py  # 原子类型、键几何、刚体群位置
+│   ├── protein.py            # 蛋白质数据容器
+│   ├── mmcif_parsing.py      # mmCIF 格式解析器
+│   ├── parsers.py            # PDB/FASTA 解析器
+│   └── data_pipeline.py      # 数据流水线辅助工具
+├── models/                   # 预训练模型权重与配置
+│   ├── ab_config.json        # 抗体模型超参数
+│   ├── ab_weights.pt         # 抗体模型权重
+│   ├── science_config.json   # 微型蛋白模型超参数
+│   └── science_weights.pt    # 微型蛋白模型权重
+└── tests/data/               # 推理输入示例 (CSV)
+```
+
+来源: [run_inference.py](/run_inference.py#L1-L103), [models.py](/models.py#L1-L937), [cg.py](/cg.py#L1-L103)
+
+## 系统架构图
+
+下图捕捉了推理期间的端到端数据流，从输入氨基酸序列经过粗粒化表示、迭代等变精修，到最终的全原子重建：
+
+```mermaid
+flowchart TB
+    subgraph Input["输入阶段"]
+        SEQ["氨基酸序列<br/>(CSV)"]
+        FEATS["sequence_to_feats()<br/>utils_data.py"]
+    end
+
+    subgraph CG["粗粒化表示"]
+        CG_MAP["cg_dict: 残基 → CG 节点<br/>cg.py"]
+        CG_IDX["CG 类型索引<br/>(cg_cgidx)"]
+        CG_X0["模板坐标<br/>(cg_X0.npz)"]
+        EDGE["边类型<br/>(残基距离)"]
+    end
+
+    subgraph Init["结构初始化"]
+        INIT["compute_init_struct()<br/>R=I, T=0 (黑洞)<br/>或随机"]
+        SLERP["SLERP 预热<br/>(仅训练阶段)"]
+    end
+
+    subgraph Refinement["迭代等变精修 (×num_blocks)"]
+        EMB["嵌入层<br/>Emb: cg_cgidx → (s, v)"]
+        BLOCK["E3NN 模块<br/>Equiformer × num_layers"]
+        UPD["预测 ΔR, ΔT<br/>R = ΔR·R, T = T + ΔT"]
+        RECON["重建 X_v<br/>X = R·X0 + T"]
+    end
+
+    subgraph Output["输出阶段"]
+        SCATTER["散射至全原子<br/>compute_x_pdb()"]
+        PDB["PDB 文件<br/>(gzip 压缩)"]
+    end
+
+    SEQ --> FEATS
+    FEATS --> CG_MAP
+    FEATS --> CG_IDX
+    FEATS --> EDGE
+    CG_MAP --> CG_X0
+    CG_IDX --> EMB
+    CG_X0 --> RECON
+    EDGE --> BLOCK
+    INIT --> SLERP
+    SLERP --> EMB
+    EMB --> BLOCK
+    BLOCK --> UPD
+    UPD --> RECON
+    RECON --> SCATTER
+    UPD -.->|"下一个模块"| EMB
+    SCATTER --> PDB
+```
+
+来源: [models.py](/models.py#L265-L400), [run_inference.py](/run_inference.py#L80-L102), [utils_data.py](/utils_data.py#L1-L50)
+
+## 核心架构组件
+
+EquiFold 的架构由四个紧密耦合的组件构成，每个组件贯穿于代码库的实现中。下表将每个组件映射到其负责的模块及关键的类/函数：
+
+| 组件 | 主文件 | 关键抽象 | 角色 |
+|---|---|---|---|
+| **粗粒化表示** | `cg.py`, `utils_data.py` | `cg_dict`, `cg_to_idx`, `cg_X0` | 将每个残基的原子映射为刚性局部坐标系；提供模板坐标与类型索引 |
+| **E3-等变神经网络** | `models.py` | `E3NN`, `Equiformer`, `DTPByHead`, `RadialNN` | 采用深度张量积与注意力机制的等变消息传递 |
+| **迭代结构精修** | `models.py` | `NN.forward()`, `compute_init_struct()` | 反复嵌入 CG 节点，运行 E3NN 模块，预测坐标系更新 ΔR, ΔT |
+| **损失与训练** | `utils.py`, `models.py` | `compute_FAPE_uv()`, `compute_struct_loss()`, `quaternion_slerp()` | 帧对齐点误差 + 结构违规惩罚；SLERP 预热 |
+
+来源: [cg.py](/cg.py#L1-L103), [models.py](/models.py#L1-L200), [utils.py](/utils.py#L1-L200)
+
+## 粗粒化表示
+
+EquiFold 最基础的设计选择在于如何参数化蛋白质的 3D 结构。它没有直接预测笛卡尔坐标，而是将每个残基**分解为小的原子群**（CG 节点），每个群表示为一个**刚体坐标系**——即旋转矩阵 **R** ∈ SO(3) 和平移向量 **T** ∈ ℝ³。每个 CG 节点内的原子在由模板坐标 `cg_X0` 定义的**局部坐标系**中指定，全原子位置可通过 **X = R · X₀ + T** 恢复。
+
+例如，丙氨酸被分解为两个 CG 节点：主链帧 `{C, CA, CB, N}` 和羰基氧 `{C, CA, O}`。20 种标准氨基酸各自拥有一个手动定义的分解方式，存储在 `cg_dict` 中。系统通过断言每个残基在所有 CG 节点上的原子并集等于来自 `residue_atoms` 的完整原子集，来验证其完备性。
+
+来源: [cg.py](/cg.py#L14-L43), [cg.py](/cg.py#L56-L75)
+
+## E3-等变网络模块
+
+`E3NN` 模块是等变主干。每个实例包含 `num_layers` 个 `Equiformer` 交互层，随后是一个最终的**欧几里得输出层**，用于预测帧更新 (ΔR, ΔT)。`Equiformer` 层实现了一种基于注意力的消息传递机制，其子结构如下：
+
+1. **边嵌入**：残基序列距离通过 `nn.Embedding` 嵌入，提供相对位置编码
+2. **初始混合**：源节点和目标节点的特征通过学习的 `Linear` 层进行投影，并通过逐通道张量积进行组合（标量×标量，标量×向量，向量×标量，向量·向量）
+3. **预注意力 DTP**：具有球谐方向向量的深度张量积（`DTPByHead`），由依赖于节点间距离的 `RadialNN`（Bessel 基 → MLP）加权
+4. **注意力**：计算门控消息，从标量特征导出注意力分数，并通过 softmax 归一化的注意力聚合来自邻居的消息
+5. **前馈**：一个门控非线性模块（ff1 → SiLU/sigmoid 门控 → ff2），带有可选的 ResNet 跳跃连接
+
+最终的欧几里得层输出不可约表示 `(0, 2)`——零个标量通道和两个向量通道——它们被解释为平移更新 `dT` 和无约束旋转参数 `u`，后者通过 `R_from_quaternion_u()` 转换为旋转矩阵。
+
+来源: [models.py](/models.py#L830-L937), [models.py](/models.py#L607-L797), [models.py](/model.py#L477-L605)
+
+## 迭代精修循环
+
+`NN.forward()` 方法编排了整个预测流水线。在初始化结构（默认：单位旋转和零平移——“黑洞”方案）之后，模型迭代 `num_blocks + 1` 步：
+
+- **模块 0**：存储初始结构而不进行网络评估（用于计算起点的损失）
+- **模块 1…N**：每个模块重新嵌入 CG 节点（可选地为每个模块使用不同的嵌入），运行 E3NN 模块以预测 (ΔR, ΔT)，并更新帧：`R = ΔR · R`，`T = T + ΔT`。随后，更新后的帧被用于重建坐标 `X_v = R · X₀ + T`，并将其散射至全原子位置
+
+在训练期间，**SLERP 预热**利用四元数球面线性插值，将初始帧从真实值逐渐插值到初始化方案，此过程由在 `warmup_steps` 期间从 0→1 递增的预热参数 τ 控制。这通过使网络从接近正确结构的状态开始，从而稳定了早期训练。
+
+来源: [models.py](/models.py#L265-L500), [utils.py](/utils.py#L208-L260)
+
+## 损失函数架构
+
+EquiFold 采用结合了**帧对齐点误差（FAPE）**与**结构违规惩罚**的复合损失：
+
+| 损失组件 | 函数 | 衡量内容 | 权重 |
+|---|---|---|---|
+| **FAPE** | `compute_FAPE_uv()` | 在与每个局部坐标系对齐后，预测与真实原子位置之间的距离 | 始终激活 |
+| **键长** | `compute_struct_loss()` | 预测键长偏离立体化学标准的程度（超出容差） | `weight_struct_loss × scale` |
+| **键角** | `compute_struct_loss()` | 预测键角偏离理想值的程度（超出容差） | `weight_struct_loss × scale` |
+| **冲突** |+ `compute_struct_loss()` | 原子对距离小于范德华半径之和减去容差 | `weight_struct_loss × scale` |
+
+结构违规缩放可按照在精修模块间的 `constant`、`linear` 或 `quadratic` 计划进行。FAPE 在每个 CG 节点的局部坐标系中计算，使其天然具有 **SE(3)-不变性**——这是等变架构的关键属性。由 180° 对称性引起的歧义（例如，ASP 的 OD1/OD2 互换）通过将预测距离与主要和替代的真实值进行比较来解决，选择匹配度更好的一个。
+
+来源: [utils.py](/utils.py#L47-L80), [utils.py](/utils.py#L262-L340), [models.py](/models.py#L460-L490)
+
+## 模型变体
+
+提供了两种预训练模型配置，它们在精修模块数量和空间截断半径上有所不同：
+
+| 参数 | 抗体 (`ab`) | 微型蛋白 (`science`) |
+|---|---|---|
+| `num_blocks` | 6 | 4 |
+| `num_layers` | 2 | 2 |
+| `nc` (通道数) | 64 | 64 |
+| `attn_num_heads` | 2 | 2 |
+| `rc` (截断) | 64.0 Å | 32.0 Å |
+| `lr_anneal_final_step` | 100,000 | 200,000 |
+| `distinct_blocks` | true | true |
+| `distinct_embeddings` | true | true |
+
+抗体模型使用了更多的精修模块和更大的空间截断，以适应抗体 CDR 环所特有的长程相互作用，而微型蛋白模型则使用了适合紧凑球状结构域的较小截断。
+
+来源: [models/ab_config.json](/models/ab_config.json#L1), [models/science_config.json](/models/science_config.json#L1)
+
+## 关键设计原则
+
+**构造性 E(3)-等变**：网络绝不直接处理原始笛卡尔坐标。所有中间表示要么是标量特征（不变），要么是向量特征（等变），预测的更新 (ΔR, ΔT) 通过群操作与现有帧复合，保证了旋转/平移输入会产生输出的相同变换。
+
+**帧对齐损失**：通过在每个 CG 节点的局部坐标系而非全局坐标中计算 FAPE，损失天然对全局 SE(3) 变换保持不变，消除了训练期间进行外部对齐（例如 Kabsch 算法）的需要。
+
+**作为归纳偏置的粗粒化**：CG 分解将搜索空间从独立预测所有原子位置缩减为预测每个残基的少量刚体变换。这将每个残基内强烈的几何约束（键长、键角、平面性）编码到表示本身中，让网络去学习更困难的残基间几何结构。
+
+<CgxTip>`compute_init_struct("blackhole")` 初始化将所有 CG 节点置于原点并赋予单位旋转——在结构上毫无意义，但在等变性上有效。SLERP 预热对训练收敛至关重要：若没有它，来自完全坍缩初始状态的 FAPE 梯度信号过于弥散，无法引导网络生成有意义的结构。</CgxTip>
+
+来源: [models.py](/models.py#L18-L32), [models.py](/models.py#L830-L937), [utils.py](/utils.py#L47-L80)
+
+## 导航指南
+
+要深入理解每个组件，请遵循以下深度剖析部分的阅读路径：
+
+1. **[粗粒化表示](4-coarse-grained-representation)** — 残基如何分解为刚性帧与模板坐标
+2. **[E3-等变神经网络](5-e3-equivariant-neural-network)** — Equiformer 交互层、张量积与注意力机制
+3. **[迭代结构精修](6-iterative-structure-refinement)** — 精修循环、帧更新与 SLERP 预热
+4. **[FAPE 损失函数](7-fape-loss-function)** — 帧对齐点误差与对称性歧义消解
+5. **[结构违规损失](8-structure-violation-losses)** — 键长、键角与冲突惩罚计算
+6. **[使用 SLERP 预热进行训练](9-training-with-slerp-warmup)** — 四元数插值与学习率调度
+7. **[输入数据流水线](10-input-data-pipeline)** — 推理期间的序列特征化与 CG 映射
+8. **[推理与 PDB 输出](11-inference-and-pdb-output)** — 端到端预测与坐标重建
+9. **[模型配置参考](12-model-configuration-reference)** — `NN.__init__()` 的完整参数目录
+
+---
+
+- [深入解析/模型配置参考](https://zread.ai/Genentech/equifold/12-model-configuration-reference)
+
+---
+slug:12-model-configuration-reference
+blog_type:normal
+---
+
+
+EquiFold 的模型行为完全由单个 JSON 配置文件控制，该文件的键值对会在实例化时直接解包并传入 `NN` 构造函数。本页提供了完整的参数参考，解释了每个参数的架构作用，并比较了内置的两种预设 —— **ab**（抗体）和 **science**（单链）—— 以便你在训练自定义模型前，能够合理评估需要修改的内容。
+
+来源: [models.py](models.py#L249-L311), [run_inference.py](run_inference.py#L57-L62)
+
+## 配置加载机制
+
+在推理时，`--model` CLI 标志会选择 `models/` 目录下的一对文件：`{model}_config.json` 用于超参数，`{model}_weights.pt` 用于已学习的参数。配置 JSON 通过 `json.load` 加载，并作为关键字参数解包传入 `NN(**config)`。由于 `NN.__init__` 为每个参数都定义了默认值，因此配置文件可以省略任何键 —— 此时将使用相应的默认值。这意味着你可以创建仅覆盖你关注参数的最小化配置文件。
+
+```mermaid
+flowchart LR
+    A["CLI --model flag"] --> B["{model_dir}/{model}_config.json"]
+    B --> C["json.load → dict"]
+    C --> D["NN **config"]
+    D --> E["PyTorch Lightning Module"]
+    F["{model_dir}/{model}_weights.pt"] --> G["load_state_dict"]
+    E --> G
+    G --> H["Ready Model"]
+```
+
+来源: [run_inference.py](run_inference.py#L48-L64)
+
+## 完整参数参考
+
+下表列出了 `NN.__init__` 接受的所有参数，并按子系统分组。**Default** 列显示了 Python 级别的默认值（即当 JSON 中缺少该键时的取值）。**ab** 和 **science** 列显示了内置预设配置中的值。
+
+### 优化与学习率调度
+
+| 参数 | 类型 | 默认值 | ab | science | 描述 |
+|---|---|---|---|---|---|
+| `lr` | float | `1e-5` | `0.001` | `0.001` | Adam 优化器的基础学习率 |
+| `wd` | float | `1e-8` | `1e-8` | `1e-8` | 权重衰减（L2 正则化） |
+| `lr_warmup` | bool | `false` | `true` | `true` | 在 `warmup_steps` 内从 0 线性预热至 `lr` |
+| `lr_anneal` | bool | `false` | `true` | `true` | 预热完成后进行余弦退火 |
+| `lr_anneal_final_step` | int | `200000` | `100000` | `200000` | 退火达到下限 `0.1 × lr` 时的步数 |
+| `slerp_warmup` | bool | `true` | `true` | `true` | 预热期间从真实值到初始方案的 SLERP 插值 |
+| `warmup_steps` | int | `1` | — | — | SLERP 和 LR 预热的训练步数 |
+| `accumulate_grad_batches` | int | `1` | — | — | 优化器执行步骤前的梯度累积步数 |
+| `gradient_clip_val` | float | `5.0` | — | — | `clip_grad_norm_` 的最大梯度范数 |
+
+学习率调度为三阶段曲线：(1) 在 `warmup_steps` 内从 0 → `lr` 的**线性预热**；(2) 预热完成后在 `lr_anneal_final_step` 步内从 `lr` → `0.1 × lr` 的**余弦退火**；(3) 此后保持 `0.1 × lr` 的**恒定下限**。`lr_anneal_final_step` 是预设间的主要区分点 —— 抗体模型的退火速度（10 万步）是科学模型（20 万步）的两倍，这反映了抗体结构预测的典型训练集规模较小。
+
+来源: [models.py](models.py#L250-L282), [models.py](models.py#L505-L537)
+
+### 网络架构
+
+| 参数 | 类型 | 默认值 | ab | science | 描述 |
+|---|---|---|---|---|---|
+| `nc` | int | `32` | `64` | `64` | 通道数 —— 控制标量（`d_s = nc`）和向量（`d_v = 3×nc`）嵌入的宽度 |
+| `num_blocks` | int | `4` | `6` | `4` | 迭代细化块（每个块 = 嵌入 → E3NN → 预测 ΔR, ΔT） |
+| `num_layers` | int | `3` | `2` | `2` | 每个块中的 Equiformer 层数（位于最终的欧几里得预测层之前） |
+| `interaction_type` | str | `"attn-direct"` | `"attn-direct"` | `"attn-direct"` | 交互模块类型；目前仅支持 `"attn-direct"` |
+| `attn_num_heads` | int | `1` | `2` | `2` | Equiformer 注意力机制中的注意力头数 |
+| `distinct_blocks` | bool | `false` | `true` | `true` | 若为 true，每个细化块将拥有独立的 E3NN 参数 |
+| `distinct_embeddings` | bool | `false` | `true` | `true` | 若为 true，每个块将拥有独立的节点嵌入表 |
+| `rc` | float | `100.0` | `64.0` | `32.0` | Bessel 基和软权重截断的径向截断距离 (Å) |
+| `d_edge` | int | `32` | `32` | `32` | 残基间隔边特征的边嵌入维度 |
+| `radial_num_basis` | int | `32` | — | — | Bessel 径向基函数的数量 |
+| `radial_num_hidden` | int | `32` | — | — | 径向 MLP 的隐藏层维度 |
+| `apply_layer_norm` | bool | `false` | — | — | 在注意力和前馈层之前应用等变 LayerNorm |
+| `attend_to_self` | bool | `false` | — | — | 允许节点自注意力（否则将掩码自注意力） |
+| `disable_cutoff` | bool | `false` | — | — | 禁用软径向权重截断（所有节点对贡献相等） |
+
+**`nc` 是影响最大的单一参数** —— 它决定了标量特征（`nc`）和向量特征（`3 × nc`）的嵌入维度，并传播至每个 `Linear`、`Equiformer` 和 `RadialNN` 子模块。两种预设均将其默认值翻倍至 64。**截断半径 `rc`** 是第二个关键架构旋钮：抗体模型使用 `rc = 64 Å`（用于捕获重/轻链间的长程接触），而科学模型使用 `rc = 32 Å`（足以应对单链折叠）。**`num_blocks`** 控制迭代细化的深度：抗体为 6 个块（需更多迭代以解析链间几何结构），单链为 4 个块。
+
+<CgxTip>当 `distinct_blocks = true` 且 `distinct_embeddings = true` 时（如两种预设的情况），每次细化迭代都拥有完全独立的参数 —— 该模型实际上是 `num_blocks` 个专用网络的集合，而非单一共享权重的循环回路。这会显著增加参数量，但能防止跨迭代的表征坍缩。</CgxTip>
+
+来源: [models.py](models.py#L249-L340), [models.py](models.py#L313-L323)
+
+### 损失与结构违规
+
+| 参数 | 类型 | 默认值 | ab | science | 描述 |
+|---|---|---|---|---|---|
+| `fape_clip_val` | float | `10.0` | — | — | FAPE 损失的 `d_max` 截断值 —— 超出此范围的距离将被封顶 |
+| `weight_struct_loss` | float | `1.0` | — | — | 结构违规损失（键长 + 键角 + 空间冲突）的缩放因子 |
+| `weight_struct_loss_scale` | str | `"constant"` | — | — | 逐块缩放配置：`"constant"`、`"linear"` 或 `"quadratic"` |
+
+`weight_struct_loss_scale` 控制结构违规损失在各细化块间的爬升方式。使用 `"constant"` 时，每个块的贡献权重相等。使用 `"linear"` 时，后续块的权重更大（缩放系数 = `i / num_blocks`）。使用 `"quadratic"` 时，爬升更陡峭（缩放系数 = `(i / num_blocks)²`）。块 `i` 的总结构损失为：
+
+```
+loss_struct_i = τ × weight_struct_loss × scale(i) × (loss_bond + loss_angle + loss_clash)
+```
+
+其中 `τ` 为 SLERP 预热插值因子（在 `warmup_steps` 内从 0 → 1）。
+
+来源: [models.py](models.py#L278-L282), [models.py](models.py#L448-L474)
+
+### 初始化与推理控制
+
+| 参数 | 类型 | 默认值 | ab | science | 描述 |
+|---|---|---|---|---|---|
+| `init_scheme` | str | `"blackhole"` | — | — | 初始结构：`"blackhole"`（恒等旋转，零平移）或 `"random"` |
+
+`init_scheme` 决定了迭代细化的起点。`"blackhole"` 将所有 CG 节点置于原点并赋予恒等旋转 —— 网络必须学会将结构向外“爆炸”展开。`"random"` 使用随机 SO(3) 旋转和高斯采样平移（`σ = 1.0`）进行初始化，这有助于早期训练阶段的探索，但会引入噪声。
+
+来源: [models.py](models.py#L21-L35), [models.py](models.py#L273)
+
+## 预设对比：ab vs. science
+
+这两种内置配置在**抗体**（双链重+轻链）和**单链科学**用例之间体现了一种刻意的架构权衡：
+
+```mermaid
+graph TD
+    subgraph Antibody Model
+        AB1["num_blocks = 6<br/>More refinement iterations"]
+        AB2["rc = 64 Å<br/>Long-range cutoff for inter-chain"]
+        AB3["lr_anneal_final_step = 100k<br/>Faster annealing"]
+    end
+    subgraph Science Model
+        SC1["num_blocks = 4<br/>Fewer iterations needed"]
+        SC2["rc = 32 Å<br/>Shorter cutoff sufficient"]
+        SC3["lr_anneal_final_step = 200k<br/>Slower annealing"]
+    end
+    AB1 ---|"Shared: nc=64, attn_num_heads=2,<br/>distinct_blocks=true, num_layers=2"| SC1
+```
+
+| 方面 | ab | science | 原理 |
+|---|---|---|---|
+| 细化深度 | 6 个块 | 4 个块 | 链间几何结构需要更多迭代 |
+| 空间感受野 | 64 Å | 32 Å | 抗体需要跨链注意力 |
+| 训练调度 | 10 万步退火 | 20 万步退火 | 抗体数据集较小 → 需更快的收敛目标 |
+| 边嵌入维度 | 32 | 32 | 相同 —— 残基间隔编码与领域无关 |
+| 通道宽度 | 64 | 64 | 相同 —— 两者均受益于更宽的表征 |
+
+来源: [models/ab_config.json](models/ab_config.json#L1-L1), [models/science_config.json](models/science_config.json#L1-L1)
+
+## 导出量与内部架构
+
+多个配置参数会传播并衍生出架构维度。在修改 `nc`、`attn_num_heads` 或 `d_edge` 时，理解这些关系至关重要：
+
+| 导出量 | 公式 | 源参数 |
+|---|---|---|
+| 标量嵌入维度 (`d_s`) | `nc` | `nc` |
+| 向量嵌入维度 (`d_v`) | `3 × nc` | `nc` |
+| 嵌入输入词表大小 | `NUM_CG_TYPES + 1` | [cg.py](cg.py#L48)（由粗粒化方案计算得出） |
+| 边类型词表大小 | `2 × MAX_DIST + 2 = 66` | [utils_data.py](utils_data.py#L14-L15)（`MAX_DIST = 32`） |
+| 每头通道数 | `nc // attn_num_heads` | `nc`, `attn_num_heads` |
+| DTP 后乘积维度 | `2 × nc_per_head` | `nc`, `attn_num_heads` |
+| 注意力前 DTP 权重元素数 | `4 × nc_per_head × attn_num_heads` | `nc`, `attn_num_heads` |
+| 前馈扩展维度 | `ff_mul × nc`（其中 `ff_mul = 3`） | `nc` |
+| 最终欧几里得层输出不可约表示 | `(0, 2)` — 2 个向量通道 | 硬编码 |
+
+<CgxTip>`nc` 必须能被 `attn_num_heads` 整除（通过 `nc_by_head = nc // num_heads` 隐式强制执行）。当 `nc = 64` 且 `attn_num_heads = 2` 时，每个头操作 32 个通道。如果在 `nc = 64` 时尝试设置 `attn_num_heads = 3`，将导致 `DTPByHead` 模块出现维度不匹配错误。</CgxTip>
+
+来源: [models.py](models.py#L172-L198), [models.py](models.py#L656-L678), [models.py](models.py#L832-L905)
+
+## 推理时 CLI 参数
+
+`run_inference.py` 脚本接受以下控制加载配置的 CLI 参数：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--model` | str | `"ab"` | 模型预设名称；必须与 `model_dir` 中的 `{name}_config.json` 和 `{name}_weights.pt` 匹配。可选值：`"ab"`、`"science"` |
+| `--model_dir` | str | `"models"` | 包含配置 JSON 和权重文件的目录 |
+| `--seqs` | str | `None` | 输入 CSV 的路径（必填） |
+| `--ncpu` | int | `1` | 数据预处理的 CPU 并行度 |
+| `--out_dir` | str | `"out"` | 预测 PDB 文件的输出目录（gzip 压缩） |
+
+要使用自定义配置，请将 `{name}_config.json` 和 `{name}_weights.pt` 放入 `model_dir`，然后传入 `--model {name}`。配置 JSON 只需包含你想要覆盖的参数 —— 其余参数将回退至 `NN.__init__` 的默认值。
+
+来源: [run_inference.py](run_inference.py#L48-L55)
+
+## 创建自定义配置
+
+在设计新配置时，请遵循此决策框架：
+
+1. **领域复杂度** → 设置 `num_blocks`（多链或大蛋白质需要更多块）和 `rc`（长程接触需要更大的截断值）
+2. **模型容量** → 设置 `nc`（更宽的通道以增强表达能力）和 `attn_num_heads`（更多的头以获取更丰富的注意力模式，确保 `nc % attn_num_heads == 0`）
+3. **训练预算** → 设置 `lr_anneal_final_step`（更大数据集需要更长退火步数）和 `accumulate_grad_batches`（增加此值以模拟更大的批大小）
+4. **正则化** → 设置 `gradient_clip_val` 和 `wd`（若训练不稳定则增加）；在 `nc` 较高时将 `apply_layer_norm` 设为 `true` 以提升训练稳定性
+
+仅覆盖关键架构参数的最小化自定义配置：
+
+```json
+{
+  "nc": 48,
+  "num_blocks": 5,
+  "rc": 48.0,
+  "attn_num_heads": 2,
+  "lr": 0.0005,
+  "lr_anneal_final_step": 150000
+}
+```
+
+来源: [models.py](models.py#L249-L282)
+
+## 下一步
+
+- 了解这些参数如何在迭代细化循环中流转，请参阅 [迭代结构细化](6-iterative-structure-refinement)
+- 了解由 `fape_clip_val` 和 `weight_struct_loss` 控制的损失函数，请参阅 [FAPE 损失函数](7-fape-loss-function) 和 [结构违规损失](8-structure-violation-losses)
+- 了解由 `slerp_warmup` 和 `warmup_steps` 控制的 SLERP 预热机制，请参阅 [使用 SLERP 预热进行训练](9-training-with-slerp-warmup)
+
+---
+
+## 核心流水线
+
+- [深入解析/核心流水线/粗粒度表征](https://zread.ai/Genentech/equifold/4-coarse-grained-representation)
+
+---
+slug:4-coarse-grained-representation
+blog_type:normal
+---
+
+
+EquiFold的粗粒度（CG）表示是一种基础抽象，它将蛋白质的全原子结构转换为由**刚体节点**构成的图——每个节点编码一个局部坐标系（旋转**R** + 平移**T**）以及一组刚性运动的原子位置。这种分解使得E3等变网络能够在紧凑且具备旋转感知的特征上运算，而非直接处理原始笛卡尔坐标，从而在保留蛋白质折叠所必需的几何结构的同时，大幅降低了维度。
+
+## 刚性群分解
+
+核心思想是，每个氨基酸残基可以被划分为若干**刚性群**——即由键几何结构固定了相对位置的原子簇，它们仅在扭转角变化时作为整体重新定向。这与AlphaFold2的刚性群分解相呼应，其中骨架原子构成一个群，侧链原子则根据可旋转键分裂为不同的群。每个刚性群成为EquiFold图中的一个**CG节点**，携带自身的SO(3)坐标系和局部原子坐标。
+
+[cg.py](cg.py)中的`cg_dict`为所有20种标准氨基酸定义了该分解。每个残基映射到一个元组列表，其中每个元组包含属于同一个刚性群的原子名称：
+
+```python
+cg_dict = {
+    "ALA": [("C", "CA", "CB", "N"), ("C", "CA", "O")],
+    "ARG": [("C", "CA", "CB", "N"), ("C", "CA", "O"), ("CB", "CG", "CD"), ("NE", "NH1", "NH2", "CZ")],
+    "PHE": [("C", "CA", "CB", "N"), ("C", "CA", "O"), ("CG", "CD1", "CD2", "CE1", "CE2", "CZ")],
+    "TRP": [("C", "CA", "CB", "N"), ("C", "CA", "O"), ("CG", "CD1", "CD2", "CE2", "CE3", "CZ2", "CZ3", "CH2", "NE1")],
+    ...
+}
+```
+
+来源: [cg.py](cg.py#L1-L31)
+
+### 每个残基的群结构
+
+每个残基遵循一致的模式分解为**2至4个刚性群**。第一个群始终捕获**骨架坐标系**（N–CA–C加上适用的CB），第二个群将**羰基氧**锚定到骨架上。附加群则捕获由chi扭转角分隔的侧链刚性片段。
+
+| 残基 | 群数量 | 群1 (骨架) | 群2 (羰基) | 群3+ (侧链) |
+|---------|----------|-------------------|--------------------|-----------------------|
+| GLY | 2 | C, CA, N | C, CA, O | — |
+| ALA | 2 | C, CA, CB, N | C, CA, O | — |
+| SER | 3 | C, CA, CB, N | C, CA, O | CA, CB, OG |
+| PHE | 3 | C, CA, CB, N | C, CA, O | CG, CD1, CD2, CE1, CE2, CZ |
+| TRP | 3 | C, CA, CB, N | C, CA, O | CG, CD1, CD2, CE2, CE3, CZ2, CZ3, CH2, NE1 |
+| ARG | 4 | C, CA, CB, N | C, CA, O | CB, CG, CD \| NE, NH1, NH2, CZ |
+| ILE | 4 | C, CA, CB, N | C, CA, O | CB, CG1, CG2 \| CB, CG1, CD1 |
+| LYS | 4 | C, CA, CB, N | C, CA, O | CB, CG, CD \| CD, CE, NZ |
+
+来源: [cg.py](cg.py#L10-L31)
+
+该分解是**完备的**——运行时断言验证了所有CG群中原子的并集，与[openfold_light/residue_constants.py](openfold_light/residue_constants.py#L356-L405)中`residue_atoms`定义的每个残基的完整重原子集完全匹配：
+
+```python
+for res, atoms in residue_atoms.items():
+    assert set([atom for cg in cg_dict[res] for atom in cg]) == set(atoms)
+```
+
+来源: [cg.py](cg.py#L37-L38)
+
+## CG节点类型索引
+
+每个不同的（残基类型，群索引）对被分配一个**唯一整数ID**，从而创建了一个由网络嵌入的有限CG节点类型词表。该索引通过按规范顺序迭代20种标准残基（排除UNK）确定性地构建：
+
+```python
+cg_to_idx = {}
+idx = 0
+for res in resnames[:-1]:  # skip UNK
+    for j in range(len(cg_dict[res])):
+        cg_to_idx[(resname_to_idx[res], j)] = idx
+        idx += 1
+```
+
+这产生了**60种独特的CG类型**（`NUM_CG_TYPES = 60`），嵌入层将其用作词表大小（`NUM_CG_TYPES + 1`以适应填充）。逆映射`idx_to_cg`允许从任何CG类型ID恢复（残基索引, 群编号）对。
+
+来源: [cg.py](cg.py#L41-L48), [models.py](models.py#L313-L316)
+
+### 最大群规模
+
+常量`N_CG_MAX`捕获了所有CG群中的最大原子数：
+
+```python
+N_CG_MAX = max([max(len(y) for y in x) for x in cg_dict.values()])
+```
+
+该值为**9**，由TRP的侧链群决定，其包含（CG, CD1, CD2, CE2, CE3, CZ2, CZ3, CH2, NE1）。所有CG节点坐标数组都被填充至该大小，无论每个群中实际存在多少原子，都能生成统一的`[N_CG, N_CG_MAX, 3]`张量。
+
+来源: [cg.py](cg.py#L33-L34)
+
+## 坐标系构建：从原子到刚体
+
+[utils_data.py](utils_data.py)中的数据流水线通过`pdb_feats_to_data()`函数将原始全原子位置转换为CG表示。对于每个残基，它遍历`cg_dict`中定义的CG群，从37通道的全原子数组中提取相关原子位置，并计算刚体坐标系。
+
+### 通过Kabsch算法计算坐标系
+
+每个CG节点的旋转**R**和平移**T**，是通过使用Kabsch算法将节点的当前原子位置与**模板坐标**（`cg_X0`）对齐而获得的——Kabsch算法是求解两个配对点集间最优旋转的闭式解：
+
+```python
+def get_cg_RT(cg_cgidx, cg_X, cg_mask, cg_atom_mask, use_kabsch):
+    if not use_kabsch:
+        cg_T, cg_R = get_euclidean(torch.from_numpy(cg_X[:, :3]))
+    else:
+        cg_T, cg_R = get_euclidean_kabsch(torch.from_numpy(cg_X), cg_X0[cg_cgidx], 
+                                           torch.from_numpy(cg_atom_mask))
+```
+
+模板坐标`cg_X0`被预计算并存储在[cg_X0.npz](cg_X0.npz)中，为每种CG类型提供规范的“理想”局部坐标系。这意味着**R**和**T**编码了每个刚性群与其理想几何的偏差——这种表示既紧凑，又非常适合迭代精炼。
+
+来源: [utils_data.py](utils_data.py#L122-L130), [utils_data.py](utils_data.py#L17-L21)
+
+### 掩码与缺失原子
+
+流水线通过双层掩码方案谨慎处理缺失原子（在实验PDB结构中很常见）：
+
+- **`cg_mask`**（节点级）：仅当CG节点的**前三个原子**全部存在时，该节点才有效（1.0）——这些原子定义了局部坐标系。如果任何定义坐标系的原子缺失，则整个节点将被掩码屏蔽。
+- **`cg_atom_mask`**（原子级）：在有效节点内，单个原子仍可能缺失。此逐原子掩码对于FAPE损失至关重要，该损失必须忽略未观测原子的预测位置。
+
+对于被掩码屏蔽的节点，模板坐标将被作为虚拟值代入，并且在减去质心后，平移/旋转将被置零或设为单位矩阵，以防止梯度污染。
+
+来源: [utils_data.py](utils_data.py#L244-L276), [utils_data.py](utils_data.py#L110-L119)
+
+## 180°对称性与命名歧义
+
+四种氨基酸——**ASP, GLU, PHE, TYR**——包含在180°旋转下不可区分的对称原子对。AlphaFold2通过定义原子重命名交换解决了此问题；EquiFold通过`cg_dict_rename`继承了此约定：
+
+```python
+cg_dict_rename = {
+    "ASP": [None, None, (0, 2, 1)],       # OD1 ↔ OD2
+    "GLU": [None, None, (0, 1, 3, 2)],    # OE1 ↔ OE2
+    "PHE": [None, None, (0, 2, 1, 4, 3, 5)],  # CD1↔CD2, CE1↔CE2
+    "TYR": [None, None, (0, 2, 1, 4, 3, 5, 6)],  # CD1↔CD2, CE1↔CE2
+    ...
+}
+```
+
+这些排列被编译为训练期间使用的两个numpy数组：
+
+- **`cg_atom_rename_np`**：每种CG类型的排列索引，用于构建“备选真值”坐标。
+- **`cg_atom_ambiguous_np`**：一个二值掩码，指示每种CG类型内哪些原子受歧义影响（非恒等排列）。
+
+数据流水线同时生成主坐标和备选（排列后）坐标、旋转及平移，使得[FAPE损失](7-fape-loss-function)能够选择产生较低误差的对齐方式。
+
+来源: [cg.py](cg.py#L58-L89), [utils_data.py](utils_data.py#L297-L302)
+
+## 逆映射：从CG节点回到全原子
+
+由于原子可以在CG群之间共享（例如，CB同时出现在SER的骨架群和侧链群中），从CG预测逆映射回全原子坐标需要谨慎的加权平均。`cg_atom_weight`字典记录了每个原子参与的CG群数量：
+
+```python
+cg_atom_weight = {}
+for resn, atomss in cg_dict.items():
+    cg_atom_weight[resn] = Counter([y for x in atomss for y in x])
+```
+
+逆索引`cgidx_to_atomidx`为每种CG类型提供了从原子在CG群内位置到其在完整残基原子列表中位置的映射，及其权重因子。在推理期间，`compute_x_pdb()`函数使用带有这些权重的**分散归约**，从重叠的CG节点预测中重建全原子坐标：
+
+```python
+scatter_w[src_idx] = 1 / w  # w = 共享原子的 cg_atom_weight
+```
+
+这确保了由多个CG群预测的原子能获得逆加权平均值，从而防止重复计算。
+
+来源: [cg.py](cg.py#L93-L102), [utils_data.py](utils_data.py#L360-L377)
+
+## 流水线中的数据流
+
+下图展示了CG表示如何从PDB输入流经网络并返回至全原子输出：
+
+```mermaid
+flowchart TD
+    A["PDB全原子位置<br/>[N_res, 37, 3]"] --> B["CG群提取<br/>基于 cg_dict"]
+    B --> C["CG节点坐标<br/>[N_cg, N_CG_MAX, 3]"]
+    C --> D["Kabsch对齐<br/>基于 cg_X0 模板"]
+    D --> E["刚体坐标系<br/>R [N_cg, 3, 3], T [N_cg, 3]"]
+    E --> F["E3等变网络<br/>迭代 R,T 精炼"]
+    F --> G["更新后的坐标系<br/>R_pred, T_pred"]
+    G --> H["重建原子位置<br/>X_v = R_pred · X0 + T_pred"]
+    H --> I["分散归约<br/>共享原子的加权平均"]
+    I --> J["全原子PDB输出<br/>[N_atoms, 3]"]
+
+    style A fill:#e8f4f8,stroke:#2196F3
+    style E fill:#fff3e0,stroke:#FF9800
+    style F fill:#fce4ec,stroke:#E91E63
+    style J fill:#e8f5e9,stroke:#4CAF50
+```
+
+来源: [utils_data.py](utils_data.py#L209-L399), [models.py](models.py#L356-L446)
+
+## 关键派生常量摘要
+
+| 常量 | 值 | 定义 | 用于 |
+|----------|-------|------------|---------|
+| `N_CG_MAX` | 9 | 任意单个CG群中的最大原子数 | 坐标填充, FAPE损失 |
+| `NUM_CG_TYPES` | 60 | 不同的（残基，群）对总数 | 嵌入词表大小 |
+| `cg_to_idx` | Dict | (res_idx, group_j) → 唯一整数 | 节点特征索引 |
+| `cg_to_np` | Dict | (res_idx, group_j) → 原子索引 | 从37通道数组提取位置 |
+| `cg_atom_rename_np` | Array | 每种CG类型的排列索引 | 备选真值构建 |
+| `cg_atom_ambiguous_np` | Array | 每种CG类型的二值歧义掩码 | FAPE损失歧义消解 |
+| `cgidx_to_atomidx` | Dict | CG索引 → (残基名, 原子, 原子索引, 权重) | PDB输出的分散归约 |
+
+来源: [cg.py](cg.py#L33-L102)
+
+<CgxTip>CG表示不仅仅是一种降维手段——它是一种**几何重参数化**。通过将结构编码为与理想模板的偏差（R, T）而非原始坐标，网络在一个恒等变换对应于“完美局部几何”的空间中运作，使得迭代精炼任务变得显著容易。</CgxTip>
+
+<CgxTip>在CG群之间共享的原子（如骨架群和侧链群中的CB）会被独立预测多次。带有逆计数权重（`1/w`）的分散归约对这些预测进行平均，为共享原子提供了一种隐式集成的形式，从而提升了鲁棒性。</CgxTip>
+
+## 下一步
+
+CG表示为网络运算提供了节点特征和刚体坐标系。若要了解这些坐标系如何被E3等变架构迭代精炼，请参阅[E3等变神经网络](5-e3-equivariant-neural-network)。有关FAPE损失如何针对主CG真值和备选CG真值评估预测的详细信息，请参阅[FAPE损失函数](7-fape-loss-function)。关于从PDB输入构建CG特征的完整数据流水线，请参阅[输入数据流水线](10-input-data-pipeline)。
+
+---
+
+- [深入解析/核心流水线/E3等变神经网络](https://zread.ai/Genentech/equifold/5-e3-equivariant-neural-network)
+
+---
+slug:5-e3-equivariant-neural-network
+blog_type:normal
+---
+
+
+E3等变神经网络是EquiFold的计算核心——这是一种定制架构，直接作用于附属于粗粒化（CG）节点的SE(3)坐标系，并产生对旋转矩阵**R**和平移向量**T**的等变更新。与AlphaFold2的不变点注意力不同，该网络在其各层中始终保持显式的SO(3)等变表示，并利用e3nn库的不可约表示机制在构造上强制实现精确的旋转等变性。该架构融合了**深度张量积**（DTP）、球谐耦合、多头等变注意力、门控非线性以及最终的坐标系预测头——所有这些组合成迭代结构精炼块。
+
+## 表示空间：标量-向量不可约表示
+
+网络中的每个节点携带一个特征对**(s, v)**，其中`s ∈ ℝ^{nc}`是标量（不变）通道，`v ∈ ℝ^{nc×3}`是向量（等变）通道。它们对应于重复`nc`次的不可约表示`0e ⊕ 1e`——在代码中统一表示为不可约表示元组`(nc, nc)`。标量特征在旋转下发生平凡变换（s → s），而向量特征按`v → Rv`变换。这种分离表示是贯穿每一层传播的基本数据结构。
+
+| 组件 | 不可约表示 | 形状 | 变换 |
+|-----------|-------|-------|----------------|
+| 标量特征`s` | L=0（不变） | `[N, nc]` | s → s |
+| 向量特征`v` | L=1（等变） | `[N, nc, 3]` | v → Rv |
+
+不可约表示元组`(nc, nc)`在所有内部交互层中保持固定，仅最后的预测层将输出不可约表示更改为`(0, 2)`——即零个标量通道和两个向量通道——它们编码了SE(3)坐标系的更新。
+
+来源: [models.py](/models.py#L833-L855), [models.py](/models.py#L610-L654)
+
+## 嵌入层：旋转等变初始化
+
+`Emb`模块将离散的CG节点类型映射到可学习的标量和向量嵌入。关键的设计选择是，向量嵌入在输入网络之前会**被当前的帧旋转R旋转**，从而确保初始特征相对于节点的当前朝向是等变的：
+
+```
+s = embed_s(cg_type)                          # [N, nc]    — 不变
+v = rotate_embedding(embed_v(cg_type), R)      # [N, nc, 3] — 等变
+```
+
+旋转通过`rotate_embedding(v, R) = einsum("rij, rkj -> rki", R, v)`应用，即用节点的3×3旋转矩阵对每个向量通道进行左乘。该嵌入支持**每个精炼块使用独立的嵌入**（`distinct_embeddings=True`），允许每次迭代基于当前结构从全新的特征初始化开始。
+
+来源: [models.py](/models.py#L172-L198)
+
+## Equiformer交互块
+
+`Equiformer`类实现了主要的等变交互模块——这是为标量-向量不可约表示空间适配的Equiformer架构（原论文图1b）的修改版本。每个块由通过残差连接的两个子模块组成：
+
+```mermaid
+flowchart TD
+    Input["(s, v) input"] --> LN_A["LayerNorm (attn)"]
+    LN_A --> Mix["Initial Mixing<br/>linear_src + linear_dst"]
+    Mix --> TP["Channel-wise Tensor Product<br/>ss, sv, vs, vv"]
+    TP --> PostTP["Post-TP Linear"]
+    PostTP --> DTP["DTP with Spherical Harmonics<br/>RadialNN weights"]
+    DTP --> Gate1["Gated Message<br/>σ(gate_v) · v + SiLU(s)"]
+    Gate1 --> MsgTP["Message Tensor Product<br/>with r_ij_vec"]
+    MsgTP --> AttnLinear["Attention Message Linear"]
+    AttnLinear --> AttnScore["Attention Score<br/>softmax(z_ij)"]
+    AttnScore --> Combine["Weighted Sum<br/>over neighbors"]
+    Combine --> Final["Final Linear"]
+    Final --> Skip1["Skip Connection +"]
+    Skip1 --> LN_F["LayerNorm (ff)"]
+    LN_F --> FF1["Feed-Forward 1<br/>Linear (expansion)"]
+    FF1 --> Gate2["Gated Nonlinearity<br/>SiLU(s) · σ(gate_v)"]
+    Gate2 --> FF2["Feed-Forward 2<br/>Linear (projection)"]
+    FF2 --> Skip2["Skip Connection +"]
+    Skip2 --> Output["(s, v) output"]
+
+    style Input fill:#e8f4f8,stroke:#2196F3
+    style Output fill:#e8f4f8,stroke:#2196F3
+    style DTP fill:#fff3e0,stroke:#FF9800
+    style AttnScore fill:#fce4ec,stroke:#E91E63
+    style Gate2 fill:#e8f5e9,stroke:#4CAF50
+```
+
+### 注意力模块
+
+注意力模块在所有节点对之间执行**等变消息传递**。计算过程分为以下几个阶段：
+
+**初始混合。** 源和目标特征分别通过`linear_src`和`linear_dst`（两者均为`Linear`层，映射`(nc, nc) → (nc, nc)`）进行投影，然后通过将通道维度分割为`num_heads`个大小为`nc_by_head = nc / num_heads`的组，重塑为多头格式。
+
+**逐通道张量积。** 混合特征经过受Clebsch-Gordan启发的张量积，枚举标量和向量通道之间所有四种耦合模式：
+
+| 乘积 | 输入 | 输出不可约表示 | 公式 |
+|---------|-------|-------------|---------|
+| s_i ⊗ s_j | L=0 ⊗ L=0 | L=0（标量） | `s_i * s_j` |
+| s_i ⊗ v_j | L=0 ⊗ L=1 | L=1（向量） | `s_i · v_j` |
+| v_i ⊗ s_j | L=1 ⊗ L=0 | L=1（向量） | `v_i * s_j` |
+| v_i ⊗ v_j | L=1 ⊗ L=1 | L=0（标量） | `(v_i · v_j)` |
+
+标量输出`ss`和`vv`被拼接；向量输出`sv`和`vs`被拼接。随后，逐头线性投影将其映射为每个头`nc_by_head`个通道。
+
+**带球谐函数的预注意力DTP。** `DTPByHead`模块执行深度张量积，其中节点间的几何耦合由**单位方向向量**`r_ij_vec`（节点间的归一化位移）介导。径向依赖由产生位置依赖权重的`RadialNN`捕获，随后这些权重通过四个张量积通道（`w_ss, w_sv, w_vs, w_vv`）将节点特征与方向信息耦合。这是网络学习遵循Wigner-Eckart定理约束的**方向依赖**消息函数的机制。
+
+**门控消息计算。** DTP输出被分为三部分：注意力分数特征`s_ij0`、向量门`gate_v`和消息特征`s_ij`。随后对消息进行门控：标量为`s_ij → SiLU(s_ij)`，向量为`v_ij → σ(gate_v) · v_ij`，其中σ是sigmoid函数。这种**门控非线性**是在等变网络中应用激活函数的标准技术——sigmoid门控的向量通道确保输出仍是规范的L=1表示。
+
+**注意力聚合。** 注意力分数计算为`z_ij = attn_w · s_ij0`（标量分数特征的可学习线性投影），在源维度上经过softmax，并用于计算消息特征的加权和。通过用大负值（−1e9）掩蔽对角线，可以选择性地禁用自注意力。
+
+来源: [models.py](/models.py#L610-L829)
+
+### 前馈模块
+
+在注意力模块（带残差连接）之后，一个**门控前馈网络**扩展然后投影特征：
+
+1. **FF1**：`Linear(nc, ff_mul × nc + ff_mul × nc, nc, ff_mul × nc)` —— 将表示扩展`ff_mul`倍（默认为3）
+2. **Gate**：扩展后的标量输出被分割 —— 前`ff_mul × nc_s_out`个通道通过`SiLU`，剩余通道作为向量特征的门控，经由`σ(gate_v) · v`起作用
+3. **FF2**：`Linear(ff_mul × nc, nc, ff_mul × nc, nc)` —— 投影回原始通道维度
+
+残差（ResNet）连接包裹整个前馈模块。层归一化在注意力和前馈模块之前独立应用，使用自定义的`LayerNorm`，它在遵循等变性的同时分别归一化标量和向量通道。
+
+来源: [models.py](/models.py#L797-L829), [models.py](/models.py#L139-L168)
+
+## 深度张量积 (DTPByHead)
+
+`DTPByHead`模块是几何耦合引擎，在节点对之间产生**方向感知消息**。给定每个节点对的特征`(s, v)`和单位方向向量`r_ij_vec`，它执行：
+
+**步骤1 —— 加权张量积。** `RadialNN`产生的权重（在每个头中重塑为四组`w_ss, w_sv, w_vs, w_vv`）缩放四个张量积通道：
+
+| 通道 | 表达式 | 输出类型 |
+|---------|-----------|-------------|
+| ss | `w_ss * s` | 标量 |
+| sv | `w_sv * s * r_ij_vec` | 向量 |
+| vs | `w_vs * v` | 向量 |
+| vv | `w_vv * (v · r_ij_vec)` | 标量 |
+
+**步骤2 —— 拼接与线性投影。** 标量通道`(ss, vv)`沿特征维度拼接；向量通道`(sv, vs)`类似地拼接。随后，一个带偏置的逐头线性层将其投影到输出维度`(nc_s_out_by_head, nc_v_out_by_head)`。
+
+径向网络产生的权重参数总数为`4 × nc_s_in × num_heads`，这决定了`RadialNN`的输出大小。
+
+来源: [models.py](/models.py#L554-L606)
+
+## 径向网络与基函数
+
+`RadialNN`模块通过两阶段流水线捕获节点间交互的**距离依赖性**：
+
+```mermaid
+flowchart LR
+    R_ij["r_ij<br/>(edge length)"] --> BB["BesselBasis<br/>(sinusoidal basis)"]
+    BB --> Mult["× weight_cutoff"]
+    Edge["edge_type_ij"] --> Emb["Embedding"]
+    Mult --> Cat["Concatenate"]
+    Emb --> Cat
+    Cat --> MLP["MLP<br/>(SiLU activation)"]
+    MLP --> W["weight tensor"]
+
+    style R_ij fill:#e8f4f8,stroke:#2196F3
+    style W fill:#e8f5e9,stroke:#4CAF50
+```
+
+**BesselBasis。** 计算正弦径向基函数：对于`k = 1, ..., radial_num_basis`，`φ_k(r) = (2/rc) × sin(kπr/rc)`。它们构成了`[0, rc]`上平方可积函数的完备基，并为径向坐标提供了平滑、可微的表示。
+
+**权重截断。** 来自e3nn的平滑截断函数`soft_unit_step(10 × (1 − r/rc))`确保消息在截断半径`rc`（默认100Å）处平滑衰减至零，防止边界处的不连续性。
+
+**边特征融合。** 基于残基距离的边类型嵌入在MLP之前与径向基拼接，使网络能够区分序列相邻（例如，肽键相连的残基）和空间相邻。
+
+来源: [models.py](/models.py#L70-L135), [models.py](/models.py#L38-L39)
+
+## E3NN块：完整更新网络
+
+`E3NN`类为单次精炼步骤编排完整的等变更新流水线。其前向传播接收当前嵌入`(s, v)`和帧参数`(R, T)`，并产生更新的帧`(R_new, T_new)`：
+
+```mermaid
+flowchart TD
+    S["s, v, R, T, edge_type_ij"] --> EdgeEmb["Edge Embedding<br/>embed_edge(edge_type_ij)"]
+    S --> Geom["Geometry Computation<br/>r_ij_vec = normalize(T_j - T_i)<br/>r_ij = ‖T_j - T_i‖<br/>weight_cutoff"]
+    EdgeEmb --> Layer1["Equiformer Layer 1"]
+    Geom --> Layer1
+    Layer1 --> Layer2["Equiformer Layer 2"]
+    Geom --> Layer2
+    Layer2 --> LayerN["Equiformer Layer N"]
+    Geom --> LayerN
+    LayerN --> PredLayer["Prediction Layer<br/>irreps_out = (0, 2)"]
+    Geom --> PredLayer
+    PredLayer --> Parse["Parse Output<br/>dT = out[:, 0]<br/>u = out[:, 1]"]
+    Parse --> dR["dR = R_from_quaternion_u(u)"]
+    Parse --> dT2["dT (translation update)"]
+    dR --> UpdateR["R_new = dR · R"]
+    dT2 --> UpdateT["T_new = T + dT"]
+    UpdateR --> Out["R_new, T_new"]
+    UpdateT --> Out
+
+    style S fill:#e8f4f8,stroke:#2196F3
+    style Out fill:#e8f5e9,stroke:#4CAF50
+    style PredLayer fill:#fff3e0,stroke:#FF9800
+```
+
+### 几何计算（无梯度）
+
+节点间几何量在**`torch.no_grad()`**下计算，这反映了一个关键设计原则：网络应专注于在给定当前几何结构下学习“下一步移动”，而不是通过几何嵌入进行反向传播。这阻止了通过距离计算的梯度流，并稳定了训练。
+
+### 层堆叠
+
+`num_layers`个Equiformer层（默认为3）在保持`(nc, nc)`不可约表示签名的同时传播嵌入。每一层接收相同的几何输入（边嵌入、距离、方向向量、截断权重），但对不断演化的节点特征进行操作。
+
+### 帧预测头
+
+最后的`Equiformer`层将输出不可约表示更改为**(0, 2)**——产生零个标量通道和恰好两个向量通道。它们被解释为：
+
+- **`dT = out[:, 0]`** —— ℝ³中的平移更新向量
+- **`u = out[:, 1]`** —— ℝ³中的旋转参数向量，通过`R_from_quaternion_u(u)`转换为旋转矩阵
+
+旋转参数化使用**无约束四元数**形式：给定`u ∈ ℝ³`，四元数为`q = (1, u₁, u₂, u₃) / ‖(1, u₁, u₂, u₃)‖`，这总能产生一个有效的旋转矩阵。这避免了万向节死锁并确保了平滑的梯度。
+
+### SE(3)帧更新
+
+帧更新在**局部坐标系**中应用预测的增量：
+
+- **平移**：`T_new = T + dT` —— 在全局坐标系中的加性更新
+- **旋转**：`R_new = dR · R` —— 旋转更新与当前帧旋转的左复合
+
+此复合规则`compose_rotations(dR, R) = einsum("rij, rjk -> rik", dR, R)`确保更新`dR`被解释为在节点局部坐标系中的旋转，这是帧相对校正的自然参数化。
+
+来源: [models.py](/models.py#L833-L937), [utils.py](/utils.py#L13-L14), [utils.py](/utils.py#L138-L166)
+
+## 等变层归一化
+
+自定义的`LayerNorm`独立归一化标量和向量通道，保持等变性：
+
+**标量通道**经过标准LayerNorm：减去均值，除以RMS，然后应用可学习的增益γ_s和偏置β_s。
+
+**向量通道**通过其在通道和空间维度上的RMS范数归一化：`rms = √(Σ(v²) / nc_v + ε)`，然后由可学习的增益γ_v缩放。**不对向量通道应用偏置**——这会破坏等变性，因为添加常向量不是旋转等变的。
+
+来源: [models.py](/models.py#L139-L168)
+
+## 迭代结构精炼
+
+顶层`NN`模块通过重复应用`E3NN`块来编排迭代精炼。每次迭代：
+
+1. 使用当前帧旋转**重新嵌入**节点：`s, v = emb(cg_type, R_pred)`
+2. **应用**E3NN块：`R_pred, T_pred = block(s, v, R_pred, T_pred, edge_type_ij)`
+3. **计算**预测结构：`X_v_pred = R_pred · X0 + T_pred`
+4. 在每个块**评估**损失（FAPE + 结构违规）
+
+这些块可以在迭代间**共享**（`distinct_blocks=False`，默认）或**独立**。跨迭代共享权重的共享块类似于循环网络，而独立块允许每个精炼阶段学习专门的更新。
+
+### 初始化方案
+
+| 方案 | R_pred | T_pred | 用例 |
+|--------|--------|--------|----------|
+| `blackhole` | 单位矩阵（I₃） | 零向量（0） | 默认；所有帧从原点开始 |
+| `random` | 随机SO(3)矩阵 | 高斯噪声 | 探索 / 多样性 |
+
+`blackhole`初始化将所有CG节点置于具有单位旋转的原点——网络必须学会从单点“爆发”出结构外向展开，这在训练期间通过SLERP预热策略进行正则化。
+
+<CgxTip>预测层中的`(0, 2)`输出不可约表示是深思熟虑的架构约束——它将网络限制为仅输出SE(3)帧更新所需的自由度（3个用于平移 + 3个用于旋转），防止其将容量浪费在未使用的标量预测上。</CgxTip>
+
+<CgxTip>围绕几何计算（`r_ij`、`r_ij_vec`、`weight_cutoff`）的`torch.no_grad()`上下文是关键的训练稳定性选择——它防止网络通过距离度量本身接收梯度，强制其学习基于（分离的）几何上下文的帧更新，而不是直接优化嵌入几何。</CgxTip>
+
+来源: [models.py](/models.py#L249-L503), [models.py](/models.py#L21-L35)
+
+## 架构总结
+
+| 模块 | 输入不可约表示 | 输出不可约表示 | 关键操作 |
+|--------|-------------|---------------|---------------|
+| `Emb` | CG类型索引 | `(nc, nc)` | 可学习 + 旋转等变嵌入 |
+| `Equiformer`（内部） | `(nc, nc)` | `(nc, nc)` | 带门控非线性的Attn + FF |
+| `Equiformer`（预测） | `(nc, nc)` | `(0, 2)` | 帧更新预测 |
+| `E3NN` | `(s, v, R, T)` | `(R_new, T_new)` | N层 + 预测 + SE(3)更新 |
+| `DTPByHead` | 逐头特征 | 逐头特征 | 带球谐函数的深度TP |
+| `RadialNN` | `r_ij`，边类型 | 权重张量 | Bessel基 + MLP |
+| `Linear` | `(nc_s, nc_v)` | `(nc_s', nc_v')` | 独立的等变投影 |
+
+**默认配置**（`nc=32, num_layers=3, num_blocks=4, rc=100.0`）：网络使用32个标量 + 32个向量通道，每块3个Equiformer层，以及4个迭代精炼块，交互截断半径为100Å。这产生了一个紧凑而富有表达力的模型，能够仅从序列预测全原子蛋白质结构。
+
+来源: [models.py](/models.py#L249-L341), [models.py](/models.py#L833-L937)
+
+## 与粗粒化表示和迭代精炼的关系
+
+E3等变网络位于EquiFold三阶段流水线的中心。它从[粗粒化表示](4-coarse-grained-representation)模块接收**预计算的CG节点嵌入和初始帧**，并产生在[迭代结构精炼](6-iterative-structure-refinement)循环中迭代更新的**SE(3)帧**。随后，预测的帧通过`X_v_pred = R_pred · X0 + T_pred`用于重建全原子坐标，其中`X0`是由粗粒化方案定义的局部模板坐标。指导此帧预测的损失景观由[FAPE损失函数](7-fape-loss-function)和[结构违规损失](8-structure-violation-losses)塑造，而训练稳定性则通过[使用SLERP预热训练](9-training-with-slerp-warmup)来维持。
+
+---
+
+- [深入解析/核心流水线/迭代结构精修](https://zread.ai/Genentech/equifold/6-iterative-structure-refinement)
+
+---
+slug:6-iterative-structure-refinement
+blog_type:normal
+---
+
+
+EquiFold 通过**迭代粗粒度修正**预测蛋白质结构：一系列 E3 等变块逐步更新逐节点旋转 (R) 和平移 (T) 的预测，将初始化的退化结构转换为物理上合理的 3D 构象。每个块消耗当前几何状态，通过四元数组合旋转和残差平移预测增量更新，并生成日益清晰的结构。本页将剖析迭代循环、更新机制、梯度流架构以及稳定早期训练的预热策略。
+
+## 修正循环
+
+核心迭代位于 `NN.forward()` 中，执行 `num_blocks + 1` 步——第 0 步存储初始结构而不应用任何神经网络，第 1 步到第 `num_blocks` 步每步应用一个完整的 E3 等变块。该循环操作逐粗粒度节点旋转矩阵 `R_pred` 和平移向量 `T_pred`，它们共同为每个 CG 节点定义了一个从局部到全局的欧几里得变换：
+
+```python
+for i in range(self.num_blocks + 1):
+    if i == 0 and skip_first:
+        continue  # skip initial during training
+    if i > 0:
+        s, v = emb(data["cg_cgidx"], R_pred)
+        R_pred, T_pred = block(s, v, R_pred, T_pred, edge_type_ij)
+    # compute structure from current (R, T)
+    X_v_pred = compute_X_v_pred(X0, R_pred, T_pred)
+    x_pred = compute_x_pdb(X_v_pred, ...)
+```
+
+在每次迭代中，嵌入模块基于**当前**旋转 `R_pred` 重新编码节点类型——这是几何信息跨块传播的*导向*机制。随后，该块预测对 `R` 和 `T` 的更新，并通过将更新后的变换应用于标准 CG 模板坐标 `X0` 来重建原子级结构。
+
+来源: [models.py](/models.py#L414-L446)
+
+## 初始化方案
+
+在第一个修正块之前，必须初始化逐节点旋转和平移。通过 `init_scheme` 参数可使用两种方案：
+
+| 方案 | 旋转 `R_pred` | 平移 `T_pred` | 效果 |
+|--------|-------------------|----------------------|--------|
+| **`blackhole`** | 每个节点的单位矩阵 (3×3) | 每个节点的零向量 | 所有 CG 节点以单位方向从原点开始——一种退化的“黑洞” |
+| **`random`** | 通过 `o3.rand_matrix` 生成的随机 SO(3) 矩阵 | 高斯噪声 (σ=1.0) | 随机的初始位置和方向 |
+
+`blackhole` 方案是默认且更常见的选择。其刻意的退化性迫使网络从头学习整个结构组装，而 SLERP 预热（下文讨论）使这在早期训练中变得可行。`random` 方案可用于测试等变性或在训练期间进行数据增强。
+
+```python
+def compute_init_struct(init_scheme, resnum, dtype):
+    N_cg = len(resnum)
+    if init_scheme == "blackhole":
+        R_pred = torch.eye(3, ...).repeat((N_cg, 1, 1))
+        T_pred = torch.zeros((N_cg, 3), ...)
+    elif init_scheme == "random":
+        R_pred = o3.rand_matrix(N_cg, ...)
+        T_pred = 1.0 * torch.randn((N_cg, 3), ...)
+```
+
+来源: [models.py](/models.py#L21-L35)
+
+## 更新机制：加性平移，组合旋转
+
+E3NN 块不直接输出新的 (R, T) 值。相反，它输出**增量更新**——平移增量 `dT` 和旋转增量 `dR`——它们与当前状态进行组合。这在架构上具有重要意义：加性/组合结构保留了 SE(3) 的流形几何，并确保无论当前状态的幅度如何，更新都能保持良好的行为。
+
+```mermaid
+flowchart TD
+    A["Current state<br/>(R, T)"] --> B["Embed nodes<br/>conditioned on R"]
+    B --> C["Equiformer layers<br/>(scalar s, vector v)"]
+    C --> D["Final layer:<br/>output irreps (0, 2)"]
+    D --> E["dT = out[:, 0]</>u = out[:, 1]"]
+    E --> F["dR = R_from_quaternion_u(u)"]
+    F --> G["T_new = T + dT"]
+    F --> H["R_new = compose_rotations(dR, R)"]
+    G --> I["Updated state<br/>(R_new, T_new)"]
+    H --> I
+```
+
+旋转更新使用**球极投影四元数参数化**。网络不输出完整的 4 分量四元数（这需要归一化），而是输出一个 3 分量向量 `u`，该向量通过以下方式映射为单位四元数：
+
+```
+norm = √(1 + ||u||²)
+q = (1/norm, u₁/norm, u₂/norm, u₃/norm)
+```
+
+该参数化覆盖了 SO(3) 并避免了原始四元数的双覆盖问题。然后，将生成的旋转 `dR` 通过矩阵乘法与当前旋转组合：`R_new = dR @ R`。平移更新则是简单的加法：`T_new = T + dT`。
+
+```python
+# Inside E3NN.forward():
+_, out = self.layer_euclidean(s, v, edges_ij, r_ij, r_ij_vec, weight_cutoff)
+dT = out[:, 0]        # [N_cg, 3] translation delta
+u = out[:, 1]         # [N_cg, 3] stereographic quaternion params
+dR = R_from_quaternion_u(u)  # [N_cg, 3, 3] rotation delta
+
+T = T + dT
+R = compose_rotations(dR, R)  # dR @ R
+```
+
+最终的欧几里得预测层输出不可约表示 `(0, 2)`——零个标量通道和两个向量通道——恰好对应于 3D 平移增量和 3D 旋转参数。
+
+来源: [models.py](/models.py#L907-L936), [utils.py](/utils.py#L138-L166)
+
+## 几何条件化消息传递
+
+在每个 E3NN 块内，用于消息传递的成对几何在每次迭代中都**从当前 T 位置重新推导**。这意味着空间图——边距离、方向和截断掩码——随着结构的修正而演化：
+
+```python
+with torch.no_grad():
+    r_ij_vec = T[None, :] - T[:, None]      # pairwise displacement
+    r_ij = (r_ij_vec.square().sum(-1) + 1e-6).sqrt()  # distances
+    r_ij_vec = r_ij_vec / r_ij.unsqueeze(-1)           # unit directions
+    weight_cutoff = compute_weight_cutoff(r_ij, self.rc)
+```
+
+使用 `torch.no_grad()` 上下文是刻意的：梯度不流经几何计算。其设计原理是，网络应专注于在给定特定几何的情况下预测“下一步动作”，而不是对空间图本身进行微分。这保持了梯度路径的清晰，并避免了对依赖于距离的注意力模式进行微分的复杂性。**软单位阶跃截断** `compute_weight_cutoff` 随着距离接近截断半径 `rc` 平滑地将边权重衰减至零，防止了硬不连续性。
+
+来源: [models.py](/models.py#L914-L918), [models.py](/models.py#L38-L39)
+
+## 独立与共享块权重
+
+修正迭代支持由 `distinct_blocks` 和 `distinct_embeddings` 控制的两种权重共享机制：
+
+| 配置 | `distinct_blocks=False` | `distinct_blocks=True` |
+|---------------|------------------------|------------------------|
+| **E3NN 权重** | 所有迭代共享单个块 | 每次迭代使用独立的 `E3NN` 模块 |
+| **嵌入权重** | 共享单个嵌入（`distinct_embeddings` 必须为 False） | 当 `distinct_embeddings=True` 时，每次迭代使用独立的嵌入 |
+| **梯度缩放** | 损失除以 `num_blocks`（共享权重平均） | 无额外缩放 |
+| **容量** | 固定容量，权重绑定的修正 | 增长容量，逐阶段特化 |
+
+当块共享权重时，损失显式除以 `num_blocks` 以计算相同参数的重复应用 (models.py#L481)。使用独立块时，每次迭代学习一种特化的变换——早期块可能执行粗略的位置调整，而后期块则修正局部几何。
+
+生产配置同时使用 `distinct_blocks=True` 和 `distinct_embeddings=True`：
+- **抗体模型**：6 个独立块，每个包含 2 个 Equiformer 层
+- **科学模型**：4 个独立块，每个包含 2 个 Equiformer 层
+
+来源: [models.py](/models.py#L320-L323), [models.py](/models.py#L313-L316), [models.py](/models.py#L476-L481), [models/ab_config.json](/models/ab_config.json#L1-L1), [models/science_config.json](/models/science_config.json#L1-L1)
+
+## 梯度流：块间分离
+
+一个关键的架构选择：在每个块的损失计算并反向传播后，更新后的 `R_pred` 和 `T_pred` 会**从计算图中分离**：
+
+```python
+# compute and backprop loss for this block
+self.manual_backward(loss_for_grad)
+# detach to stop gradient flow across block boundaries
+R_pred = R_pred.detach()
+T_pred = T_pred.detach()
+```
+
+这意味着**梯度不会跨修正迭代流动**。每个块被训练为在给定输入状态的情况下产生良好的更新，但链式法则不会穿过顺序组合进行传播。此设计具有几个含义：
+
+1. **训练稳定性**：没有跨块梯度流，每个块的训练信号是独立的，避免了在展开迭代中出现梯度消失/爆炸。
+2. **推理连贯性**：在推理时，块仍按顺序执行——每个块看到前一个块的输出——因此迭代修正仍然有效。
+3. **隐式优化框架**：每个块可以被视为学习隐式结构优化的单个“步骤”，而不是像循环网络那样被微分。
+
+来源: [models.py](/models.py#L493-L495)
+
+## SLERP 预热：稳定早期训练
+
+从退化的 `blackhole` 初始化开始训练具有挑战性——初始结构没有为消息传递图提供任何空间信息。**SLERP 预热**通过在早期训练步骤中将初始 (R, T) 在真值和初始化方案之间进行线性插值来解决此问题：
+
+```python
+tau = min(1., self.trainer.global_step / self.warmup_steps) if is_train else 1.0
+if self.slerp_warmup and tau < 1.0:
+    unmasked = mask == 1.
+    T_pred[unmasked] = tau * T_pred[unmasked] + (1 - tau) * T[unmasked]
+    R_pred[unmasked] = quaternion_slerp(R[unmasked], R_pred[unmasked], tau)
+```
+
+插值调度由 `tau` 控制，它在 `warmup_steps` 训练步骤中从 0 递增到 1：
+- **τ = 0**：初始状态等于真值（减去质心）——网络看到近乎正确的结构并学习微小修正。
+- **τ = 1**：初始状态等于 `init_scheme` 的输出——网络必须执行完整的结构预测。
+
+平移插值是线性的：`T = τ · T_init + (1-τ) · T_gt`。旋转插值使用四元数空间中的**球面线性插值 (SLERP)**，它遵循 SO(3) 上的测地线并生成平滑、恒速的旋转路径。实现使用了幂公式：`slerp(R₀, R₁, t) = q₀ · (q₀⁻¹ · q₁)^t`，其中四元数幂 `(q₀⁻¹ · q₁)^t` 将旋转角度缩放 `t` 倍。
+
+对于被掩码的节点（那些没有真值的节点），直接应用初始化方案而不进行插值。
+
+来源: [models.py](/models.py#L384-L397), [utils.py](/utils.py#L238-L253)
+
+## 跨块结构违例损失缩放
+
+结构违例损失（键长、键角、空间冲突）可以通过 `weight_struct_loss_scale` 在不同修正块间进行差异化缩放：
+
+| 缩放模式 | 块 `i` 处的公式 | 行为 |
+|------------|---------------------|----------|
+| `constant` | `1.0` | 所有块权重相等 |
+| `linear` | `i / num_blocks` | 从 0 递增至 1——早期块仅关注 FAPE |
+| `quadratic` | `(i / num_blocks)²` | 对早期块的抑制更强 |
+
+此缩放通过 `tau` 乘子与 SLERP 预热交互：有效结构损失权重为 `τ · weight_struct_loss · scale · loss_struct`。在预热期间 (τ < 1)，结构违例损失被全局抑制；然后逐块缩放决定了它在后续迭代中递增的幅度。`linear` 和 `quadratic` 模式体现了这样的设计直觉：早期块应专注于获得正确的粗略几何（通过 FAPE），而后期块则更适合强制执行精确的立体化学。
+
+来源: [models.py](/models.py#L466-L474)
+
+## 推理：选择最终修正结构
+
+在推理时，模型运行所有 `num_blocks` 次迭代并在每一步存储预测的原子级坐标。最终输出从**最后一个块**中提取：
+
+```python
+results_dict = model(data, compute_loss=False, return_struct=True, ...)
+x_pred = results_dict["x_pred"][0][-1]  # last block's prediction
+```
+
+来自早期块的中间预测可在返回的字典中获取（用于分析或可视化），但不用于最终的 PDB 输出。这遵循了迭代修正模型的标准做法：最深的迭代经历了最多轮次的几何修正，能产生质量最高的结构。
+
+来源: [run_inference.py](/run_inference.py#L92-L95), [run_inference.py](/run_inference.py#L98-L102)
+
+## 架构总结
+
+```mermaid
+flowchart TB
+    subgraph Init["Initialization"]
+        A["init_scheme:<br/>blackhole or random"] --> B["(R⁰, T⁰)"]
+    end
+    
+    subgraph Block1["Block 1"]
+        B --> C1["Embed(CG types, R⁰)"]
+        C1 --> D1["E3NN Block 1<br/>(distinct weights)"]
+        D1 --> E1["(R¹, T¹)"]
+    end
+    
+    subgraph BlockN["Block N (num_blocks)"]
+        FN["Embed(CG types, Rᴺ⁻¹)"] --> GN["E3NN Block N"]
+        GN --> HN["(Rᴺ, Tᴺ)"]
+    end
+    
+    E1 -->|"re-embed with R¹"| FN
+    
+    subgraph Output["Structure Reconstruction"]
+        HN --> I["X = Rᴺ · X₀ + Tᴺ"]
+        I --> J["Scatter to atoms → PDB"]
+    end
+    
+    style Init fill:#e8f4f8,stroke:#2196F3
+    style Block1 fill:#fff3e0,stroke:#FF9800
+    style BlockN fill:#fff3e0,stroke:#FF9800
+    style Output fill:#e8f5e9,stroke:#4CAF50
+```
+
+完整的修正管线通过以下阶段将氨基酸序列转换为 3D 结构：(1) 初始化逐 CG 节点 SE(3) 变换，(2) 迭代应用几何条件化的 E3 等变块以预测增量旋转和平移更新，(3) 从应用于标准 CG 模板的最终变换中重建原子位置，以及 (4) 将 CG 级预测分散到完整的原子级坐标。每个块的 E(3) 等变性保证了整个修正过程相对于输入结构的全局旋转和平移是协变的。
+
+<CgxTip>添加新的修正块时，请记住块间的梯度分离意味着每个块是独立训练的——增加 `num_blocks` 并不会创建更深的反向传播链。容量增益来自额外的特化参数，而非可微深度。</CgxTip>
+
+<CgxTip>球极投影四元数参数化 (`R_from_quaternion_u`) 将无约束的 3D 向量映射到 SO(3) 而无需归一化，但它无法表示 180° 旋转 (u → ∞)。在实践中，网络避免了此奇点，因为蛋白质结构更新在单个块中很少达到此幅度。</CgxTip>
+
+**下一步**：修正块预测的结构由 [FAPE 损失函数](7-fape-loss-function) 评估，该函数在局部坐标系中测量帧对齐位置误差。有关使此迭代过程从一开始就保持稳定的训练策略，请参阅 [使用 SLERP 预热训练](9-training-with-slerp-warmup)。
+
+---
+
+## 损失与训练
+
+- [深入解析/损失与训练/FAPE损失函数](https://zread.ai/Genentech/equifold/7-fape-loss-function)
+
+---
+slug:7-fape-loss-function
+blog_type:normal
+---
+
+
+**帧对齐点误差（FAPE）** 是 EquiFold 中的主要结构损失，它在预测和真实原子位置都被转换到共享的局部坐标系后，衡量两者之间的差异。与对齐整个结构的全局 RMSD 不同，FAPE **在所有局部帧上成对计算误差**，使其对局部几何和长程结构一致性均具有敏感性——这一特性对于蛋白质结构预测至关重要，因为局部正确性和全局折叠必须被同时约束。
+
+来源：[utils.py](utils.py#L94-L108), [models.py](models.py#L448-L457)
+
+## 数学基础
+
+FAPE 基于**帧相对比较**原理运行：对于粗粒度（CG）节点 $(u, v)$ 的每个有序对，属于节点 $v$ 的原子被转换到由节点 $u$ 的旋转 $R_u$ 和平移 $T_u$ 定义的局部坐标系中。这产生了一个形状为 $[N, N, N_a, 3]$ 的张量 $X_{uv}$，其中 $N$ 是 CG 节点数，$N_a$ 是每个 CG 节点的最大原子数。对预测坐标应用相同的转换。损失计算如下：
+
+$$\mathcal{L}_{\text{FAPE}} = \frac{1}{|\mathcal{M}| \cdot Z} \sum_{u,v,a} \mathcal{M}_{uva} \cdot \min\left(\|X_{uva} - \hat{X}_{uva}\|, \, d_{\max}\right)$$
+
+其中 $\mathcal{M}$ 是有效原子对的二进制掩码，$d_{\max}$ 是截断距离，$Z$ 是归一化常数（设为等于 $d_{\max}$）。截断操作确保训练早期严重不准确的预测不会主导梯度，从而在迭代精修过程中提供鲁棒性。
+
+来源：[utils.py](utils.py#L94-L108)
+
+## 计算流程
+
+FAPE 损失通过四阶段流程计算：将坐标转换到局部帧、解决对称性歧义以及聚合逐原子误差。下图展示了该流程：
+
+```mermaid
+flowchart TD
+    A["真实值<br/>(X, R, T) + 替代值<br/>(X_alt, R_alt, T_alt)"] --> B["compute_d_ijab<br/>原子间距离<br/>(真实值 + 替代值)"]
+    C["预测值<br/>X_v_pred"] --> D["compute_d_ijab_pred<br/>原子间距离<br/>(预测值)"]
+    B --> E["compute_X_uv<br/>歧义消解<br/>+ 局部帧转换"]
+    D --> E
+    E --> F["X_uv, mask_atom_uv<br/>局部帧中的真实值"]
+    C --> G["compute_X_uv_pred<br/>局部帧中的预测值"]
+    G --> H["X_uv_pred"]
+    F --> I["compute_FAPE_uv<br/>截断 L1 距离<br/>+ 掩码 + 归一化"]
+    H --> I
+    I --> J["FAPE 损失 (标量)"]
+```
+
+每个阶段在确保损失既**具有几何意义**又**对对称性具有鲁棒性**方面发挥着独特作用。
+
+来源：[utils.py](utils.py#L59-L108), [models.py](models.py#L448-L457)
+
+## 阶段 1：原子间距离计算
+
+在帧对齐之前，流程会计算所有 CG 节点间的逐对原子间距离。此步骤服务于一个关键目的：**对称性歧义消解**。某些氨基酸侧链（例如 ASP 的 OD1/OD2，PHE 的芳香环）存在命名歧义——即存在通过 180° 旋转关联的两种有效标记。函数 `compute_d_ijab` 计算所有成对距离 $d_{ijab} = \|X_{i,a} - X_{j,b}\|$ 以及一个掩码，该掩码隔离出一个原子有歧义而另一个原子无歧义的原子对：
+
+```python
+# mask_ijab 选择: (原子 ia 有歧义) 且 (原子 jb 无歧义)
+mask_ijab = mask_atom_ijab * mask_amb[:, None, :, None] * mask_nonamb[None, :, None, :]
+```
+
+该掩码确保距离比较针对的是有信息量的原子对——将两个有歧义的原子相互比较是无意义的，因为两种标记会产生相同的成对距离。对规范和替代真实构型以及当前预测均执行相同的计算。
+
+来源：[utils.py](utils.py#L31-L45)
+
+## 阶段 2：歧义消解与局部帧转换
+
+函数 `compute_X_uv` 依次执行两项操作：
+
+**歧义消解。** 对于每个 CG 节点 $i$，比较规范真实值与预测值之间的绝对距离误差之和，以及使用替代（对称重命名）真实值的相同和：
+
+$$d_i = \sum_{j,a,b} \mathcal{M}_{ijab} \cdot |d_{ijab} - \hat{d}_{ijab}|$$
+
+如果替代构型产生较小的误差（$d_i > d_i^{\text{alt}}$），则该节点的真实坐标、旋转和平移将与其替代值交换。这是一个**逐节点贪心**决策——并非全局最优，但高效且经验上有效。
+
+**局部帧转换。** 消解后，每个节点 $v$ 中的所有原子通过以下方式转换到每个节点 $u$ 的局部帧中：
+
+$$X_{uv} = R_u^T (X_v - T_u)$$
+
+此操作由 `apply_inverse_euclidean_uv` 实现，该函数利用单个 `einsum` 操作在所有 $(u, v)$ 对上进行广播以提升效率。结果 `X_uv` 的形状为 $[N, N, N_a, 3]$——一个表示所有成对局部帧中所有原子的四阶张量。
+
+来源：[utils.py](utils.py#L59-L79), [utils.py](utils.py#L130-L135)
+
+## 阶段 3：预测帧对齐
+
+预测的原子坐标经历相同的帧对齐过程。首先，`compute_X_v_pred` 将预测的旋转和平移应用于模板坐标 $X_0$：
+
+$$\hat{X}_v = R_v^{\text{pred}} X_0 + T_v^{\text{pred}}$$
+
+然后 `compute_X_uv_pred` 使用**预测的**旋转和平移将这些坐标转换到成对的局部帧中：
+
+$$\hat{X}_{uv} = (R_u^{\text{pred}})^T (\hat{X}_v - T_u^{\text{pred}})$$
+
+这是关键的设计选择：**真实值和预测值均表示在各自的局部帧中**，因此 FAPE 损失衡量的是帧相对结构误差，而非单一全局帧中的误差。这使得损失对应用于任一结构的全局 SE(3) 变换保持不变。
+
+来源：[utils.py](utils.py#L82-L91), [utils.py](utils.py#L130-L135)
+
+## 阶段 4：截断距离聚合
+
+`compute_FAPE_uv` 中的核心 FAPE 计算如下：
+
+```python
+d_uv = ((X_uv - X_uv_pred).square().sum(-1) + eps).sqrt().clamp(max=d_max)
+loss = (d_uv * mask_atom_uv).sum() / natom_pairs / Z
+```
+
+逐原子的欧氏距离在 `d_max`（默认 10.0 Å）处被**截断**，然后被 `mask_atom_uv` 掩码处理，该掩码将缺失或无效原子的条目置零。总和除以有效原子对数和缩放常数 $Z = d_{\max}$ 进行归一化。这种双重归一化确保损失：（1）与蛋白质大小无关，且（2）当所有距离超过截断值时，其值有界于 $[0, 1]$。
+
+来源：[utils.py](utils.py#L94-L108)
+
+## 与训练循环的集成
+
+FAPE 在迭代结构预测流程的**每个精修块**中计算。在 `NN.forward` 方法中，损失在所有块（索引 0 到 `num_blocks`）中累加，梯度从块 1 及后续块流过：
+
+```python
+for i in range(self.num_blocks + 1):
+    # ... 通过 E3NN 块更新结构 ...
+    X_v_pred = compute_X_v_pred(X0, R_pred, T_pred)
+    d_ijab_pred = compute_d_ijab_pred(X_v_pred)
+    X_uv, mask_atom_uv = compute_X_uv(...)
+    X_uv_pred = compute_X_uv_pred(X_v_pred, R_pred, T_pred)
+    loss = compute_FAPE_uv(X_uv, mask_atom_uv, X_uv_pred,
+                           eps=1e-4, d_max=self.fape_clip_val)
+```
+
+块 0 迭代在**初始结构**（任何神经网络更新之前）上评估 FAPE，提供基线。当 `distinct_blocks` 为 `False` 时，损失进一步除以 `num_blocks` 以考虑跨块参数共享。结构违反损失（键长、键角、空间冲突）以可配置的权重和缩放计划添加到 FAPE 中。
+
+来源：[models.py](models.py#L414-L491)
+
+## 配置参数
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `fape_clip_val` | `10.0` | 用于截断和归一化的最大距离（$d_{\max}$ 和 $Z$） |
+| `eps` | `1e-4` | 用于 sqrt 中数值稳定性的小常数 |
+| `weight_struct_loss` | `1.0` | 添加到 FAPE 中的结构违反损失权重 |
+| `weight_struct_loss_scale` | `"constant"` | 依赖于块的缩放：`constant`、`linear` 或 `quadratic` |
+| `warmup_steps` | `1` | SLERP 预热步数；预热期间 FAPE 按 $\tau$ 缩放 |
+
+`fape_clip_val` 参数影响最大：设置过低会使损失对大误差不敏感（减慢收敛），而设置过高会削弱截断带来的好处，即防止训练早期严重错误预测导致的梯度爆炸。
+
+来源：[models.py](models.py#L279-L281), [models.py](models.py#L465-L474)
+
+## 与 AlphaFold2 FAPE 的关系
+
+EquiFold 的 FAPE 采用了 AlphaFold2 的相同核心理念——帧相对点误差——但由于粗粒度表示，在几个重要方面有所不同：
+
+| 方面 | AlphaFold2 | EquiFold |
+|--------|-----------|----------|
+| **帧定义** | 逐残基骨架帧 (N, Cα, C) | 来自 CG 刚体组的逐 CG 节点帧 |
+| **比较的原子** | 每个残基的所有重原子 | 每个 CG 节点内的所有原子 |
+| **歧义消解** | 全局（逐结构） | 逐 CG 节点贪心 |
+| **距离截断** | 骨架/侧链分别使用 `d_max` | 单一 `fape_clip_val` |
+| **损失计划** | 多尺度（多个 `d_max` 值） | 每块单一尺度 |
+
+粗粒度表示意味着每个“帧”支配着可变数量的原子（从 GLY 骨架的 2 个到 TRP 吲哚基团的 9 个），并且歧义消解必须处理这些基团内的侧链对称性，而不是在单个残基层面上。
+
+来源：[utils.py](utils.py#L59-L79), [cg.py](cg.py#L10-L31)
+
+## 实际考量
+
+<CgxTip>`X_uv` 张量（形状 $[N, N, N_a, 3]$）的 $O(N^2)$ 内存开销是处理大蛋白质时的主要瓶颈。`mask_atom_uv` 张量原则上允许稀疏计算，尽管当前实现是密集的。</CgxTip>
+
+<CgxTip>当向 `compute_FAPE_uv` 传入 `return_count=True` 时，该函数分别返回未归一化的损失总和与原子对计数。这使得在批处理中跨多个蛋白质聚合 FAPE 时能够正确归一化——将所有未归一化的损失求和，然后除以总原子对计数。</CgxTip>
+
+来源：[utils.py](utils.py#L94-L108), [utils.py](utils.py#L130-L135)
+
+## 后续步骤
+
+- FAPE 损失由**结构违反损失**（键长、键角、空间冲突）补充，后者强制执行物理约束——参见 [结构违反损失](8-structure-violation-losses)。
+- 在训练早期，**SLERP 预热**机制将预测帧与真实值混合，FAPE 损失相应缩放——参见 [使用 SLERP 预热进行训练](9-training-with-slerp-warmup)。
+- 输入 FAPE 的粗粒度帧和模板坐标 $X_0$ 在数据流程中构建——参见 [粗粒度表示](4-coarse-grained-representation)。
+
+---
+
+- [深入解析/损失与训练/结构违规损失](https://zread.ai/Genentech/equifold/8-structure-violation-losses)
+
+---
+slug:8-structure-violation-losses
+blog_type:normal
+---
+
+
+EquiFold 通过复合的**结构违反损失** 来惩罚偏离已知立体化学约束的偏差，从而强制实现物理上真实的蛋白质结构。与衡量相对于真实值的全局坐标精度的 [FAPE 损失函数](7-fape-loss-function) 不同，结构违反损失作用于**局部几何不变量** —— 键长、键角和原子间距离 —— 这些不变量独立于任何坐标系。这使得它们成为一种强大的正则化器，可以防止 E3 等变网络生成在全局上接近目标但在局部上不符合物理规律的结构。这三个组件 —— 键长违反、键角违反和空间碰撞违反 —— 由 `compute_struct_loss` 函数一起计算，并求和为单个 `loss_struct` 项，在训练期间作为 FAPE 损失的补充。
+
+来源: [utils.py](/utils.py#L256-L337), [models.py](/models.py#L460-L474)
+
+## 立体化学参考数据
+
+在计算任何损失之前，系统必须知道“正确”的几何结构是什么样的。EquiFold 从随 OpenFold 分发的 `stereo_chemical_props.txt` 文件中获取其参考值，该文件包含每个氨基酸残基的实验测量键长、键长标准差、键角和键角标准差。这些数据通过 `load_stereo_chemical_props()` 加载，然后在模块初始化时在 `utils_data.py` 中进行预处理。
+
+预处理构建了三个查找字典 —— `bonds_np`、`bond_angles_np` 和 `atom_width_np` —— 以残基名称为键。每个条目包含原子索引、目标值和表示为 `tol_factor × stddev` 的容差窗口，其中 `tol_factor = 3`。这个 3σ 容差窗口至关重要：它定义了一个**软约束**而非硬约束，允许损失在物理预期范围内的偏差保持为零，仅惩罚真正异常的几何结构。对于键角，容差在余弦空间中计算以保持对称性，使用 `mid = (cos(θ - 3σ) + cos(θ + 3σ)) / 2` 和 `tol = |cos(θ - 3σ) - mid|`。
+
+一个关键的细微差别是**歧义掩码** (`dst_bonds_mask`)。完全包含在单个粗粒度节点内且不涉及歧义原子的键和角度被排除在键/角度损失之外，因为 FAPE 损失已经通过直接坐标监督约束了节点内几何结构。只有**跨 CG** 约束 —— 跨越两个 CG 节点的键/角度，或涉及 CG 节点间共享原子的键/角度 —— 的歧义掩码值为 1.0，并对违反损失产生贡献。残基间肽键约束（C[i]–N[i+1] 和 Cα–Cα 距离，加上 C-N-Cα 和 Cα-C-N 角度）在数据整理期间被追加，从而连接链上的相邻残基。
+
+来源: [utils_data.py](/utils_data.py#L22-L100), [utils_data.py](/utils_data.py#L304-L353), [openfold_light/residue_constants.py](/openfold_light/residue_constants.py#L1-L30)
+
+## 键长违反损失
+
+键长违反损失惩罚偏离容差窗口超出其立体化学参考值的预测原子间距离。给定预测的原子位置 `X`、键索引数组 `dst_bonds_i1` 和 `dst_bonds_i2`、参考长度 `dst_bonds_l` 和容差 `dst_bonds_tol`，计算过程如下：
+
+```
+l_pred = ||X[i1] - X[i2]||₂
+loss_bond = clamp(|dst_bonds_l - l_pred| - bond_tol_scale × dst_bonds_tol, min=0)
+```
+
+`clamp(min=0)` 实现了**单侧软惩罚**：容差窗口内的违反产生零损失，而容差窗口外的违反产生的损失与超出容差的程度成正比。`bond_tol_scale` 参数（默认为 1.0）允许在调用时对容差窗口进行全局缩放。在使用 `dst_bonds_mask`（以及可选的缺失原子的逐原子掩码）进行掩码处理后，损失在所有活动（未掩码）键上取平均值。
+
+当 `return_full=True` 时，该函数使用 `scatter` 归约返回逐原子细分，而不是标量平均值，并将每个键两端原子的贡献对称化。这种逐原子模式可用于诊断，但在标准训练路径中未使用。
+
+来源: [utils.py](/utils.py#L278-L293)
+
+## 键角违反损失
+
+键角违反损失强制执行每个成键原子三元组周围的正确局部几何结构。给定三个原子索引 `dst_angles_i1`、`dst_angles_i2`（中心原子）和 `dst_angles_i3`，预测角度通过其余弦值计算：
+
+```
+v1 = X[i1] - X[i2]
+v2 = X[i3] - X[i2]
+cosa_pred = (v1 · v2) / (||v1||₂ × ||v2||₂)
+loss_angle = clamp(|dst_angles_mid - cosa_pred| - dst_angles_tol, min=0)
+```
+
+在**余弦空间**而非角度空间中工作是一个深思熟虑的设计选择。余弦在 [0, π] 上是单调递减函数，因此微小的角度偏差对应于微小的余弦偏差。更重要的是，参考值 `mid` 和容差 `tol` 在数据准备期间已在余弦空间中预计算（考虑了从角度到余弦的非线性映射），这避免了在训练时重复调用三角函数，并提高了数值稳定性。适用相同的单侧钳位模式：在余弦空间中处于其 3σ 窗口内的角度产生零损失。
+
+请注意，键角仅针对**跨 CG 三元组或涉及歧义原子的三元组**强制执行。完全由粗粒度节点内部几何结构确定的节点内角度被排除，因为它们已经通过每个 CG 节点内原子坐标的 FAPE 监督被隐式约束。
+
+来源: [utils.py](/utils.py#L295-L311), [utils_data.py](/utils_data.py#L64-L98)
+
+## 空间碰撞违反损失
+
+碰撞损失防止非键合原子重叠，强制执行原子不能占据同一空间区域的物理原理。它使用来自残基常数的**范德华半径** 来定义最小允许原子间距离：
+
+```
+d = ||X[:, None] - X[None, :]||₂          # 全对距离矩阵
+d_min = vdW_radius[:, None] + vdW_radius[None, :]  # 半径之和
+clash_tol = 0.1
+loss_clash = clamp(d_min - d - clash_tol, min=0)
+```
+
+当两个原子之间的距离 `d` 小于 `d_min - clash_tol` 时，即当原子重叠超过 0.1 Å 的微小容差时，就会发生违反。掩码策略对计算效率和正确性至关重要：(1) 仅考虑 8 Å 以内的原子对 (`mask_clash = d < 8.0`)，(2) 键合原子对从碰撞检查中排除，(3) 通过对角线排除自交互，(4) 缺失原子（当 `apply_mask=True` 时）在两个维度上均被掩码排除。损失在所有活动（未掩码）对上取平均值。
+
+`clash_tol = 0.1` 的值非常严格 —— 之前的实验尝试过 1.5 和 0.5 Å 的容差，最终确定为 0.1。这反映了一个观察结果：宽松的碰撞容差允许网络通过轻微压缩结构来“作弊”，生成在 FAPE 上得分良好但具有不真实空间堆积的模型。
+
+来源: [utils.py](/utils.py#L313-L335)
+
+## 损失组合与缩放
+
+三个违反组件通过简单求和组合：`loss_struct = loss_bond + loss_angle + loss_clash`。然后，此复合损失通过由 `weight_struct_loss` 和 `weight_struct_loss_scale` 超参数控制的两个缩放级别整合到总训练目标中：
+
+```python
+loss = loss_FAPE + τ × weight_struct_loss × loss_struct × scale
+```
+
+**SLERP 预热因子 τ**（在预热阶段范围从 0 到 1）控制结构损失的贡献，确保仅在模型学习了合理的初始结构后才完全应用它。`weight_struct_loss_scale` 参数控制结构损失权重在迭代精修块中的变化方式：
+
+| 缩放模式 | 公式 | 行为 |
+|---|---|---|
+| `constant` | `scale = 1` | 每个精修块的权重相等 |
+| `linear` | `scale = i / num_blocks` | 从块 0 的 0 逐渐提升至最终块的 1 |
+| `quadratic` | `scale = (i / num_blocks)²` | 缓慢提升，强烈倾向于后序块的执行 |
+
+非恒定缩放模式背后的直觉是，早期精修块生成粗略结构，在此阶段严格的立体化学强制执行会产生反效果 —— 网络需要自由移动原子较长距离。后期块进行更精细的调整，应生成全局准确（低 FAPE）且局部符合物理规律（低违反）的结构。
+
+<CgxTip>当 `weight_struct_loss_scale` 设置为 `linear` 或 `quadratic` 时，结构违反损失在早期精修块中被有意减弱。这不是缺陷 —— 它反映了粗略几何校正应先于精细立体化学强制的架构原则。监视逐块的 `losses_bond`、`losses_angle` 和 `losses_clash` 指标（记录为 `train_loss_{bond,angle,clash}_final`），以验证违反损失在训练期间跨块单调递减。</CgxTip>
+
+来源: [models.py](/models.py#L460-L474), [models.py](/models.py#L280-L281)
+
+## 数据流与计算图
+
+下图追踪了从立体化学参考数据到训练步骤中损失计算的完整路径：
+
+```mermaid
+flowchart TD
+    A["stereo_chemical_props.txt<br/>(键长, 角度, 标准差)"] --> B["load_stereo_chemical_props()"]
+    B --> C["bonds_np, bond_angles_np<br/>atom_width_np<br/>(在导入时预计算)"]
+    
+    D["输入蛋白质序列"] --> E["pdb_feats_to_data()"]
+    C --> E
+    E --> F["dst_bonds_i1, i2, l, tol, mask<br/>dst_angles_i1, i2, i3, mid, tol<br/>dst_atom_widths"]
+    
+    G["预测的原子位置<br/>来自 CG → PDB 散射的 x_pred"] --> H["compute_struct_loss()"]
+    F --> H
+    
+    H --> I["loss_bond"]
+    H --> J["loss_angle"]
+    H --> K["loss_clash"]
+    
+    I --> L["loss_struct = bond + angle + clash"]
+    J --> L
+    K --> L
+    
+    L --> M["loss_total = loss_FAPE +<br/>τ × weight × scale × loss_struct"]
+    N["loss_FAPE"] --> M
+```
+
+输入到 `compute_struct_loss` 的预测原子位置 `x_pred` 是通过 `compute_x_pdb()` 将 CG 级别的预测坐标 `X_v_pred` 散射到完整的原子级 PDB 表示而获得的。此散射步骤 —— 使用预计算的 `scatter_index` 和 `scatter_w` 数组将每个 CG 节点的预测原子映射到扁平原子数组中的正确位置 —— 正是将 E3 等变网络的 CG 级别预测与原子级立体化学约束连接起来的关键。
+
+来源: [models.py](/models.py#L438-L463), [utils.py](/utils.py#L340-L344), [utils_data.py](/utils_data.py#L359-L419)
+
+## 配置参考
+
+| 参数 | 默认值 | 类型 | 描述 |
+|---|---|---|---|
+| `weight_struct_loss` | `1.0` | `float` | 总目标中 `loss_struct` 的全局权重。设为 0 以禁用。 |
+| `weight_struct_loss_scale` | `constant` | `str` | 逐块缩放：`constant`、`linear` 或 `quadratic` |
+| `bond_tol_scale` | `1.0` | `float` | 3σ 键容差窗口的乘数（在调用时传递） |
+| `clash_tol` | `0.1` | `float` | 低于范德华最小距离的硬编码容差 (Å) |
+| `tol_factor` | `3` | `int` | 立体化学容差窗口的标准差倍数 |
+
+<CgxTip>`tol_factor = 3` 和 `clash_tol = 0.1` 是硬编码的，而不是作为超参数暴露。如果你在验证中观察到系统的键长违反，请考虑在 `compute_struct_loss` 调用处调整 `bond_tol_scale`，而不是修改全局 `tol_factor`，因为后者会影响模块初始化时预计算的数据数组，并需要重启 Python 解释器。</CgxTip>
+
+来源: [models.py](/models.py#L280-L281), [utils.py](/utils.py#L256-L258), [utils_data.py](/utils_data.py#L24-L24)
+
+## 与训练流水线的关系
+
+结构违反损失与训练流水线的其他两个组件交互。[FAPE 损失函数](7-fape-loss-function) 提供主要的坐标级监督信号，而结构违反损失充当 FAPE 无法表达的补充正则化器 —— FAPE 测量位置误差，但无法直接强制键长或角度保持物理规律，因为它在 SE(3) 对齐后对坐标进行操作。[SLERP 预热训练](9-training-with-slerp-warmup) 机制通过 τ 因子控制结构损失，确保早期训练（预测远离目标）不会因激进的立体化学强制执行而失稳。这三个组件共同构成一个课程：SLERP 预热提供平滑初始化，FAPE 驱动全局结构收敛，而结构违反损失在全局支架大致正确后精修局部几何结构。
+
+---
+
+- [深入解析/损失与训练/使用SLERP预热进行训练](https://zread.ai/Genentech/equifold/9-training-with-slerp-warmup)
+
+---
+slug:9-training-with-slerp-warmup
+blog_type:normal
+---
+
+
+EquiFold 采用**球面线性插值 (SLERP) 预热**策略来稳定训练的早期阶段，在该阶段，模型预测的刚体变换（旋转和平移）会从真实值初始化逐渐过渡到模型自身学习到的初始化方案。该技术解决了迭代结构精修中的一个基本自举问题：E3等变网络必须从第一步起就产生有意义的旋转更新，但其初始预测是任意的。SLERP 预热提供了一种几何原则明确的课程学习机制来弥补这一差距。
+
+## 自举问题
+
+在训练期间，EquiFold 的迭代精修循环从由 `init_scheme` 定义的初始结构开始——即 `"blackhole"`（单位旋转，零平移）或 `"random"`（随机旋转，高斯平移）。在早期训练步中，网络预测的更新 (ΔR, ΔT) 本质上是未经训练的噪声。将这些噪声更新与无意义的初始结构组合，会产生不连贯的中间帧，使得 [FAPE 损失函数](7-fape-loss-function)的梯度充满噪声，优化地形变得险恶。若不加干预，模型必须同时学习*从何处开始*和*如何移动*——这是一个减缓收敛并带来不稳定风险的鸡生蛋问题。
+
+来源: [models.py](models.py#L21-L35), [models.py](models.py#L343-L362)
+
+## SLERP 预热机制
+
+预热定义了一个混合参数 **τ**，该参数在 `warmup_steps` 训练步内从 0 线性增加至 1：
+
+$$\tau = \min\left(1,\ \frac{\text{global\_step}}{\text{warmup\_steps}}\right)$$
+
+在每个训练步中，初始预测的旋转 `R_pred` 和平移 `T_pred` 会与所有未掩码（已观测）粗粒度节点的真实值 `R` 和 `T` 进行混合：
+
+- **平移**使用标准线性插值：`T_pred = τ · T_pred + (1 − τ) · T`
+- **旋转**使用四元数 SLERP：`R_pred = slerp(R, R_pred, τ)`
+
+当 τ = 0 时，模型在每个精修周期都从真实结构（减去质心）开始。当 τ = 1 时，模型使用完整的初始化方案。核心思想在于，**平移在欧几里得空间中进行线性插值**，而**旋转沿旋转群 SO(3) 的测地线进行插值**——这尊重了流形的几何结构，而非直接穿透它。
+
+```mermaid
+flowchart TD
+    A["训练步开始"] --> B{"is_train AND<br/>slerp_warmup=True?"}
+    B -- No --> C["直接使用 init_scheme<br/>(blackhole 或 random)"]
+    B -- Yes --> D["计算 τ = min(1, global_step / warmup_steps)"]
+    D --> E{"τ < 1.0?"}
+    E -- No --> C
+    E -- Yes --> F["识别未掩码节点<br/>(mask == 1)"]
+    F --> G["T_pred[unmasked] ← τ·T_pred + (1−τ)·T_gt"]
+    F --> H["R_pred[unmasked] ← slerp(R_gt, R_pred, τ)"]
+    G --> I["进入迭代<br/>结构精修"]
+    H --> I
+    C --> I
+```
+
+来源: [models.py](models.py#L384-L397)
+
+## 四元数 SLERP 实现
+
+EquiFold 通过**幂公式**而非更常见的几何（基于 sin）公式来实现 SLERP。给定两个旋转矩阵 R₀ 和 R₁ 及其对应的单位四元数 q₀ 和 q₁，插值公式为：
+
+$$\text{slerp}(q_0, q_1, t) = q_0 \cdot (q_0^{-1} \cdot q_1)^t$$
+
+这可分解为三个操作：(1) 计算相对旋转 `q₀⁻¹ · q₁`，(2) 通过轴角分解将该四元数提升至 t 次幂——即 `exp(t · ln(q₀⁻¹ · q₁))`——该方法在保持旋转轴不变的同时将旋转角缩放 t 倍，(3) 与 q₀ 重新组合。对于所有 t ∈ [0, 1]，幂公式在数值上都是稳定的，并避免了当 q₀ ≈ q₁ 时几何公式出现的除零奇异性。
+
+该实现还包含一个替代的 `quaternion_slerp2`，它使用几何公式并在接近恒等变换时显式回退到线性插值，但基于幂公式的 `quaternion_slerp` 才是训练中使用的函数。
+
+| 实现 | 公式 | 奇异性处理 | 训练中是否使用 |
+|---|---|---|---|
+| `quaternion_slerp` | q₀(q₀⁻¹q₁)^t | 通过幂公式实现固有稳定性 | **是** |
+| `quaternion_slerp2` | (sin((1−t)θ)·q₀ + sin(tθ)·q₁) / sin(θ) | 当 θ ≈ 0 时回退至 lerp | 否 (仅供参考) |
+
+来源: [utils.py](utils.py#L238-L253), [utils.py](utils.py#L210-L229), [utils.py](utils.py#L232-L235)
+
+## 与学习率预热及结构损失的交互
+
+SLERP 预热并非孤立运行。`warmup_steps` 参数同时控制着在早期训练期间协同作用的三个预热机制：
+
+1. **SLERP 预热** (`slerp_warmup=True`)：将初始化从真实值混合过渡至初始化方案（控制旋转/平移的起始点）。
+2. **学习率预热** (`lr_warmup=True`)：在 `warmup_steps` 步内将学习率从 0 线性增加至 `lr`，防止在模型预测仍严重依赖真实值时出现较大的梯度步。
+3. **结构违背损失缩放**：结构损失（键长 + 键角 + 空间冲突）乘以 τ，意味着其权重从零开始并逐渐增加至满权重。这可以防止当模型本质上只是在复制真实值时，[结构违背损失](8-structure-violation-losses)占据主导地位。
+
+该三元组确保了连贯的训练动态：模型首先学习重现真实值（τ ≈ 0，低学习率，无结构损失压力），然后随着优化器逐渐获得信心且结构约束开始生效，模型逐渐接管其初始化过程。
+
+```mermaid
+flowchart LR
+    subgraph "τ = 0 (Step 0)"
+        A1["R_pred = R_gt"]
+        A2["T_pred = T_gt"]
+        A3["lr = 0"]
+        A4["w_struct = 0"]
+    end
+    subgraph "τ ∈ (0,1) (Warmup)"
+        B1["R_pred = slerp(R_gt, R_init, τ)"]
+        B2["T_pred = τ·T_init + (1−τ)·T_gt"]
+        B3["lr = τ · lr_max"]
+        B4["w_struct = τ"]
+    end
+    subgraph "τ = 1 (Post-Warmup)"
+        C1["R_pred = R_init"]
+        C2["T_pred = T_init"]
+        C3["lr = lr_max"]
+        C4["w_struct = 1"]
+    end
+    A1 --> B1 --> C1
+    A2 --> B2 --> C2
+    A3 --> B3 --> C3
+    A4 --> B4 --> C4
+```
+
+来源: [models.py](models.py#L384-L397), [models.py](models.py#L474-L474), [models.py](models.py#L510-L533)
+
+## 配置参考
+
+发布的两个模型配置均默认启用 SLERP 预热。相关的超参数及其交互作用如下：
+
+| 参数 | 默认值 | AB 模型 | Science 模型 | 作用 |
+|---|---|---|---|---|
+| `slerp_warmup` | `True` | `true` | `true` | 启用/禁用旋转 SLERP 混合 |
+| `warmup_steps` | `1` | 依赖配置 | 依赖配置 | τ 从 0→1 增加的训练步数 |
+| `lr_warmup` | `False` | `true` | `true` | 将学习率预热与 SLERP 预热协调 |
+| `lr_anneal` | `False` | `true` | `true` | 在预热后启用余弦退火 |
+| `init_scheme` | `"blackhole"` | — | — | 当 τ = 1 时的目标初始化方案 |
+| `weight_struct_loss` | `1.0` | — | — | 结构违背损失的基础权重 |
+| `weight_struct_loss_scale` | `"constant"` | — | — | 结构损失的逐块缩放配置 |
+
+<CgxTip>设置 `warmup_steps = 1`（代码默认值）实际上会禁用 SLERP 预热，因为 τ 会立即变为 1。要激活预热课程学习，必须将 `warmup_steps` 设置为远大于 1 的值（例如数千步）。发布的配置文件使用了自定义的 warmup_steps 值——在复现训练运行时，请务必检查此参数。</CgxTip>
+
+<CgxTip>SLERP 预热仅适用于**未掩码**节点（即 `mask == 1` 的节点）。掩码节点——代表缺失或未观测的残基——始终使用原始的 `init_scheme` 初始化，因为不存在可供混合过渡的真实变换。这对于部分结构预测场景至关重要。</CgxTip>
+
+来源: [models.py](models.py#L249-L282), [models/ab_config.json](models/ab_config.json#L1-L1), [models/science_config.json](models/science_config.json#L1-L1)
+
+## 验证行为
+
+在验证和测试步期间，SLERP 预热会被显式禁用。前向传播将以 `is_train=False` 被调用，无论全局步数多少，这都会强制设定 `τ = 1.0`。这确保了评估始终衡量模型从其自身初始化方案起步的性能——从而对学习到的结构预测能力提供客观评估，而非评估受真实值引导的训练行为。
+
+---
+
+## 数据与推理
+
+- [深入解析/数据与推理/输入数据流水线](https://zread.ai/Genentech/equifold/10-input-data-pipeline)
+
+---
+slug:10-input-data-pipeline
+blog_type:normal
+---
+
+
+EquiFold 的输入数据管道填补了原始氨基酸序列与 E3-equivariant 神经网络所消耗的图结构张量表示之间的鸿沟。该管道在两种截然不同的模式下运行——**推理**（仅序列）和**训练**（基于 PDB）——两者最终都汇聚于共享的粗粒化（CG）特征化，该过程将每个残基分解为刚性分子片段。理解此管道至关重要，因为流入模型的每个张量均确定性地派生自这些特征化步骤，且 CG 映射中的错误会直接传播至结构预测中。
+
+来源: [run_inference.py](/run_inference.py#L1-L103), [utils_data.py](/utils_data.py#L1-L471), [openfold_light/data_pipeline.py](/openfold_light/data_pipeline.py#L1-L625)
+
+## 输入格式：抗体 vs. 科学序列
+
+EquiFold 支持通过 `--model` 标志选择两种输入模式，每种模式由相应的 CSV 格式支撑。**抗体（`ab`）**模型期望在单行中配对重链和轻链序列，而**科学（`science`）**模型则处理单链序列。两种格式均要求每行具有唯一标识符（`uid`）。
+
+| 字段 | 抗体 (`ab`) | 科学 (`science`) |
+|---|---|---|
+| `uid` | 唯一标识符 | 唯一标识符 |
+| `heavy` | 重链序列（单字母码） | — |
+| `light` | 轻链序列（单字母码） | — |
+| `seq` | — | 单链序列（单字母码） |
+
+位于 `tests/data/inference_ab_input.csv` 和 `tests/data/inference_science_input.csv` 的 CSV 文件具体展示了这些格式。抗体示例（PDB `6mh2`）同时提供了一个 120 残基的重链和一个 107 残基的轻链，而科学示例则提供了一个 46 残基的从头设计序列，其 `uid` 为 `EHEE_rd3_0145`。
+
+来源: [tests/data/inference_ab_input.csv](/tests/data/inference_ab_input.csv#L1-L2), [tests/data/inference_science_input.csv](/tests/data/inference_science_input.csv#L1-L3), [run_inference.py](/run_inference.py#L67-L76)
+
+## 管道架构
+
+数据管道遵循三阶段转换：**CSV 解析** → **序列特征化** → **图构建**。在推理时，该管道完全由序列驱动（无 MSA 或模板搜索），这是一项经过深思熟虑的架构选择，消除了多序列比对带来的计算瓶颈。
+
+```mermaid
+flowchart TD
+    A["CSV File<br/>(uid + sequence(s))"] --> B["pandas.read_csv()<br/>Parse into (uid, seq1, seq2) tuples"]
+    B --> C{"Model Type?"}
+    C -->|"ab"| D["Process heavy chain<br/>sequence_to_feats(seq1)"]
+    C -->|"science"| E["Process single chain<br/>sequence_to_feats(seq1)"]
+    D --> F{"Has second chain?"}
+    F -->|Yes| G["sequence_to_feats(seq2)<br/>with dst_idx_offset"]
+    F -->|No| H["Single chain graph"]
+    G --> I["Concatenate & offset<br/>chain2 indices"]
+    I --> J["torch_geometric Data<br/>object construction"]
+    D --> J
+    E --> J
+    H --> J
+    J --> K["DataLoader<br/>(batch_size=1)"]
+    K --> L["Model forward pass"]
+```
+
+来源: [run_inference.py](/run_inference.py#L17-L45), [run_inference.py](/run_inference.py#L67-L86)
+
+## 序列特征化：`sequence_to_feats`
+
+函数 `sequence_to_feats` 是训练期间使用的更丰富的 `pdb_feats_to_data` 在推理时的对应版本。仅给定一个氨基酸序列字符串，它便生成模型推理所需的最小张量集合——具体而言，即 CG 节点索引、残基编号映射，以及将 CG 节点预测还原回全原子输出坐标的散射归约索引。
+
+### 步骤 1：残基至 CG 节点扩展
+
+输入序列中的每个氨基酸根据[粗粒化表示](4-coarse-grained-representation)中定义的 CG 字典，被分解为一个或多个**粗粒化节点**。对于每种残基类型，该函数遍历 `cg_dict` 中定义的 CG 组，为每个组分配唯一的 CG 类型索引（`cg_cgidx`）并记录父残基编号（`cg_resnum`）。例如，丙氨酸（`ALA`）产生两个 CG 节点——主链组 `(C, CA, CB, N)` 和羰基组 `(C, CA, O)`——而精氨酸（`ARG`）产生四个节点，包括胍基平面组。
+
+来源: [utils_data.py](/utils_data.py#L425-L440), [cg.py](/cg.py#L10-L31)
+
+### 步骤 2：原子偏移计算
+
+为了支持从 CG 节点空间到全原子空间的散射归约，管道计算每个残基的偏移量（`resnum_to_offset`）。该偏移量考虑了每种残基类型中重原子数量的差异（例如，甘氨酸有 4 个原子，而色氨酸有 14 个）。累积偏移量实现了一种扁平索引方案，使得整个序列中的每个原子都具有一个唯一的全局索引。
+
+来源: [utils_data.py](/utils_data.py#L442-L448)
+
+### 步骤 3：散射索引构建
+
+**散射索引**和**散射权重**（`scatter_index`，`scatter_w`）定义了从 CG 节点预测到全原子坐标的映射。对于每个 CG 节点，`cgidx_to_atomidx` 查找提供目标残基名称、原子名称、该残基内的原子索引以及**权重因子** `w`。该权重因子是原子在多个 CG 组中出现的重数——被多个 CG 组共享的原子（例如，`C` 和 `CA` 同时出现在主链组和羰基组中）具有 `w > 1`，其散射权重被设置为 `1/w`，以确保在归约期间正确平均。散射索引将每个源位置（`i * N_CG_MAX + k`）映射到全局原子目标索引，并通过 `dst_idx_offset` 进行偏移以支持多链。
+
+来源: [utils_data.py](/utils_data.py#L450-L470), [cg.py](/cg.py#L92-L102)
+
+## 多链拼接
+
+对于抗体模型，重链和轻链通过分别调用 `sequence_to_feats` 进行独立处理，然后通过索引偏移进行拼接。轻链的 `dst_idx_offset` 被设置为重链的总原子数，其残基编号偏移 `len(seq1) + MAX_DIST`（其中 `MAX_DIST = 32`）。这种距离填充确保了在图构建步骤中，链之间不会形成伪边——重链最后一个残基与轻链第一个残基之间的残基距离超过了图半径阈值。
+
+```python
+# 多链拼接逻辑（简化版）
+cg_cgidx2, ..., offset2 = sequence_to_feats(seq2, dst_idx_offset=offset)
+seq2_offset = len(seq1) + MAX_DIST  # = len(seq1) + 32
+cg_resnum = np.concatenate([cg_resnum, cg_resnum2 + seq2_offset])
+```
+
+<CgxTip>链之间 `MAX_DIST = 32` 的填充至关重要：它保证了链之间的图隔离。如果此值小于模型中使用的 `radius_graph` 阈值，初始化时将出现链间边，这可能在迭代精化收敛前导致非预期的跨链相互作用。</CgxTip>
+
+来源: [run_inference.py](/run_inference.py#L18-L29), [utils_data.py](/utils_data.py#L14-L15)
+
+## 图数据对象构建
+
+特征化后的数组被封装为 `torch_geometric.data.Data` 对象，包含以下字段，这些字段构成了神经网络的完整推理时输入：
+
+| 字段 | 形状 | 描述 |
+|---|---|---|
+| `num_nodes` | 标量 | 所有残基的 CG 节点总数 |
+| `cg_resnum` | `[N_CG]` | 每个 CG 节点的残基索引 |
+| `cg_cgidx` | `[N_CG]` | CG 类型索引（映射至模板坐标） |
+| `cg_X0` | `[N_CG, N_CG_MAX, 3]` | 来自 `cg_X0.npz` 的模板参考坐标 |
+| `scatter_index` | `[N_CG × N_CG_MAX]` | 用于散射归约的目标原子索引 |
+| `scatter_w` | `[N_CG × N_CG_MAX]` | 散射权重（1/重数）用于平均 |
+| `dst_resnum` | `[N_atoms]` | 每个输出原子的残基编号 |
+| `dst_atom` | `[N_atoms]` | 每个输出原子的原子名称 |
+| `dst_resname` | `[N_atoms]` | 每个输出原子的残基名称（3 字母） |
+| `uid` | 标量 | 此预测的唯一标识符 |
+
+`cg_X0` 字段通过在模块初始化时加载的预计算模板坐标数组 `cg_X0.npz` 进行索引填充。这些模板坐标作为每个 CG 节点的初始参考系，`get_cg_RT` 中的 Kabsch 比对利用它们来建立局部到全局的旋转和平移。
+
+来源: [run_inference.py](/run_inference.py#L31-L44), [utils_data.py](/utils_data.py#L16-L21)
+
+## 训练管道：`pdb_feats_to_data`
+
+在训练期间，由于具备真实 3D 坐标，管道更为丰富。函数 `pdb_feats_to_data` 在 `sequence_to_feats` 的基础上扩展了几项额外计算：
+
+1. **原子位置提取**：从 PDB 特征中读取全原子位置（`[N_res, 37, 3]`）和掩码，其中 37 表示 AlphaFold/OpenFold 中的标准重原子排序。
+2. **CG 帧计算**：对于每个 CG 节点，局部坐标系（旋转 `cg_R` 和平移 `cg_T`）由真实原子位置计算得出，可通过简单的三点法（`get_euclidean`）或针对模板坐标的 Kabsch 比对（`get_euclidean_kabsch`）实现。
+3. **模板 RMSD 过滤**：当 `real_pdb=True` 时，重建位置与模板坐标偏差过大（RMSD > 1.0 Å）的 CG 节点将通过 `cg_mask` 掩码屏蔽，将解析度较差的残基排除在训练之外。
+4. **180° 对称性备选**：对于具有命名歧义的 CG 组（ASP OD1/OD2、GLU OE1/OE2、PHE CD1/CD2、TYR），计算备选原子排列（`cg_X_alt`、`cg_R_alt`、`cg_T_alt`），以处理简并的 chi 角对称性。
+5. **结构违规索引**：预计算的键长、键角和范德华宽度数组（`dst_bonds_*`、`dst_angles_*`、`dst_atom_widths`）按残基组装，并辅以残基间肽键约束进行增强。
+
+来源: [utils_data.py](/utils_data.py#L209-L422)
+
+## 序列特征构建：OpenFold Light 层
+
+`openfold_light/data_pipeline.py` 模块提供了改编自 OpenFold/AlphaFold 的底层特征构建函数。这些函数生成训练中使用的规范特征字典：
+
+- **`make_sequence_features`**：从字符串序列生成独热氨基酸编码（`aatype`）、残基索引、序列长度和域名。独热映射使用 `restype_order_with_x`，将 20 种标准残基加上未知（'X'）映射到整数索引。
+- **`make_msa_features`**：从多序列比对构建 MSA 整数数组和删除矩阵。在推理时，这被完全绕过——EquiFold 不需要 MSA 输入。
+- **`make_template_features`**：组装模板特征（模板氨基酸类型、原子位置、原子掩码、概率总和）。当没有可用的模板命中（推理默认情况）时，返回空的零形状数组。
+- **`make_mmcif_features`** / **`make_pdb_features`**：从 mmCIF 或 PDB 结构中提取全原子位置、掩码、分辨率和发布日期，并与序列特征合并。
+
+`DataPipeline` 类（目前已被注释掉）将通过 `process_fasta`、`process_mmcif`、`process_pdb` 和 `process_core` 方法协调这些步骤，每个方法从序列、MSA 和模板特征中组装组合特征字典。EquiFold 的推理管道完全绕过该层，仅依赖 `sequence_to_feats`。
+
+来源: [openfold_light/data_pipeline.py](/openfold_light/data_pipeline.py#L66-L121), [openfold_light/data_pipeline.py](/openfold_light/data_pipeline.py#L181-L214), [openfold_light/data_pipeline.py](/openfold_light/data_pipeline.py#L29-L63)
+
+## 数据加载与整理
+
+推理管道使用自定义的 `collate_fn`，将批处理数据封装到 `ListData` 容器中，而非默认的 PyTorch Geometric 整理方式。`ListData` 类提供了一个简单的 `.to(device)` 方法，可将所有张量元素移动到目标设备。`DataLoader` 配置为 `batch_size=1`、`drop_last=False` 和 `pin_memory=True`，以实现高效的 GPU 传输。输入处理通过 `multiprocessing.Pool` 的 `imap_unordered` 在 CPU 间并行化以提升吞吐量，由 `--ncpu` 标志控制。
+
+```mermaid
+flowchart LR
+    A["sequence_to_feats()"] --> B["np.ndarray tensors"]
+    B --> C["torch_geometric.data.Data"]
+    C --> D["Pool.imap_unordered<br/>(parallel across sequences)"]
+    D --> E["List[ListData]"]
+    E --> F["DataLoader<br/>batch_size=1"]
+    F --> G["model.forward(data)"]
+```
+
+<CgxTip>EquiFold 的推理管道刻意采用无 MSA 和无模板设计。此设计选择以 AlphaFold 利用进化信息为代价，换取了极大的速度提升和更简单的部署。粗粒化表示通过模板坐标和 CG 分解本身编码强大的结构先验，从而对此进行补偿。</CgxTip>
+
+来源: [utils_data.py](/utils_data.py#L133-L151), [run_inference.py](/run_inference.py#L78-L92)
+
+## 特征总结：推理 vs. 训练
+
+下表总结了推理与训练数据管道之间的主要差异，突出显示了每种模式下可用的特征及其计算来源。
+
+| 特征 | 推理 | 训练 | 来源 |
+|---|---|---|---|
+| `cg_cgidx` | ✅ | ✅ | 序列 → CG 映射 |
+| `cg_resnum` | ✅ | ✅ | 序列残基索引 |
+| `scatter_index` / `scatter_w` | ✅ | ✅ | CG → 原子归约映射 |
+| `cg_X0` (模板坐标) | ✅ | ✅ | `cg_X0.npz` 查找 |
+| `cg_X` (真实坐标) | ❌ | ✅ | PDB 原子位置 |
+| `cg_R`, `cg_T` (CG 帧) | ❌ | ✅ | 源自 PDB 的 Kabsch / Euclidean |
+| `cg_mask` (节点有效性) | ❌ | ✅ | 原子存在性 + RMSD 过滤 |
+| `cg_R_alt`, `cg_T_alt` (对称性备选) | ❌ | ✅ | 180° 排列 |
+| `dst_bonds_*`, `dst_angles_*` | ❌ | ✅ | 立体化学约束 |
+| MSA 特征 | ❌ | ✅ (可选) | 比对运行器 |
+| 模板特征 | ❌ | ✅ (可选) | HHsearch 命中 |
+
+来源: [utils_data.py](/utils_data.py#L380-L420), [run_inference.py](/run_inference.py#L31-L43)
+
+---
+
+**下一步**：了解这些特征化输入如何流经模型以生成最终 PDB 坐标，请参阅[推理与 PDB 输出](11-inference-and-pdb-output)。有关支撑此管道的 CG 表示理论，请参阅[粗粒化表示](4-coarse-grained-representation)。
+
+---
+
+- [深入解析/数据与推理/推理与PDB输出](https://zread.ai/Genentech/equifold/11-inference-and-pdb-output)
+
+---
+slug:11-inference-and-pdb-output
+blog_type:normal
+---
+
+
+EquiFold 的推理流程将氨基酸序列转换为全原子 3D 蛋白质结构，并输出可用于生产的 PDB 文件。该流程是一个自包含的单次处理过程：序列特征被组装为粗粒化（CG）图节点，等变神经网络迭代优化刚体变换，最终的 CG 级坐标被散射回逐原子的笛卡尔坐标位置，随后序列化为 gzip 压缩的 PDB 文件。本文将逐步介绍该流程的每个阶段——从输入 CSV 到磁盘上的 `.pdb.gz` 文件——并解释将 CG 表示桥接至全原子输出的坐标重建逻辑。
+
+来源: [run_inference.py](run_inference.py#L1-L103), [models.py](models.py#L249-L503), [utils_data.py](utils_data.py#L1-L471), [utils.py](utils.py#L340-L344)
+
+## 推理入口与 CLI 参数
+
+`run_inference.py` 脚本是生产推理的唯一入口。它接受四个命令行参数，用于控制模型选择、数据来源、并行度以及输出位置：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `--model` | `"ab"` | 模型变体：`"ab"` 代表抗体（重链+轻链），`"science"` 代表单链科学蛋白质 |
+| `--model_dir` | `"models"` | 包含 `{model}_weights.pt` 和 `{model}_config.json` 的目录 |
+| `--seqs` | `None` | 输入 CSV 文件的路径（必填） |
+| `--ncpu` | `1` | 用于并行特征计算的 CPU 进程数 |
+| `--out_dir` | `"out"` | gzip 压缩 PDB 输出文件的目录 |
+
+该脚本从 JSON 加载模型配置，实例化 `NN` 模块，通过 `torch.load` 恢复权重，并切换至评估模式。设备选择是自动的——如果可用则使用 CUDA，否则使用 CPU。
+
+来源: [run_inference.py](run_inference.py#L48-L65)
+
+## 输入格式与序列特征提取
+
+EquiFold 消费一个 CSV 文件，其模式取决于模型变体。**抗体模型**（`--model ab`）期望的列为 `uid`、`heavy` 和 `light`，其中 `heavy` 和 `light` 分别是重链和轻链的单字母氨基酸序列。**科学模型**（`--model science`）期望的列为 `uid` 和 `seq`，用于单链序列。
+
+```
+# 抗体输入 (tests/data/inference_ab_input.csv)
+uid,heavy,light
+6mh2,EVQLVESGGGLVQPGGSLRLSCAASGFNIKDTYIHWVRQAPGKGLEWVARIYPTNGYTRYADSVKGRFTISADTSKNTAYLQMNSLRAEDTAVYYCSRWGGDGFYAMDYWGQGTLVTVSS,DIQMTQSPSSLSASVGDRVTITCRASQDVNTAVAWYQQKPGKAPKLLIYSASFLYSGVPSRFSGSRSGTDFTLTISSLQPEDFATYYCQQHYTTPPTFGQGTKVEIK
+
+# 科学输入 (tests/data/inference_science_input.csv)
+uid,seq
+EHEE_rd3_0145,GSSEQTYTFDNSKQAKKFAKELKKKGIPFQLHQKNGKWQVTKQ
+```
+
+强制要求唯一标识符（`uid`）唯一——重复的 UID 将触发断言失败。对于抗体推理，两条链会被一起处理：轻链的残基编号和原子索引会偏移 `len(seq1) + MAX_DIST`（其中 `MAX_DIST = 32`），以避免与重链发生冲突，同时保留边类型编码的语义。
+
+来源: [run_inference.py](run_inference.py#L67-L83), [tests/data/inference_ab_input.csv](tests/data/inference_ab_input.csv#L1-L2), [tests/data/inference_science_input.csv](tests/data/inference_science_input.csv#L1-L3)
+
+## `process_one` 函数：从序列到图数据
+
+每一输入行通过 `process_one` 被转换为 `torch_geometric.data.Data` 对象，该函数通过 `multiprocessing.Pool` 在 CPU 核心上并行执行。该函数调用 `sequence_to_feats` 从原始氨基酸字符串派生出以下张量：
+
+| 字段 | 形状 | 用途 |
+|---|---|---|
+| `cg_cgidx` | `[N_cg]` | 每个节点的 CG 类型索引（映射到模板坐标和嵌入） |
+| `cg_resnum` | `[N_cg]` | 每个 CG 节点的残基编号（驱动边类型计算） |
+| `scatter_index` | `[N_cg × N_CG_MAX]` | 散射归约的目标原子索引（CG → 全原子） |
+| `scatter_w` | `[N_cg × N_CG_MAX]` | 每个散射原子的逆多重性权重 |
+| `dst_resnum` | `[N_atoms]` | 每个输出原子的残基编号 |
+| `dst_atom` | `[N_atoms]` | 每个输出原子的原子名称（如 `"CA"`、`"CB"`） |
+| `dst_resname` | `[N_atoms]` | 每个输出原子的三字母残基名称 |
+
+`cg_X0` 模板坐标（从 `cg_X0.npz` 加载）通过 `cg_cgidx` 进行索引，并附加到每个 Data 对象上，提供网络预测的刚体变换所作用的局部坐标系参考坐标。
+
+来源: [run_inference.py](run_inference.py#L17-L45), [utils_data.py](utils_data.py#L425-L470)
+
+## 散射归约：从 CG 坐标到全原子位置
+
+从 CG 节点坐标映射回逐原子笛卡尔坐标位置的过程是一个**散射归约**——同一个原子可能出现在多个 CG 节点中（例如，对于某些残基，`CA` 同时属于主链 CG 和侧链 CG），因此其最终位置是加权平均值。`compute_x_pdb` 函数实现了这一点：
+
+```python
+def compute_x_pdb(X_v_pred, scatter_index, scatter_w, natoms):
+    X_pred_flat = X_v_pred.reshape(-1, 3) * scatter_w.reshape(-1, 1)
+    X_pred_pdb = scatter(X_pred_flat, scatter_index, dim=0, dim_size=natoms)
+    return X_pred_pdb
+```
+
+权重 `scatter_w` 是每个原子在其残基 CG 分解中的**逆多重性**。例如，如果 `CA` 出现在两个 CG 组中，则每次出现的权重为 `1/2`，因此散射求和产生两个预测的平均值。这是在 `sequence_to_feats` 期间通过 `cg.py` 中的 `cg_atom_weight` 计数器预先计算的，该计数器统计每个原子属于多少个 CG 组。
+
+<CgxTip>跨 CG 节点共享的原子（如主链中的 CA、C、N）在散射归约期间会被平均。这不是 Bug——这是为解决粗粒化分解中固有重叠而设计的机制，确保将冲突的局部坐标系预测协调为单一一致的位置。</CgxTip>
+
+来源: [utils.py](utils.py#L340-L344), [utils_data.py](utils_data.py#L450-L470), [cg.py](cg.py#L93-L102)
+
+## 模型前向传播：迭代结构优化
+
+在推理期间，模型的调用参数为 `compute_loss=False` 和 `return_struct=True`。`NN.forward` 方法迭代 `num_blocks + 1` 步（第 0 步存储初始结构；第 1 步到第 `num_blocks` 步应用等变网络块）。在每一步中，当前的全原子坐标通过以下方式计算：
+
+1. 将预测的刚体变换**应用于**模板坐标：`X_v_pred = R_pred @ X0 + T_pred`（`compute_X_v_pred` 函数）
+2. **散射归约**至逐原子位置：`x_pred = compute_x_pdb(X_v_pred, scatter_index, scatter_w, natoms)`
+
+推理循环在每次优化步骤存储 `R_pred`、`T_pred`、`X_pred`（CG 级）和 `x_pred`（原子级）。最终的 PDB 输出仅使用**最后一步的** `x_pred`——通过 `results_dict["x_pred"][0][-1]` 访问，其中索引 `0` 选取第一个（也是唯一的，因为 batch_size=1）样本，`[-1]` 选取最终的优化迭代。
+
+```mermaid
+flowchart TD
+    A["输入 CSV<br/>(uid, 序列)"] --> B["process_one<br/>sequence_to_feats"]
+    B --> C["Data 对象<br/>(cg_cgidx, scatter_index, ...)"]
+    C --> D["DataLoader<br/>(batch_size=1)"]
+    D --> E["NN.forward<br/>return_struct=True"]
+    E --> F["第 0 步: 初始结构<br/>(黑洞或随机)"]
+    F --> G["第 1 步: E3NN 块 1<br/>→ ΔR, ΔT → R₁, T₁"]
+    G --> H["第 2 步: E3NN 块 2<br/>→ ΔR, ΔT → R₂, T₂"]
+    H --> I["第 N 步: E3NN 块 N<br/>→ ΔR, ΔT → Rₙ, Tₙ"]
+    I --> J["compute_X_v_pred<br/>Xᵥ = Rₙ·X₀ + Tₙ"]
+    J --> K["compute_x_pdb<br/>散射归约"]
+    K --> L["x_to_pdb<br/>PDB 字符串生成"]
+    L --> M["gzip → .pred.pdb.gz"]
+```
+
+来源: [models.py](models.py#L343-L503), [run_inference.py](run_inference.py#L89-L102)
+
+## PDB 文件生成：`x_to_pdb` 函数
+
+`x_to_pdb` 函数将预测的原子坐标转换为符合标准的 PDB 字符串。它接收四个必需参数——`x`（坐标 `[N_atoms, 3]`）、`resnum`（残基编号）、`resname`（三字母残基名称）和 `atoms`（原子名称）——以及一个可选的 `b_factors` 数组（默认为零）。
+
+每个原子作为 `ATOM` 记录输出，采用 PDB v3.3 列格式：
+
+| 列 | 字段 | 来源 |
+|---|---|---|
+| 1–6 | 记录类型 | `"ATOM"` |
+| 7–11 | 原子序列号 | 递增整数 |
+| 13–16 | 原子名称 | 若小于 4 个字符则左填充 |
+| 18–20 | 残基名称 | 三字母代码 |
+| 22 | 链标识符 | 硬编码为 `"A"` |
+| 23–26 | 残基序列号 | 来自 `resnum` |
+| 31–38 | X 坐标 | `pos[0]`，8.3f 格式 |
+| 39–46 | Y 坐标 | `pos[1]`，8.3f 格式 |
+| 47–54 | Z4 Z 坐标 | `pos[.2]`，8.3f 格式 |
+| 55–60 | 占据率 | `1.00` |
+| 61–66 | B 因子 | 来自 `b_factors` |
+| 77–78 | 元素符号 | 原子名称的首字符 |
+
+PDB 文件由 `MODEL     1` / `ENDMDL` / `END` 记录包裹，并在最后一个原子后包含一行 `TER`。
+
+<CgxTip>无论输入是单链还是重链+轻链抗体对，所有输出原子均被分配至链 `A`。如果下游工具需要单独的链标识符，则需对 PDB 文件进行后处理。</CgxTip>
+
+来源: [utils_data.py](utils_data.py#L154-L206)
+
+## 输出格式与文件命名
+
+最终输出是写入 `{out_dir}/{uid}.pred.pdb.gz` 的 **gzip 压缩 PDB 文件**。gzip 压缩通过 Python 的 `gzip.open` 以二进制写入模式应用，PDB 字符串在写入前编码为 UTF-8。这种压缩格式是结构生物学流程中的标准格式，可被 `PyMOL` 等工具直接读取（`load filename.pdb.gz`），或使用 `gunzip` 解压。
+
+完整的推理循环每次处理一个结构（`batch_size=1`），在 `torch.no_grad()` 和进度条的伴随下迭代 DataLoader：
+
+```python
+with torch.no_grad():
+    for data in tqdm(loader):
+        data = data.to(device)
+        results_dict = model(data, compute_loss=False, return_struct=True, ...)
+        x_pred = results_dict["x_pred"][0][-1]   # 最终优化步骤
+        with gzip.open(f"{out_dir}/{data[0].uid}.pred.pdb.gz", "wb") as f:
+            f.write(x_to_pdb(x_pred.cpu(), ...).encode())
+```
+
+来源: [run_inference.py](run_inference.py#L86-L103)
+
+## 完整推理流程总结
+
+下表总结了各流程阶段的数据转换，追踪单个蛋白质从序列到 PDB 的全过程：
+
+| 阶段 | 输入 | 输出 | 关键操作 |
+|---|---|---|---|
+| 1. CSV 解析 | `uid, heavy, light`（或 `uid, seq`） | UID 和序列的 Python 列表 | `pandas.read_csv` |
+| 2. 特征提取 | 氨基酸字符串 | `Data(cg_cgidx, cg_resnum, scatter_index, scatter_w, dst_*, cg_X0)` | 经由 `multiprocessing.Pool` 的 `sequence_to_feats` |
+| 3. 模型前向传播 | 设备上的 `Data` 对象 | 包含每次优化步骤 `x_pred` 的 `results_dict` | `NN.forward(return_struct=True)` |
+| 4. 坐标选择 | `results_dict["x_pred"][0]`（所有步骤） | 最终原子位置 `x_pred[-1]` | 索引 `[-1]` 取最后一次优化结果 |
+| 5. PDB 序列化 | `(x_pred, dst_resnum, dst_resname, dst_atom)` | PDB 格式字符串 | `x_to_pdb` |
+| 6. 压缩与 I/O | PDB 字符串 | 磁盘上的 `{uid}.pred.pdb.gz` | `gzip.open` + 写入 |
+
+来源: [run_inference.py](run_inference.py#L48-L103)
+
+## 后续内容
+
+推理流程已完整梳理，逻辑上的下一步是理解控制模型架构和推理行为的配置参数——从优化块的数量到径向截断距离。请参阅 [模型配置参考](12-model-configuration-reference) 获取完整的参数目录，或重温 [输入数据流程](10-input-data-pipeline) 以深入了解 `sequence_to_feats` 的特征工程逻辑。
+
+---

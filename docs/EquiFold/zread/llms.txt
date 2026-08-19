@@ -1,0 +1,30 @@
+# Genentech/equifold
+
+Source: https://zread.ai/Genentech/equifold
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+
+## 深入解析
+
+- [深入解析/架构概述](3-architecture-overview.md)
+- [深入解析/模型配置参考](12-model-configuration-reference.md)
+### 核心流水线
+
+- [深入解析/核心流水线/粗粒度表征](4-coarse-grained-representation.md)
+- [深入解析/核心流水线/E3等变神经网络](5-e3-equivariant-neural-network.md)
+- [深入解析/核心流水线/迭代结构精修](6-iterative-structure-refinement.md)
+
+### 损失与训练
+
+- [深入解析/损失与训练/FAPE损失函数](7-fape-loss-function.md)
+- [深入解析/损失与训练/结构违规损失](8-structure-violation-losses.md)
+- [深入解析/损失与训练/使用SLERP预热进行训练](9-training-with-slerp-warmup.md)
+
+### 数据与推理
+
+- [深入解析/数据与推理/输入数据流水线](10-input-data-pipeline.md)
+- [深入解析/数据与推理/推理与PDB输出](11-inference-and-pdb-output.md)
+
