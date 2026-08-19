@@ -40,8 +40,56 @@ Sources: [fastfold/relax/relax.py L1-L93](https://github.com/hpcaitech/FastFold/
 
 ### Module Structure
 
-```
+```mermaid
+flowchart TD
 
+AmberRelax["AmberRelaxation<br>relax.py"]
+AmberMin["amber_minimize module<br>run_pipeline, clean_protein"]
+Utils["utils module<br>PDB manipulation"]
+OpenMM["OpenMM<br>Molecular dynamics engine"]
+PDBFixer["PDBFixer<br>Structure preparation"]
+BioPython["BioPython<br>PDB parsing"]
+Protein["fastfold.common.protein<br>Protein dataclass"]
+ResidueConstants["fastfold.common.residue_constants<br>Atom definitions"]
+Config["config.relax<br>Configuration parameters"]
+InferenceScript["inference.py<br>Main inference script"]
+ModelOutput["Model prediction output"]
+
+InferenceScript --> AmberRelax
+Config --> AmberRelax
+ModelOutput --> Protein
+Protein --> AmberRelax
+AmberMin --> OpenMM
+AmberMin --> PDBFixer
+Utils --> OpenMM
+Utils --> BioPython
+AmberRelax --> Protein
+Utils --> ResidueConstants
+
+subgraph subGraph3 ["Inference Pipeline"]
+    InferenceScript
+    ModelOutput
+end
+
+subgraph subGraph2 ["FastFold Core"]
+    Protein
+    ResidueConstants
+    Config
+end
+
+subgraph subGraph1 ["External Dependencies"]
+    OpenMM
+    PDBFixer
+    BioPython
+end
+
+subgraph subGraph0 ["fastfold.relax Package"]
+    AmberRelax
+    AmberMin
+    Utils
+    AmberRelax --> AmberMin
+    AmberRelax --> Utils
+end
 ```
 
 **Module Responsibilities**:
@@ -69,8 +117,8 @@ The `AmberRelaxation` class provides the main interface for structure refinement
 
 **Constructor Parameters**:
 
-```
-
+```python
+AmberRelaxation(    max_iterations: int,           # L-BFGS iterations (0 = no limit)    tolerance: float,              # Energy tolerance (kcal/mol)    stiffness: float,              # Restraint spring constant (kcal/mol·Å²)    exclude_residues: Sequence[int],  # Residues excluded from restraints    max_outer_iterations: int,     # Violation-informed iterations    use_gpu: bool                  # GPU acceleration flag)
 ```
 
 | Parameter | Default | Description |
@@ -90,8 +138,8 @@ Sources: [fastfold/relax/relax.py L27-L59](https://github.com/hpcaitech/FastFold
 
 The `process` method executes the relaxation pipeline:
 
-```
-
+```python
+def process(*, prot: protein.Protein) -> Tuple[str, Dict[str, Any], np.ndarray]:    """    Args:        prot: Protein object with atom positions and metadata            Returns:        min_pdb: Relaxed structure as PDB string        debug_data: Dict with 'initial_energy', 'final_energy', 'attempts', 'rmsd'        violations: Per-residue violation mask    """
 ```
 
 **Return values**:
@@ -108,8 +156,41 @@ Sources: [fastfold/relax/relax.py L61-L92](https://github.com/hpcaitech/FastFold
 
 ### Workflow Diagram
 
-```
+```mermaid
+flowchart TD
 
+Input["Protein object<br>(from model prediction)"]
+Pipeline["amber_minimize.run_pipeline"]
+AddH["Add hydrogen atoms<br>(PDBFixer)"]
+Setup["Setup Amber force field<br>+ restraining potentials"]
+Outer["Outer iteration loop<br>(max_outer_iterations)"]
+Minimize["L-BFGS minimization<br>(max_iterations, tolerance)"]
+CheckViol["Violations<br>detected?"]
+UpdateRestraints["Update restraints<br>for violated residues"]
+ExtractPos["Extract minimized positions"]
+Clean["clean_protein<br>(remove hydrogens)"]
+OverwriteCoords["overwrite_pdb_coordinates"]
+OverwriteB["overwrite_b_factors<br>(pLDDT scores)"]
+Validate["assert_equal_nonterminal_atom_types"]
+Output["Returns:<br>min_pdb, debug_data, violations"]
+CalcRMSD["Calculate RMSD<br>(initial vs final)"]
+
+Input --> Pipeline
+Pipeline --> AddH
+AddH --> Setup
+Setup --> Outer
+Outer --> Minimize
+Minimize --> CheckViol
+CheckViol --> UpdateRestraints
+UpdateRestraints --> Outer
+CheckViol --> ExtractPos
+ExtractPos --> Clean
+Clean --> OverwriteCoords
+OverwriteCoords --> OverwriteB
+OverwriteB --> Validate
+Validate --> Output
+Pipeline -->|"No"| CalcRMSD
+CalcRMSD --> Output
 ```
 
 **Pipeline Stages**:
@@ -129,8 +210,29 @@ Sources: [fastfold/relax/relax.py L65-L92](https://github.com/hpcaitech/FastFold
 
 The outer iteration loop implements the violation-informed relaxation strategy:
 
-```
+```mermaid
+flowchart TD
 
+Start["Iteration 1"]
+Min1["Minimize with<br>uniform restraints"]
+Check1["Violations?"]
+Iter2["Iteration 2:<br>Strengthen restraints<br>on violated regions"]
+Done["Complete"]
+Min2["Minimize again"]
+Check2["Violations?"]
+Continue["Continue up to<br>max_outer_iterations"]
+Final["Final attempt"]
+
+Start --> Min1
+Min1 --> Check1
+Check1 --> Iter2
+Check1 --> Done
+Iter2 --> Min2
+Min2 --> Check2
+Check2 --> Continue
+Check2 --> Done
+Continue --> Final
+Final --> Done
 ```
 
 This approach (introduced in AlphaFold 2.1) resolves >95% of difficult cases while adding minimal overhead to typical structures that relax cleanly in the first iteration.
@@ -164,8 +266,8 @@ Sources: [fastfold/config.py L461-L467](https://github.com/hpcaitech/FastFold/bl
 
 The relaxation step is controlled by the `--relaxation` flag in `inference.py`:
 
-```
-
+```markdown
+parser.add_argument(    "--relaxation",     action="store_false",  # Note: action is store_false    default=False,         # Default is False (relaxation disabled))
 ```
 
 **Note**: The `action="store_false"` combined with `default=False` means relaxation is **disabled by default**. To enable, the flag must be explicitly set.
@@ -173,7 +275,7 @@ The relaxation step is controlled by the `--relaxation` flag in `inference.py`:
 To run inference with relaxation:
 
 ```
-
+python inference.py target.fasta ... --relaxation
 ```
 
 Sources: [inference.py L524-L525](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L524-L525)
@@ -188,16 +290,34 @@ Sources: [inference.py L524-L525](https://github.com/hpcaitech/FastFold/blob/eba
 
 ### Inference Pipeline Integration
 
-```
+```mermaid
+sequenceDiagram
+  participant inference.py::main
+  participant AlphaFold Model
+  participant AmberRelaxation
+  participant File System
 
+  inference.py::main->>AlphaFold Model: Forward pass
+  AlphaFold Model-->>inference.py::main: out (prediction dict)
+  inference.py::main->>inference.py::main: protein.from_prediction
+  note over inference.py::main: Create Protein object
+  inference.py::main->>File System: (features, result, b_factors)
+  loop [Relaxation Enabled]
+    inference.py::main->>AmberRelaxation: Save unrelaxed PDB
+    inference.py::main->>AmberRelaxation: (tag_model_unrelaxed.pdb)
+    note over AmberRelaxation: Run amber_minimize.run_pipeline
+    AmberRelaxation-->>inference.py::main: AmberRelaxation(**config.relax)
+    note over inference.py::main: debug_data contains:
+    inference.py::main->>File System: process(prot=unrelaxed_protein)
+  end
 ```
 
 **Monomer Workflow** ([inference.py L465-L480](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L465-L480)
 
 ):
 
-```
-
+```python
+if(args.relaxation):    amber_relaxer = relax.AmberRelaxation(        use_gpu=True,        **config.relax,    )        t = time.perf_counter()    relaxed_pdb_str, _, _ = amber_relaxer.process(prot=unrelaxed_protein)    print(f"Relaxation time: {time.perf_counter() - t}")        relaxed_output_path = os.path.join(        args.output_dir,        f'{tag}_{args.model_name}_relaxed.pdb'    )    with open(relaxed_output_path, 'w') as f:        f.write(relaxed_pdb_str)
 ```
 
 **Multimer Workflow**: Identical logic at [inference.py L322-L337](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py#L322-L337)
@@ -216,8 +336,8 @@ The `fastfold.relax.utils` module provides PDB file manipulation functions:
 
 #### overwrite_pdb_coordinates
 
-```
-
+```python
+def overwrite_pdb_coordinates(pdb_str: str, pos) -> str:    """Replaces coordinates in PDB string with new positions.        Uses OpenMM to parse topology and write new coordinates.    """
 ```
 
 **Process**:
@@ -230,8 +350,8 @@ Sources: [fastfold/relax/utils.py L28-L34](https://github.com/hpcaitech/FastFold
 
 #### overwrite_b_factors
 
-```
-
+```python
+def overwrite_b_factors(pdb_str: str, bfactors: np.ndarray) -> str:    """Replaces B-factors with pLDDT confidence scores.        Args:        pdb_str: PDB string        bfactors: Array [n_residues, 37] with pLDDT values            Returns:        PDB string with updated B-factors    """
 ```
 
 **Implementation**:
@@ -244,8 +364,8 @@ Sources: [fastfold/relax/utils.py L37-L72](https://github.com/hpcaitech/FastFold
 
 #### assert_equal_nonterminal_atom_types
 
-```
-
+```python
+def assert_equal_nonterminal_atom_types(    atom_mask: np.ndarray,     ref_atom_mask: np.ndarray):    """Validates that atom sets match pre- and post-relaxation.        Ignores terminal OXT atoms added during minimization.    """
 ```
 
 This validation ensures the relaxation process hasn't inadvertently changed the protein's atom composition (except for expected terminal oxygen additions).
@@ -273,8 +393,8 @@ Sources: [inference.py L460-L480](https://github.com/hpcaitech/FastFold/blob/eba
 
 The `debug_data` dictionary returned by `process()` contains:
 
-```
-
+```css
+{    'initial_energy': float,   # Potential energy before minimization (kcal/mol)    'final_energy': float,     # Potential energy after minimization (kcal/mol)    'attempts': int,           # Number of outer iterations performed    'rmsd': float             # RMSD between initial and final structures (Å)}
 ```
 
 **Interpreting Metrics**:
@@ -289,8 +409,8 @@ Sources: [fastfold/relax/relax.py L74-L82](https://github.com/hpcaitech/FastFold
 
 The `violations` array is a per-residue binary mask indicating which residues still have unresolved violations after relaxation. This can be used for quality control:
 
-```
-
+```python
+relaxed_pdb, debug_data, violations = amber_relaxer.process(prot=protein) if violations.sum() > 0:    print(f"Warning: {violations.sum()} residues have unresolved violations")
 ```
 
 Sources: [fastfold/relax/relax.py L89-L91](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/relax/relax.py#L89-L91)
@@ -337,8 +457,8 @@ This is separate from the main model's GPU memory usage, so relaxation typically
 
 The relaxation module requires:
 
-```
-
+```markdown
+# From environment.yml- conda-forge::openmm=7.7.0      # Molecular dynamics engine- conda-forge::pdbfixer           # Structure preparation- pip::biopython==1.79            # PDB parsing
 ```
 
 These are installed automatically when using the provided Conda environment.

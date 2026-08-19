@@ -19,8 +19,67 @@ This page documents the template search and processing pipeline, which converts 
 
 Template processing transforms raw template search results (`.hhr` or `.sto` files) into structured feature arrays containing atom positions, masks, and metadata. The pipeline handles common challenges like sequence mismatches, obsolete PDB entries, and missing structural data.
 
-```
+```mermaid
+flowchart TD
 
+HHR["HHSearch Results (.hhr)"]
+HMM["Hmmsearch Results (.sto)"]
+ParseHHR["parsers.parse_hhr()"]
+ParseHMM["parsers.parse_hmmsearch_sto()"]
+THList["List[TemplateHit]"]
+TF["TemplateHitFeaturizer"]
+HF["HmmsearchHitFeaturizer"]
+Prefilter["Prefilter: Date, Quality, Duplicates"]
+ParseMMCIF["Parse mmCIF Structure"]
+FindSeq["Find Template in PDB"]
+Realign["Realignment (Kalign)"]
+Extract["Extract Atom Positions"]
+TempFeats["template_aatype<br>template_all_atom_positions<br>template_all_atom_mask<br>template_sum_probs"]
+
+HHR --> ParseHHR
+HMM --> ParseHMM
+ParseHHR --> THList
+ParseHMM --> THList
+THList --> TF
+THList --> HF
+TF --> Prefilter
+HF --> Prefilter
+Extract --> TempFeats
+
+subgraph subGraph5 ["Output Features"]
+    TempFeats
+end
+
+subgraph subGraph4 ["Processing Steps"]
+    Prefilter
+    ParseMMCIF
+    FindSeq
+    Realign
+    Extract
+    Prefilter --> ParseMMCIF
+    ParseMMCIF --> FindSeq
+    FindSeq --> Realign
+    Realign --> Extract
+end
+
+subgraph Featurization ["Featurization"]
+    TF
+    HF
+end
+
+subgraph subGraph2 ["Template Hit Objects"]
+    THList
+end
+
+subgraph Parsing ["Parsing"]
+    ParseHHR
+    ParseHMM
+end
+
+subgraph subGraph0 ["Input Sources"]
+    HHR
+    HMM
+end
 ```
 
 **Sources**: [fastfold/data/templates.py L1-L1429](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/templates.py#L1-L1429)
@@ -69,8 +128,65 @@ The final output is a feature dictionary with standardized shapes:
 
 `TemplateHitFeaturizer` processes HHSearch hits from PDB70 searches for monomer predictions.
 
-```
+```mermaid
+flowchart TD
 
+Init["TemplateHitFeaturizer(...)"]
+MMCIFDir["mmcif_dir"]
+Obsolete["obsolete_pdbs_path"]
+ReleaseDate["release_dates_path"]
+Kalign["kalign_binary_path"]
+MaxHits["max_hits"]
+Method["get_templates(query_sequence, hits, ...)"]
+LoadDates["Load release_dates"]
+LoadObs["Load obsolete_pdbs"]
+LoopHits["Loop over hits"]
+Assess["_assess_hhsearch_hit()"]
+Parse["Parse mmCIF"]
+ExtractFeats["_extract_template_features()"]
+Result["TemplateSearchResult"]
+Features["features: dict"]
+Warnings["warnings: list"]
+
+ExtractFeats --> Result
+
+subgraph Output ["Output"]
+    Result
+    Features
+    Warnings
+    Result --> Features
+    Result --> Warnings
+end
+
+subgraph subGraph1 ["get_templates() Method"]
+    Method
+    LoadDates
+    LoadObs
+    LoopHits
+    Assess
+    Parse
+    ExtractFeats
+    Method --> LoadDates
+    Method --> LoadObs
+    Method --> LoopHits
+    LoopHits --> Assess
+    Assess --> Parse
+    Parse --> ExtractFeats
+end
+
+subgraph Initialization ["Initialization"]
+    Init
+    MMCIFDir
+    Obsolete
+    ReleaseDate
+    Kalign
+    MaxHits
+    Init --> MMCIFDir
+    Init --> Obsolete
+    Init --> ReleaseDate
+    Init --> Kalign
+    Init --> MaxHits
+end
 ```
 
 **Key Parameters**:
@@ -102,8 +218,33 @@ Template hits undergo multiple prefilter checks before structure parsing. Hits t
 
 ### Prefilter Checks
 
-```
+```mermaid
+flowchart TD
 
+Hit["TemplateHit"]
+CheckDate["Date Check"]
+CheckPDB["PDB ID Check"]
+DateErr["DateError"]
+CheckAlign["Align Ratio Check"]
+PDBErr["PdbIdError"]
+CheckDup["Duplicate Check"]
+AlignErr["AlignRatioError"]
+CheckLen["Length Check"]
+DupErr["DuplicateError"]
+Accept["Accept Hit"]
+LenErr["LengthError"]
+
+Hit --> CheckDate
+CheckDate --> CheckPDB
+CheckDate --> DateErr
+CheckPDB --> CheckAlign
+CheckPDB --> PDBErr
+CheckAlign --> CheckDup
+CheckAlign --> AlignErr
+CheckDup --> CheckLen
+CheckDup --> DupErr
+CheckLen --> Accept
+CheckLen --> LenErr
 ```
 
 | Check | Threshold | Raises | Description |
@@ -118,8 +259,8 @@ Template hits undergo multiple prefilter checks before structure parsing. Hits t
 
 ### _assess_hhsearch_hit Function
 
-```
-
+```python
+def _assess_hhsearch_hit(    hit: parsers.TemplateHit,    hit_pdb_code: str,    query_sequence: str,    release_dates: Mapping[str, datetime.datetime],    release_date_cutoff: datetime.datetime,    query_pdb_code: Optional[str] = None,    max_subsequence_ratio: float = 0.95,    min_align_ratio: float = 0.1,) -> bool:
 ```
 
 This function implements all prefilter checks. It returns `True` if the hit passes, otherwise raises a specific `PrefilterError` subclass.
@@ -132,8 +273,25 @@ This function implements all prefilter checks. It returns `True` if the hit pass
 
 The `_find_template_in_pdb` function locates the template sequence within the parsed mmCIF structure using three matching strategies:
 
-```
+```mermaid
+flowchart TD
 
+Start["Template Chain ID + Sequence"]
+Try1["Strategy 1: Exact Match"]
+Found1["Return: chain_seq, chain_id, offset"]
+Try2["Strategy 2: Sequence-Only Match"]
+Found2["Return: chain_seq, new_chain_id, offset"]
+Try3["Strategy 3: Fuzzy Match (X=wildcard)"]
+Found3["Return: chain_seq, new_chain_id, offset"]
+Error["SequenceNotInTemplateError"]
+
+Start --> Try1
+Try1 --> Found1
+Try1 --> Try2
+Try2 --> Found2
+Try2 --> Try3
+Try3 --> Found3
+Try3 --> Error
 ```
 
 **Sources**: [fastfold/data/templates.py L266-L337](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/templates.py#L266-L337)
@@ -142,8 +300,25 @@ The `_find_template_in_pdb` function locates the template sequence within the pa
 
 When the template sequence in the mmCIF file differs from the sequence in the hit (common when PDB70 is outdated), realignment is performed:
 
-```
+```mermaid
+flowchart TD
 
+Mismatch["Sequence Mismatch Detected"]
+Kalign["kalign.align([old_seq, new_seq])"]
+Parse["Parse A3M alignment"]
+BuildMap["Build old_index → new_index mapping"]
+Check["Check >= 90% identity"]
+Remap["Remap query_index → new_template_index"]
+Error["QueryToTemplateAlignError"]
+Return["Return: new_sequence, new_mapping"]
+
+Mismatch --> Kalign
+Kalign --> Parse
+Parse --> BuildMap
+BuildMap --> Check
+Check --> Remap
+Check --> Error
+Remap --> Return
 ```
 
 **Key Constraint**: The realignment must have ≥90% sequence identity (relative to the shorter sequence). This ensures the structural data is still relevant.
@@ -152,8 +327,8 @@ When the template sequence in the mmCIF file differs from the sequence in the hi
 
 ### _realign_pdb_template_to_query Function
 
-```
-
+```python
+def _realign_pdb_template_to_query(    old_template_sequence: str,    template_chain_id: str,    mmcif_object: mmcif_parsing.MmcifObject,    old_mapping: Mapping[int, int],    kalign_binary_path: str,) -> Tuple[str, Mapping[int, int]]:
 ```
 
 This function:
@@ -171,8 +346,34 @@ This function:
 
 The `_extract_template_features` function is the core feature extraction routine:
 
-```
+```mermaid
+flowchart TD
 
+Input["mmCIF object + mapping"]
+GetChain["Identify template chain"]
+TryFind["_find_template_in_pdb()"]
+GetAtoms["_get_atom_positions()"]
+Realign["_realign_pdb_template_to_query()"]
+CheckDist["_check_residue_distances()"]
+AlignToQuery["Align atoms to query sequence"]
+NoAtomErr["NoAtomDataInTemplateError"]
+BuildFeatures["Build feature arrays"]
+CheckMask["Check template_all_atom_mask"]
+Return["Return features + warning"]
+MaskErr["TemplateAtomMaskAllZerosError"]
+
+Input --> GetChain
+GetChain --> TryFind
+TryFind --> GetAtoms
+TryFind --> Realign
+Realign --> GetAtoms
+GetAtoms --> CheckDist
+CheckDist --> AlignToQuery
+CheckDist --> NoAtomErr
+AlignToQuery --> BuildFeatures
+BuildFeatures --> CheckMask
+CheckMask --> Return
+CheckMask --> MaskErr
 ```
 
 **Sources**: [fastfold/data/templates.py L521-L678](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/templates.py#L521-L678)
@@ -181,8 +382,8 @@ The `_extract_template_features` function is the core feature extraction routine
 
 The `_check_residue_distances` function validates that consecutive Cα atoms are within 150Å (essentially unlimited):
 
-```
-
+```python
+def _check_residue_distances(    all_positions: np.ndarray,    all_positions_mask: np.ndarray,    max_ca_ca_distance: float,  # = 150.0):
 ```
 
 This check catches egregiously bad structures where chains are incorrectly connected.
@@ -193,8 +394,8 @@ This check catches egregiously bad structures where chains are incorrectly conne
 
 The extracted atom positions are mapped to query sequence indices using the alignment mapping:
 
-```
-
+```markdown
+# Initialize arrays with zeros for all query residuestemplates_all_atom_positions = []templates_all_atom_masks = []output_templates_sequence = [] for _ in query_sequence:    templates_all_atom_positions.append(np.zeros((37, 3)))    templates_all_atom_masks.append(np.zeros(37))    output_templates_sequence.append("-") # Fill in aligned positionsfor query_idx, template_idx in mapping.items():    template_index = template_idx + mapping_offset    templates_all_atom_positions[query_idx] = all_atom_positions[template_index]    templates_all_atom_masks[query_idx] = all_atom_masks[template_index]    output_templates_sequence[query_idx] = template_sequence[template_idx]
 ```
 
 **Sources**: [fastfold/data/templates.py L633-L647](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/templates.py#L633-L647)
@@ -205,8 +406,8 @@ The extracted atom positions are mapped to query sequence indices using the alig
 
 The `make_template_features` function provides the high-level interface used by `DataPipeline`:
 
-```
-
+```python
+def make_template_features(    input_sequence: str,    hits: Sequence[Any],    template_featurizer: Union[TemplateHitFeaturizer, HmmsearchHitFeaturizer],    query_pdb_code: Optional[str] = None,    query_release_date: Optional[str] = None,) -> FeatureDict:
 ```
 
 **Behavior**:
@@ -221,8 +422,33 @@ The `make_template_features` function provides the high-level interface used by 
 
 The `DataPipeline` class integrates template processing in its `process_fasta()` and `process_mmcif()` methods:
 
-```
+```mermaid
+flowchart TD
 
+ParseHits["_parse_template_hits(alignment_dir)"]
+MakeTemp["make_template_features(...)"]
+MakeSeq["make_sequence_features(...)"]
+MakeMSA["_process_msa_feats(...)"]
+Merge["Merge all features"]
+Output["FeatureDict with:<br>- sequence features<br>- MSA features<br>- template features"]
+
+Merge --> Output
+
+subgraph subGraph1 ["Feature Dict Output"]
+    Output
+end
+
+subgraph DataPipeline.process_fasta() ["DataPipeline.process_fasta()"]
+    ParseHits
+    MakeTemp
+    MakeSeq
+    MakeMSA
+    Merge
+    ParseHits --> MakeTemp
+    MakeTemp --> Merge
+    MakeSeq --> Merge
+    MakeMSA --> Merge
+end
 ```
 
 **Template Hit Parsing**:
@@ -239,8 +465,8 @@ The `DataPipeline` class integrates template processing in its `process_fasta()`
 
 When no templates are available, `empty_template_feats()` returns properly shaped zero arrays:
 
-```
-
+```python
+def empty_template_feats(n_res) -> FeatureDict:    return {        "template_aatype": np.zeros((0, n_res)).astype(np.int64),        "template_all_atom_positions": np.zeros((0, n_res, 37, 3)).astype(np.float32),        "template_sum_probs": np.zeros((0, 1)).astype(np.float32),        "template_all_atom_mask": np.zeros((0, n_res, 37)).astype(np.float32),    }
 ```
 
 This ensures the model always receives template features with the correct structure, even when no templates are found.
@@ -253,16 +479,42 @@ Template processing uses a hierarchical exception system to handle various failu
 
 ### Exception Hierarchy
 
-```
+```mermaid
+flowchart TD
 
+Error["templates.Error"]
+NoChains["NoChainsError"]
+SeqNotFound["SequenceNotInTemplateError"]
+NoAtom["NoAtomDataInTemplateError"]
+AllZeroMask["TemplateAtomMaskAllZerosError"]
+AlignError["QueryToTemplateAlignError"]
+CaDist["CaDistanceError"]
+PrefilterError["PrefilterError"]
+DateError["DateError"]
+PdbIdError["PdbIdError"]
+AlignRatioError["AlignRatioError"]
+DuplicateError["DuplicateError"]
+LengthError["LengthError"]
+
+Error --> NoChains
+Error --> SeqNotFound
+Error --> NoAtom
+Error --> AllZeroMask
+Error --> AlignError
+Error --> CaDist
+PrefilterError --> DateError
+PrefilterError --> PdbIdError
+PrefilterError --> AlignRatioError
+PrefilterError --> DuplicateError
+PrefilterError --> LengthError
 ```
 
 ### Error Recovery
 
 The featurizer's `get_templates()` method catches errors per-hit and continues processing:
 
-```
-
+```css
+for hit in hits:    try:        # Prefilter        _assess_hhsearch_hit(...)        # Parse mmCIF        mmcif_object = mmcif_parsing.parse(...)        # Extract features        features, warning = _extract_template_features(...)            except PrefilterError as e:        msg = f"Hit {hit.name} did not pass prefilter: {str(e)}"        warnings.append(msg)        continue    except Error as e:        msg = f"Hit {hit.name} failed feature extraction: {str(e)}"        warnings.append(msg)        continue
 ```
 
 This ensures that a single bad template doesn't break the entire pipeline.
@@ -278,13 +530,13 @@ This ensures that a single bad template doesn't break the entire pipeline.
 The `release_dates` dictionary maps PDB IDs (uppercase) to `datetime.datetime` objects representing structure release dates:
 
 ```
-
+{    "4ABC": datetime.datetime(2015, 3, 18, 0, 0),    "1XYZ": datetime.datetime(2001, 6, 5, 0, 0),    ...}
 ```
 
 ### Loading Release Dates
 
-```
-
+```python
+def _parse_release_dates(path: str) -> Mapping[str, datetime.datetime]:    with open(path, "r") as fp:        data = json.load(fp)        return {        pdb.upper(): to_date(v)        for pdb, d in data.items()        for k, v in d.items()        if k == "release_date"    }
 ```
 
 The expected JSON format is nested with PDB IDs as keys and metadata including `release_date` as values.
@@ -307,8 +559,8 @@ This allows the featurizer to automatically use the updated structure when the h
 
 ### Monomer Template Processing
 
-```
-
+```javascript
+from fastfold.data import templates, data_pipeline # Initialize featurizertemplate_featurizer = templates.TemplateHitFeaturizer(    mmcif_dir="/path/to/pdb_mmcif",    max_hits=20,    kalign_binary_path="/usr/bin/kalign",    release_dates_path="/path/to/release_dates.json",    obsolete_pdbs_path="/path/to/obsolete.dat",) # Initialize data pipelinedata_pipeline = data_pipeline.DataPipeline(    template_featurizer=template_featurizer) # Process FASTAfeatures = data_pipeline.process_fasta(    fasta_path="query.fasta",    alignment_dir="alignments/",)
 ```
 
 **Sources**: [fastfold/data/data_pipeline.py L784-L790](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/data_pipeline.py#L784-L790)
@@ -317,8 +569,8 @@ This allows the featurizer to automatically use the updated structure when the h
 
 ### Multimer Template Processing
 
-```
-
+```javascript
+from fastfold.data import templates # Initialize hmmsearch featurizertemplate_featurizer = templates.HmmsearchHitFeaturizer(    mmcif_dir="/path/to/pdb_mmcif",    max_hits=20,    kalign_binary_path="/usr/bin/kalign",    release_dates_path="/path/to/release_dates.json",) # Use in multimer pipeline# (typically called internally by DataPipelineMultimer)
 ```
 
 **Sources**: [fastfold/data/templates.py L899-L1043](https://github.com/hpcaitech/FastFold/blob/eba49680/fastfold/data/templates.py#L899-L1043)

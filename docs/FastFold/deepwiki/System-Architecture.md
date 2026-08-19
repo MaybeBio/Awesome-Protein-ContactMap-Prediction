@@ -23,9 +23,6 @@ FastFold is a high-performance implementation of AlphaFold 2 that maintains comp
 
 FastFold's architecture consists of five primary layers that interact to provide both training and inference capabilities:
 
-```
-
-```
 
 **Sources:** [inference.py](https://github.com/hpcaitech/FastFold/blob/eba49680/inference.py)
 
