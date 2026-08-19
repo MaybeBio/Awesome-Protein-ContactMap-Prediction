@@ -1,0 +1,4383 @@
+# hpcaitech/FastFold
+
+Source: https://zread.ai/hpcaitech/FastFold
+
+# 入门
+
+- [入门/概述](https://zread.ai/hpcaitech/FastFold/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+FastFold 是 AlphaFold **Evoformer** 模块的高性能重实现，旨在优化 GPU 集群上的蛋白质结构预测。FastFold 基于 ColossalAI 的分布式原语和 OpenFold 的模型架构构建，通过三项核心创新实现了显著的加速与内存缩减：**融合 CUDA/Triton 内核**、**动态轴向并行** 以及 **Ray 加速的数据工作流**。由此构建出的系统，能够在单块 A100 GPU 上推断超过 **10,000 个残基**的序列——远超原始 AlphaFold 的内存上限。
+
+![FastFold](https://github.com/hpcaitech/FastFold/raw/main/assets/fold.jpg)
+
+来源: [README.md](/README.md#L1-L30), [setup.py](/setup.py#L129-L143)
+
+## FastFold 解决的问题
+
+AlphaFold 的 Evoformer 是蛋白质结构预测的计算瓶颈。其 48 个迭代块执行 MSA 注意力、三角形乘法更新和外积均值操作，在序列长度上会产生二次方的内存开销。原始实现存在三项根本局限，而 FastFold 正好直击痛点：
+
+| 局限性 | 根本原因 | FastFold 解决方案 |
+|---|---|---|
+| **内核低效** | 原生 PyTorch 算子导致冗余的内存往返 | 融合 CUDA 内核 + Triton JIT 内核（用于注意力、softmax 和层归一化） |
+| **单 GPU 内存墙** | Pair 表示的复杂度相对于序列长度 N 为 O(N²) | 动态轴向并行通过全互联通信将计算分摊到多块 GPU 上 |
+| **数据预处理缓慢** | 串行 MSA 搜索 (jackhmmer, HHblits, HHsearch) | 具备任务级并行能力的 Ray 工作流 DAG（单体约 3 倍加速，多体约 3N 倍加速） |
+
+<CgxTip>FastFold 在运行时通过 `inject_fastnn()` 替换 OpenFold 的 Evoformer——这是一种权重复制注入机制，能将原始模型的每个参数映射到优化后的 FastNN 模块中，无需重新训练。这意味着你无需更改训练或推理流程即可获得加速。</CgxTip>
+
+来源: [README.md](/README.md#L19-L30), [fastfold/utils/inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L1-L30)
+
+## 架构概览
+
+FastFold 由四个紧密集成的子系统组成。**FastNN 模块**通过融合内核与分块执行提供优化后的 Evoformer。**DAP 分布式层**通过 scatter/gather 和异步全互联通信处理张量并行。**数据工作流**通过 Ray DAG 加速 MSA 搜索。**模型集成层**通过权重注入与配置将各部分桥接在一起。
+
+```mermaid
+graph TB
+    subgraph "User Entry Points"
+        INF["inference.py"]
+        TRN["train.py"]
+        BM["benchmark/perf.py"]
+    end
+
+    subgraph "Model Integration"
+        AF["AlphaFold Model<br/>(OpenFold-based)"]
+        INJ["inject_fastnn()"]
+        JAX["import_jax_weights_()"]
+        CFG["config.py<br/>(model_config)"]
+    end
+
+    subgraph "FastNN — High-Performance Evoformer"
+        EVO["Evoformer / EvoformerStack"]
+        MSA["MSACore<br/>(RowAtt + ColAtt + Transition)"]
+        PAIR["PairCore<br/>(TriangleMul + TriangleAtt)"]
+        OPM["OutProductMean"]
+        TK["Kernel Layer<br/>(CUDA / Triton / JIT)"]
+    end
+
+    subgraph "DAP — Dynamic Axial Parallelism"
+        CORE["init_dap()"]
+        COMM["scatter / gather / reduce"]
+        A2A["All_to_All_Async<br/>(col_to_row / row_to_col)"]
+    end
+
+    subgraph "Data Workflow (Ray)"
+        WF["FastFoldDataWorkFlow"]
+        FACT["Task Factories<br/>(JackHmmer / HHBlits / HHSearch)"]
+        BRUN["batch_run()"]
+    end
+
+    INF --> AF --> INJ
+    TRN --> AF --> INJ
+    BM --> EVO
+    INJ --> EVO
+    JAX --> AF
+    CFG --> AF
+
+    EVO --> MSA & PAIR & OPM
+    MSA --> TK
+    PAIR --> TK
+    OPM --> TK
+
+    EVO --> COMM & A2A
+    MSA --> COMM & A2A
+    CORE --> COMM & A2A
+
+    INF --> WF
+    WF --> FACT --> BRUN
+```
+
+来源: [fastfold/model/fastnn/__init__.py](/fastfold/model/fastnn/__init__.py#L1-L13), [fastfold/distributed/__init__.py](/fastfold/distributed/__init__.py#L1-L7), [fastfold/workflow/template/fastfold_data_workflow.py](/fastfold/workflow/template/fastfold_data_workflow.py#L1-L50), [inference.py](/inference.py#L30-L45)
+
+## 项目结构
+
+代码库按职责进行了清晰划分。以下是带有注释的目录结构可视化映射：
+
+```
+FastFold/
+├── inference.py / train.py          ← 推理与训练入口
+├── fastfold/
+│   ├── model/
+│   │   ├── fastnn/                  ← ⚡ 高性能 Evoformer
+│   │   │   ├── evoformer.py         ← Evoformer & EvoformerStack
+│   │   │   ├── msa.py               ← MSA 注意力 (行 + 列 + 全局)
+│   │   │   ├── triangle.py          ← Pair 注意力 (三角形乘法 + 注意力)
+│   │   │   ├── ops.py               ← OutProductMean, Linear, 分块执行
+│   │   │   ├── embedders.py         ← 模板与循环嵌入器
+│   │   │   └── kernel/              ← 融合内核实现
+│   │   │       ├── cuda_native/     ← 自定义 CUDA C++ 内核 (layer_norm, softmax)
+│   │   │       ├── triton/          ← Triton JIT 内核 (attention, layernorm, softmax)
+│   │   │       └── jit/             ← PyTorch JIT 融合操作
+│   │   ├── nn/                      ← 原始 OpenFold 模型组件
+│   │   └── hub/                     ← AlphaFold 模型组装
+│   ├── distributed/                 ← 🔀 动态轴向并行
+│   │   ├── core.py                  ← init_dap() — 并行初始化
+│   │   ├── comm.py                  ← Scatter, Gather, Reduce, All-to-All
+│   │   └── comm_async.py            ← 用于计算/通信重叠的异步 All-to-All
+│   ├── workflow/                    ← 🚀 Ray 加速数据处理
+│   │   ├── factory/                 ← 任务工厂 (jackhmmer, hhblits, hhsearch)
+│   │   ├── template/                ← 工作流 DAG 模板 (单体 + 多体)
+│   │   └── workflow_run.py          ← batch_run() 执行器
+│   ├── data/                        ← 特征流水线与变换
+│   ├── utils/
+│   │   ├── inject_fastnn.py         ← 从 OpenFold 到 FastNN 的权重注入
+│   │   ├── import_weights.py        ← JAX 权重导入
+│   │   └── checkpointing.py         ← 块级梯度检查点
+│   ├── config.py                    ← 模型配置 (model_1..5, multimer)
+│   └── relax/                       ← Amber 弛豫后处理
+├── habana/                          ← Intel Habana (Gaudi/Gaudi2) 支持
+├── benchmark/perf.py                ← 独立 Evoformer 性能基准测试
+├── tests/                           ← FastNN 内核与模块的单元测试
+└── scripts/                         ← 数据集下载脚本
+```
+
+来源: [setup.py](/setup.py#L86-L127), [fastfold/__init__.py](/fastfold/__init__.py#L1-L1)
+
+## 核心技术解析
+
+### 融合内核层
+
+FastFold 提供了 **三种内核后端**，在运行时根据可用性自动选择，并具备自动回退机制：
+
+| 后端 | 语言 | 内核 | 使用时机 |
+|---|---|---|---|
+| **CUDA Native** | C++ / CUDA | LayerNorm, Softmax | 当 CUDA 可用时始终可用 |
+| **Triton** | Triton DSL | Attention 核心, LayerNorm, Softmax | 当安装了 Triton 且 CUDA 版本为 11.4+ 时 |
+| **JIT** | PyTorch JIT | 融合偏置-sigmoid、偏置-dropout-残差 | 始终可用作回退方案 |
+
+CUDA 原生内核在安装时通过 `setup.py` 借助 PyTorch 的 `CUDAExtension` 构建系统进行编译，目标架构为 Volta (sm_70) 和 Ampere (sm_80)。融合的 softmax 和层归一化内核消除了困扰原生 PyTorch 实现的冗余全局内存读写。
+
+来源: [setup.py](/setup.py#L86-L127), [fastfold/model/fastnn/kernel/](/fastfold/model/fastnn/kernel/)
+
+### 动态轴向并行 (DAP)
+
+DAP 是 FastFold 的张量并行策略，它沿**序列维度**将 Evoformer 的 MSA 表示划分到多块 GPU 上。核心洞察在于：MSA 行注意力在每行独立运算，而列注意力则需要跨 GPU 通信。DAP 利用这一点的方式如下：
+
+1. 在首个 Evoformer 块将 MSA 张量 (dim=1) 和 Pair 张量 (dim=1) **Scatter** 到各 GPU 上
+2. 无需通信，执行**局部 MSA 行注意力**
+3. 使用**异步全互联** (`All_to_All_Async`) 将 MSA 分区从行并行布局转置为列并行布局
+4. 在异步通信完成后，执行**局部 MSA 列注意力**
+5. 在最后一个 Evoformer 块 **Gather** 结果
+
+异步全互联是关键的优化点：它将 `All_to_All` 通信与 `PairCore` 计算重叠，把通信延迟隐藏在有用的工作背后。随后 `All_to_All_Async_Opp` 等待通信句柄并应用重排。
+
+```python
+# Evoformer.forward() 内部简化的 DAP 通信模式:
+m = self.msa(m, z, msa_mask)                       # 局部行注意力
+z = self.communication(m, msa_mask, z)              # 外积均值
+m, work = All_to_All_Async.apply(m, 1, 2)          # 启动异步 row→col
+z = self.pair(z, pair_mask)                         # 与 pair 更新重叠
+m = All_to_All_Async_Opp.apply(m, work, 1, 2)      # 完成异步，当前为列并行
+```
+
+<CgxTip>DAP 至少需要 2 块 GPU。当 `dap_size=1` 时，所有通信原语 (scatter, gather, all-to-all) 将变为空操作，因此代码在单 GPU 上运行时完全一致，无需任何条件分支。</CgxTip>
+
+来源: [fastfold/model/fastnn/evoformer.py](/fastfold/model/fastnn/evoformer.py#L30-L91), [fastfold/distributed/comm.py](/fastfold/distributed/comm.py#L85-L204), [fastfold/distributed/comm_async.py](/fastfold/distributed/comm_async.py#L153-L199)
+
+### Ray 数据工作流
+
+AlphaFold 的数据预处理需针对大型生物数据库运行多个串行 MSA 搜索工具 (jackhmmer, HHblits, HHsearch)——对于单个序列，此过程耗时数小时。FastFold 将该流水线建模为 **Ray 工作流 DAG**，使独立的搜索步骤并发执行：
+
+- **步骤 1**: 针对 UniRef90 运行 JackHmmer (生成 `uniref90_hits.a3m`)
+- **步骤 2**: 针对 PDB70 运行 HHSearch (依赖于步骤 1 的输出)
+- **步骤 3**: 针对 MGnify 运行 JackHmmer (独立于步骤 1-2)
+- **步骤 4**: 针对 BFD 运行 HHBlits (独立于步骤 1-3)
+
+步骤 1+2 存在依赖关系 (HHSearch 需要 UniRef90 的命中结果)，但步骤 3 和 4 与整个步骤 1→2 链并行执行。这种并行性在**单体**序列上实现了约 **3 倍加速**，在包含 N 条链的**多体**上实现了约 **3N 倍加速**。该工作流可通过 `--enable_workflow` 标志启用。
+
+来源: [fastfold/workflow/template/fastfold_data_workflow.py](/fastfold/workflow/template/fastfold_data_workflow.py#L121-L170), [README.md](/README.md#L138-L139)
+
+### 内存高效分块执行
+
+对于超长序列，FastFold 提供了**分块执行模式** (`--chunk_size N`)，以更小的分片处理注意力计算，通过牺牲部分吞吐量来换取峰值内存的降低。结合 `--inplace` 标志（共享嵌入表示的内存）与 bfloat16 精度，FastFold 能够在 A100 80GB GPU 上以 61 GB 的内存推断 **10,000+ 残基**的序列。
+
+来源: [fastfold/model/fastnn/ops.py](/fastfold/model/fastnn/ops.py#L31-L42), [README.md](/README.md#L141-L146)
+
+## 平台支持
+
+| 平台 | 精度 | DAP 支持 | 最大序列长度 | 特殊配置 |
+|---|---|---|---|---|
+| **NVIDIA GPU (A100)** | bf16 / fp32 | ✅ 多 GPU | 10,000+ (bf16, 分块) | CUDA 11.3+, PyTorch 1.12+ |
+| **NVIDIA GPU (单卡)** | bf16 / fp32 | 仅单 GPU | ~3,000 (bf16) | 标准安装 |
+| **Intel Habana (Gaudi/Gaudi2)** | bf16 / fp32 | ✅ | 视情况而定 | SynapseAI R1.7.1, 自定义算子构建 |
+
+来源: [README.md](/README.md#L31-L61), [habana/](/habana/)
+
+## 核心能力摘要
+
+| 能力 | 描述 | 配置 |
+|---|---|---|
+| **融合内核** | 用于注意力、softmax 和层归一化的自定义 CUDA + Triton 内核 | 安装时自动生效 |
+| **动态轴向并行** | 带异步通信的多 GPU 张量并行 | `init_dap(dap_size)` / `--gpus N` |
+| **权重注入** | 以 FastNN 直接替换 OpenFold Evoformer | `inject_fastnn(model)` |
+| **JAX 权重导入** | 直接加载预训练的 AlphaFold JAX 权重 | `import_jax_weights_(model, path)` |
+| **Ray 数据工作流** | 基于 DAG 调度的并行 MSA 搜索 | `--enable_workflow` |
+| **分块执行** | 基于分片的注意力机制，降低峰值内存 | `--chunk_size N` |
+| **原位执行** | 内存共享的嵌入表示 | `--inplace` |
+| **多体支持** | 带配对 MSA 的 AlphaFold-Multimer 推断 | `--model_preset multimer` |
+| **兼容 AlphaFold v2.3** | 支持最新的 AlphaFold 模型配置 | 通过 `model_config()` 自动生效 |
+| **Habana 支持** | Intel Gaudi/Gaudi2 加速器支持 | 自定义算子构建 + `habana/` 脚本 |
+
+来源: [README.md](/README.md#L12-L30), [fastfold/config.py](/fastfold/config.py#L30-L125)
+
+## 下一步阅读
+
+现在你已经了解了 FastFold 的架构与能力，以下是建议的阅读路径，助你快速上手：
+
+1. **[快速开始](2-quick-start)** — 安装 FastFold、下载数据集并运行首次推断
+2. **[推断指南](3-inference-guide)** — 详细的推断配置：DAP 设置、分块执行、多体模式与内存调优
+3. **[架构概览](5-architecture-overview)** — 深入探讨 FastNN、DAP 和数据工作流的互连方式
+4. **[FastNN 模块设计](6-fastnn-module-design)** — 优化后的 Evoformer 堆栈内部结构
+5. **[DAP 通信原语](9-dap-communication-primitives)** — 驱动多 GPU 并行的 Scatter、Gather 和全互联原语
+6. **[用于 MSA 搜索的 Ray 工作流](12-ray-workflow-for-msa-search)** — Ray DAG 如何加速数据预处理流水线
+
+---
+
+- [入门/快速开始](https://zread.ai/hpcaitech/FastFold/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+几分钟内让 FastFold 跑起来 — 从环境配置到首次蛋白质结构预测。本指南将带你完成安装、数据集准备，以及运行单体和多聚体推理。
+
+## 前置条件
+
+在安装前，FastFold 需要以下基础依赖：
+
+| 需求 | 最低版本 | 备注 |
+|---|---|---|
+| **Python** | 3.8 或 3.9 | 推荐通过 Conda 安装 3.8 |
+| **NVIDIA CUDA** | 11.3+ | Triton 内核需要 11.4+ |
+| **PyTorch** | 1.12+ | 在推荐流程中通过 Conda 安装 |
+| **GPU** | Volta (SM 7.0) 或更高版本 | Ampere (SM 8.0) 在构建时自动检测 |
+
+来源: [README.md](/README.md#L31-L37), [setup.py](/setup.py#L72-L74), [setup.py](/setup.py#L107-L111)
+
+## 安装
+
+### 选项 A: Conda (推荐)
+
+基于 Conda 的安装会在单个可复现的步骤中创建一个隔离的 `fastfold` 环境，包含所有依赖 — 包括生物信息学工具链（`hmmer`、`hhsuite`、`kalign2`）和分子动力学库（`openmm`、`pdbfixer`）。
+
+```shell
+git clone https://github.com/hpcaitech/FastFold
+cd FastFold
+conda env create --name=fastfold -f environment.yml
+conda activate fastfold
+python setup.py install
+```
+
+`environment.yml` 固定了 **PyTorch 1.12** 与 **CUDA 11.3**、用于分布式原语的 **ColossalAI 0.2.7**，以及用于加速数据工作流的 **Ray 2.0.0**。`setup.py install` 步骤会针对你本地的 CUDA 工具包编译自定义 CUDA 内核（`fastfold_layer_norm_cuda`、`fastfold_softmax_cuda`），这就是为什么需要一个对 GPU 可见的构建环境。
+
+来源: [README.md](/README.md#L39-L49), [environment.yml](/environment.yml#L1-L33), [setup.py](/setup.py#L118-L143)
+
+### 选项 B: Docker
+
+若要使用完全避免依赖冲突的容器化设置，请使用提供的 Dockerfile。**注意：** 构建需要 NVIDIA Docker Runtime，因为 CUDA 扩展是在镜像构建时编译的。
+
+```shell
+cd FastFold
+docker build -t fastfold ./docker
+docker run -ti --gpus all --rm --ipc=host fastfold bash
+```
+
+基础镜像为 `hpcaitech/pytorch-cuda:1.12.0-11.3.0`，已包含支持 CUDA 的 PyTorch。Dockerfile 随后会在从源码构建 FastFold 之前，叠加安装 OpenMM、生物信息学工具和 Python 依赖。
+
+来源: [README.md](/README.md#L63-L78), [docker/Dockerfile](/docker/Dockerfile#L1-L14)
+
+### 可选: 安装 Triton 以启用高级内核
+
+要解锁额外的融合内核优化，请安装 OpenAI 的 Triton。**这需要 CUDA 11.4 或更高版本** — 如果你的 Conda 环境附带的是 CUDA 11.3，则需要单独升级工具包。
+
+```bash
+pip install -U --pre triton
+```
+
+来源: [README.md](/README.md#L53-L60)
+
+## 下载数据集
+
+FastFold 复用 AlphaFold 的遗传和结构数据库进行 MSA 搜索和模板匹配。`download_all_data.sh` 脚本使用 `aria2c` 进行高吞吐量获取，统筹所有下载任务。
+
+```shell
+./scripts/download_all_data.sh data/
+```
+
+这会将**所有**必需的数据库检索到 `data/` 中：
+
+| 数据库 | 用途 | 单体 | 多聚体 |
+|---|---|---|---|
+| **UniRef90** | JackHMMER MSA 搜索 | ✅ | ✅ |
+| **MGnify** | 宏基因组 MSA 扩展 | ✅ | ✅ |
+| **PDB70** | HHSearch 模板搜索 | ✅ | ✅ |
+| **UniRef30 / BFD** | HHblits MSA 搜索 | ✅ | ✅ |
+| **PDB mmCIF** | 模板结构文件 | ✅ | ✅ |
+| **AlphaFold Params** | 预训练 JAX 权重 | ✅ | ✅ |
+| **UniProt** | 多聚体链配对 | ❌ | ✅ |
+| **PDB SeqRes** | 多聚体链分配 | ❌ | ✅ |
+
+对于磁盘空间受限的环境，请使用精简数据库模式：
+
+```shell
+./scripts/download_all_data.sh data/ reduced_dbs
+```
+
+<CgxTip>完整下载可能会超过 2.5 TB。如果你只需要验证设置是否正常工作，可以考虑先仅下载 AlphaFold 参数：`./scripts/download_alphafold_params.sh data/` — 然后使用 `demo.py`（无需任何数据库）来测试模型前向传播。</CgxTip>
+
+来源: [scripts/download_all_data.sh](/scripts/download_all_data.sh#L1-L75), [scripts/download_alphafold_params.sh](/scripts/download_alphafold_params.sh#L32-L41)
+
+## 使用 Demo 快速验证
+
+在运行完整推理之前，请通过执行内置 demo 来验证你的安装。该脚本生成**随机输入特征**（绕过所有数据库依赖）并在模型中运行单次前向传播 — 非常适合确认 CUDA 内核和分布式设置是否正常工作。
+
+```shell
+python demo.py --gpus 1 --n_res 50 --model_name model_1
+```
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `--gpus` | 1 | 用于动态轴向并行的 GPU 数量 |
+| `--n_res` | 50 | 随机输入的虚拟残基数 |
+| `--model_name` | `model_1` | AlphaFold 模型配置名称 |
+| `--chunk_size` | None | 用于减少内存占用的块大小 |
+| `--inplace` | False | 启用原地内存共享 |
+
+来源: [demo.py](/demo.py#L86-L153)
+
+## 运行单体推理
+
+下载数据库后，即可根据 FASTA 文件预测单链蛋白质结构。以下命令运行使用 Ray 加速数据处理的 2-GPU 并行推理：
+
+```shell
+python inference.py target.fasta data/pdb_mmcif/mmcif_files/ \
+    --output_dir ./outputs \
+    --gpus 2 \
+    --uniref90_database_path data/uniref90/uniref90.fasta \
+    --mgnify_database_path data/mgnify/mgy_clusters_2022_05.fa \
+    --pdb70_database_path data/pdb70/pdb70 \
+    --uniref30_database_path data/uniref30/UniRef30_2021_03 \
+    --bfd_database_path data/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt \
+    --jackhmmer_binary_path `which jackhmmer` \
+    --hhblits_binary_path `which hhblits` \
+    --hhsearch_binary_path `which hhsearch` \
+    --kalign_binary_path `which kalign` \
+    --enable_workflow \
+    --inplace
+```
+
+或者使用便捷的 shell 脚本（运行前请编辑其中的路径）：
+
+```shell
+./inference.sh
+```
+
+**完整推理流程**分三个阶段执行，如下图所示：
+
+```mermaid
+flowchart LR
+    A[FASTA Input] --> B[MSA Search]
+    B --> C[Feature Processing]
+    C --> D[Model Inference]
+    D --> E[AMBER Relaxation]
+    E --> F[PDB Output]
+    
+    B -.->|Ray Workflow\n3× faster| B
+    D -.->|DAP across\nN GPUs| D
+```
+
+来源: [inference.py](/inference.py#L122-L159), [inference.sh](/inference.sh#L1-L21)
+
+### 关键推理标志
+
+| 标志 | 默认值 | 作用 |
+|---|---|---|
+| `--gpus N` | 1 | 通过动态轴向并行在 N 个 GPU 上分布推理 |
+| `--enable_workflow` | False | 使用 Ray 工作流实现约 3 倍快的 MSA/数据处理 |
+| `--inplace` | False | 共享嵌入张量的内存以降低峰值占用 |
+| `--chunk_size N` | None | 启用分块执行 — N 越小内存占用越少，速度越慢 |
+| `--model_name` | `model_1` | 选择模型配置: `model_{1-5}`、`model_{1-5}_ptm` 或多聚体变体 |
+| `--param_path` | auto | `.npz` 权重文件路径；若省略则从 `data/params/` 自动解析 |
+| `--model_preset` | `monomer` | 在 `monomer` 和 `multimer` 流水线之间切换 |
+| `--use_precomputed_alignments` | None | 跳过 MSA 搜索并复用现有的比对目录 |
+| `--relaxation` | False | 对预测结构运行 AMBER 弛豫 |
+
+来源: [inference.py](/inference.py#L491-L550), [inference.py](/inference.py#L68-L119)
+
+## 运行多聚体推理
+
+对于多链蛋白质复合物，请切换到多聚体预设。这需要两个额外的数据库（`--uniprot_database_path` 和 `--pdb_seqres_database_path`）以及多聚体权重文件：
+
+```shell
+python inference.py target.fasta data/pdb_mmcif/mmcif_files/ \
+    --output_dir ./ \
+    --gpus 2 \
+    --model_preset multimer \
+    --uniref90_database_path data/uniref90/uniref90.fasta \
+    --mgnify_database_path data/mgnify/mgy_clusters_2022_05.fa \
+    --pdb70_database_path data/pdb70/pdb70 \
+    --uniref30_database_path data/uniref30/UniRef30_2021_03 \
+    --bfd_database_path data/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt \
+    --uniprot_database_path data/uniprot/uniprot.fasta \
+    --pdb_seqres_database_path data/pdb_seqres/pdb_seqres.txt \
+    --param_path data/params/params_model_1_multimer.npz \
+    --model_name model_1_multimer \
+    --jackhmmer_binary_path `which jackhmmer` \
+    --hhblits_binary_path `which hhblits` \
+    --hhsearch_binary_path `which hhsearch` \
+    --kalign_binary_path `which kalign`
+```
+
+或者使用便捷脚本：
+
+```shell
+./inference_multimer.sh
+```
+
+多聚体 FASTA 输入应包含由 `>` 头部分隔的多个序列。FastFold 在 MSA 搜索期间独立处理每条链，然后为复合物级别的预测配对结果。
+
+来源: [README.md](/README.md#L166-L187), [inference_multimer.sh](/inference_multimer.sh#L1-L24)
+
+## 长序列推理
+
+FastFold 可以通过结合分块执行与 bf16 精度，预测超过 **10,000 个残基**的序列结构。使用 `--chunk_size` 以牺牲吞吐量换取内存余量：
+
+```shell
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:15000
+python inference.py target.fasta data/pdb_mmcif/mmcif_files/ \
+    --output_dir ./outputs \
+    --gpus 2 \
+    --chunk_size 4 \
+    --enable_workflow --inplace \
+    ... # (与上述相同的数据库标志)
+```
+
+| 场景 | 块大小 | 内存 | 最大序列长度 |
+|---|---|---|---|
+| **短序列** (≤1K 残基) | None (默认) | A100 上约 40 GB | ~1,000 |
+| **中等序列** (1K–5K) | 8–16 | A100 上约 55 GB | ~5,000 |
+| **超长序列** (5K–10K+) | 4 | A100 上约 61 GB (bf16) | **10,000+** |
+
+<CgxTip>对于 fp32 下超过 8,000 个残基的序列，请设置环境变量 `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:15000` 以防止 CUDA 内存碎片化。对于 bf16，此限制可扩展至约 10,000 个残基。</CgxTip>
+
+来源: [README.md](/README.md#L141-L164), [inference.py](/inference.py#L117-L118)
+
+## 编程式使用
+
+你可以将 FastFold 的高性能 Evoformer 直接集成到你自己的 PyTorch 项目中。关键在于 `inject_fastnn` 函数，它用优化后且基于 CUDA 内核的实现替换 OpenFold 的默认 Evoformer，同时保留所有已学习的权重：
+
+```python
+from fastfold.model.hub import AlphaFold
+from fastfold.config import model_config
+from fastfold.utils.inject_fastnn import inject_fastnn
+from fastfold.utils.import_weights import import_jax_weights_
+
+# 构建模型并加载预训练权重
+config = model_config("model_1")
+model = AlphaFold(config)
+import_jax_weights_(model, "data/params/params_model_1.npz", version="model_1")
+
+# 替换为高性能内核（仅需一行代码）
+model = inject_fastnn(model)
+```
+
+对于多 GPU 动态轴向并行，请在你的训练/推理循环之前添加分布式初始化器：
+
+```python
+import fastfold
+from fastfold.distributed import init_dap
+
+fastfold.distributed.init_dap(dap_size=2)  # 使用 2 个 GPU
+```
+
+来源: [README.md](/README.md#L82-L95), [fastfold/utils/inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L17-L21), [fastfold/distributed/__init__.py](/fastfold/distributed/__init__.py#L1-L7)
+
+## 下一步？
+
+既然你已经让 FastFold 跑起来了，接下来可以探索其架构与高级功能：
+
+1. **[推理指南](3-inference-guide)** — 深入了解单体/多聚体推理配置、输出解释与弛豫
+2. **[训练设置](4-training-setup)** — 在你的数据上建立微调工作流
+3. **[架构概览](5-architecture-overview)** — 理解 FastFold 各组件的协同方式
+4. **[FastNN 模块设计](6-fastnn-module-design)** — 了解高性能 Evoformer 如何实现其速度
+5. **[DAP 通信原语](9-dap-communication-primitives)** — 掌握动态轴向并行内部机制
+
+---
+
+- [入门/推理指南](https://zread.ai/hpcaitech/FastFold/3-inference-guide)
+
+---
+slug:3-inference-guide
+blog_type:normal
+---
+
+
+FastFold 为蛋白质结构预测提供了一个高性能推理流水线，通过动态轴向并行（Dynamic Axial Parallelism, DAP）支持**单体**和**多体**模式下的多 GPU 并行。本指南将介绍完整的推理工作流——从数据准备、模型执行到 PDB 输出——涵盖命令行调用、配置选项以及内部执行流水线。
+
+## 推理流水线概述
+
+端到端的推理过程遵循四阶段流水线：**FASTA 输入 → MSA/模板比对 → 特征处理 → 模型预测 → 结构输出**。每个阶段均可独立配置，比对阶段还可选择利用基于 Ray 的并行工作流来加速数据处理。
+
+```mermaid
+flowchart TD
+    A[FASTA Input File] --> B{Mode?}
+    B -->|Monomer| C[Monomer Alignment Runner]
+    B -->|Multimer| D[Multimer Alignment Runner]
+    C --> E[DataPipeline.process_fasta]
+    D --> F[DataPipelineMultimer.process_fasta]
+    E --> G[FeaturePipeline.process_features]
+    F --> G
+    G --> H[Multi-GPU Spawn<br/>inference_model per rank]
+    H --> I[init_dap → Load Config → Build Model]
+    I --> J[import_jax_weights_ → inject_fastnn]
+    J --> K[AlphaFold.forward batch]
+    K --> L[Unrelaxed PDB Output]
+    L --> M{--relaxation?}
+    M -->|Yes| N[Amber Relaxation → Relaxed PDB]
+    M -->|No| O[Done]
+    N --> O
+```
+
+来源: [inference.py](/inference.py#L122-L489), [inference.sh](/inference.sh#L1-L21)
+
+## 快速调用
+
+### 单体推理
+
+运行单体结构预测最简单的方式是使用提供的 shell 脚本，它封装了所有必需的数据库路径和标志：
+
+```bash
+# 使用 2 块 GPU 进行基础单体推理
+python inference.py target.fasta data/pdb_mmcif/mmcif_files \
+    --output_dir ./outputs \
+    --gpus 2 \
+    --uniref90_database_path data/uniref90/uniref90.fasta \
+    --mgnify_database_path data/mgnify/mgy_clusters_2022_05.fa \
+    --pdb70_database_path data/pdb70/pdb70 \
+    --uniref30_database_path data/uniref30/UniRef30_2021_03 \
+    --bfd_database_path data/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt \
+    --jackhmmer_binary_path `which jackhmmer` \
+    --hhblits_binary_path `which hhblits` \
+    --hhsearch_binary_path `which hhsearch` \
+    --kalign_binary_path `which kalign` \
+    --enable_workflow \
+    --inplace
+```
+
+来源: [inference.sh](/inference.sh#L7-L20)
+
+### 多体推理
+
+通过 `--model_preset multimer` 激活多体模式，该模式需要额外的数据库（`pdb_seqres`、`uniprot`）以及多体专用的模型参数：
+
+```bash
+python inference.py target.fasta data/pdb_mmcif/mmcif_files \
+    --output_dir ./ \
+    --gpus 1 \
+    --pdb_seqres_database_path data/pdb_seqres/pdb_seqres.txt \
+    --uniprot_database_path data/uniprot/uniprot.fasta \
+    --model_preset multimer \
+    --param_path data/params/params_model_1_multimer_v3.npz \
+    --model_name model_1_multimer \
+    ... # 其他数据库路径
+```
+
+与单体模式的关键区别在于，多体模式使用 `HmmsearchHitFeaturizer` 进行模板特征化，并使用 `DataPipelineMultimer` 进行数据处理，后者负责处理 FASTA 输入中多条序列的链级比对和配对。
+
+来源: [inference_multimer.sh](/inference_multimer.sh#L7-L24), [inference.py](/inference.py#L169-L338)
+
+## 命令行参数参考
+
+### 核心参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `fasta_path` | positional | — | 输入 FASTA 文件路径 |
+| `template_mmcif_dir` | positional | — | 模板 mmCIF 目录路径 |
+| `--output_dir` | str | `os.getcwd()` | 预测结果输出目录 |
+| `--model_name` | str | `model_1` | 模型配置名称（参见模型配置表） |
+| `--param_path` | str | auto-derived | JAX `.npz` 参数文件路径 |
+| `--model_preset` | str | `monomer` | `monomer` 或 `multimer` 模式 |
+| `--gpus` | int | `1` | 推理使用的 GPU 数量 (DAP) |
+| `--cpus` | int | `12` | 比对工具使用的 CPU 数量 |
+| `--preset` | str | `full_dbs` | 数据库预设：`full_dbs` 或 `reduced_dbs` |
+
+### 性能参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--chunk_size` | int | `None` | 节省内存执行的块大小（越低显存占用越少，速度越慢） |
+| `--inplace` | flag | `False` | 启用原地操作以减少内存分配 |
+| `--enable_workflow` | flag | `False` | 使用 Ray 并行工作流进行 MSA 搜索 |
+| `--relaxation` | flag | `False` | 对预测结构运行 Amber 弛豫 |
+| `--save_prediction_result` | bool | `True` | 将原始预测字典保存为 `.pkl` 文件 |
+
+### 数据源参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--use_precomputed_alignments` | str | `None` | 预计算比对目录的路径（跳过 MSA 步骤） |
+| `--uniref90_database_path` | str | `None` | UniRef90 数据库路径 |
+| `--mgnify_database_path` | str | `None` | MGnify 数据库路径 |
+| `--pdb70_database_path` | str | `None` | PDB70 数据库路径（单体） |
+| `--uniref30_database_path` | str | `None` | UniRef30 数据库路径 |
+| `--bfd_database_path` | str | `None` | BFD 数据库路径 |
+| `--pdb_seqres_database_path` | str | `None` | PDB seqres 数据库（多体） |
+| `--uniprot_database_path` | str | `None` | UniProt 数据库（多体） |
+| `--max_template_date` | str | today | 模板最大发布日期 |
+
+来源: [inference.py](/inference.py#L68-L120), [inference.py](/inference.py#L491-L556)
+
+## 模型配置名称
+
+FastFold 支持标准的 AlphaFold 2 模型命名约定。`--model_name` 标志不仅选择架构配置，还在省略 `--param_path` 时选择参数文件路径（自动推导为 `data/params/params_{model_name}.npz`）。
+
+| 模型名称 | 模板 | 额外 MSA | pTM 头 | 适用场景 |
+|---|---|---|---|---|
+| `model_1` | ✓ | 5120 | ✗ | 带模板的单体 |
+| `model_2` | ✓ | default | ✗ | 带模板的单体（减少的额外 MSA） |
+| `model_3` | ✗ | 5120 | ✗ | 无模板的单体 |
+| `model_4` | ✗ | 5120 | ✗ | 无模板的单体（备用配置） |
+| `model_5` | ✗ | default | ✗ | 无模板的单体（轻量级） |
+| `model_1_ptm` | ✓ | 5120 | ✓ | 带 pTM 分数的单体 |
+| `model_2_ptm`–`model_5_ptm` | varies | varies | ✓ | pTM 变体 |
+| `model_{1-5}_multimer` | ✓ (Hmmsearch) | varies | ✗ | 蛋白质复合物预测 |
+
+当 `--param_path` 的路径字符串中包含 `v3` 时，FastFold 会自动启用**融合三角形乘法**核函数以获得额外的性能提升。
+
+来源: [fastfold/config.py](/fastfold/config.py#L30-L125), [inference.py](/inference.py#L133-L134), [inference.py](/inference.py#L553-L554)
+
+## 内部推理执行流程
+
+理解内部流程对于调试和自定义至关重要。`inference_model` 函数通过 `torch.multiprocessing.spawn` 在所有 GPU 上派生，每个进程执行以下序列：
+
+```mermaid
+flowchart LR
+    A[Set RANK/LOCAL_RANK<br/>env variables] --> B[init_dap<br/>DAP initialization]
+    B --> C[model_config<br/>Load configuration]
+    C --> D[Apply chunk_size<br/>and inplace overrides]
+    D --> E[AlphaFold config<br/>Build model]
+    E --> F[import_jax_weights_<br/>Load JAX parameters]
+    F --> G[inject_fastnn<br/>Replace with fast kernels]
+    G --> H[model.eval + .cuda]
+    H --> I[set_chunk_size<br/>global chunk state]
+    I --> J[torch.no_grad<br/>Forward pass]
+    J --> K[tensor_tree_map<br/>CPU transfer]
+```
+
+### 第 1 步：分布式初始化
+
+每个派生的进程设置其 `RANK`、`LOCAL_RANK` 和 `WORLD_SIZE` 环境变量，然后调用 `fastfold.distributed.init_dap()` 来初始化动态轴向并行通信后端。DAP 将 Evoformer 的轴向计算划分到各个 GPU 上——一组计算行注意力，另一组计算列注意力——并通过异步通信使计算重叠。
+
+### 第 2 步：模型构建与权重加载
+
+根据配置构建 `AlphaFold` 模型，然后通过 `import_jax_weights_` 导入 JAX 权重。该函数读取 `.npz` 参数文件，并使用转换字典将每个参数映射到正确的 PyTorch 张量，该字典负责处理权重转置、MHA 重塑以及多体专用参数布局。
+
+### 第 3 步：FastNN 注入
+
+`inject_fastnn` 函数是性能的基石——它递归地将原始的 AlphaFold 子模块替换为优化的 **FastNN** 对应项。此替换覆盖了整个 Evoformer 堆栈：用于注意力的融合 QKV 投影、自定义 LayerNorm 核函数、融合三角乘法更新以及分块执行包装器。参数权重通过专用的 `copy_*` 函数从原始模块复制到其 FastNN 替代模块中，这些函数负责处理 QKV 拼接、左/右权重堆叠和偏置对齐。
+
+### 第 4 步：前向传播与输出
+
+在 `torch.no_grad()` 下，预处理后的特征批次被转移到 GPU 并送入模型。然后，输出字典通过 `tensor_tree_map` 作为 NumPy 数组映射回 CPU。`torch.distributed.barrier()` 和 `torch.cuda.synchronize()` 确保所有进程干净地完成。
+
+来源: [inference.py](/inference.py#L122-L159), [fastfold/distributed/__init__.py](/fastfold/distributed/__init__.py#L1-L7), [fastfold/utils/inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L17-L21), [fastfold/utils/import_weights.py](/fastfold/utils/import_weights.py#L110-L129)
+
+## 数据处理：比对策略
+
+FastFold 支持两种比对策略，它们决定了在模型推理前如何生成 MSA 和模板数据。
+
+### 顺序比对（默认）
+
+不使用 `--enable_workflow` 时，比对工具（`jackhmmer`、`hhblits`、`hhsearch`）通过 `AlignmentRunner` 顺序运行。这与原始 AlphaFold 的方法一致，简单直接，但对于长序列可能会很慢。
+
+### Ray 工作流比对 (`--enable_workflow`)
+
+设置 `--enable_workflow` 后，FastFold 使用 **Ray Workflow** 引擎来并行化独立的比对步骤。`FastFoldDataWorkFlow` 构建了一个比对操作的有向无环图（DAG）：
+
+| 步骤 | 工具 | 数据库 | 依赖 |
+|---|---|---|---|
+| 1 | `jackhmmer` | UniRef90 | 无（根节点） |
+| 2 | `hhsearch` | PDB70 | 步骤 1（需要 UniRef90 输出） |
+| 3 | `jackhmmer` | MGnify | 无（根节点，与步骤 1 并行） |
+| 4a | `hhblits` | BFD | 无（根节点，full_dbs 模式） |
+| 4b | `jackhmmer` | small_bfd | 无（根节点，reduced_dbs 模式） |
+
+步骤 1、3 和 4 并发运行，因为它们之间没有相互依赖；步骤 2 仅等待步骤 1。该工作流通过带有唯一 ID 的 `ray.workflow` 进行管理，并且每次运行时都会清理之前的工作流状态。
+
+来源: [fastfold/workflow/template/fastfold_data_workflow.py](/fastfold/workflow/template/fastfold_data_workflow.py#L121-L169), [inference.py](/inference.py#L396-L426)
+
+### 预计算比对
+
+对于同一序列的重复预测，传入 `--use_precomputed_alignments <path>` 可完全跳过比对并复用缓存的 MSA/模板文件。这是在先前已生成特征时的最快路径。
+
+## 输出文件
+
+FastFold 在 `--output_dir` 目录中生成多个输出文件：
+
+| 文件 | 条件 | 描述 |
+|---|---|---|
+| `{tag}_{model}_unrelaxed.pdb` | 始终 | 未经弛豫的预测结构 |
+| `{tag}_{model}_relaxed.pdb` | `--relaxation` | 经 Amber 8力场弛豫后的结构5 |
+| `{tag}_{model}.pkl` | `--save_prediction_result` | 原始预测字典（包含 `plddt`、距离图等） |
+| `alignments/` | 无预计算 | 包含 MSA 命中结果 (.a3m, .hhr) 的目录 |
+
+对于多体，`{tag}` 通过用 `_and_` 连接所有链标签来构建。**pLDDT** 分数（逐残基置信度）作为 B 因子嵌入在 PDB 文件中，平均 pLDDT 在执行期间计算并打印。
+
+来源: [inference.py](/inference.py#L447-L488), [inference.py](/inference.py#L297-L337)
+
+## 演示模式：合成数据推理
+
+`demo.py` 脚本提供了一种轻量级的方式来验证你的安装并对推理速度进行基准测试，而无需任何生物数据库或真实的 FASTA 输入。它生成与预期模型输入模式相匹配的**随机合成特征**：
+
+```bash
+# 使用合成的 50 残基输入在 1 块 GPU 上运行
+python demo.py --n_res 50 --gpus 1 --model_name model_1
+
+# 使用分块执行进行内存效率基准测试
+python demo.py --n_res 500 --gpus 2 --chunk_size 128 --inplace
+```
+
+该演示绕过了整个数据流水线——无需比对，无需特征处理——并直接构建一个包含随机 MSA 特征（128 条序列）、模板特征（4 个模板）和额外 MSA 特征（5120 条序列）的批次。请注意，`demo.py` **不**调用 `import_jax_weights_`，因此它使用随机初始化的权重运行（适用于计时，不适用于有效预测）。
+
+来源: [demo.py](/demo.py#L65-L152)
+
+## 多 GPU 并行配置
+
+FastFold 的多 GPU 扩展由**动态轴向并行（DAP）**驱动，这与数据并行或张量并行方法不同。DAP 划分了 Evoformer 的双轴向计算——MSA 行注意力和列注意力被拆分到 GPU 组之间，并通过异步 scatter/gather 通信使计算重叠。
+
+```mermaid
+flowchart TB
+    subgraph GPU0 ["GPU 0 (Rank 0)"]
+        R1[Row Attention Partition]
+        S1[Structure Module]
+    end
+    subgraph GPU1 ["GPU 1 (Rank 1)"]
+        R2[Column Attention Partition]
+        S2[Structure Module]
+    end
+    R1 -.->|Async Scatter| R2
+    R2 -.->|Async Gather| R1
+    R1 --> S1
+    R2 --> S2
+```
+
+GPU 数量由 `--gpus N` 控制，它设置 `WORLD_SIZE` 并通过 `torch.multiprocessing.spawn` 派生 N 个进程。每个进程接收 `rank` 和 `world_size` 作为参数，并调用 `init_dap()` 建立通信通道。可用的 DAP 通信原语包括 `scatter`、`gather`、`reduce`、`col_to_row` 和 `row_to_col` 变换。
+
+<CgxTip>对于具有大 MSA 深度的序列，当行/列注意力划分的计算量均衡时，DAP 的扩展效果最佳。对于短序列或浅层 MSA，由于通信开销，使用 `--chunk_size` 和 `--inplace` 的单 GPU 推理可能比多 GPU DAP 更快。</CgxTip>
+
+来源: [inference.py](/inference.py#L122-L128), [fastfold/distributed/__init__.py](/fastfold/distributed/__init__.py#L1-L7)
+
+## 内存优化
+
+两种互补的机制控制着推理期间的峰值 GPU 内存使用：
+
+**分块执行** (`--chunk_size N`)：将大型张量操作（尤其是注意力和三角形更新）沿批次或序列维度拆分为大小为 N 的块。较小的块大小以增加内核启动次数为代价减少峰值内存。块大小会同时传播到配置（`config.globals.chunk_size`）以及通过 `set_chunk_size()` 设置的全局状态中。
+
+**原地操作** (`--inplace`)：在支持的情况下，覆盖中间张量而不是重新分配，从而减少总内存占用。这通过 `config.globals.inplace` 控制。
+
+| 序列长度 | 推荐 `--chunk_size` | `--inplace` | 近似显存 (每块 GPU) |
+|---|---|---|---|
+| ≤ 200 | `None` (禁用) | 可选 | ~10 GB |
+| 200–500 | `128` | ✓ | ~16 GB |
+| 500–1000 | `64`–`128` | ✓ | ~24 GB |
+| > 1000 | `32`–`64` | ✓ | 32+ GB |
+
+<CgxTip>从 `--chunk_size 128 --inplace` 开始，如果遇到 OOM 则减小块大小。`demo.py` 脚本非常适合在运行完整预测之前，快速测试不同残基数下的内存设置。</CgxTip>
+
+来源: [inference.py](/inference.py#L117-L119), [inference.py](/inference.py#L130-L136), [demo.py](/demo.py#L95-L106)
+
+## Habana 平台推理
+
+FastFold 还通过 `habana/inference.py` 入口支持在 Intel Habana Gaudi 加速器上进行推理。Habana 路径通过关键替换镜像了 CUDA 推理流程：
+
+| 组件 | CUDA 路径 | Habana 路径 |
+|---|---|---|
+| 设备选择 | `torch.cuda.set_device(rank)` | `torch.device("hpu")` |
+| DAP 初始化 | `fastfold.distributed.init_dap()` | `habana.enable_habana()` + `init_dist()` |
+| 核函数注入 | `inject_fastnn(model)` | `inject_habana(model)` |
+| 步骤标记 | `torch.cuda.synchronize()` | `htcore.mark_step()` |
+
+Habana 推理脚本使用 `model.to(device="hpu")` 而不是 `model.cuda()`，并设置 `config.globals.inplace = False`（原地操作尚未针对 HPU 优化）。所有其他参数与 CUDA 推理保持一致。
+
+来源: [habana/inference.py](/habana/inference.py#L115-L156)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| `RuntimeError: CUDA out of memory` | 序列过长，超出 GPU 显存 | 减小 `--chunk_size`（尝试 64 或 32），添加 `--inplace` |
+| 比对阶段缓慢 | 工具顺序执行 | 添加 `--enable_workflow` 以实现 Ray 并行 |
+| `ValueError: Invalid model name` | 不支持的 `--model_name` | 使用 `model_{1-5}`、`model_{1-5}_ptm` 或 `model_{1-5}_multimer` |
+| 加载时参数形状错误 | 模型名称与 param_path 不匹配 | 确保 `--model_name` 与 `--param_path` 中的架构匹配 |
+| 多体缺失数据库 | 数据库路径不完整 | 提供 `--pdb_seqres_database_path` 和 `--uniprot_database_path` |
+| 推理在屏障处挂起 | DAP 通信不匹配 | 验证 `--gpus` 与可用 GPU 匹配且 NCCL 后端正常运行 |
+
+## 后续步骤
+
+- **了解 FastNN 核函数优化**：参见 [FastNN 模块设计](6-fastnn-module-design)，了解 `inject_fastnn` 如何替换标准模块
+- **深入探究 DAP 通信**：参见 [DAP 通信原语](9-dap-communication-primitives)，了解 scatter/gather 机制
+- **权重加载内幕**：参见 [从 JAX 注入权重](15-weight-injection-from-jax)，了解参数转换流水线
+- **对配置进行基准测试**：参见 [性能基准测试](18-performance-benchmarking)，了解系统化性能分析
+
+---
+
+- [入门/训练设置](https://zread.ai/hpcaitech/FastFold/4-training-setup)
+
+---
+slug:4-training-setup
+blog_type:normal
+---
+
+
+FastFold 为蛋白质结构预测提供了一套完整的训练流程，该流程集成了 **ColossalAI** 以实现分布式并行，集成了 **FastNN 融合核** 以实现 GPU 加速，以及集成了 **动态轴向并行** 以支持多 GPU 扩展。本页涵盖环境准备、数据准备、配置选择、启动流程，以及适用于 NVIDIA GPU 和 Intel Habana 平台的训练循环架构。
+
+## 先决条件与环境
+
+FastFold 要求 PyTorch ≥ 1.10 且支持 CUDA，同时需要用于生成 MSA 和处理模板的特定生物信息学工具。该项目提供了三种互补的环境规范：
+
+| 规范 | 用例 | 主要内容 |
+|---|---|---|
+| `environment.yml` | 基于 Conda 的完整安装 | PyTorch 1.12, CUDA 11.3, OpenMM, HHsuite, HMMER, Kalign |
+| `requirements/requirements.txt` | 最小化 pip 依赖 | `einops`, `colossalai` |
+| `docker/Dockerfile` | 容器化可复现构建 | `hpcaitech/pytorch-cuda:1.12.0-11.3.0` 基础镜像 |
+
+**Conda 环境** 是推荐的起点。它捕获了完整的依赖树，包括数据预处理和结构弛豫所需的生物信息学工具链（`hmmer==3.3.2`, `hhsuite==3.3.0`, `kalign2==2.04`）和分子动力学库（`openmm==7.7.0`, `pdbfixer`）：
+
+```bash
+conda env create -f environment.yml
+conda activate fastfold
+```
+
+对于 Docker 用户，Dockerfile 执行两阶段安装：首先是 conda 层的生物信息学工具，其次是 pip 层的 Python 包，最后从源码编译并安装 FastFold 及其 CUDA 核扩展。
+
+来源：[environment.yml](/environment.yml#L1-L33), [requirements/requirements.txt](/requirements/requirements.txt#L1-L3), [docker/Dockerfile](/docker/Dockerfile#L1-L14)
+
+### 从源码安装并启用 CUDA 扩展
+
+FastFold 在安装时会编译自定义 CUDA 核——特别是 **融合 LayerNorm** 和 **融合 Softmax**——这对 FastNN 的性能优势至关重要。`setup.py` 构建过程会验证 CUDA 版本的兼容性，并针对相应的计算能力进行编译：
+
+```bash
+python setup.py install
+```
+
+安装程序执行多个验证步骤：通过 `nvcc -V` 检测 CUDA 基础版本，将其与 PyTorch 二进制文件的 CUDA 版本进行交叉引用，并设置计算能力标志（Volta 架构对应 `sm_70`，当 CUDA ≥ 11 时 Ampere 架构对应 `sm_80`）。每个 CUDA 扩展都使用 `-maxrregcount=50` 和 `--use_fast_math` 进行编译，以实现针对寄存器压力调整的高吞吐量核执行。如果未设置 `CUDA_HOME` 或未检测到 GPU，构建将在不包含 CUDA 扩展的情况下完成，并记录一条通知。
+
+<CgxTip>安装程序要求 PyTorch ≥ 1.10，对于更旧的版本将抛出 `RuntimeError`。如果为特定架构进行交叉编译，请确保设置了 `TORCH_CUDA_ARCH_LIST` 环境变量。</CgxTip>
+
+来源：[setup.py](/setup.py#L1-L144)
+
+## 数据准备
+
+训练 AlphaFold 需要三类数据：**模型参数**、**MSA/搜索数据库** 和 **模板结构数据**。FastFold 在 `scripts/` 目录下为每类数据提供了下载脚本。
+
+### 下载数据库与参数
+
+主脚本 `download_all_data.sh` 负责编排所有下载任务。它接受一个目标目录和一个可选模式（`full_dbs` 或 `reduced_dbs`）：
+
+```bash
+bash scripts/download_all_data.sh /path/to/data_dir full_dbs
+```
+
+该脚本按顺序下载：AlphaFold 模型参数、BFD（或在缩减模式下为 Small BFD）、MGnify、PDB70、PDB mmCIF 文件、UniRef30、UniRef90、UniProt 和 PDB SeqRes。所有下载均使用 `aria2c` 以实现高吞吐量的并行获取。模型参数从 Google Cloud Storage（`alphafold_params_2022-12-06.tar`）中解压到 `params/` 子目录。
+
+### 训练数据目录布局
+
+训练脚本要求训练输入遵循特定的目录结构。以下是所需的布局：
+
+```
+${DATA_DIR}/
+├── mmcif_dir/              # 训练 mmCIF (*.cif) 或 PDB (*.pdb) 文件
+├── alignment_dir/           # 每条链的预计算比对
+│   └── {PDB_ID}_{CHAIN_ID}/
+│       ├── *.a3m
+│       ├── *.sto
+│       └── *.hhr
+├── data/
+│   └── pdb_mmcif/
+│       └── mmcif_files/    # 模板 mmCIF 数据库
+├── mmcif_cache.json        # 模板发布日期缓存
+└── chain_data_cache.json   # 用于训练过滤的链级数据
+```
+
+**比对目录** 包含带有 MSA 和模板搜索输出的逐链子目录。**链数据缓存** 是一个 JSON 文件，存储随机训练过滤器使用的逐链元数据（分辨率、序列、聚类大小）。这两种缓存均可使用 `scripts/generate_mmcif_cache.py` 工具生成。
+
+来源：[scripts/download_all_data.sh](/scripts/download_all_data.sh#L1-L76), [scripts/download_alphafold_params.sh](/scripts/download_alphafold_params.sh#L1-L42)
+
+## 配置预设
+
+FastFold 实现了补充论文中完整的 AlphaFold 2 配置分类体系。`fastfold/config.py` 中的 `model_config()` 函数返回一个由预设名称参数化的深度嵌套 `ml_collections.ConfigDict`。每个预设都会调整数据处理、模板使用和损失加权：
+
+| 预设 | 描述 | 关键覆盖 |
+|---|---|---|
+| `initial_training` | 默认 AF2 初始训练（补充表 4） | 无（基线） |
+| `finetuning` | AF2 微调（补充表 4） | `max_extra_msa=5120`, `crop_size=384`, `violation.weight=1.0` |
+| `model_1` | 启用模板，含额外 MSA（补充表 5, 1.1.1） | 模板 + `max_extra_msa=5120` |
+| `model_2` | 启用模板，无额外 MSA（补充表 5, 1.1.2） | 仅模板 |
+| `model_3` / `model_4` / `model_5` | 禁用模板的变体（补充表 5, 1.2.x） | 关闭模板 |
+| `model_1_ptm` 至 `model_5_ptm` | 带有 TM 损失的 PTM 变体 | `tm.weight=0.1` |
+| `multimer` | 多聚体模式 | `is_multimer=True`, `max_msa_clusters=252`, `trans_scale_factor=20` |
+
+当传入 `train=True` 时，配置会强制执行 **逐块梯度检查点**（`blocks_per_ckpt=1`）并禁用分块执行（`chunk_size=None`），以保留完整的激活图用于反向传播。在训练期间，全局 `inplace` 标志也会被设置为 `False`，以防止原地变异干扰自动求导。
+
+来源：[fastfold/config.py](/fastfold/config.py#L28-L75), [train.py](/train.py#L147-L152)
+
+## 训练循环架构
+
+训练流程由 `train.py` 编排，它将 ColossalAI 的分布式引擎与 AlphaFold 的自定义优化器和损失函数集成在一起。以下流程图展示了完整的初始化和训练序列：
+
+```mermaid
+flowchart TD
+    A[解析 CLI 参数] --> B[初始化所有随机数生成器]
+    B --> C[ColossalAI 启动<br/>含 DAP 张量并行]
+    C --> D[加载配置预设<br/>train=True]
+    D --> E[实例化 AlphaFold 模型]
+    E --> F[注入 FastNN 核<br/>inject_fastnn]
+    F --> G[设置训练/验证数据集<br/>SetupTrainDataset]
+    G --> H[创建数据加载器<br/>TrainDataLoader]
+    H --> I[初始化 HybridAdam<br/>lr=1e-3, eps=1e-8]
+    I --> J[创建 AlphaFoldLRScheduler]
+    J --> K[ColossalAI.initialize<br/>model+optimizer+criterion+loader]
+    K --> L{Epoch 循环}
+    L --> M[训练步骤: 前向 → 损失 → 反向 → 更新]
+    M --> N{到达日志间隔?}
+    N -->|是| O[记录损失 + 验证指标]
+    N -->|否| M
+    O --> M
+    M --> P{Epoch 结束?}
+    P -->|是| Q[学习率调度器步进]
+    Q --> R{存在验证数据加载器?}
+    R -->|是| S[验证轮次<br/>superimposition_metrics=True]
+    R -->|否| T{保存检查点?}
+    S --> T
+    T -->|是| U[torch.save engine.model]
+    T -->|否| L
+    U --> L
+```
+
+### ColossalAI 集成与 DAP
+
+训练脚本通过 `colossalai.launch_from_torch()` 启动，其配置设定了 **DAP（动态轴向并行）张量并行大小**，并为 torch DDP 优化启用 `static_graph=True`。`--dap_size` 参数控制有多少 GPU 参与 Evoformer 的 MSA 和对表示的张量并行切分。当 `dap_size=1` 时，训练以标准数据并行模式运行；当 `dap_size=nproc_per_node` 时，则在整个节点上采用全张量并行。
+
+初始化后，ColossalAI 通过 `colossalai.initialize()` 将所有组件封装为一个统一的 `engine` 对象，该对象会自动处理梯度同步、张量并行通信和混合精度调度。
+
+来源：[train.py](/train.py#L120-L185), [fastfold/distributed/comm.py](/fastfold/distributed/comm.py#L1-L50)
+
+### FastNN 核注入
+
+`inject_fastnn()` 函数将 AlphaFold 模型中的标准 PyTorch 模块替换为以优化 CUDA 核为支撑的等效模块。它执行精细的权重复制——将层归一化、线性投影、QKV 注意力权重以及三角乘法更新参数从原始模型复制到 FastNN 替代模块中。这在为 Evoformer 块、ExtraMSA 块和模板嵌入器换入高性能核的同时，保留了任何预训练权重。
+
+来源：[fastfold/utils/inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L1-L50), [train.py](/train.py#L149-L150)
+
+### 优化器与学习率调度
+
+训练使用 **HybridAdam**（ColossalAI 的 CPU/GPU 混合 Adam 实现），参数为 `lr=1e-3` 和 `eps=1e-8`。学习率遵循 `AlphaFoldLRScheduler` 中实现的 AlphaFold 2 补充材料调度：
+
+| 阶段 | 步数范围 | 学习率公式 |
+|---|---|---|
+| 预热 | `0 → warmup_no_steps` | `base_lr + (step / warmup_no_steps) × max_lr` |
+| 平台期 | `warmup_no_steps → start_decay_after_n_steps` | `max_lr` (= 0.001) |
+| 衰减 | `> start_decay_after_n_steps` | `max_lr × 0.95^((steps_since_decay // 50000) + 1)` |
+
+默认调度参数：`warmup_no_steps=1000`、`start_decay_after_n_steps=50000`、`decay_every_n_steps=50000`、`decay_factor=0.95`。这产生了一个 1K 步的线性预热，一个 49K 步的峰值学习率平台期，随后是每 50K 步衰减 5% 的指数衰减。
+
+来源：[fastfold/model/hub/lr_scheduler.py](/fastfold/model/hub/lr_scheduler.py#L22-L98), [train.py](/train.py#L170-L172)
+
+### 损失计算与日志记录
+
+`AlphaFoldLoss` 类聚合了由配置加权的多个损失项——FAPE（帧对齐点误差）、distogram、置信度、违规以及辅助头。在训练期间，损失分解会与由 `compute_validation_metrics()` 计算的 **验证指标** 一同记录。日志辅助函数 `log_loss()` 将所有单独的损失名称及其格式化后的值拼接成一个字符串，供分布式记录器使用。
+
+来源：[train.py](/train.py#L16-L30), [fastfold/model/hub/loss.py](/fastfold/model/hub/loss.py#L1-L50)
+
+### 检查点
+
+当指定了 `--save_ckpt_path` 时，模型检查点会通过 `torch.save()` 作为完整的 `engine.model` 对象保存。保存频率由 `--save_ckpt_interval` 控制（默认：每个 epoch）。另外，**激活检查点** 通过 `blocks_per_ckpt=1`（当 `train=True` 时自动设置）在块级别进行配置，这会在反向传播期间为每个 Evoformer/ExtraMSA 块重新计算激活，以约 48 倍的内存节省换取每个块额外的一次前向传播。
+
+来源：[train.py](/train.py#L245-L248), [fastfold/utils/checkpointing.py](/fastfold/utils/checkpointing.py#L26-L85)
+
+## 启动训练
+
+### NVIDIA GPU 训练
+
+`train.sh` 脚本提供了标准的启动模板。配置脚本顶部的变量，然后执行：
+
+| 变量 | 描述 | 示例 |
+|---|---|---|
+| `DATA_DIR` | 数据根目录 | `/data/fastfold` |
+| `gpus_per_node` | 每个节点的 GPU 数 | `2` |
+| `nnodes` | 节点数 | `1` |
+| `max_template_date` | 模板截止日期 | `2021-10-10` |
+| `train_epoch_len` | 虚拟 epoch 长度 | `10000` |
+
+```bash
+bash train.sh
+```
+
+该脚本使用 `torchrun --standalone` 启动分布式训练。对于多节点设置，请调整 `--nnodes` 并添加 `--node_rank` 以及 `--master_addr`/`--master_port` 参数。传递给 `train.py` 的主要训练参数为：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `--config_preset` | `initial_training` | 模型配置预设名称 |
+| `--dap_size` | `1` | DAP 张量并行大小（1 到 nproc_per_node） |
+| `--max_epochs` | `10000` | 最大训练 epoch 数 |
+| `--seed` | `42` | 可复现性的随机种子 |
+| `--log_interval` | `1` | 日志条目之间的步数间隔 |
+| `--save_ckpt_path` | `None` | 检查点保存目录 |
+| `--save_ckpt_interval` | `1` | 检查点保存之间的 epoch 间隔 |
+| `--from_torch` | `False` | 使用 `colossalai.launch_from_torch` 的标志 |
+
+来源：[train.sh](/train.sh#L1-L31), [train.py](/train.py#L120-L165)
+
+### Intel Habana 训练
+
+FastFold 通过 `habana/train.py` 中的并行训练流程支持在 Intel Habana Gaudi 加速器上进行训练。Habana 变体在以下几个关键方面有所不同：
+
+| 方面 | NVIDIA (`train.py`) | Habana (`habana/train.py`) |
+|---|---|---|
+| 启动 | `torchrun` | `mpirun --allow-run-as-root` |
+| 并行机制 | ColossalAI 引擎 + DAP | 原生 DDP (`gradient_as_bucket_view=True`) |
+| 优化器 | `HybridAdam` | `FusedAdamW` (Habana) |
+| 混合精度 | ColossalAI FP16 | HMP O1 (BF16/FP32 算子列表) |
+| 设备 | `.cuda()` | `.to(device="hpu")` |
+| 核注入 | `inject_fastnn()` | `inject_habana()` |
+
+Habana 混合精度配置使用独立的 BF16 和 FP32 算子允许列表。BF16 列表包含计算密集型算子（`addmm`, `mm`, `bmm`, `linear`, `layer_norm`），而 FP32 列表则为数值敏感算子（`cross_entropy`, `log_softmax`, `nll_loss`, `softmax`）保持精度。通过以下命令启动：
+
+```bash
+bash habana/train.sh
+```
+
+Habana 脚本设置 `GC_KERNEL_PATH` 以加载自定义 TPC 性能库，并使用 `mpirun` 代替 `torchrun` 进行进程派生。
+
+来源：[habana/train.py](/habana/train.py#L1-L50), [habana/train.sh](/habana/train.sh#L1-L32), [habana/ops_bf16.txt](/habana/ops_bf16.txt#L1-L16), [habana/ops_fp32.txt](/habana/ops_fp32.txt#L1-L5)
+
+## 数据流程与随机过滤
+
+训练数据流经 `SetupTrainDataset()` → `TrainDataLoader()`，它们构造了一个实现了 AlphaFold **随机训练过滤器** 的 `OpenFoldDataset`。此过滤器应用两层选择：
+
+1. **确定性过滤器** —— 拒绝分辨率 > 9.0 Å 或单氨基酸比例 > 0.8 的链
+2. **随机过滤器** —— 以与聚类大小成反比且按链长缩放的概率对链进行采样，与 DeepMind 公开的训练机制相匹配
+
+数据集同时接受 **PDB 训练数据** 和 **蒸馏数据** 作为单独的来源，并具有可配置的混合概率（默认 `distillation_prob=0.75`）。数据默认以 `batch_size=1` 和 `num_workers=16` 加载，并受 `train_epoch_len` 虚拟长度参数控制逐 epoch 的打乱。
+
+来源：[fastfold/data/data_modules.py](/fastfold/data/data_modules.py#L210-L330), [train.py](/train.py#L154-L169)
+
+## 推荐阅读路径
+
+既然你已经了解了训练设置，接下来可以探索使 FastFold 训练高效运行的内部机制：
+
+- **[FastNN 模块设计](6-fastnn-module-design)** —— 训练期间注入的融合 CUDA 核如何实现其加速
+- **[DAP 通信原语](9-dap-communication-primitives)** —— 实现多 GPU 张量并行的 scatter/gather/all-to-all 操作
+- **[AlphaFold 模型配置](16-alphafold-model-configuration)** —— 深入探讨配置预设系统及所有可调参数
+- **[性能基准测试](18-performance-benchmarking)** —— 跨 GPU 配置的定量训练吞吐量测量
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/hpcaitech/FastFold/5-architecture-overview)
+
+---
+slug:5-architecture-overview
+blog_type:normal
+---
+
+
+FastFold 是 AlphaFold2 Evoformer 堆栈的高性能重实现，专为消除 GPU 集群上蛋白质结构预测的计算瓶颈而构建。该项目通过三大协同支柱实现加速：**融合核加速**（FastNN）、用于多 GPU 扩展的**动态轴向并行**（DAP），以及用于数据流水线并行的 **Ray 编排工作流**。理解这些层级的组合方式——从原始 FASTA 输入，到分布式张量通信，再到最终的 3D 坐标——是高效导航 FastFold 代码库的关键。
+
+## 系统架构
+
+下图展示了端到端的数据流以及 FastFold 四个主要子系统之间的关系。每个彩色区域代表一个具有清晰所有权边界的独立架构关注点。
+
+```mermaid
+graph TB
+    subgraph DataLayer["数据处理层"]
+        FASTA["FASTA 输入"] --> WP["Ray 工作流<br/>(fastfold/workflow)"]
+        WP --> MSA["MSA 搜索<br/>(jackhmmer/hhblits/hhsearch)"]
+        MSA --> DP["数据流水线<br/>(fastfold/data)"]
+        DP --> FP["特征流水线<br/>(fastfold/data/feature_pipeline)"]
+    end
+
+    subgraph ModelLayer["模型执行层"]
+        FP --> IE["输入嵌入器"]
+        IE --> EF["Evoformer 堆栈<br/>(fastfold/model/fastnn)"]
+        EF --> SM["结构模块"]
+        SM --> AM["Amber 弛豫<br/>(fastfold/relax)"]
+    end
+
+    subgraph KernelLayer["融合核层"]
+        EF -.-> AK["注意力核心<br/>(Triton/CUDA)"]
+        EF -.-> LN["融合 LayerNorm"]
+        EF -.-> FM["融合 Softmax"]
+        EF -.-> FO["融合 Bias-Dropout-Add"]
+    end
+
+    subgraph DistLayer["分布式通信层"]
+        EF -.-> DAP["动态轴向并行<br/>(fastfold/distributed)"]
+        DAP --> SC["Scatter / Gather"]
+        DAP --> A2A["All-to-All<br/>(col↔row)"]
+        DAP --> AR["异步通信<br/>(comm_async)"]
+    end
+
+    subgraph IntegrationLayer["集成层"]
+        INJ["inject_fastnn()"] --> EF
+        WI["import_jax_weights_()"] --> INJ
+    end
+
+    style DataLayer fill:#e8f5e9,stroke:#2e7d32
+    style ModelLayer fill:#e3f2fd,stroke:#1565c0
+    style KernelLayer fill:#fff3e0,stroke:#e65100
+    style DistLayer fill:#fce4ec,stroke:#c62828
+    style IntegrationLayer fill:#f3e5f5,stroke:#6a1b9a
+```
+
+来源: [inference.py](/inference.py#L1-L120), [fastfold/workflow/workflow_run.py](/fastfold/workflow/workflow_run.py#L1-L15)
+
+## 核心子系统
+
+FastFold 的架构可分解为五个子系统，每个子系统都具有明确的职责和公共接口。下表总结了它们的作用、入口点和关键依赖。
+
+| 子系统 | 目录 | 职责 | 主要入口点 | 关键依赖 |
+|---|---|---|---|---|
+| **FastNN** | `fastfold/model/fastnn/` | 融合核 Evoformer，MSA 注意力，配对更新 | `Evoformer`, `EvoformerStack` | Triton / CUDA |
+| **分布式 (DAP)** | `fastfold/distributed/` | 多 GPU 张量并行原语 | `init_dap()` | ColossalAI |
+| **数据流水线** | `fastfold/data/` | MSA 搜索，特征提取，模板处理 | `data_pipeline`, `feature_pipeline` | jackhmmer, HH-suite |
+| **Ray 工作流** | `fastfold/workflow/` | 并行化的 MSA 搜索编排 | `batch_run()` | Ray Workflows |
+| **集成** | `fastfold/utils/inject_fastnn.py` | 将 OpenFold 模块替换为 FastNN 等价模块 | `inject_fastnn()` | JAX 权重加载器 |
+
+来源: [fastfold/model/fastnn/__init__.py](/fastfold/model/fastnn/__init__.py#L1-L14), [fastfold/distributed/__init__.py](/fastfold/distributed/__init__.py#L1-L7)
+
+## 项目结构
+
+下面的目录布局突出了每个模块的架构所有权。带有 `⭐` 前缀的模块是 FastFold 区别于 OpenFold/AlphaFold 的主要创新点。
+
+```
+fastfold/
+├── config.py                          # 模型配置 (model_1..5, ptm, multimer)
+├── common/                            # 蛋白质数据类型，残基常量
+├── ⭐ model/fastnn/                   # 高性能 Evoformer 实现
+│   ├── evoformer.py                   #   Evoformer 与 EvoformerStack 块
+│   ├── msa.py                         #   带有 DAP 的 MSA 行/列注意力
+│   ├── triangle.py                    #   配对核心（三角形更新 + 注意力）
+│   ├── ops.py                         #   融合 Linear, Transition, OutProductMean
+│   ├── embedders.py                   #   模板与循环嵌入器
+│   ├── template.py                    #   模板配对堆栈
+│   └── kernel/                        #   ⭐ 融合 CUDA/Triton 核
+│       ├── attention_core.py          #     注意力分派 (Triton → PyTorch)
+│       ├── layer_norm.py              #     融合 LayerNorm
+│       ├── softmax.py                 #     融合 Softmax
+│       ├── triton/                    #     Triton 核实现
+│       ├── cuda_native/               #     自定义 CUDA C++ 核
+│       └── jit/                       #     JIT 编译的融合操作
+├── model/nn/                          # 参考的 OpenFold nn.Module 实现
+├── ⭐ distributed/                    # 动态轴向并行
+│   ├── core.py                        #   通过 ColossalAI 进行 DAP 初始化
+│   ├── comm.py                        #   同步：scatter, gather, all-to-all
+│   └── comm_async.py                  #   异步：通信与计算重叠
+├── data/                              # 数据处理 (MSA, 模板, 特征)
+├── ⭐ workflow/                       # 基于 Ray 的 MSA 搜索工作流
+│   ├── factory/                       #   工具包装器 (jackhmmer, hhblits 等)
+│   ├── template/                      #   单体与多聚体工作流 DAG
+│   └── workflow_run.py               #   批量执行入口点
+├── utils/
+│   ├── inject_fastnn.py              #   ⭐ 模块替换与权重复制
+│   ├── import_weights.py             #   JAX → PyTorch 权重加载
+│   └── checkpointing.py              #   梯度检查点工具
+├── habana/                            # Intel Habana (Gaudi) 平台支持
+└── relax/                             # 最终结构的 Amber 弛豫
+```
+
+来源: [fastfold/model/fastnn/kernel/__init__.py](/fastfold/model/fastnn/kernel/__init__.py#L1-L13), [fastfold/distributed/core.py](/fastfold/distributed/core.py#L1-L41)
+
+## 执行流程：推理路径
+
+推理流水线是 FastFold 中遍历最多的路径。下面的流程图追踪了从 FASTA 输入到 PDB 输出的精确序列，突出显示了每个子系统的激活位置。
+
+```mermaid
+flowchart LR
+    A["FASTA 序列"] --> B["Ray 工作流<br/>MSA 搜索"]
+    B --> C["特征流水线<br/>numpy 特征"]
+    C --> D["np_to_tensor_dict<br/>PyTorch 张量"]
+    D --> E["AlphaFold 模型<br/>(OpenFold 参考)"]
+    E --> F["import_jax_weights_<br/>加载预训练参数"]
+    F --> G["inject_fastnn()<br/>替换 → 融合模块"]
+    G --> H["init_dap()<br/>初始化并行"]
+    H --> I["EvoformerStack<br/>48 块 × DAP"]
+    I --> J["结构模块<br/>→ 3D 坐标"]
+    J --> K["Amber 弛豫<br/>物理精修"]
+    K --> L["PDB 输出"]
+
+    style B fill:#e8f5e9
+    style G fill:#f3e5f5
+    style H fill:#fce4ec
+    style I fill:#e3f2fd
+```
+
+关键的集成步骤是 `inject_fastnn()`，它遍历模型的模块树，并将每个 OpenFold 子层（MSA 注意力、三角形乘法、外积均值等）替换为其 FastNN 融合等价模块，逐参数复制权重以确保数值一致性。这种设计意味着 FastFold **无需对模型定义进行任何更改**——只需在模型构建后进行一次函数调用即可。
+
+来源: [inference.py](/inference.py#L1-L120), [fastfold/utils/inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L1-L50)
+
+## 动态轴向并行 (DAP) 架构
+
+DAP 是 FastFold 用于在 GPU 间划分 Evoformer 的 MSA 和配对表示的机制。核心洞察在于，Evoformer 的两个主导张量——MSA 表示 **M** `(N_seq, N_res, c_m)` 和配对表示 **Z** `(N_res, N_res, c_z)`——具有互补的可划分轴。DAP 利用这一点，在 MSA 注意力中沿**行轴**进行拆分，在配对注意力中沿**列轴**进行拆分，并在阶段之间通过 `all-to-all` 集合通信来转置划分。
+
+```mermaid
+sequenceDiagram
+    participant GPU0 as GPU 0
+    participant GPU1 as GPU 1
+
+    Note over GPU0,GPU1: MSA 行注意力 (M 在 seq 轴上拆分)
+    GPU0->>GPU0: M_row_local × Z_local → M_row_out
+    GPU1->>GPU1: M_row_local × Z_local → M_row_out
+
+    Note over GPU0,GPU1: All-to-All: 列 → 行转置
+    GPU0->>GPU1: async all-to-all (M, dim 1→2)
+    GPU1->>GPU0: async all-to-all (M, dim 1→2)
+
+    Note over GPU0,GPU1: 重叠：通信完成期间进行配对更新
+    GPU0->>GPU0: PairCore(Z_local) [overlapped]
+    GPU1->>GPU1: PairCore(Z_local) [overlapped]
+
+    Note over GPU0,GPU1: MSA 列注意力 (M 在 res 轴上拆分)
+    GPU0->>GPU0: M_col_local → M_col_out
+    GPU1->>GPU1: M_col_local → M_col_out
+```
+
+上述异步通信模式通过 `All_to_All_Async` 和 `All_to_All_Async_Opp` 自定义 autograd 函数实现，它们使用 `async_op=True` 启动 `dist.all_to_all` 操作，并将配对计算（`PairCore`）与通信重叠。这种**异步操作的对偶性**是使 DAP 能够扩展而不产生成比例通信开销的主要机制。
+
+来源: [fastfold/distributed/comm.py](/fastfold/distributed/comm.py#L1-L100), [fastfold/distributed/comm_async.py](/fastfold/distributed/comm_async.py#L1-L80), [fastfold/model/fastnn/evoformer.py](/fastfold/model/fastnn/evoformer.py#L1-L80)
+
+## FastNN 核层级
+
+FastNN 提供了多后端核分派策略。每个关键操作最多有三种实现，并带有自动回退机制：
+
+| 操作 | Triton 核 | CUDA C++ 核 | JIT 回退 | 分派逻辑 |
+|---|---|---|---|---|
+| **注意力核心** | `triton/attention_core.py` | — | PyTorch matmul | 若 Triton 可用则使用 Triton，否则使用 `_torch_attention_core` |
+| **LayerNorm** | `triton/layer_norm.py` | `cuda_native/layer_norm.py` | — | Triton → CUDA → 错误 |
+| **Softmax** | `triton/softmax.py` | `cuda_native/softmax.py` | — | Triton → CUDA → 错误 |
+| **Bias-Dropout-Add** | — | — | `jit/fused_ops.py` | 始终使用 JIT |
+
+注意力核心的分派遵循一种简洁的模式：在导入时，FastFold 尝试加载 Triton 核；如果未安装 Triton（或 CUDA < 11.4），则回退到 PyTorch 原生实现。这确保了 FastFold 可以在任何 CUDA 平台上运行，同时在硬件允许的情况下实现最高性能。
+
+<CgxTip>在安装 FastFold 时，如果你的 CUDA 版本为 11.4+，**请务必安装 Triton (`pip install -U --pre triton`)**。Triton 注意力核带来了最大的单次推理加速——缺少它，注意力将回退到标准的 `torch.matmul`，这对于 Evoformer 的注意力模式而言会慢 2-3 倍。</CgxTip>
+
+来源: [fastfold/model/fastnn/kernel/attention_core.py](/fastfold/model/fastnn/kernel/attention_core.py#L1-L53), [fastfold/model/fastnn/kernel/__init__.py](/fastfold/model/fastnn/kernel/__init__.py#L1-L13)
+
+## 内存高效的分块执行
+
+对于超长序列（>1000 个残基），配对表示 **Z** 呈 O(N²) 增长，使得全量物化不可行。FastFold 通过由 `set_chunk_size()` 控制的**分块执行**策略来解决此问题。当设置了分块大小时，`OutProductMean`、`ChunkTransition` 和 `ChunkMSAColumnGlobalAttention` 等操作会按分块在序列维度上进行迭代，每次处理 `chunk_size × multiplier` 个残基。这以适度的速度开销换取了显著的内存减少，从而能够在单张 A100 (80GB) 上以 bf16 精度对 **10,000+ 残基**的序列进行推理。
+
+<CgxTip>对于长序列推理，请设置 `--chunk_size N`，其中 N 控制分块粒度。值越小，内存消耗越少，但迭代开销越大。对于 A100 80GB 上的 10K 残基序列，经验证的配置为 `--chunk_size 128`，同时使用 bf16 精度和 `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:15000`。</CgxTip>
+
+来源: [fastfold/model/fastnn/ops.py](/fastfold/model/fastnn/ops.py#L1-L60), [README.md](/README.md#L100-L130)
+
+## 配置架构
+
+FastFold 在 `config.py` 中的模型配置系统定义了与 AlphaFold2 的五种模型变体（加上 PTM 和多聚体扩展）相匹配的参数预设。该配置是一个深度嵌套的 `ml_collections.ConfigDict`，包含三个贯穿整个模型的关键维度常量：
+
+| 符号 | 常量 | 默认值 | 含义 |
+|---|---|---|---|
+| `c_m` | MSA 通道维度 | 256 | MSA 表示的特征维度 |
+| `c_z` | 配对通道维度 | 128 | 配对表示的特征维度 |
+| `c_s` | 单一通道维度 | 384 | 输出单一嵌入维度 |
+| `c_t` | 模板通道维度 | 64 | 模板特征维度 |
+
+`model_config()` 函数克隆基础配置并应用特定于变体的覆盖（例如，`model_1` 启用模板并设置 `max_extra_msa=5120`，而 `model_5` 完全禁用模板）。`low_prec` 标志会交换数值常量以适应 bf16 训练。
+
+来源: [fastfold/config.py](/fastfold/config.py#L1-L80)
+
+## 平台可扩展性：Habana
+
+FastFold 通过位于 `fastfold/habana/` 的专用 Habana 后端扩展到了 NVIDIA GPU 之外。`inject_habana()` 函数镜像了 `inject_fastnn()` 的模式——它通过补丁让操作使用 Habana 的 SynapseAI 自定义核。架构在**模型定义**（`model/nn/`）与**优化执行**（`model/fastnn/`、`habana/`）之间的清晰分离，使得这种可移植性成为可能，而无需复制模型逻辑。
+
+来源: [README.md](/README.md#L1-L50), [fastfold/habana/](/fastfold/habana/)
+
+## 阅读指南
+
+该架构自然而然地提示了一种从性能关键的内部核心向外延伸到集成与部署的阅读顺序：
+
+1. **从此处开始** → [FastNN 模块设计](6-fastnn-module-design) — 理解融合 Evoformer 如何替换 OpenFold 的参考实现
+2. **然后** → [融合核实现](7-fused-kernel-implementations) — 深入了解 Triton 和 CUDA 核内部机制
+3. **然后** → [内存高效分块执行](8-memory-efficient-chunked-execution) — 学习针对长序列的分块策略
+4. **然后** → [DAP 通信原语](9-dap-communication-primitives) — 理解 scatter/gather/all-to-all 基础
+5. **然后** → [对偶异步操作](10-duality-async-operation) — 掌握计算-通信重叠模式
+6. **然后** → [从 JAX 注入权重](15-weight-injection-from-jax) — 了解预训练的 AlphaFold 权重如何转换到 FastFold
+7. **最后** → [用于 MSA 搜索的 Ray 工作流](12-ray-workflow-for-msa-search) — 加速数据预处理瓶颈
+
+---
+
+- [深入解析/性能基准测试](https://zread.ai/hpcaitech/FastFold/18-performance-benchmarking)
+
+---
+slug:18-performance-benchmarking
+blog_type:normal
+---
+
+
+FastFold 的性能工程建立在三个协同支柱之上：通过 Triton 和 CUDA 原生实现进行的**融合核加速**，将 All-to-All 通信与计算重叠的**动态轴向并行**，以及通过激活检查点和分块注意力限制峰值显存的**内存高效分块执行**。本页提供了跨这些维度测量和优化 FastFold 性能所需的方法论、工具和调优指南——从 Evoformer 主干的单 GPU 微基准测试，到端到端推理和训练的多 GPU 分布式扩展。
+
+来源: [perf.py](benchmark/perf.py#L1-L188), [evoformer.py](fastfold/model/fastnn/evoformer.py#L1-L92)
+
+## 基准测试架构与工具
+
+标准基准测试入口点是 `benchmark/perf.py`，这是一个独立的 Evoformer 性能测试工具，它将计算密集型的 Evoformer 主干与完整的 AlphaFold 流水线隔离开来。这种设计能够将吞吐量的提升精确归因于特定的优化——融合核、DAP 通信重叠或分块执行——而不会受到数据 I/O 或辅助模型头的干扰。
+
+基准测试编排以下测量协议：
+
+```mermaid
+flowchart TD
+    A[解析命令行参数] --> B[init_dap - DAP 大小]
+    B --> C[选择精度<br/>bfloat16 或 float16]
+    C --> D[实例化 Evoformer 块]
+    D --> E[分配随机张量<br/>node, pair, masks]
+    E --> F[预热迭代<br/>默认: 5]
+    F --> G[Barrier + CUDA 同步]
+    G --> H[记录前向传播开始事件]
+    H --> I[执行 N 个 Evoformer 层]
+    I --> J[CUDA 同步 + 记录反向传播开始]
+    J --> K{仅前向传播?}
+    K -->|否| L[反向传播]
+    K -->|是| M[跳过反向传播]
+    L --> N[记录反向传播停止事件]
+    M --> N
+    N --> O{更多迭代?}
+    O -->|是| G
+    O -->|否| P[通过 CUDA 事件计算耗时]
+    P --> Q[打印 ms/层 前向 + 反向]
+```
+
+基准测试工具中的**关键设计决策**：使用 CUDA 事件（`torch.cuda.Event(enable_timing=True)`）而非系统时钟 `time.time()`，以确保 GPU 端计时的准确性，排除主机端开销。每次迭代前通过 `torch.distributed.barrier()` 和 `torch.cuda.synchronize()` 消除跨秩不同步的伪影。预热阶段（默认 5 次迭代）被排除在报告的统计数据之外，以允许 Triton 核的 JIT 编译和 CUDA 上下文初始化达到稳定。
+
+来源: [perf.py](benchmark/perf.py#L93-L184)
+
+## 基准测试参数与配置
+
+基准测试脚本暴露了对 Evoformer 计算每个维度的细粒度控制：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `--dap-size` | 1 | 动态轴向并行使用的 GPU 数量 |
+| `--msa-length` | 132 | MSA 序列深度（MSA 表示中的 N_rows） |
+| `--res-length` | 256 | 残基序列长度（N_res，决定配对维度） |
+| `--trials` | 50 | 测量的基准测试迭代次数 |
+| `--warmup-trials` | 5 | 从统计中排除的预热迭代次数 |
+| `--layers` | 12 | 要执行的 Evoformer 块数量 |
+| `--cm` | 256 | MSA 隐藏通道维度 (c_m) |
+| `--cz` | 128 | 配对隐藏通道维度 (c_z) |
+| `--heads` | 8 | 多头注意力头数 |
+| `--openfold` | False | 基准测试 OpenFold 的 EvoformerBlock 以进行比较 |
+| `--fwd` | False | 仅前向传播模式（跳过反向传播） |
+| `--prof` | False | 启用 PyTorch 性能分析器并导出至 TensorBoard |
+
+**精度选择**不是用户可配置的，而是受关键约束支配：当 `dap_size > 1` 时，精度自动从 `bfloat16` 回退到 `float16`，因为 PyTorch 的 All-to-All 通信原语在分布式模式下不支持 BFloat16 数据类型。这是一个已知的 PyTorch 限制，直接影响了吞吐量（bfloat16 在 Ampere+ GPU 上通常更快）和数值行为。
+
+来源: [perf.py](benchmark/perf.py#L14-L43)
+
+## 运行基准测试
+
+### 单 GPU Evoformer 基准测试
+
+最简单的调用方式是在单个 GPU 上使用默认问题维度对 FastFold Evoformer 进行基准测试：
+
+```bash
+python benchmark/perf.py
+```
+
+这会生成以下格式的输出：
+```
+[ MSA Attn ] Input:    1,  132,  256, ( 256  128) Fwd Time / Layer: X.XXX ms Bwd Time / Layer: Y.YYY ms
+```
+
+### 多 GPU DAP 基准测试
+
+要测量动态轴向并行在例如 4 个 GPU 上的扩展性：
+
+```bash
+torchrun --nproc_per_node=4 benchmark/perf.py --dap-size 4
+```
+
+### 对比 OpenFold 基线
+
+与 OpenFold Evoformer 实现的直接 A/B 比较使用 `--openfold` 标志，该标志动态导入 `openfold.model.evoformer.EvoformerBlock` 并将其封装以匹配 FastFold 基准测试接口：
+
+```bash
+python benchmark/perf.py --openfold
+python benchmark/perf.py           # FastFold，用于比较
+```
+
+### 性能分析器集成
+
+要进行核级别的归因分析，请启用 PyTorch 性能分析器，它会将追踪记录导出到 TensorBoard：
+
+```bash
+python benchmark/perf.py --prof
+# 查看追踪记录：
+# tensorboard --logdir=./log/fastfold
+```
+
+性能分析器使用调度模式：`wait=1, warmup=5, active=50, repeat=1`，这与默认的迭代/预热计数一致，以确保性能分析仅捕获稳态执行。追踪处理程序将数据写入 `./log/fastfold`。
+
+### 自定义问题规模
+
+对于具有非典型 MSA 深度或序列长度的蛋白质：
+
+```bash
+# 长序列（例如，512 个残基，深度 MSA）
+python benchmark/perf.py --res-length 512 --msa-length 256 --layers 48
+
+# 短序列，浅 MSA（例如，多肽预测）
+python benchmark/perf.py --res-length 64 --msa-length 16 --layers 12
+```
+
+来源: [perf.py](benchmark/perf.py#L82-L121), [perf.py](benchmark/perf.py#L122-L132)
+
+## 性能优化向量
+
+FastFold 通过分层优化策略实现加速。每一层针对 Evoformer 计算中独特的瓶颈，且各层之间以相乘而非相加的方式组合。
+
+```mermaid
+graph LR
+    subgraph "内核层"
+        A[Triton 融合注意力] 
+        B[融合 Softmax + Mask + Bias]
+        C[融合 LayerNorm]
+        D[融合 Bias-Dropout-Add]
+    end
+    subgraph "并行层"
+        E[动态轴向并行]
+        F[异步 All-to-All 重叠]
+        G[Scatter/Gather 原语]
+    end
+    subgraph "内存层"
+        H[分块注意力]
+        I[激活检查点]
+        J[原位操作]
+    end
+    A & B & C & D --> K[组合吞吐量]
+    E & F & G --> K
+    H & I & J --> K
+```
+
+### 融合核加速
+
+内核层通过将多步操作融合为单次内核启动，消除了冗余的 GPU 往返。调度架构遵循 **Triton 优先回退策略**：优先尝试 Triton 核以在 Ampere+ GPU 上获得卓越性能；如果 Triton 不可用，系统回退到 CUDA 原生核（通过 C++ 扩展）或纯 PyTorch 操作。
+
+| 核 | Triton 实现 | 回退方案 | 融合收益 |
+|--------|-----------------------|----------|----------------|
+| **注意力核心** | Triton 中的 Flash 风格分块注意力 | `torch.matmul` + `softmax` + `matmul` | 消除完整 N×N 注意力矩阵的具体化；在 SRAM 中进行在线 softmax |
+| **Softmax** | 融合 softmax + mask + bias | CUDA 原生 softmax 核 | 单个核对比 3 个独立操作；反向传播与保存的输出融合 |
+| **LayerNorm** | Triton LayerNorm | Apex FusedLayerNormAffine | 单次遍历对比多操作；MSA 深度 > 4000 时自动分块 |
+| **Bias-Dropout-Add** | JIT 编译的融合操作 | PyTorch functional dropout | 融合偏置加法、sigmoid、逐元素乘法、dropout 和残差 |
+
+Triton 注意力核心实现了 **Flash 风格分块算法**，以 128 个元素的块（`BLOCK_M=BLOCK_N=128`）处理 Q×K^T 计算，并维护运行时的最大值和求和统计量，以实现数值稳定的在线 softmax。这将注意力矩阵的内存复杂度从 O(N²) 降低到 O(N)，这对于蛋白质结构预测中的长序列至关重要。该核支持编译时条件性的掩码和偏置应用（`use_mask: tl.constexpr`，`use_bias: tl.constexpr`），避免了分支开销。
+
+<CgxTip>Triton 注意力核将头维度 (`Lk`) 约束为 {16, 32, 64, 128}，并在 Lk ≤ 64 时使用 `num_warps=4`，否则使用 `num_warps=8`。未对齐到 BLOCK=128 分块大小的序列长度通过掩码加载而非填充处理，避免了计算浪费。</CgxTip>
+
+来源: [attention_core.py](fastfold/model/fastnn/kernel/attention_core.py#L1-L53), [triton/attention_core.py](fastfold/model/fastnn/kernel/triton/attention_core.py#L1-L191), [softmax.py](fastfold/model/fastnn/kernel/softmax.py#L1-L59), [layer_norm.py](fastfold/model/fastnn/kernel/layer_norm.py#L1-L61), [__init__.py](fastfold/model/fastnn/kernel/__init__.py#L1-L13)
+
+### 动态轴向并行 (DAP) 扩展
+
+DAP 通过沿其两个轴向维度——行和列——划分 MSA 表示，将 Evoformer 计算分布到多个 GPU 上。行并行和列并行状态之间通过 **All-to-All 通信**进行转换，该通信重新分配数据，使得每个 GPU 持有其分配的 MSA 行（或列）子集的完整序列维度。
+
+关键的性能洞察是，All-to-All 通信是**异步的且与计算重叠**。在 Evoformer 的前向传播中，`MSACore` 完成其行并行计算后，异步启动 All-to-All 转置（`All_to_All_Async.apply`），而 `PairCore` 在通信进行期间**并发地**对配对表示执行计算。异步操作的完成句柄（`work`）仅在下次需要 MSA 表示时才被等待：
+
+```
+m = self.msa(m, z, msa_mask)           # 行并行 MSA 计算
+z = self.communication(m, msa_mask, z) # 外积均值
+m, work = All_to_All_Async.apply(m)    # 启动异步 All-to-All
+z = self.pair(z, pair_mask)            # 配对计算与通信重叠
+m = All_to_All_Async_Opp.apply(m, work) # 等待通信完成
+```
+
+**DAP 扩展基准测试**应将 `--dap-size` 从 1 扫描至可用 GPU 数量。预期的扩展曲线是次线性的，原因在于：(1) All-to-All 通信量按每 GPU O(N²/P) 缩放，引入了通信开销下限；(2) 当 DAP > 1 时 float16 精度要求，其吞吐量可能不同于单 GPU 上的 bfloat16；(3) 为对齐 `dap_size` 的序列填充（计算为 `(seq_length // dap_size + 1) * dap_size - seq_length`）对不可整除的序列长度引入了浪费。
+
+来源: [evoformer.py](fastfold/model/fastnn/evoformer.py#L30-L91), [comm_async.py](fastfold/distributed/comm_async.py#L129-L199), [core.py](fastfold/distributed/core.py#L17-L41)
+
+### 内存高效执行
+
+两种互补机制控制峰值显存：
+
+**分块注意力**——通过 `set_chunk_size()` 和 `--chunk-size` 命令行参数控制，分块将大型注意力操作分解为按顺序处理的小型块，以吞吐量换取更低的激活内存。模型配置中的 `chunk_size` 参数（`config.globals.chunk_size`）会传播至所有分块注意力模块（`ChunkMSARowAttentionWithPairBias`、`ChunkMSAColumnGlobalAttention`、`ChunkTransition`）。
+
+**激活检查点**——EvoformerStack 中的 `checkpoint_blocks` 函数将 Evoformer 块栈划分为大小为 `blocks_per_ckpt` 的块。每个块的输入激活被保存，而块内的中间激活在反向传播期间重新计算。配置 `blocks_per_ckpt=None` 完全禁用检查点（最快速度，最大内存）；`blocks_per_ckpt=1` 检查点每个块（最小内存，最多重计算）。在训练期间，配置自动设置 `blocks_per_ckpt=1` 和 `chunk_size=None`，优先为更大的反向传播内存占用节省内存。
+
+| 设置 | `blocks_per_ckpt` | `chunk_size` | 内存 | 速度 |
+|---------|-------------------|--------------|--------|-------|
+| 推理（默认） | `None` | `None` | 高 | 最快 |
+| 推理（内存受限） | 例如 `4` | 例如 `512` | 中 | 中等 |
+| 训练 | `1` | `None` | 最低 | 最慢（重计算） |
+
+**原位操作**提供了额外的内存优化路径。`Evoformer.inplace()` 方法原位修改张量而非创建新分配，由 `config.globals.inplace` 控制（在推理期间通过 `--inplace` 标志设置）。这对配对表示 `z` 尤其有效，因为它通过多个子模块更新而无需保留原始值。
+
+<CgxTip>当 `input.shape[-3] > 4000` 时，LayerNorm 核实现自动分块：分块大小计算为 `min(4000² / dim, (dim + 1) / 2)`，平衡核占用与内存。这透明地处理了深度 MSA 堆栈，无需手动配置。</CgxTip>
+
+来源: [checkpointing.py](fastfold/utils/checkpointing.py#L30-L84), [evoformer.py](fastfold/model/fastnn/evoformer.py#L93-L152), [inference.py](inference.py#L130-L145), [config.py](fastfold/config.py#L115-L124), [layer_norm.py](fastfold/model/fastnn/kernel/layer_norm.py#L37-L52)
+
+## 端到端推理基准测试
+
+虽然 `benchmark/perf.py` 隔离了 Evoformer，但完整推理性能通过 `inference.py` 流水线测量，它对包含所有模型阶段的完整模型前向传播计时：
+
+```python
+t = time.perf_counter()
+out = model(batch)
+print(f"Inference time: {time.perf_counter() - t}")
+```
+
+推理流水线应用以下与性能相关的配置序列：
+
+1. 通过 `import_jax_weights_()` **导入 JAX 权重**——一次性成本，不包含在推理计时中
+2. 通过 `inject_fastnn(model)` **注入 FastNN**——用融合核等效项替换标准 PyTorch 模块
+3. 通过 `set_chunk_size(model.globals.chunk_size)` **配置分块大小**——应用内存/速度权衡
+4. 通过 `set_fused_triangle_multiplication()` 为 v3 模型权重**融合三角形乘法**
+5. 对 PyTorch ≥ 1.12 **启用 TF32**：`torch.backends.cuda.matmul.allow_tf32 = True`
+
+推理脚本（`inference.sh`、`inference_multimer.sh`）使用适当的分布式启动配置封装 `inference.py`。对于 DAP 推理，启动必须设置 `WORLD_SIZE` 和 `RANK` 环境变量，`init_dap()` 消耗这些变量以初始化 ColossalAI 张量并行上下文。
+
+来源: [inference.py](inference.py#L122-L159), [inference.py](inference.py#L47-L48)
+
+## 训练性能
+
+训练性能通过 **ColossalAI** 的分布式训练框架和 `HybridAdam` 优化器管理。训练脚本（`train.py`）暴露了 `--dap_size` 参数（推荐范围：1 到 `nproc_per_node`），该参数在 ColossalAI 的并行上下文中配置张量并行大小：
+
+```python
+colossalai.launch_from_torch(
+    config=dict(parallel=dict(tensor=dict(size=args.dap_size)),
+                torch_ddp=dict(static_graph=True)))
+```
+
+DDP 配置中的 `static_graph=True` 标志启用图优化，因为 Evoformer 的计算图在迭代间是固定的——批次内无动态控制流或变长序列。这消除了每次迭代的图分析开销。
+
+训练自动配置内存保守设置：`blocks_per_ckpt=1`（完全激活检查点）和 `chunk_size=None`（不分块，仅依赖检查点进行内存管理）。`config.globals.inplace` 在训练期间设置为 `False`，以维护通过检查点块的正确梯度计算。
+
+来源: [train.py](train.py#L1-L18), [train.py](train.py#L155-L174), [config.py](fastfold/config.py#L115-L118)
+
+## 基准测试最佳实践
+
+**确定性比较**需要控制所有方差来源。设置固定种子（如 `perf.py` 中的 `torch.manual_seed(42)`、`torch.cuda.manual_seed_all(42)`），禁用 CUDA 基准测试模式（`torch.backends.cudnn.benchmark = False`），并使用确定性算法。注意，由于并行 warp 中的浮点归约顺序，Triton 核在不同运行间仍可能表现出轻微的非确定性。
+
+**预热充分性**取决于被基准测试的优化层。对于 Triton 核基准测试，5 次预热迭代（默认）通常足以完成 JIT 编译。对于 DAP 扩展基准测试，可能需要额外预热以允许 NCCL 通信通道完全初始化——考虑增加至 10–15 次预热迭代。
+
+**隔离优化贡献**需要系统性的 A/B 方法论：
+
+| 比较 | 命令 A | 命令 B | 隔离因素 |
+|------------|-----------|-----------|-----------------|
+| FastNN 对比 OpenFold | `perf.py` | `perf.py --openfold` | 融合核 + DAP |
+| DAP 扩展 | `perf.py --dap-size 1` | `perf.py --dap-size N` | 并行 + 通信重叠 |
+| 前向 对比 前向+反向 | `perf.py --fwd` | `perf.py` | 反向传播成本 |
+| 有/无性能分析器 | `perf.py` | `perf.py --prof` | 核级别归因 |
+
+**报告约定**：始终报告每层时序（ms/层）而非总时间，因为 Evoformer 块的数量在不同模型配置中有所不同。每次测量都包含完整的维度签名 `(batch, msa_length, res_length, c_m, c_z)` 以实现跨研究比较。注意，基准测试始终使用 `batch_size=1`，反映了蛋白质结构预测中典型的单序列推理工作负载。
+
+来源: [perf.py](benchmark/perf.py#L47-L49), [perf.py](benchmark/perf.py#L179-L183)
+
+## 解释基准测试结果
+
+基准测试输出格式编码了完整的问题规格：
+
+```
+[ MSA Attn ] Input:    1,  132,  256, ( 256  128) Fwd Time / Layer: 12.345 ms Bwd Time / Layer: 34.567 ms
+                  │     │    │      │    │                    │                        │
+                  │     │    │      │    │                    │                        └─ 每个 Evoformer 块的反向传播毫秒数
+                  │     │    │      │    │                    └─ 每个 Evoformer 块的前向传播毫秒数
+                  │     │    │      │    └─ c_z（配对通道）
+                  │     │    │      └─ c_m（MSA 通道）
+                  │     │    └─ res_length（序列 / 配对维度）
+                  │     └─ msa_length（MSA 深度）
+                  └─ batch_size
+```
+
+内核级别的**性能预期**：对于序列长度 ≥ 256，Triton 融合注意力核心应比未融合的 PyTorch 基线实现 2–4 倍的加速，且随着序列变长差距扩大，因为 O(N²) → O(N) 的内存减少支持了更大的分块占用。具有异步通信重叠的 DAP 扩展在 4 个 GPU 上对于典型蛋白质长度（256–384 个残基）应达到 70–85% 的并行效率，而对于通信开销占主导的较短序列，效率下降。`--openfold` 比较基线通常显示比 FastFold 慢 3–9 倍的每层时序，这归因于基线实现中缺少融合核、DAP 和异步通信重叠。
+
+如需更深入的性能分析，请继续阅读 [融合核实现](7-fused-kernel-implementations) 了解核级别优化细节，[对偶异步操作](10-duality-async-operation) 了解通信-计算重叠机制，或 [内存高效分块执行](8-memory-efficient-chunked-execution) 了解分块和检查点策略。
+
+---
+
+## 高性能 Evoformer
+
+- [深入解析/高性能 Evoformer/FastNN 模块设计](https://zread.ai/hpcaitech/FastFold/6-fastnn-module-design)
+
+---
+slug:6-fastnn-module-design
+blog_type:normal
+---
+
+
+FastFold 的 **FastNN** 模块是对 AlphaFold2 Evoformer 主干网络的彻底重写，旨在用高性能组件替换原有的 `fastfold/model/nn/` 层。这些高性能组件集成了融合的 CUDA/Triton 核、用于动态轴向并行 (DAP) 的异步通信原语，以及内存高效的分块执行机制。该模块作为**直接替换方案**——其注入机制将原始 JAX 派生参数中的预训练权重复制到优化后的 PyTorch 架构中，从而无需重新训练即可实现加速。
+
+## 架构概览
+
+FastNN 模块被组织为计算核心的分层组合，每个核心负责 Evoformer 算法的一个独立阶段。顶层 `EvoformerStack` 编排重复的 `Evoformer` 块，而每个块委派给三个子核心——`MSACore`、`OutProductMean` 和 `PairCore`——它们分别对应 AlphaFold2 论文中算法 6 的 MSA 更新、通信和配对更新步骤。
+
+```mermaid
+graph TB
+    subgraph FastNN["fastfold/model/fastnn/"]
+        ES["EvoformerStack<br/>(N blocks + checkpointing)"]
+        EB["Evoformer Block"]
+        MC["MSACore"]
+        OPM["OutProductMean<br/>(Communication)"]
+        PC["PairCore"]
+        EMSA["ExtraMSAStack"]
+        TE["TemplateEmbedder"]
+        IE["InputEmbedder /<br/>RecyclingEmbedder"]
+    end
+
+    subgraph Kernel["kernel/ (Fused Operators)"]
+        AC["attention_core<br/>(Flash Attention)"]
+        LN["LayerNorm<br/>(Fused)"]
+        SM["Softmax<br/>(Fused)"]
+        FO["fused_ops<br/>(JIT)"]
+    end
+
+    subgraph DAP["Distributed Communication"]
+        A2A["All_to_All_Async"]
+        GA["gather_async"]
+        SR["scatter / gather"]
+        R2C["row_to_col / col_to_row"]
+    end
+
+    ES --> EB
+    EB --> MC
+    EB --> OPM
+    EB --> PC
+    EMSA --> MC
+    TE --> PC
+
+    MC --> AC & LN & SM & FO
+    OPM --> GA & SR
+    PC --> AC & LN & SM & FO & GA
+
+    EB --> A2A
+    MC --> R2C
+    PC --> R2C
+```
+
+来源: [__init__.py](/fastfold/model/fastnn/__init__.py#L1-L14), [evoformer.py](/fastfold/model/fastnn/evoformer.py#L1-L30)
+
+## 模块组合与公共 API
+
+FastNN 包从 `__init__.py` 导出其顶层构建块，形成 FastFold 其余部分导入的公共接口：
+
+| 导出 | 来源文件 | 作用 |
+|---|---|---|
+| `Evoformer` | `evoformer.py` | 具有 DAP scatter/gather 的单个 Evoformer 块 |
+| `EvoformerStack` | `evoformer.py` | 完整主干：N 个块 + 梯度检查点 |
+| `MSACore` | `msa.py` | MSA 行注意力 → 列注意力 → 转换 |
+| `ExtraMSACore` | `msa.py` | 具有全局列注意力的额外 MSA 变体 |
+| `ExtraMSABlock` / `ExtraMSAStack` | `msa.py` | 集成了 DAP 的额外 MSA 块 |
+| `OutProductMean` | `ops.py` | MSA→配对通信（外积均值） |
+| `PairCore` | `triangle.py` | 三角乘法 + 三角注意力 + 转换 |
+| `TemplatePairBlock` / `TemplatePairStack` | `template.py` | 模板配对嵌入块 |
+| `set_chunk_size` | `ops.py` | 用于内存调优的全局分块大小控制 |
+
+来源: [__init__.py](/fastfold/model/fastnn/__init__.py#L1-L14)
+
+## Evoformer 块：核心执行单元
+
+`Evoformer` 类是 Evoformer 主干的原子单元。每个块执行三个连续阶段，并与 **DAP 通信操作**交错进行，这些通信操作在张量并行轴上重新分配张量：
+
+**单体执行顺序：**
+1. **MSA 更新** — `MSACore` 对 MSA 表示 `m` 应用带配对偏置的行注意力、列注意力和 MSA 转换
+2. **通信** — `OutProductMean` 将 MSA 投影到配对空间，更新 `z`
+3. **异步 All-to-All** — `All_to_All_Async` 沿并行轴重新分配 `m`（配对更新通过异步工作句柄并发运行）
+4. **配对更新** — `PairCore` 对 `z` 应用三角乘法更新、三角注意力和配对转换
+5. **异步 All-to-All 完成** — `All_to_All_Async_Opp` 完成 MSA 的重新分配
+
+**多聚体执行顺序**重新排列了步骤 1–3：通信首先运行，配对核心与 MSA 重新分配并发执行，MSA 更新最后使用通信前的配对状态 `z_ori` 应用。
+
+当 `first_block=True` 或 `last_block=True` 时，该块还处理**边界填充与分配**——在入口处将序列长度填充为 DAP world size 的倍数，将输入张量分散到各设备，并在出口处将它们收集回来。
+
+```python
+# 简化的 Evoformer 前向传播（单体路径）
+if self.first_block:
+    m = scatter(m, dim=1)       # 沿 DAP 秩分配 MSA
+    z = scatter(z, dim=1)       # 沿 DAP 秩分配配对
+
+m = self.msa(m, z, msa_mask)                  # MSA 更新
+z = self.communication(m, msa_mask, z)        # MSA→配对
+m, work = All_to_All_Async.apply(m, 1, 2)    # 开始异步重新分配
+z = self.pair(z, pair_mask)                   # 配对更新（与通信重叠）
+m = All_to_All_Async_Opp.apply(m, work, 1, 2)# 完成重新分配
+
+if self.last_block:
+    m = gather(m, dim=0)        # 从所有秩收集 MSA
+    z = gather(z, dim=0)        # 从所有秩收集配对
+```
+
+<CgxTip>异步 All-to-All 通信是实现**通信-计算重叠**的关键机制：当 MSA 张量 `m` 在设备间传输时，配对核心处理 `z`。这对配对更新路径完全隐藏了通信延迟。</CgxTip>
+
+来源: [evoformer.py](/fastfold/model/fastnn/evoformer.py#L33-L120)
+
+## EvoformerStack：带检查点的块重复
+
+`EvoformerStack` 封装了 `no_blocks` 个 `Evoformer` 实例，通过 `checkpoint_blocks` 应用梯度激活检查点，以内存换计算。第一个块接收 `first_block=True`（处理 scatter + 填充），最后一个块接收 `last_block=True`（处理 gather + 去填充）。所有块执行完毕后，线性投影从第一行 MSA 中提取单一表示 `s`：`s = Linear(m[..., 0, :, :])`。
+
+同时提供了标准 `forward()` 和 **`inplace()`** 变体。就地路径在每个块中原地修改输入张量，通过避免中间分配来降低峰值内存——这是长序列推理的关键优化。
+
+来源: [evoformer.py](/fastfold/model/fastnn/evoformer.py#L150-L333)
+
+## MSACore：MSA 表示更新
+
+`MSACore` 实现了算法 6 的 MSA 堆栈，由三个子操作组成，这些子操作按顺序执行，并在它们之间进行 DAP 轴转置：
+
+| 子操作 | 类 | DAP 转换 |
+|---|---|---|
+| 带配对偏置的行注意力 | `MSARowAttentionWithPairBias` | 在行分布数据上操作 |
+| 列注意力 | `MSAColumnAttention` | 之前执行 `row_to_col()`，在列分布数据上操作 |
+| MSA 转换 | `Transition` | 在列分布数据上进行前馈 |
+
+**MSARowAttentionWithPairBias** 是架构上最重要的 MSA 操作。它计算非批处理的配对偏置 `b = LayerNorm(Z) · W_b`，该偏置通过 `gather_async` 沿 DAP 列维度异步收集。然后，注意力使用**融合的 QKV 投影**（产生 `3 * n_head * c` 输出的单个 `Linear`），随后是融合的 softmax 核和输出门控。配对偏置被融合到 softmax 调用中，消除了单独的加法核。
+
+**MSAColumnAttention** 更简单——它沿列轴应用自注意力（在之前和之后转置 MSA），而没有配对偏置。这两个操作都使用 `ops.py` 中的 `SelfAttention` 类，该类封装了 QKV 投影、融合 softmax、加权平均和门控输出投影。
+
+**ExtraMSACore** 遵循相同的结构，但替换为分块变体（`ChunkMSARowAttentionWithPairBias`、`ChunkMSAColumnGlobalAttention`、`ChunkTransition`），并在列方向使用**全局注意力**而非标准自注意力——这反映了算法 8 中额外 MSA 堆栈的不同注意力模式。
+
+来源: [msa.py](/fastfold/model/fastnn/msa.py#L32-L160)
+
+## PairCore：配对表示更新
+
+`PairCore` 实现了算法 6 的配对堆栈，执行五个子操作并进行 DAP 轴转置：
+
+| 步骤 | 操作 | DAP 轴 |
+|---|---|---|
+| 1 | `TriangleMultiplicationOutgoing` | 行分布 |
+| 2 | `TriangleMultiplicationIncoming` | 列分布（在 `row_to_col` 之后） |
+| 3 | `TriangleAttentionStartingNode` | 行分布（在 `col_to_row` 之后） |
+| 4 | `TriangleAttentionEndingNode` | 列分布（在 `row_to_col` 之后） |
+| 5 | `PairTransition` | 列分布 → 行分布（在 `col_to_row` 之后） |
+
+**三角乘法更新**（`TriangleMultiplicationOutgoing` / `TriangleMultiplicationIncoming`）是通信最密集的配对操作。它们通过融合的 `left_right_projection`（产生 `2c` 输出并一分为二的单个 `Linear`）将配对表示投影为左右因子，应用 sigmoid 门控，然后沿配对维度计算矩阵乘法。`gather_async` 原语将矩阵乘法所需的跨秩数据移动与输出门控的本地计算重叠执行。
+
+**三角注意力**（`TriangleAttentionStartingNode` / `TriangleAttentionEndingNode`）沿配对表示的一个轴应用带学习线性偏置的多头注意力。`EndingNode` 变体在注意力之前和之后转置配对张量。两者都使用 `last_bias_fuse=True` 的 `SelfAttention`，这会将输出偏置融合到最终的线性投影中，从而节省一次核启动。
+
+`PairCore` 的 `inplace()` 变体在每个子操作中原地修改配对张量，这对于减少长序列推理期间的峰值内存至关重要。
+
+来源: [triangle.py](/fastfold/model/fastnn/triangle.py#L1-L271)
+
+## OutProductMean：MSA→配对通信
+
+`OutProductMean` 通过计算 MSA 两次线性投影的外积并在序列维度上取平均值，从而连接 MSA 和配对表示。这是算法 6 中 MSA 堆栈和配对堆栈之间的通信步骤：
+
+1. 对 MSA 表示进行 LayerNorm
+2. 投影到维度为 `n_feat_proj` 的左（`linear_a`）和右（`linear_b`）因子
+3. 沿 DAP 列维度对右因子执行**异步收集**
+4. 通过 `einsum('bsid, bsje->bijde')` 计算带掩码的外积
+5. 重塑并通过 `o_linear` 投影以产生配对大小的输出
+6. 根据非掩码 MSA 行的有效计数进行归一化
+
+分块执行路径（当设置了 `CHUNK_SIZE` 时）沿并行维度以固定大小的块进行迭代，计算部分外积并增量写入结果。这将峰值内存从 O(N_seq × N_res²) 降低到 O(chunk_size × N_res²)。
+
+来源: [ops.py](/fastfold/model/fastnn/ops.py#L100-L199)
+
+## 核层：融合算子分发
+
+`kernel/` 子包提供了 FastNN 所依赖的底层融合算子。每个算子遵循**Triton 优先，CUDA 回退**的分发策略：
+
+```
+kernel/
+├── attention_core.py      # Flash Attention 分发
+├── layer_norm.py          # 融合 LayerNorm 分发
+├── softmax.py             # 融合 Softmax 分发
+├── jit/fused_ops.py       # JIT 编译的偏置融合操作
+├── triton/                # Triton 核实现
+│   ├── attention_core.py  # Triton flash attention 核
+│   ├── layer_norm.py      # Triton LayerNorm 核
+│   └── softmax.py         # Triton softmax 核
+└── cuda_native/           # CUDA 回退实现
+    ├── layer_norm.py      # 基于 Apex 的 LayerNorm
+    └── softmax.py         # 自定义 CUDA softmax
+```
+
+| 算子 | Triton 实现 | CUDA 回退 | 关键优化 |
+|---|---|---|---|
+| `fused_attention_core` | Triton 中的分块 flash attention | PyTorch matmul+softmax | 在线 softmax、SRAM 分块、mask+bias 融合 |
+| `LayerNorm` | Triton LayerNorm 核 | Apex `FusedLayerNormAffineFunction` | 当 dim > 4000 时的分块执行 |
+| `fused_softmax` | Triton 融合 softmax | 自定义 CUDA softmax 核 | mask + bias 融合到单次 softmax 过程中 |
+| `bias_dropout_add` | JIT 编译 | — | 融合偏置 + dropout + 残差 |
+| `bias_sigmod_ele` | JIT 编译 | — | 融合偏置 + sigmoid 门控 + 逐元素相乘 |
+
+**FusedLayerNorm** 包含一种特殊的**自适应分块**策略：当输入的第三维超过 4000 时，它会自动将计算分块为最多 `min(4000² / dim, dim/2)` 行的切片，从而在极长序列上防止核启动失败，同时最大化计算效率。
+
+**FusedAttentionCore** 在 Triton 中使用在线 softmax 技术实现了分块 flash-attention 算法。该核以 `BLOCK_M=128` 行的块处理 Q，以 `BLOCK_N=128` 列的块迭代 K/V，维护运行时的最大值和归一化常数，以避免实例化完整的 N×N 注意力矩阵。它通过编译时常量（`use_mask`、`use_bias`）支持可选的 mask 和 bias 张量，当它们为 `None` 时，Triton 可以将其完全优化掉。
+
+来源: [kernel/__init__.py](/fastfold/model/fastnn/kernel/__init__.py#L1-L13), [kernel/attention_core.py](/fastfold/model/fastnn/kernel/attention_core.py#L1-L53), [kernel/layer_norm.py](/fastfold/model/fastnn/kernel/layer_norm.py#L1-L61), [kernel/softmax.py](/fastfold/model/fastnn/kernel/softmax.py#L1-L59), [kernel/triton/attention_core.py](/fastfold/model/fastnn/kernel/triton/attention_core.py#L1-L191)
+
+## SelfAttention：统一注意力原语
+
+`ops.py` 中的 `SelfAttention` 是 MSA 和配对注意力模块共同使用的核心注意力实现。其设计集成了多项性能优化：
+
+- **融合 QKV 投影**：单个 `Linear(qkv_dim, 3 * n_head * c)` 替换了三个独立的 Q、K、V 线性层，将核启动次数从 3 减少到 1
+- **融合 softmax**：调用 `fused_softmax(logits, mask, bias)`，将掩码应用、偏置相加和 softmax 融合到单个核中
+- **融合门控**：使用 `bias_sigmod_ele(gate_values, gating_bias, weighted_avg)` 来融合 sigmoid 计算、偏置相加和逐元素相乘
+- **末尾偏置融合**：当 `last_bias_fuse=True` 时，输出线性投影省略其偏置（它将被融合到调用者的 `bias_dropout_add` 中）
+- **分块执行**：当设置了 `CHUNK_SIZE` 时，沿并行维度分块迭代，降低峰值内存
+
+`GlobalAttention`（用于 ExtraMSA 列中）遵循不同的模式：它使用独立的 Q 投影和融合的 KV 投影，并应用全局注意力，其中查询关注所有位置，并以完整序列长度进行归一化。
+
+来源: [ops.py](/fastfold/model/fastnn/ops.py#L290-L399)
+
+## 线性层与权重初始化
+
+FastNN 的 `Linear` 类扩展了 `nn.Linear`，带有**AlphaFold2 特定的初始化器**，这些初始化器与 JAX 参数初始化方案相匹配。这对于从预训练检查点正确注入权重至关重要：
+
+| 初始化器 | 增益 | 用例 |
+|---|---|---|
+| `'linear'` | 1.0（Glorot 均匀） | 标准投影，注意力 QKV |
+| `'relu'` | 2.0（具有 ReLU 增益的 Glorot 均匀） | 转换隐藏层 |
+| `'zeros'` | 0.0 | 输出投影，门控线性，偏置初始化 |
+
+`glorot_uniform_af` 初始化器处理了**JAX/PyTorch 维度顺序差异**：AlphaFold2 的 JAX 代码初始化形状为 `[feature_in, n_head, feature_out]` 的张量，而 PyTorch 使用 `[feature_out, feature_in, n_head]`。该初始化器无论总秩如何，都从**最后两个维度**计算 fan-in/fan-out，从而保留了原始 JAX 初始化语义。
+
+来源: [ops.py](/fastfold/model/fastnn/ops.py#L259-L288), [initializer.py](/fastfold/model/fastnn/initializer.py#L1-L30)
+
+## 权重注入：桥接 nn → fastnn
+
+`inject_fastnn.py` 工具提供了将预训练权重从原始 `fastfold/model/nn/` 模块传输到优化后的 `fastnn/` 模块的机制。这是必不可少的，因为 FastFold 将 AlphaFold2 的官方 JAX 检查点加载到 `nn/` 架构中，然后注入到 `fastnn/` 中进行推理。
+
+注入通过专门的复制函数处理两种架构之间的**结构不匹配**：
+
+| 复制函数 | 处理内容 |
+|---|---|
+| `copy_qkv_linear` | 通过 `torch.cat` 将独立的 Q、K、V 权重融合为单个 `to_qkv` 权重 |
+| `copy_kv_linear` | 为全局注意力的 `to_kv` 融合独立的 K、V 权重 |
+| `copy_left_right` | 将独立的左/右投影权重融合为单个 `left_right_projection` |
+| `copy_attention` | 编排 QKV 融合 + 门控 + 输出投影复制 |
+| `copy_triangle` | 复制乘法更新权重，处理融合与未融合的三角路径 |
+| `copy_evoformer_para` | 顶层：复制一个 Evoformer 块的所有参数 |
+
+<CgxTip>权重注入是**架构感知**的：它在注入时检查 `is_fused_triangle_multiplication()`，以决定是使用融合的左/右投影路径还是独立投影路径，从而确保与 JIT 编译和非融合三角实现的兼容性。</CgxTip>
+
+来源: [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L1-L200)
+
+## 分块执行与内存控制
+
+FastNN 通过 `ops.py` 中的 `set_chunk_size()` / `get_chunk_size()` 提供了全局**分块大小机制**。当设置了分块大小时，所有可分块操作（`SelfAttention`、`OutProductMean`、`Transition`、三角操作）沿并行维度以固定大小的切片迭代，而不是一次性处理整个张量。
+
+这将内存配置从**实例化完整中间张量**转换为**流式处理部分结果**，代价是每个块内的并行度降低。这种权衡是可调的：较大的块使用更多内存，但能更好地饱和 GPU 计算单元；较小的块适应受限内存，但会增加核启动开销。
+
+关键的可分块操作及其分块策略：
+
+| 操作 | 分块维度 | 块乘数 |
+|---|---|---|
+| `ChunkTransition` | MSA 序列维度 (dim=1) | `CHUNK_SIZE × 48` |
+| `OutProductMean.inplace` | MSA 序列维度 | `CHUNK_SIZE × 32` |
+| `SelfAttention` | 批处理并行维度 (dim=1) | `CHUNK_SIZE`（直接） |
+| `ChunkTriangleAttention` | 行维度 | `CHUNK_SIZE × 48` |
+
+来源: [ops.py](/fastfold/model/fastnn/ops.py#L17-L29), [ops.py](/fastfold/model/fastnn/ops.py#L130-L199)
+
+## 对比：nn 与 fastnn 架构
+
+下表总结了参考实现（`model/nn/`）与优化的 FastNN（`model/fastnn/`）之间的关键架构差异：
+
+| 方面 | `model/nn/`（参考） | `model/fastnn/`（优化） |
+|---|---|---|
+| 注意力 QKV | 独立的 Q、K、V 线性层 | 单个融合的 `to_qkv` 线性层 |
+| Softmax | `torch.nn.functional.softmax` | 带 mask+bias 的融合 Triton/CUDA 核 |
+| LayerNorm | `torch.nn.LayerNorm` | 带自适应分块的融合 Triton/CUDA 核 |
+| 偏置 + Dropout + 残差 | 独立操作 | JIT 融合的 `bias_dropout_add` |
+| Sigmoid 门控 | 独立的 sigmoid + 相乘 | JIT 融合的 `bias_sigmod_ele` |
+| DAP 通信 | 不支持 | 带重叠的 `gather_async`、`All_to_All_Async` |
+| 内存控制 | `chunk_layer` 工具 | 带就地变体的全局 `CHUNK_SIZE` |
+| 梯度检查点 | 逐模块 | 跨块组的 `checkpoint_blocks` |
+| 权重初始化 | PyTorch 默认 | 兼容 JAX 的 `glorot_uniform_af` |
+
+来源: [evoformer.py](/fastfold/model/fastnn/evoformer.py#L1-L30), [ops.py](/fastfold/model/fastnn/ops.py#L259-L399), [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L1-L50)
+
+## 后续步骤
+
+- 深入了解融合核实现：[Fused Kernel Implementations](7-fused-kernel-implementations)
+- 理解分块执行如何减少内存：[Memory-Efficient Chunked Execution](8-memory-efficient-chunked-execution)
+- 探索实现异步重叠的 DAP 通信原语：[DAP Communication Primitives](9-dap-communication-primitives)
+- 了解如何加载和注入预训练权重：[Weight Injection from JAX](15-weight-injection-from-jax)
+
+---
+
+- [深入解析/高性能 Evoformer/融合内核实现](https://zread.ai/hpcaitech/FastFold/7-fused-kernel-implementations)
+
+---
+slug:7-fused-kernel-implementations
+blog_type:normal
+---
+
+
+FastFold 相较于原版 AlphaFold2 的性能优势，很大程度上归功于其一系列**融合 GPU 核函数**，这些核函数将多步数学运算折叠为单次 GPU 启动，消除了中间内存分配和核函数启动开销。这些核函数组织在 `fastfold/model/fastnn/kernel/` 目录下，并提供三种不同的后端实现——**Triton**、**CUDA Native (C++/CU)** 和 **PyTorch JIT**——具备运行时自动分发机制：优先使用 Triton（若可用），否则透明回退至 CUDA native 核函数。
+
+## 核函数架构与分发策略
+
+核函数子系统在架构上分为多层：**公共 API 层**从 `kernel/__init__.py` 导出五个融合操作，每个操作由一个**分发模块**作为支撑，该模块在运行时选择最优后端；以及一个**后端层**，包含三个并行目录中的实际核函数代码。此设计确保 `ops.py`、`evoformer.py`、`msa.py` 和 `triangle.py` 中的上层模型代码无需感知当前激活的是哪个后端。
+
+```mermaid
+graph TD
+    subgraph "Public API"
+        A["kernel/__init__.py"]
+    end
+    subgraph "Dispatch Layer"
+        B["attention_core.py"]
+        C["softmax.py"]
+        D["layer_norm.py"]
+        E["jit/fused_ops.py"]
+    end
+    subgraph "Triton Backend"
+        F["triton/attention_core.py"]
+        G["triton/softmax.py"]
+        H["triton/layer_norm.py"]
+    end
+    subgraph "CUDA Native Backend"
+        I["cuda_native/softmax.py"]
+        J["cuda_native/layer_norm.py"]
+        K["csrc/*.cu / *.cpp"]
+    end
+    subgraph "JIT Backend"
+        L["jit/fused_ops.py"]
+        M["jit/options.py"]
+    end
+    A --> B & C & D & E
+    B -->|"Triton available"| F
+    B -->|"Fallback"| I
+    C -->|"Triton available"| G
+    C -->|"Fallback"| I
+    D -->|"Triton available"| H
+    D -->|"Fallback"| J
+    I & J --> K
+    E --> L
+    L --> M
+```
+
+分发逻辑遵循一致的模式：每个模块在加载时尝试导入 Triton 核函数，设置 `_triton_available` 标志，并在导入失败时发出日志警告。在执行时，前向和反向路径根据此标志进行分支。这意味着回退是**按进程静态的**——如果 Triton 导入失败一次，则在该进程的整个生命周期内，所有后续调用都会使用 CUDA native。
+
+| 融合操作 | Triton 后端 | CUDA Native 后端 | JIT 后端 | 自动求导支持 |
+|---|---|---|---|---|
+| `fused_attention_core` | ✅ Flash Attention | ❌ (回退至 PyTorch) | ❌ | 仅前向 |
+| `fused_softmax` | ✅ 前向 + 反向 | ✅ 前向 + 反向 | ❌ | 完整 (前向 + 反向) |
+| `LayerNorm` | ✅ 前向 + 反向 | ✅ 前向 + 反向 | ❌ | 完整 (前向 + 反向) |
+| `bias_sigmod_ele` | ❌ | ❌ | ✅ `@torch.jit.script` | 通过 JIT |
+| `bias_dropout_add` | ❌ | ❌ | ✅ `@torch.jit.script` | 通过 JIT |
+| `bias_ele_dropout_residual` | ❌ | ❌ | ✅ `@torch.jit.script` | 通过 JIT |
+
+来源: [__init__.py](fastfold/model/fastnn/kernel/__init__.py#L1-L13), [attention_core.py](fastfold/model/fastnn/kernel/attention_core.py#L1-L53), [softmax.py](fastfold/model/fastnn/kernel/softmax.py#L1-L59), [layer_norm.py](fastfold/model/fastnn/kernel/layer_norm.py#L1-L61)
+
+## 融合注意力核心
+
+`fused_attention_core` 操作是 FastFold 中架构意义最重大的核函数——它实现了 **Flash Attention** 算法，将整个 Q·K^T → mask → bias → softmax → ·V 流水线融合为一个单一的分块核函数，避免了在 HBM 中具象化完整的 N×N 注意力矩阵。这对 AlphaFold 的 Evoformer 至关重要，因为其注意力维度可达数千个残基。
+
+### Triton 实现
+
+Triton 核函数 `_attention_core` 是一个由 `@triton.jit` 装饰的函数，以 **BLOCK_M × BLOCK_N 大小的分块**（两者均设为 128）处理注意力。每个 Triton 程序处理查询的一个行块，遍历所有键/值块，通过 **m/l 递归**（最大值和指数和）维护运行中的在线 softmax，这是 Flash Attention 的核心算法创新：
+
+1. **加载 Q 分块** 到 SRAM 一次——在所有 K/V 迭代中持久存在
+2. **对于每个 K/V 分块**：计算 QK^T，就地应用缩放、偏置和掩码，然后使用数值稳定的递推更新运行中的最大值/总和以及累加器：`m_i_new = max(m_i, m_ij)`，`l_i_new = α·l_i + β·l_ij`，其中 `α = exp(m_i - m_i_new)` 且 `β = exp(m_ij - m_i_new)`
+3. **写入输出** 在所有分块处理完毕后
+
+该核函数通过 `tl.constexpr` 标志（`use_mask`、`use_bias`）支持**条件掩码和偏置应用**，这使得 Triton 的 JIT 编译器能够完全消除死代码路径。偏置索引处理 5D 批次结构 `(b1, b2, heads, seq, dim)`，通过计算 `off_hz_bias = (off_hz // (batch_2 * H)) * H + (off_hz % H)`，将展平的程序 ID 正确映射回每个头的偏置向量。
+
+封装函数强制要求数据类型约束（仅限 `float16` 或 `bfloat16`），并通过 `einops.rearrange` 自动处理 5D→4D 的形状重塑，在启动大小为 `(triton.cdiv(N_CTX, BLOCK), batch × heads)` 的网格之前展平两个批次维度。
+
+### 回退路径
+
+当 Triton 不可用时，`FusedAttenionCoreFunc.forward` 回退至 `_torch_attention_core`，后者使用标准 PyTorch 原语执行相同的数学运算：显式 Q·K^T 矩阵乘法、偏置/掩码相加、float32 softmax 以及最终与 V 的矩阵乘法。此路径在功能上是正确的，但会分配完整的注意力矩阵并发出 4 次以上的独立核函数启动。
+
+<CgxTip>Triton Flash Attention 核函数设置 `num_stages=1`（禁用软件流水线），因为内循环对累加器存在写后读依赖——流水线化会破坏此依赖性并产生错误结果。</CgxTip>
+
+来源: [triton/attention_core.py](fastfold/model/fastnn/kernel/triton/attention_core.py#L1-L191), [attention_core.py](fastfold/model/fastnn/kernel/attention_core.py#L1-L53)
+
+## 带掩码和偏置的融合 Softmax
+
+`fused_softmax` 操作在单次融合过程中计算 `softmax(input + bias) * mask`，这是 AlphaFold 注意力层中占主导地位的 softmax 模式，其中始终存在成对偏置项和 MSA 掩码。该融合消除了原版 PyTorch 所需的三个独立核函数（加偏置 → 应用掩码 → softmax）。
+
+### 自动求导函数设计
+
+`FusedSoftmaxFunc` 通过显式的前向/反向方法扩展了 `torch.autograd.Function`。前向传播为反向传播保存输出和掩码；反向传播在融合核函数中计算标准 softmax 梯度 `d_input = output * (d_output - sum(output * d_output))`。当存在偏置时，`grad_bias = sum(d_input, dim=1, keepdim=True)` 作为简单的规约进行计算——这是唯一非融合的步骤，但其开销可忽略不计。
+
+### Triton Softmax 核函数
+
+Triton 实现为了**分发优化**拆分为两种核函数变体：
+
+- **`softmax_mask_bias_kernel`**：每个程序处理一行。每个程序加载一行，逐元素应用偏置和掩码，计算数值稳定的 softmax（减去最大值，求指数，除以总和），并存储结果。
+- **`softmax_mask_bias_kernel_two_rows`**：每个程序处理**连续的两行**。当 `n_cols ≤ 128` 且 `n_rows` 为偶数时激活此变体，有效将启动的程序数减半，提高了小序列场景下的 GPU 占用率。
+
+两种核函数均使用 `tl.constexpr` 处理 `use_mask` 和 `use_bias`，以启用编译时分支消除。`BLOCK_SIZE` 设为 `triton.next_power_of_2(n_cols)`，warp 数量随块大小缩放（1024→2048→4096+ 个元素对应 1→4→8→16 个 warp）。
+
+反向核函数 `softmax_grad_kernel` 同样具有双行变体，并通过 `is_bf16` constexpr 处理 bfloat16，在梯度计算前将其提升为 float32。
+
+### CUDA Native Softmax 核函数
+
+CUDA native softmax 是 `softmax_cuda_kernel.cu` 中的高性能实现，使用 **warp 级原语** 进行规约操作：
+
+- `WarpAllReduceMax`：跨 32 个通道使用 `__shfl_xor_sync` 蝶蝶规约
+- `WarpAllReduceSum`：求和采用相同模式
+
+核函数 `fastfold_softmax<T, cols_per_thread>` 每个块处理 **4 行**（128 个线程 = 4 个 warp × 32 个通道），每个通道处理 `cols_per_thread` 个元素。关键优化是**编译时列特化**：CUDA 代码使用宏 `COLS_CASE(n)` 为 1–32 的 `cols_per_thread` 0-值6生成特化的模板实例/# 实例，覆盖至多 1024 的列宽。对于超过 1024+ 的宽度，共享内存回退核函数 `fastfold_softmax_sm` 使用 CUB `:BlockReduce` 进行跨 warp 规约。
+
+掩码变体 `fastfold_softmax_mask` 在 softmax 计算前通过将零项替换为 `-1e9` 来应用掩码，掩码梯度变体则将 `mask == 0` 处的 `d_input` 项置零。组合的掩码+偏置变体 `fastfold_softmax_mask_bias` 在单次过程中执行这两种操作。所有核函数均通过模板特化支持 **float32、float16 和 bfloat16**。
+
+<CgxTip>CUDA softmax 核函数的每块 4 行设计（128 线程中的 4 个 warp）是专门为 AlphaFold 典型的注意力头维度调优的，其中行与列的比例使得 4 行批处理在隐藏延迟的同时可保持寄存器压力处于合理水平，从而达到最优。</CgxTip>
+
+来源: [softmax.py](fastfold/model/fastnn/kernel/softmax.py#L1-L59), [triton/softmax.py](fastfold/model/fastnn/kernel/triton/softmax.py#L1-L221), [softmax_cuda_kernel.cu](fastfold/model/fastnn/kernel/cuda_native/csrc/softmax_cuda_kernel.cu#L1-L200), [cuda_native/softmax.py](fastfold/model/fastnn/kernel/cuda_native/softmax.py#L1-L23)
+
+## 融合 LayerNorm
+
+`FusedLayerNorm` 模块用核函数替换了 PyTorch 的 `nn.LayerNorm`，将归一化 → 缩放 → 偏移流水线（均值计算、方差计算、倒数平方根、仿射变换）融合为单次过程，避免了对输入张量的多次读取和中间内存分配。
+
+### 针对大维度的自适应分块
+
+`FusedLayerNorm.forward` 方法实现了**自适应分块策略**：当输入的倒数第三维超过 4000 时（在具有数千条序列的 AlphaFold MSA 表示中很常见），输入被拆分为大小为 `min(4000² / dim, dim / 2)` 的块。每个块通过 `kernel_forward` 独立归一化，结果写入预分配的输出张量。这确保了每次核函数启动都在经过最大计算效率优化的子张量上操作，同时保持内存使用受限。
+
+### Triton LayerNorm 核函数
+
+Triton 前向核函数 `_layer_norm_fwd_fused` 每个程序处理一行：
+
+1. **第一次过程**：在 `_mean` 缓冲区中累加元素总和（在 `BLOCK_SIZE` 上分块），计算 `mean = sum / N`
+2. **第二次过程**：累加平方偏差 `(a - mean)²`，计算 `var = sum / N` 和 `rstd = 1 / sqrt(var + eps)`
+3. **第三次过程**：应用仿射变换 `(a - mean) * rstd * weight + bias` 并存储
+
+`BLOCK_SIZE` 启发式选择为 `min(65536 / element_size, next_power_of_2(N))`，并限幅至 [128, 4096]，在 SRAM 使用率和分块开销之间取得平衡。
+
+反向传播被拆分为两个核函数：`_layer_norm_bwd_dx_fused` 以融合的双过程设计计算输入梯度 `dx = (w·dout - â·mean1 - mean2) · rstd`（其中 `mean1 = mean(â·w·dout)` 且 `mean2 = mean(w·dout)`），而 `_layer_norm_bwd_dwdb` 使用带有 `BLOCK_SIZE_M` 行批处理的展开循环累加跨行的权重和偏置梯度。
+
+### CUDA Native LayerNorm 核函数
+
+`layer_norm_cuda_kernel.cu` 中的 CUDA 层归一化核函数使用 **Welford 在线算法** 进行数值稳定的均值/方差计算。`WelfordOnline` 设备函数增量更新运行统计数据（计数、均值、M2），`WelfordWarpAllReduce` 使用 `__shfl_down_sync` 蝶蝶模式跨 warp 合并每个线程的 Welford 状态。这比两过程方法（先计算均值，再计算方差）数值更稳定，因为它避免了当值较大且相近时出现的灾难性抵消。
+
+该核函数每个块处理 4 行（与 softmax 设计匹配），每个 warp 通道处理 `(cols + 31) / 32` 个元素。反向传播使用跨步加载方案（`cuLoadWriteStridedInputs`），仔细将线程块映射到输入行和列，以实现合并内存访问。
+
+来源: [layer_norm.py](fastfold/model/fastnn/kernel/layer_norm.py#L1-L61), [triton/layer_norm.py](fastfold/model/fastnn/kernel/triton/layer_norm.py#L1-L243), [layer_norm_cuda_kernel.cu](fastfold/model/fastnn/kernel/cuda_native/csrc/layer_norm_cuda_kernel.cu#L1-L200), [cuda_native/layer_norm.py](fastfold/model/fastnn/kernel/cuda_native/layer_norm.py#L1-L36)
+
+## JIT 融合操作
+
+三个 JIT 融合操作处理频繁出现在 Evoformer 的 dropout 和门控路径中的**逐元素复合模式**。它们使用 `@torch.jit.script` 装饰，并受益于 PyTorch 的 JIT 融合优化器，该优化器在运行时将多个逐元素操作合并为单个 CUDA 核函数。
+
+| 操作 | 数学公式 | 使用场景 |
+|---|---|---|
+| `bias_sigmod_ele(y, bias, z)` | `σ(y + bias) · z` | 三角更新中带偏置的门控 |
+| `bias_dropout_add(x, bias, dropmask, residual, prob)` | `(x + bias) · dropout(mask, p) + residual` | 带残差连接的注意力输出 |
+| `bias_ele_dropout_residual(ab, b, g, dropout_mask, Z_raw, prob)` | `Z_raw + dropout(mask, p) · g · (ab + b)` | 带门控和残差的配对更新 |
+
+JIT 选项模块（`jit/options.py`）在导入时配置 PyTorch 的 JIT 融合器，禁用性能分析模式并启用 CPU/GPU 融合，这将为这些逐元素模式触发旧版 NNC 融合器。
+
+来源: [jit/fused_ops.py](fastfold/model/fastnn/kernel/jit/fused_ops.py#L1-L23), [jit/options.py](fastfold/model/fastnn/kernel/jit/options.py#L1-L29)
+
+## 模型操作中的核函数使用
+
+融合核函数被 `fastfold/model/fastnn/ops.py` 中的操作模块所使用，这些模块构建了 Evoformer 的上层基础模块。每个 `Transition` 模块都使用 `LayerNorm` 而不是 PyTorch 的原生实现。`MSACore`、`PairCore` 和三角注意力模块对所有注意力 softmax 操作使用 `fused_softmax`，并传入它们各自的掩码和偏置。`fused_attention_core` 在可对完整 QKV 注意力进行分块的注意力计算路径中被调用。JIT 融合操作（`bias_dropout_add`、`bias_ele_dropout_residual`、`bias_sigmod_ele`）用于 MSA 和配对注意力模块的 dropout 和门控路径，用单次融合操作替代了原本需要 3–4 次独立逐元素核函数启动的过程。
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L1-L50), [evoformer.py](fastfold/model/fastnn/evoformer.py#L1-L60)
+
+## 后端对比与选择指南
+
+| 标准 | Triton | CUDA Native (C++/CU) | PyTorch JIT |
+|---|---|---|---|
+| **编译** | 首次调用时 JIT | 通过 `setup.py` 预编译 | 首次调用时 JIT |
+| **灵活性** | 高——Python 级核函数编写 | 低——需要 C++/CUDA 重新构建 | 中——带 JIT 注解的 Python |
+| **性能** | 注意力操作最佳（flash 算法） | softmax/LayerNorm 最佳（warp 特化） | 逐元素融合良好 |
+| **数据类型支持** | fp16, bf16 | fp32, fp16, bf16 | 继承自 PyTorch 操作 |
+| **自动求导** | 手动（注意力仅前向） | 手动（完整前向+反向） | 通过 JIT 自动 |
+| **依赖** | `triton` 包 | CUDA toolkit + `pybind11` | PyTorch 内置 |
+| **回退链** | → CUDA native / PyTorch 操作 | → PyTorch 原生操作 | → 求值模式 |
+
+默认行为——注意力操作偏好 Triton，softmax/LayerNorm 回退至 CUDA native——在大多数 GPU 架构上提供了最佳的即用型性能。对于 Triton 不可用的环境（较旧的 GPU、非 NVIDIA 加速器），CUDA native 核函数提供了稳健的回退，相比未融合的 PyTorch 操作仍能提供显著的加速。
+
+若要深入了解这些核函数如何集成到实现内存高效长序列推理的分块执行策略中，请参阅[内存高效分块执行](8-memory-efficient-chunked-execution)。关于在 Evoformer 架构中协调这些核函数的模块级设计，请参阅[FastNN 模块设计](6-fastnn-module-design)。
+
+---
+
+- [深入解析/高性能 Evoformer/内存高效的分块执行](https://zread.ai/hpcaitech/FastFold/8-memory-efficient-chunked-execution)
+
+---
+slug:8-memory-efficient-chunked-execution
+blog_type:normal
+---
+
+
+FastFold 的分块执行框架是关键机制，它将 Evoformer 中消耗大量内存的 O(N²) 和 O(N³) 张量运算转化为内存可行的负载。该框架并没有为长蛋白质序列实例化庞大的中间张量（例如对表示 Z ∈ ℝ^{N×N×C_z}），而是沿序列维度将计算拆分为小块，独立处理每个小块并将结果写入预分配的输出缓冲区。这种架构决策以受控的重计算开销换取峰值内存的大幅降低，从而能够对原本会耗尽 GPU HBM 的序列进行推理。
+
+## 分块控制平面
+
+整个分块执行系统由一个全局变量及其访问器函数管控，构建了一个轻量级的控制平面，每个 FastNN 算子都会在运行时查询该平面：
+
+| API | 用途 | 位置 |
+|-----|---------|----------|
+| `CHUNK_SIZE` (全局) | 运行时分块粒度；`None` 表示禁用分块 | `ops.py` |
+| `set_chunk_size(chunk_size)` | 设置全局分块大小 | `ops.py` |
+| `get_chunk_size()` | 读取当前分块大小 | `ops.py` |
+
+当 `CHUNK_SIZE` 为 `None` 时，每个算子都会回退到其**全量实例化路径**——一次性计算整个张量。当设置为正整数时，每个算子进入其**分块路径**，以 `CHUNK_SIZE`（或其派生的倍数）为步长沿序列维度迭代。这种双模式设计通过在每个 `forward()` 方法入口处的 `if CHUNK_SIZE == None` / `else` 分支，统一应用于所有 FastNN 模块。
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L31-L42)
+
+## 按算子类别划分的分块策略
+
+不同算子带来不同的内存瓶颈，因此采用不同的分块粒度。下表总结了用户指定的 `CHUNK_SIZE` 与内部使用的实际迭代步长之间的关系：
+
+| 算子类 | 有效分块步长 | 分块维度 | 原理 |
+|----------------|----------------------|--------------------|-----------|
+| `SelfAttention` | `CHUNK_SIZE` | `dim=1` (batch/MSA 行) | 每个批切片的 Attention QKV 占主导内存 |
+| `OutProductMean` | `CHUNK_SIZE` | `dim=2` (序列列) | 外积 ⟂ 展开在每个切片的复杂度为 O(N·C²) |
+| `ChunkTransition` | `CHUNK_SIZE × 48` | `dim=1` | Transition 轻量；更宽的分块可摊销开销 |
+| `AsyncChunkTriangleMulOutgoing` | `CHUNK_SIZE × 32` | `dim=1` (外), `dim=1` (内) | 带有异步广播的嵌套双循环 |
+| `AsyncChunkTriangleMulIncoming` | `CHUNK_SIZE × 32` | `dim=2` (外), `dim=2` (内) | Outgoing 的镜像；沿列轴分块 |
+| `ChunkTriangleAttStartingNode` | `CHUNK_SIZE` | `dim=1` | 注意力偏置 `b` 分块计算，随后复用 |
+| `ChunkTriangleAttEndingNode` | `CHUNK_SIZE` | `dim=2` | 转置 + 带偏置复用的分块注意力 |
+| `ChunkMSAColumnGlobalAttention` | `CHUNK_SIZE` | `dim=2` | 列方向全局注意力分块 |
+| `RecyclingEmbedder` | `CHUNK_SIZE × 48` | `dim=1` | Distogram 线性层窄；宽分块足矣 |
+
+乘数因子（×32, ×48）反映了一种校准原则：**单元素计算成本低的算子使用更宽的分块**，以减少循环开销和内核启动成本；而**具有庞大中间张量的算子（attention, 外积）则使用原始 `CHUNK_SIZE`**，以严格限制峰值内存。
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L85-L108), [ops.py](fastfold/model/fastnn/ops.py#L157-L171), [ops.py](fastfold/model/fastnn/ops.py#L414-L416)
+
+## 分块自注意力模式
+
+`SelfAttention.forward()` 方法是分块模式的典型范例。其非分块路径在全量张量上计算 QKV 投影、注意力矩阵乘法和输出投影。分块路径则沿 `dim=1` 进行分解：
+
+```python
+# 分块路径 (CHUNK_SIZE != None)
+para_dim = in_data.shape[1]
+chunk_size = CHUNK_SIZE
+output = []
+for ax in range(0, para_dim, chunk_size):
+    in_data_part = in_data[:, ax:ax + chunk_size, :, :]
+    mask_part = mask[:, ax:ax + chunk_size, :]
+    # 在切片上进行全量 attention 流水线
+    qkv = self.to_qkv(in_data_part).chunk(3, dim=-1)
+    q, k, v = map(lambda t: rearrange(t, 'b1 b2 n (h d) -> b1 b2 h n d', h=self.n_head), qkv)
+    q = q * self.scaling
+    logits = torch.matmul(q, k.transpose(-1, -2))
+    weights = fused_softmax(logits, mask_part, bias.unsqueeze(1) if nonbatched_bias else None)
+    weighted_avg = torch.matmul(weights, v)
+    # ... 门控，输出投影
+    output.append(self.o_linear(weighted_avg))
+output = torch.cat(output, dim=1)
+```
+
+核心洞见在于，每次迭代仅为 `chunk_size` 行分配 QKV、logits 和加权平均，而非完整的 MSA 深度。输出通过列表追加 + `torch.cat` 进行累积，这避免了在 autograd 追踪期间对预分配张量的原地写入。
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L304-L363)
+
+## 分块 OutProductMean：控制外积爆炸
+
+外积均值模块产生了 Evoformer 中最消耗内存的中间结果：完整外积 `O[b,i,j,d,e] = Σ_s left[b,s,i,d] × right[b,s,j,e]`，其维度为 (N_seq, N_res, N_res, C_proj, C_proj)。沿序列轴（`dim=2`）分块可防止该张量被全量实例化：
+
+```python
+# 分块外积
+para_dim = left_act.shape[2]
+chunk_size = CHUNK_SIZE
+for ax in range(0, para_dim, chunk_size):
+    left_act_part = left_act[:, :, ax:ax + chunk_size, :]
+    O = torch.einsum('bsid,bsje->bijde', left_act_part, right_act_all)
+    O = rearrange(O, 'b i j d e -> b i j (d e)')
+    O = self.o_linear(O)
+    norm0 = norm[:, ax:ax + chunk_size, :, :]
+    Z[:, ax:ax + chunk_size, :, :] = O / norm0
+```
+
+此处，分块的 `left_act_part` 将 einsum 的内存占用从 O(N²·C²) 降低至 O(chunk_size·N·C²)。结果被直接写入预分配的 `Z` 中正确的切片偏移位置——无需拼接，因为每个分块写入的是互不重叠的内存区域。
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L157-L171)
+
+## 分块三角乘法：带异步广播的嵌套循环
+
+三角乘法更新算子（`AsyncChunkTriangleMultiplicationOutgoing` 和 `AsyncChunkTriangleMultiplicationIncoming`）提出了最复杂的分块挑战。其底层计算是对表示的矩阵乘法，要求跨分布式 Worker 对右（或左）投影激活进行**全互联访问**。分块策略在序列维度上使用**嵌套双循环**，并结合流水线化的异步广播：
+
+```mermaid
+flowchart TD
+    A[计算分块 i 的 left_proj_act] --> B[对于每个分块 j]
+    B --> C[计算分块 j 的 right_proj_act]
+    C --> D[跨 world_size 秩异步广播]
+    D --> E{对于每个秩 k}
+    E --> F[接收来自秩 k 的 right_proj_act 广播]
+    F --> G[matmul: left_proj_act × right_proj_act]
+    G --> H[写入全局索引处的输出]
+    H --> E
+    E -->|k == world_size| B
+    B -->|j == para_dim| I[第二遍: 输出门控 + layernorm + 残差]
+    I --> A2[分块输出门控循环]
+```
+
+外层循环沿左投影的序列维度迭代分块 `i`。内层循环沿右投影的分块迭代 `j`。%在每对 (i, j) 内，一个**遍历 `world_size` 秩的第三层循环**执行异步广播流水线：当前秩广播其 `right_proj_act`，同时接收来自其他秩的数据，从而重叠通信. 通信与计算。矩阵乘法的结果被写入输出张量的全局位置 `(i-1)*para_dim + j` 处。在嵌套循环完成后，**第二遍处理**在一个沿 `dim=1` 的独立分块循环中应用输出门控、层归一化和偏置-丢弃-残差1.
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L414-L498)
+
+## 偏置重计算：以计算换内存
+
+在 `ChunkTriangleAttentionStartingNode` 和 `ChunkMSARowAttentionWithPairBias` 中出现了一个微妙但关键的模式。这些模块从大型对表示 `Z` 计算一个小型偏置张量 `b`。偏置比 `Z` 小得多（形状为 `[B, N, N, n_head]` 对比 `[B, N, N, C_z]`），因此策略如下：
+
+1. **第一遍分块处理**：通过迭代 `Z` 的分块来计算 `b`，将每个切片写入预分配的 `b` 张量，然后对完整的 `b` 执行异步聚合。
+2. **第二遍分块处理**：再次迭代分块，从原始输入重新计算 `layernorm(Z_chunk)`，但此时使用已聚合的完整 `b` 作为注意力偏置。
+
+源码中的注释精确地捕捉了这一点：*“z 很大，但 b 很小。因此我们先分块计算 z 以得到 b，随后再分块重新计算 z，而不是存储它。”* 这避免了在两遍处理之间存储完整的归一化 `Z` 张量，以多执行一次 LayerNorm 遍历为代价，节省了 O(B·N²·C_z) 的内存。
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L672-L701), [ops.py](fastfold/model/fastnn/ops.py#L791-L821)
+
+## 原地变体：零拷贝内存缩减
+
+多个分块算子提供了 `inplace()` 方法，这些方法操作列表包装的张量（例如用 `M_raw[0]` 代替 `M_raw`）。这些变体将结果直接写回输入张量的切片中，从而消除了单独输出张量的分配。其模式如下：
+
+```python
+def inplace(self, M_raw, Z, M_mask):
+    # M_raw 是一个列表: [tensor]
+    for i in range(0, para_dim_m, chunk_size):
+        m_raw = M_raw[0][:, i:i + chunk_size, :, :]
+        m = self.layernormM(m_raw)
+        # ... 计算 attention ...
+        M_raw[0][:, i:i + chunk_size, :, :] = result  # 原地写入
+    return M_raw
+```
+
+此模式用于 Evoformer 的 `inplace()` 前向路径中，其中 MSA 表示 `m` 和对表示 `z` 被包装在单元素列表中，并在 EvoformerStack 块之间进行原地修改，从而避免了在块之间分配中间副本。
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L823-L867), [evoformer.py](fastfold/model/fastnn/evoformer.py#L93-L152)
+
+## 块级激活检查点
+
+与算子级分块正交，FastFold 通过 `checkpoint_blocks()` 实现了**块级激活检查点**。该函数将 Evoformer 的块堆栈划分为每组 `blocks_per_ckpt` 个块，并用 `torch.utils.checkpoint.checkpoint()` 包装每个组：
+
+```mermaid
+flowchart LR
+    B1[Block 0] --> B2[Block 1] --> B3[Block 2] --> B4[Block 3] --> B5[Block 4] --> B6[Block 5]
+    B1 -.->|ckpt 组 1| B2
+    B3 -.->|ckpt 组 2| B4
+    B5 -.->|ckpt 组 3| B6
+```
+
+当 `blocks_per_ckpt=2` 且共有 6 个块时，块 0-1 的激活在计算后即被丢弃，并在块 2-3 的反向传播期间重新计算，依此类推。`EvoformerStack.__init__()` 接受 `blocks_per_ckpt` 和 `clear_cache_between_blocks` 参数来控制此行为：
+
+| 参数 | 效果 |
+|-----------|--------|
+| `blocks_per_ckpt = None` | 无检查点；保留所有激活（最快，内存最高） |
+| `blocks_per_ckpt = 1` | 每个块都设置检查点（最慢，内存最低） |
+| `blocks_per_ckpt = N` | 每 N 个块组成一个检查点组（平衡的权衡） |
+
+**算子级分块**与**块级检查点**之间的交互是乘性的：分块降低了每个块内的峰值内存，而检查点减少了在内存中同时驻留激活的块数量。
+
+来源: [checkpointing.py](fastfold/utils/checkpointing.py#L31-L84), [evoformer.py](fastfold/model/fastnn/evoformer.py#L161-L170)
+
+## 内存缩减分析
+
+分块和检查点对 Evoformer 主导内存项的综合影响可近似如下。设 N 为序列长度，S 为 MSA 深度，C 为通道维度，K 为分块大小：
+
+| 内存项 | 未分块 | 分块 | 缩减因子 |
+|-------------|-----------------|---------------|-----------------|
+| MSA attention QKV | O(S·N·3·h·c) | O(K·N·3·h·c) | S/K |
+| 外积中间项 | O(N²·C_proj²) | O(K·N·C_proj²) | N/K |
+| 三角乘法中间项 | O(N²·C) | 每个分块对 O(K·N·C) | N/K |
+| 块激活 | O(B · block_mem) | O(blocks_per_ckpt · block_mem) | B/blocks_per_ckpt |
+
+对于典型的长序列（N=2500, S=1024），在 `CHUNK_SIZE=128` 的情况下，外积内存降低约 20 倍，MSA attention QKV 降低约 8 倍，使得原先会 OOM 的序列能够在单 GPU 上可行。
+
+<CgxTip>设置 `CHUNK_SIZE` 时，可从等于 N/4 的值开始，并逐次减半直到满足目标内存预算。Transition 和 TriangleMul 上的 ×32 和 ×48 乘数意味着这些算子对 `CHUNK_SIZE` 的变化不太敏感——请将调优重点放在使用原始值的 attention 和外积算子上。</CgxTip>
+
+<CgxTip>结合分块与检查点以实现最大内存缩减：先设置 `CHUNK_SIZE` 以限定每块的峰值内存，再设置 `blocks_per_ckpt`，使得 `blocks_per_ckpt × 每块峰值内存` 适配你的 HBM 预算。这两种机制是正交的，并以乘法方式组合。</CgxTip>
+
+来源: [ops.py](fastfold/model/fastnn/ops.py#L31-L42), [ops.py](fastfold/model/fastnn/ops.py#L157-L171), [checkpointing.py](fastfold/utils/checkpointing.py#L31-L84)
+
+## 相关主题
+
+- 有关加速每个分块操作的融合内核（softmax, layer norm, bias-sigmoid），请参阅 [Fused Kernel Implementations](7-fused-kernel-implementations)。
+- 有关分块三角乘法如何与 DAP 异步广播流水线交互，请参阅 [Duality Async Operation](10-duality-async-operation)。
+- 有关编排带检查点的分块块的 EvoformerStack，请参阅 [FastNN Module Design](6-fastnn-module-design)。
+
+---
+
+## 动态轴向并行
+
+- [深入解析/动态轴向并行/DAP 通信原语](https://zread.ai/hpcaitech/FastFold/9-dap-communication-primitives)
+
+---
+slug:9-dap-communication-primitives
+blog_type:normal
+---
+
+
+FastFold 的动态轴向并行通过沿张量的行轴和列轴对张量进行分区，将 Evoformer 的计算分配到多个 GPU 上。`fastfold/distributed/` 中的**通信原语**是使这种分区对模型其余部分透明的基础构建块——它们负责处理数据移动、梯度同步以及 DAP 所需的关键行↔列轴转置操作。Evoformer 堆栈、模板嵌入器和 Pair 核心中的每一个高层 DAP 操作，最终都会委托给这六个核心原语：**scatter**、**gather**、**reduce**、**copy**、**col_to_row** 和 **row_to_col**。
+
+来源: [__init__.py](/fastfold/distributed/__init__.py#L1-L7), [core.py](/fastfold/distributed/core.py#L1-L41)
+
+## DAP 初始化
+
+在任何通信原语执行之前，必须通过 `init_dap` 初始化 DAP 进程组。此函数替代了 `torch.distributed.init_process_group`，并配置了 ColossalAI 的张量并行上下文，所有原语都依赖该上下文来解析全局规模、秩和通信器组。
+
+```python
+from fastfold.distributed import init_dap
+
+init_dap(tensor_model_parallel_size_=4)  # 在 4 个 GPU 上进行分区
+```
+
+在内部，`init_dap` 会为单设备回退设置缺失的分布式环境变量（`WORLD_SIZE`、`RANK`、`LOCAL_RANK`、`MASTER_ADDR`、`MASTER_PORT`），然后通过张量并行配置委托给 `colossalai.launch_from_torch`。`ensure_divisibility` 守卫——在所有原语中均有使用——会断言张量维度能被并行度整除，从而防止因不均匀拆分导致的数据静默损坏。
+
+来源: [core.py](/fastfold/distributed/core.py#L1-L41)
+
+## 同步原语
+
+所有同步原语均位于 `comm.py` 中，并共享一种通用架构模式：每个原语都暴露一个**公共函数**，该函数检查 `torch.is_grad_enabled()`，并将操作分发给原始的集合通信操作（例如 `_split`），或分发给自定义的 `torch.autograd.Function` 子类，该子类将前向集合通信与其**解析推导的反向集合通信**配对。这种设计确保了 DAP 下的梯度正确性，而无需手动同步梯度。
+
+### 原语参考
+
+| 原语 | 前向操作 | 反向操作 | 张量变换 |
+|-----------|------------------|--------------------|---------------------|
+| `scatter` | 沿 `dim` 拆分张量 → 本地分片 | 沿 `dim` 收集分片 | 完整 → 已分区 |
+| `gather` | 沿 `dim` 拼接分片 | 沿 `dim` 拆分梯度 | 已分区 → 完整 |
+| `reduce` | 跨组全规约求和 | 恒等直通 | 逐设备 → 已求和 |
+| `copy` | 恒等（前向无操作） | 梯度全规约求和 | 前向无变化 |
+| `col_to_row` | 全互斥（dim1→dim2） | 全互斥（dim2→dim1） | 列分区 → 行分区 |
+| `row_to_col` | 全互斥（dim2→dim1） | 全互斥（dim1→dim2） | 行分区 → 列分区 |
+
+来源: [comm.py](/fastfold/distributed/comm.py#L1-L204)
+
+### Scatter 和 Gather — 张量分区
+
+**Scatter** 沿指定维度将完整张量拆分为等大的分片，并返回当前秩所拥有的分片。它是每个 DAP 块起始处的入口原语——完整的 MSA 嵌入沿 MSA 行维度进行 scatter，完整的 Pair 表示沿 Pair 行维度进行 scatter。
+
+```python
+def _split(tensor: Tensor, dim: int = -1) -> Tensor:
+    split_size = divide(tensor.shape[dim], gpc.get_world_size(ParallelMode.TENSOR))
+    tensor_list = torch.split(tensor, split_size, dim=dim)
+    return tensor_list[gpc.get_local_rank(ParallelMode.TENSOR)].contiguous()
+```
+
+**Gather** 是 scatter 的逆操作——它通过 `dist.all_gather` 拼接所有分片，并生成完整张量。在每个 DAP 块的末尾会调用它来重新组装完整的表示。其自动求导配对是精确的：`Scatter.backward = _gather` 且 `Gather.backward = _split`，这反映了分区与重组之间的基本对偶性。
+
+`_gather` 中存在一个重要的优化：当 `dim == 1` 且批次维度为 1 时，输出缓冲区会被预分配为一个单一的连续张量，并为 `all_gather` 执行 `chunk` 操作，从而避免了分配 `world_size` 个独立张量及随后的 `cat` 操作。
+
+来源: [comm.py](/fastfold/distributed/comm.py#L24-L72)
+
+### Reduce 和 Copy — 梯度同步
+
+**Reduce** 在张量并行组中执行带有 `SUM` 的原地 `dist.all_reduce` 操作。它的反向操作是恒等函数——因为梯度在前向传播中已经被求和，每个秩都持有正确的总梯度，因此不需要进一步的规约。
+
+**Copy** 是一个微妙但至关重要的原语。它的前向操作是恒等函数，但其反向操作会调用 `_reduce`。这实现了**“前向复制，反向规约”**模式：张量在各秩之间复制（前向值相同），而在反向传播期间，来自每个秩的局部梯度被求和以产生正确的全局梯度。这是对于那些必须在各分区之间保持相同、但在训练期间又会接收各秩贡献的张量的标准模式。
+
+来源: [comm.py](/fastfold/distributed/comm.py#L74-L112)
+
+### col_to_row 和 row_to_col — 轴转置
+
+这些是 DAP 中架构意义最重要的原语。它们实现了 `dist.all_to_all` 集合通信，以将张量从列并行布局**重新分区**为行并行布局（反之亦然）。这种转置是 DAP 的通信瓶颈，每当计算从面向行的操作（例如行注意力、输出三角形乘法）切换到面向列的操作（例如列注意力、输入三角形乘法）时，都需要进行此转置。
+
+底层的 `_all_to_all` 沿 `in_dim` 拆分输入，执行全互斥交换，并沿 `out_dim` 拼接接收到的块。自动求导规则是对称的：`col_to_row` 的反向操作是 `row_to_col`（维度互换），这正是 `_all_to_all` 的反向操作通过交换 `in_dim` 和 `out_dim` 所实现的。
+
+```python
+# All_to_All backward: swap in_dim and out_dim
+def backward(ctx, grad_output):
+    saved_tensors = ctx.saved_tensors[0]
+    return _all_to_all(grad_output, in_dim=int(saved_tensors[1]),
+                       out_dim=int(saved_tensors[0])), None, None
+```
+
+来源: [comm.py](/fastfold/distributed/comm.py#L137-L204)
+
+## 异步原语
+
+文件 `comm_async.py` 引入了 gather 和全互斥通信的非阻塞变体，它们返回**工作句柄**而不是阻塞至完成。这实现了**计算与通信重叠**，这是 FastFold 的关键性能优化之一。
+
+### 异步通信架构
+
+```mermaid
+sequenceDiagram
+    participant GPU as GPU Compute
+    participant NIC as Network (NCCL)
+    Note over GPU: "Launch async op → get work handle"
+    GPU->>NIC: "Begin data transfer (non-blocking)"
+    GPU->>GPU: Execute independent computation
+    NIC-->>GPU: "Transfer completes (work.wait())"
+    Note over GPU: "Consume result with rearrange"
+```
+
+异步模式分为三个阶段：（1）**启动**——集合通信操作开始并立即返回一个 `(output_tensor, work_handle)` 对；（2）**重叠**——在网络传输数据时进行独立计算；（3）**完成**——调用 `work.wait()`，随后执行 `rearrange`，将收集到的数据从其拼接传输布局重塑为最终的轴转置布局。
+
+### 异步 Gather
+
+`_gather_async` 发出带有 `async_op=True` 的 `dist.all_gather`，并返回预分配的输出缓冲区及工作句柄。完成函数 `gather_async_opp` 调用 `work.wait()`，并在 `dim == 2` 时应用 `einops.rearrange`，将拼接布局 `(n, x*h, w, c)` 转换为目标布局 `(n, h, x*w, c)`——这种重排是 DAP 特有的重塑操作，它将 all-gather 拼接顺序转换为行分区数据的正确空间排列。
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L62-L131)
+
+### 异步 All-to-All
+
+`All_to_All_Async` 和 `All_to_All_Async_Opp` 实现了轴转置的启动-完成模式。启动操作（`All_to_All_Async.forward`）返回 `(output, work)`。完成操作（`All_to_All_Async_Opp.forward`）调用 `work.wait()`，并在 `out_dim == 2` 时应用 `rearrange`。
+
+一个关键的实现细节是**全局变量 `WORLD_WORK_ALL2ALL`**。在 `All_to_All_Async_Opp` 的反向传播中，会在启动新的异步通信之前等待上一个异步工作句柄完成。这种串行化防止了竞态条件，即新的全互斥通信可能会覆盖仍在被传输中数据使用的缓冲区。`All_to_All_Async` 的反向操作将已启动的工作存储在 `WORLD_WORK_ALL2ALL` 中，下一次反向调用会确保其在继续之前完成。
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L133-L199)
+
+### 异步广播
+
+`broadcast_sync` 和 `broadcast_async` 提供了带有 `host` 标志的秩到全体广播操作，该标志决定当前秩是源（原地修改）还是接收者（分配输出缓冲区）。这些原语用于分发所有秩都需要保持一致的标量值或配置张量。
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L12-L44)
+
+## 实践中的 DAP 数据流
+
+通信原语在每个 Evoformer 块内协调着精确的数据流模式。理解此数据流对于调试 DAP 行为和优化通信调度至关重要。
+
+### Evoformer 块通信模式
+
+```mermaid
+flowchart TD
+    A["Full MSA (m) & Pair (z)"] -->|"first_block: scatter"| B["Partitioned m (row) & z (row)"]
+    B --> C["MSA Row Attention"]
+    C --> D["OutProductMean"]
+    D -->|"All_to_All_Async<br/>dim1→dim2"| E["MSA → col partition<br/>(async work handle)"]
+    E --> F["PairCore<br/>(overlaps with all-to-all)"]
+    F -->|"All_to_All_Async_Opp<br/>wait + rearrange"| G["MSA → col partition<br/>(result consumed)"]
+    G --> H["Partitioned m (col) & z (row)"]
+    H -->|"last_block: gather"| I["Full MSA & Pair output"]
+```
+
+在块入口处，`scatter` 沿 MSA 序列维度对完整的 MSA 表示进行分区，沿 Pair 行维度对完整的 Pair 表示进行分区。在块内部，MSA 行注意力在行分区数据上操作，随后 `All_to_All_Async` 将 MSA 转置为列分区布局，同时与 Pair 计算重叠。在块出口处，`gather` 重组完整张量并裁剪填充。
+
+来源: [evoformer.py](/fastfold/model/fastnn/evoformer.py#L44-L102)
+
+### PairCore 通信模式
+
+`PairCore` 模块展示了轴转置原语最密集的使用——在面向行与面向列的计算之间进行子层切换时，每次都需要调用 `row_to_col` 或 `col_to_row`：
+
+```python
+def forward(self, pair, pair_mask):
+    pair_mask_row = scatter(pair_mask, dim=1)     # Row-partitioned mask
+    pair_mask_col = scatter(pair_mask, dim=2)     # Col-partitioned mask
+    pair = TriangleMultiplicationOutgoing(pair, pair_mask_row)  # Row-oriented
+    pair = row_to_col(pair)                       # Transpose → col
+    pair = TriangleMultiplicationIncoming(pair, pair_mask_col)  # Col-oriented
+    pair = col_to_row(pair)                       # Transpose → row
+    pair = TriangleAttentionStartingNode(pair, pair_mask_row)   # Row-oriented
+    pair = row_to_col(pair)                       # Transpose → col
+    pair = TriangleAttentionEndingNode(pair, pair_mask_col)     # Col-oriented
+    pair = PairTransition(pair)
+    pair = col_to_row(pair)                       # Final → row
+    return pair
+```
+
+掩码上的每次 `scatter` 调用都会为当前轴方向创建正确的分区视图。交替的 `row_to_col` / `col_to_row` 调用确保每个三角形操作都能接收到其所期望的分区方向的数据。此模式在模板 Pair 块中同样重复出现。
+
+来源: [triangle.py](/fastfold/model/fastnn/triangle.py#L212-L231), [template.py](/fastfold/model/fastnn/template.py#L249-L278)
+
+### 三角形乘法中的异步重叠
+
+`TriangleMultiplicationOutgoing` 模块展示了异步原语最复杂的用法——将右侧投影激活的 gather 与输出门的计算重叠：
+
+```python
+# Launch async gather — returns immediately
+right_proj_act, work = gather_async(right_proj_act.contiguous(), dim=1)
+
+# Computation that DOES NOT depend on right_proj_act runs here
+g = torch.sigmoid(self.output_gate(Z))      # Overlaps with network transfer
+
+# Wait for gather to complete, then rearrange
+right_proj_act = gather_async_opp(right_proj_act, work, dim=1)
+```
+
+`output_gate` 的计算仅依赖于 `Z`（层归一化后的输入），而不依赖于已收集的 `right_proj_act`，因此它可以在 all-gather 传输期间继续执行。这种重叠隐藏了很大一部分通信延迟。相同的模式也出现在 `TriangleMultiplicationIncoming`（左侧投影的异步 gather）和 `MSARowAttentionWithPairBias`（Pair 偏置的异步 gather）中。
+
+来源: [triangle.py](/fastfold/model/fastnn/triangle.py#L52-L67), [msa.py](/fastfold/model/fastnn/msa.py#L55-L64)
+
+## 填充与可整除性
+
+DAP 要求分区后的维度能被全局规模整除。当序列长度不可整除时，Evoformer 和模板块会在 scatter 之前应用**对称填充**：
+
+```python
+padding_size = (int(seq_length / dap_size) + 1) * dap_size - seq_length
+m = torch.nn.functional.pad(m, (0, 0, 0, padding_size))
+z = torch.nn.functional.pad(z, (0, 0, 0, padding_size, 0, padding_size))
+```
+
+在块出口处 gather 之后，填充会被裁剪：`m = m[:, :-padding_size, :]`。这种填充策略确保所有秩接收到大小相等的分片，这是 NCCL 集合通信的先决条件。
+
+来源: [evoformer.py](/fastfold/model/fastnn/evoformer.py#L59-L65)
+
+## 自动求导设计哲学
+
+通信原语遵循一致的自动求导设计原则：**每个原语的反向操作是其前向操作的解析共轭**。这并非任意设定——它源于应用于分布式计算的链式法则。关键的共轭对如下：
+
+| 前向 | 反向 | 数学依据 |
+|---------|----------|---------------------------|
+| 拆分 | 拼接 | ∂(split)/∂x = gather |
+| 拼接 | 拆分 | ∂(concat)/∂x = split |
+| 全规约 | 恒等 | ∂(Σxᵢ)/∂xᵢ = 1 |
+| 恒等 | 全规约 | 梯度从所有副本中累积 |
+| 全互斥 (dim_a→dim_b) | 全互斥 (dim_b→dim_a) | 转置是自逆的 |
+
+`Copy` 原语尤其值得注意：它在正向传播中没有任何开销（恒等操作），但其反向传播会通过全规约在各秩之间隐式同步梯度。这使得它成为那些在所有秩上产生相同输出、但在训练期间需要累加梯度的层的正确原语选择。
+
+<CgxTip>在调试不正确的 DAP 结果时，首先验证 `torch.is_grad_enabled()` 是否处于预期状态。如果梯度跟踪被意外禁用（例如在 `torch.no_grad()` 内部），原语将执行原始的集合通信操作而非自动求导函数，从而产生正确的前向值，但会静默丢弃梯度同步——导致微妙的训练发散而非明显的崩溃。</CgxTip>
+
+<CgxTip>`comm_async.py` 中的全局变量 `WORLD_WORK_ALL2ALL` 会对整个模型的反向传播全互斥操作进行串行化。如果你引入了在反向路径中使用 `All_to_All_Async` 的新模块，请确保在启动新的异步通信之前已等待上一个工作句柄完成——否则可能会因重叠的传输占用而导致缓冲区损坏。</CgxTip>
+
+来源: [comm.py](/fastfold/distributed/comm.py#L74-L204), [comm_async.py](/fastfold/distributed/comm_async.py#L166-L199)
+
+## API 总结
+
+### `fastfold.distributed.comm` — 同步原语
+
+| 函数 | 签名 | 描述 |
+|----------|-----------|-------------|
+| `scatter` | `(input: Tensor, dim: int = -1) → Tensor` | 分区张量；自动求导与 gather 配对 |
+| `gather` | `(input: Tensor, dim: int = -1) → Tensor` | 重组张量；自动求导与 scatter 配对 |
+| `reduce` | `(input: Tensor) → Tensor` | 全规约求和；反向操作为恒等 |
+| `copy` | `(input: Tensor) → Tensor` | 前向恒等；反向操作为梯度全规约 |
+| `col_to_row` | `(input_: Tensor) → Tensor` | 全互斥轴转置 (col→row) |
+| `row_to_col` | `(input_: Tensor) → Tensor` | 全互斥轴转置 (row→col) |
+
+### `fastfold.distributed.comm_async` — 异步原语
+
+| 函数 | 签名 | 描述 |
+|----------|-----------|-------------|
+| `gather_async` | `(input: Tensor, dim: int) → (Tensor, Work)` | 非阻塞 gather；返回输出缓冲区 + 句柄 |
+| `gather_async_opp` | `(output: Tensor, work, dim: int) → Tensor` | 完成异步 gather；等待 + 重排 |
+| `All_to_All_Async.apply` | `(input_, in_dim, out_dim) → (Tensor, Work)` | 非阻塞全互斥；返回缓冲区 + 句柄 |
+| `All_to_All_Async_Opp.apply` | `(output, work, in_dim, out_dim) → Tensor` | 完成异步全互斥；等待 + 重排 |
+| `broadcast_async` | `(src, tensor, host) → Work` | 非阻塞广播；返回工作句柄 |
+
+来源: [comm.py](/fastfold/distributed/comm.py#L1-L204), [comm_async.py](/fastfold/distributed/comm_async.py#L1-L199)
+
+## 下一步
+
+此处涵盖的同步原语构成了基础，但真正的性能提升来自**异步操作的对偶性**——通信与计算的系统性重叠。要了解异步原语如何编排成完整的重叠策略，请参阅 [对偶异步操作](10-duality-async-operation)。对于支撑 `col_to_row`/`row_to_col` 的底层 scatter-gather 和全互斥模式，请参阅 [Scatter-Gather 与 All-to-All](11-scatter-gather-and-all-to-all)。
+
+---
+
+- [深入解析/动态轴向并行/对偶异步操作](https://zread.ai/hpcaitech/FastFold/10-duality-async-operation)
+
+---
+slug:10-duality-async-operation
+blog_type:normal
+---
+
+
+FastFold 的**对偶异步操作**是一种通信-计算重叠策略，也是动态轴向并行（DAP）的核心。每个异步集合通信操作都配对一个*对偶*完成原语——即“opp”对应项——它既同步正在进行的工作句柄，又应用必要的张量重排。这种对偶契约使得调度器能够在通信发起与其同步屏障之间插入独立的计算，将原本串行的集合通信延迟转化为重叠的吞吐量。
+
+## 对偶契约
+
+对偶模式为每个分布式集合通信建立了一个严格的两阶段协议：**发起**（异步操作）和**完成**（opp 操作）。发起阶段使用 `async_op=True` 发起通信，并立即返回一个工作句柄以及一个预分配的输出缓冲区——调用方不会被阻塞。完成阶段消费工作句柄，调用 `work.wait()`，并执行 DAP 分片语义所需的任何维度轴重排。其不变量是，在 opp 阶段完成之前，任何消费者都不能读取输出缓冲区，但任何独立的计算都可以在发起和完成之间的间隙中执行。
+
+```mermaid
+sequenceDiagram
+    participant Compute as Local Compute
+    participant Async as Async Launch
+    participant NIC as Network (In-Flight)
+    participant Opp as Dual Completion
+
+    Compute->>Async: Produce input tensor
+    Async->>NIC: Issue collective (async_op=True)
+    Async-->>Compute: Return (output_buffer, work_handle)
+    Note over Compute,NIC: Gap — independent computation overlaps communication
+    Compute->>Opp: Ready to consume output
+    Opp->>NIC: work.wait()
+    NIC-->>Opp: Collective complete
+    Opp->>Opp: Rearrange axes if dim==2
+    Opp-->>Compute: Valid output tensor
+```
+
+这种重叠并非可选的微优化——它是结构性的。在 Evoformer 块中，MSA 全互联通信和 PairCore 计算在设计上就是并发的；移除这种重叠将使它们串行化，并使挂钟时间增加整个集合通信的延迟。
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L1-L11), [evoformer.py](/fastfold/model/fastnn/evoformer.py#L64-L69)
+
+## 对偶操作对
+
+`comm_async.py` 中定义了三个对偶对。每个对共享一个共同的结构：第一个函数发起异步集合通信并返回 `(tensor, work)`，而第二个函数接收相同的元组，等待工作完成，并应用完成后的转换。
+
+| 对偶对 | 发起（异步） | 完成 | 集合通信 | 重排条件 |
+|---|---|---|---|---|
+| **Gather** | `gather_async(input, dim)` → `(output, work)` | `gather_async_opp(output, work, dim)` → `Tensor` | `dist.all_gather` | `dim == 2`: `rearrange('n (x h) w c → n h (x w) c')` |
+| **All-to-All** | `All_to_All_Async.apply(input, in_dim, out_dim)` → `(output, work)` | `All_to_All_Async_Opp.apply(output, work, in_dim, out_dim)` → `Tensor` | `dist.all_to_all` | `out_dim == 2`: `rearrange('n (x h) w c → n h (x w) c')` |
+| **Broadcast** | `broadcast_async(src, tensor, host)` → `work` | `broadcast_async_opp(work)` → `0` | `dist.broadcast` | None（无重排） |
+
+重排条件 `dim == 2`（或 `out_dim == 2`）反映了 DAP 的列并行分片约定。当 gather 或 all-to-all 沿着维度 2（即形状为 `[batch, rows, cols, channels]` 的 4D 张量中的列/序列轴）操作时，收集后的结果会交错并行维度——`n (x h) w c`——并且必须被紧凑化为 `n h (x w) c`，其中 `x` 为全局进程数。这正是将按秩分块排序转换为下游层所期望的连续逻辑排序的轴交换操作。
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L66-L111), [comm_async.py](/fastfold/distributed/comm_async.py#L129-L199), [comm_async.py](/fastfold/distributed/comm_async.py#L34-L55)
+
+## Gather 异步及其对偶
+
+`gather_async` / `gather_async_opp` 对是 FastFold 中最常用的对偶操作。它出现在外积均值、三角形乘法和注意力偏置计算中——即在局部分片的张量必须在归约或 einsum 之前物化为其完整形状的任何地方。
+
+**发起阶段**（`_gather_async`）：预分配形状为 `[..., world_size × dim_1, ...]` 的输出缓冲区，将其拆分为 `world_size` 个块，并使用 `async_op=True` 发起 `dist.all_gather`。输出缓冲区和工作句柄将被立即返回。
+
+**完成阶段**（`gather_async_opp`）：调用 `work.wait()` 进行同步，然后——仅在 `dim == 2` 时——应用 `GatherAsyncOpp`，这是一个自定义的 `torch.autograd.Function`，其前向传播执行 `rearrange('n (x h) w c → n h (x w) c')` 紧凑化，其反向传播通过 `resize_` 将其反转。
+
+支持自动求导的包装器 `gather_async` 和 `gather_async_opp` 在启用梯度时会分派给自定义的 `GatherAsync` / `GatherAsyncOpp` 函数，从而确保正确的反向传播。`GatherAsync.backward` 委托给 `_split`（gather 的数学逆运算），而 `GatherAsyncOpp.backward` 则执行逆 resize。
+
+```python
+# OutProductMean.forward 中的典型用法模式：
+right_act_all, work = gather_async(right_act, dim=2)   # ← 发起
+left_act = self.linear_a(M)                             # ← 重叠：独立计算
+M_mask_col = scatter(M_mask, dim=2)                     # ← 重叠：独立计算
+left_act = M_mask_col * left_act                        # ← 重叠：独立计算
+norm = torch.einsum('bsid,bsjd->bijd', M_mask_col, M_mask) + 1e-3  # ← 重叠
+right_act_all = gather_async_opp(right_act_all, work, dim=2)  # ← 完成
+```
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L66-L127), [ops.py](/fastfold/model/fastnn/ops.py#L141-L154)
+
+## All-to-All 异步及其对偶
+
+`All_to_All_Async` / `All_to_All_Async_Opp` 对实现了在行并行和列并行张量布局之间转换的轴交换通信——这是 DAP 的基础原语。在 Evoformer 块中，此通信负责将 MSA 表示从行分区形式重新分配为列分区形式。
+
+**发起阶段**（`_all_to_all_async`）：沿 `in_dim` 将输入张量拆分为 `world_size` 个相等的块，预分配输出缓冲区，并使用 `async_op=True` 发起 `dist.all_to_all`。每个秩将其第 `i` 个块发送至秩 `i`，并将秩 `i` 的块接收到其第 `i` 个输出槽位中。
+
+**完成阶段**（`All_to_All_Async_Opp`）：等待工作句柄，然后——当 `out_dim == 2` 时——应用 `rearrange('n (x h) w c → n h (x w) c')` 紧凑化。这与 gather 对偶中的轴交换相同，因为 `out_dim == 2` 的 all-to-all 会产生相同的交错布局。
+
+**通过 `WORLD_WORK_ALL2ALL` 耦合反向传播**：all-to-all 对偶使用模块级全局变量 `WORLD_WORK_ALL2ALL` 来流水线化反向传播。当调用 `All_to_All_Async.backward` 时，它首先等待上一次反向传播步骤中未完成的 `WORLD_WORK_ALL2ALL`，然后将当前反向传播的 all-to-all 工柄设置为新的全局句柄。当调用 `All_to_All_Async_Opp.backward` 时，它会发起一个新的 `_all_to_all_async` 并将其工作句柄存储在 `WORLD_WORK_ALL2ALL` 中。这种串行链式设计确保了连续的反向 all-to-all 操作不会在网络资源上发生竞争，同时仍允许与紧邻的计算进行重叠。
+
+```python
+# Evoformer 块 — 典型的对偶重叠：
+m, work = All_to_All_Async.apply(m, 1, 2)   # ← 发起 MSA 轴交换
+z = self.pair(z, pair_mask)                   # ← 重叠：PairCore 并发运行
+m = All_to_All_Async_Opp.apply(m, work, 1, 2)  # ← 完成：MSA 现为列并行
+```
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L129-L199), [evoformer.py](/fastfold/model/fastnn/evoformer.py#L64-L69)
+
+## Broadcast 异步及其对偶
+
+`broadcast_async` / `broadcast_async_opp` 对仅用于分块三角形乘法模块（`AsyncChunkTriangleMultiplicationOutgoing` 和 `AsyncChunkTriangleMultiplicationIncoming`）。这些模块实现了一个流水线化的广播调度：在遍历 `world_size` 个秩的循环中，每次迭代将一个秩的投影激活广播给所有其他秩，而前一次迭代的广播仍在传输中。
+
+**发起阶段**：使用 `async_op=True` 发起 `dist.broadcast`。`host` 标志区分源秩（原地广播）与接收秩（广播到预分配的缓冲区）。
+
+**完成阶段**：仅调用 `work.wait()`。与 gather 和 all-to-all 不同，不需要任何重排——广播保持了张量形状不变。
+
+流水线逻辑如下：迭代 `k` 消费前一次迭代的异步广播结果（通过 `broadcast_async_opp`），然后发起迭代 `k+1` 的广播（通过 `broadcast_async`）。第一次迭代使用 `broadcast_sync`，因为没有先前的计算可以重叠。这创建了一个软件流水线，其中每次广播的网络延迟都被隐藏在前一次迭代接收数据的矩阵乘法计算之后。
+
+```python
+# 流水线广播调度（简化版）：
+for k in range(world_size):
+    if work:
+        broadcast_async_opp(work)          # ← 完成前一次广播
+        right_proj_act_rec = tmp.clone()   # ← 消费接收到的数据
+    if k + 1 != world_size:
+        work = broadcast_async(k+1, ...)   # ← 发起下一次广播
+    # ... 利用 right_proj_act_rec 的矩阵乘法与下一次广播重叠 ...
+```
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L34-L55), [ops.py](/fastfold/model/fastnn/ops.py#L446-L483)
+
+## 自动求导集成
+
+每个对偶对都通过自定义 `torch.autograd.Function` 子类与 PyTorch 的自动求导系统集成。这并非为了便利——而是正确性的要求。如果没有支持自动求导的实现，异步通信将对反向传播不可见，从而在 DAP 下产生错误的梯度。
+
+| 自动求导函数 | 前向传播 | 反向传播 |
+|---|---|---|
+| `GatherAsync` | `_gather_async(input, dim)` | `_split(grad_output, dim)` — scatter 是 gather 的伴随运算 |
+| `GatherAsyncOpp` | `rearrange('n (x h) w c → n h (x w) c')` | `resize_(n, h*mp_size, w/mp_size, c)` — 逆重排 |
+| `All_to_All_Async` | `_all_to_all_async(input, in_dim, out_dim)` | 当 `in_dim==2` 时 `rearrange(grad, 'n (x h) w c → n h (x w) c')` |
+| `All_to_All_Async_Opp` | `work.wait()` + 当 `out_dim==2` 时重排 | `_all_to_all_async(grad, out_dim, in_dim)` — all-to-all 是自伴随的 |
+
+<CgxTip>`All_to_All_Async_Opp.backward` 会发起一个*新的*异步 all-to-all（交换 `in_dim` 和 `out_dim`），并将其工作句柄存储在全局变量 `WORLD_WORK_ALL2ALL` 中。下一次 `All_to_All_Async.backward` 调用将在继续之前等待此句柄。这种串行链式设计是必要的，因为 `torch.autograd.Function.backward` 在调用者的流上同步运行——如果没有全局句柄，两个并发的反向 all-to-all 操作将破坏彼此的网络缓冲区。</CgxTip>
+
+来源: [comm_async.py](/fastfold/distributed/comm_async.py#L98-L199)
+
+## 模型中的使用位置
+
+对偶异步模式被部署在 Evoformer 堆栈中的每个通信边界。下表将每个使用位置映射到其对应的对偶对以及与该通信重叠的计算。
+
+| 模块 | 对偶对 | 重叠的计算 | 文件 |
+|---|---|---|---|
+| `Evoformer.forward` | All-to-All | `PairCore(z, pair_mask)` | [evoformer.py](/fastfold/model/fastnn/evoformer.py#L67-L69) |
+| `OutProductMean.forward` | Gather | `linear_a(M)`, mask scatter, norm einsum | [ops.py](/fastfold/model/fastnn/ops.py#L145-L154) |
+| `TriangleMultiplicationOutgoing` | Gather | `output_gate(Z)`, `permute_final_dims` | [triangle.py](/fastfold/model/fastnn/triangle.py#L51-L56) |
+| `TriangleMultiplicationIncoming` | Gather | `output_gate(Z)`, `permute_final_dims` | [triangle.py](/fastfold/model/fastnn/triangle.py#L103-L109) |
+| `TriangleAttentionStartingNode` | Gather | `attention(Z, Z_mask, (b, work))` — 偏置在内部被消费 | [triangle.py](/fastfold/model/fastnn/triangle.py#L154-L159) |
+| `MSARowAttentionWithPairBias` | Gather | `attention(M, M_mask, (b, work))` — 偏置在内部被消费 | [msa.py](/fastfold/model/fastnn/msa.py#L64-L69) |
+| `AsyncChunkTriangleMultOutgoing` | Broadcast（流水线化） | `matmul(left_proj_act, right_proj_act_rec)` | [ops.py](/fastfold/model/fastnn/ops.py#L446-L483) |
+| `AsyncChunkTriangleMultIncoming` | Broadcast（流水线化） | `matmul(left_proj_act_rec, right_proj_act)` | [ops.py](/fastfold/model/fastnn/ops.py#L575-L614) |
+| `ChunkTriangleAttentionStartingNode` | Gather | 分块偏置预计算，然后执行 attention | [ops.py](/fastfold/model/fastnn/ops.py#L662-L680) |
+
+<CgxTip>在注意力模块（`MSARowAttentionWithPairBias`、`TriangleAttentionStartingNode`）中，gather-async 对偶用于对偶偏置张量 `b`。发起操作在进入 `SelfAttention.forward` 之前发生，而完成操作（`gather_async_opp`）在实际消费偏置时于 `SelfAttention.forward` *内部*被调用——它通过 `nonbatched_bias` 参数以元组 `(b, work)` 的形式传递。这种延迟完成最大化了重叠窗口，允许 QKV 投影和部分注意力计算在 gather 完成之前继续执行。</CgxTip>
+
+来源: [evoformer.py](/fastfold/model/fastnn/evoformer.py#L64-L69), [ops.py](/fastfold/model/fastnn/ops.py#L141-L154), [triangle.py](/fastfold/model/fastnn/triangle.py#L51-L56), [msa.py](/fastfold/model/fastnn/msa.py#L64-L69)
+
+## 对偶与同步通信
+
+[comm.py](/fastfold/distributed/comm.py) 中的同步对应项——`gather`、`col_to_row`、`row_to_col`——调用了相同的 `dist.all_gather` / `dist.all_to_all` 原语，但设置了 `async_op=False`，从而阻塞调用方直到集合通信完成。它们仅在 DAP 边界条件下使用：将输入划分到各秩的初始 `scatter`，以及重组完整输出的最终 `gather`。Evoformer 循环内的所有中间通信均使用异步对偶对。
+
+其架构意义在于，Evoformer 每个块的通信成本不再是完整的集合通信延迟，而是 `max(compute_time, comm_time)`——这种重叠将串行的 `compute + comm` 转换为并行的 `compute ∥ comm`。对于 Evoformer 块中的 all-to-all，PairCore 计算（四个三角形操作 + transition）提供了重叠窗口，且其计算量通常大于 all-to-all 延迟，从而使得有效通信成本接近于零。
+
+来源: [comm.py](/fastfold/distributed/comm.py#L42-L65), [comm.py](/fastfold/distributed/comm.py#L146-L173), [evoformer.py](/fastfold/model/fastnn/evoformer.py#L53-L86)
+
+## 后续步骤
+
+对偶异步操作构建在 [DAP 通信原语](9-dap-communication-primitives) 中描述的基础集合通信之上。有关定义张量如何跨 DAP 秩进行分区与重组的特定 scatter-gather 和 all-to-all 模式，请参见 [Scatter-Gather 与 All-to-All](11-scatter-gather-and-all-to-all)。
+
+---
+
+- [深入解析/动态轴向并行/Scatter-Gather 与 All-to-All](https://zread.ai/hpcaitech/FastFold/11-scatter-gather-and-all-to-all)
+
+---
+slug:11-scatter-gather-and-all-to-all
+blog_type:normal
+---
+
+
+FastFold的动态轴向并行依赖于两族集合通信——**scatter-gather**用于沿单轴切分和重组张量，**all-to-all**用于在行并行和列并行分解机制之间转置数据。这两族通信均被实现为`torch.autograd.Function`的子类，将自身的逆运算嵌入为反向传播，从而对训练过程透明。构建在这些同步原语之上的异步层使通信与下游计算重叠，这是让Evoformer能在pair堆栈执行期间隐藏all-to-all延迟的关键机制。
+
+来源：[comm.py](/fastfold/distributed/comm.py#L1-L204)，[comm_async.py](/fastfold/distributed/comm_async.py#L1-L199)，[core.py](/fastfold/distributed/core.py#L1-L41)
+
+## 同步Scatter与Gather
+
+`scatter` / `gather`对构成了每个DAP区域的入口和出口边界。**Scatter**沿指定维度将全局复制的张量切分为等大的块，并仅返回属于当前本地rank的块。**Gather**是其逆运算——将所有rank的块重新拼接为完整的张量。两者均作为公共函数暴露，根据是否启用梯度来分派至原始集合通信或autograd包装版本。
+
+| 操作 | 前向传播 | 反向传播 |
+|-----------|---------|---------------------|
+| `scatter(input, dim)` | `_split` — 通过`torch.split`获取本地块 | `_gather` — `dist.all_gather`后接`torch.cat` |
+| `gather(input, dim)` | `_gather` — `dist.all_gather`后接`torch.cat` | `_split` — 通过`torch.split`获取本地块 |
+
+`_split`辅助函数计算`split_size = tensor.shape[dim] / world_size`，调用`torch.split`，并返回由本地rank索引的切片。`_gather`辅助函数在批次维度大小为1且`dim=1`时，具有一条**优化的快速路径**：它预分配一个单一的连续输出张量，并使用`output.chunk()`为`dist.all_gather`生成基于视图的子张量，从而避免额外的拼接操作。常规路径则分配一个按rank划分的缓冲区列表，将数据`all_gather`至其中，然后执行`torch.cat`。
+
+```python
+# 入口：跨DAP ranks切分MSA与pair表征
+m = scatter(m, dim=1)   # MSA：沿序列行切分
+z = scatter(z, dim=1)   # Pair：沿首个pair维度切分
+
+# 出口：在返回非DAP代码前重组
+m = gather(m, dim=0)    # MSA：跨批次切分块进行gather
+z = gather(z, dim=0)    # Pair：跨批次切分块进行gather
+```
+
+当`world_size == 1`时，这两个操作会提前原样返回输入，因此相同的代码在不启用DAP时也能正确运行。
+
+来源：[comm.py](/fastfold/distributed/comm.py#L30-L143)，[evoformer.py](/fastfold/model/fastnn/evoformer.py#L45-L56)
+
+## 同步All-to-All：`col_to_row`与`row_to_col`
+
+scatter-gather沿*单一*轴移动数据，而all-to-all则同时跨*两*轴重新分配数据——它是将**列并行**布局转换为**行并行**布局（反之亦然）的通信原语。在FastFold中，这由两个命名的便捷包装器实现：
+
+- **`row_to_col(input)`** — 以`in_dim=2, out_dim=1`调用`_all_to_all`。将MSA或pair数据从行并行（序列在dim 2上切分）重新分配为列并行（序列在dim 1上切分）。
+- **`col_to_row(input)`** — 以`in_dim=1, out_dim=2`调用`_all_to_all`。逆方向的转换。
+
+内部`_all_to_all`函数沿`in_dim`将输入张量切分为`world_size`个块，发起`dist.all_to_all`将每个rank的块重新分配至不同的rank，然后沿`out_dim`拼接接收到的块。与`_gather`类似，当`out_dim == 1`时，它具有一条**连续内存快速路径**：单一预分配缓冲区被切分为多个视图作为输出列表，消除了最后的`torch.cat`操作。
+
+autograd包装器`All_to_All`在`ctx`中保存了`in_dim`和`out_dim`，其反向传播仅以**交换**的维度（`in_dim`与`out_dim`互换）再次调用`_all_to_all`。这在数学上是可靠的，因为当维度转置时，all-to-all是其自身的逆运算。
+
+```mermaid
+graph LR
+    subgraph "Row-Parallel Layout"
+        R0["Rank 0:\nrows [0..N/P]"]
+        R1["Rank 1:\nrows [N/P..2N/P]"]
+    end
+    subgraph "Column-Parallel Layout"
+        C0["Rank 0:\ncols [0..N/P]"]
+        C1["Rank 1:\ncols [N/P..2N/P]"]
+    end
+    R0 -->|"col_to_row / all_to_all\nin_dim=1, out_dim=2"| C0
+    R1 -->|"col_to_row / all_to_all\nin_dim=1, out_dim=2"| C1
+    C0 -->|"row_to_col / all_to_all\nin_dim=2, out_dim=1"| R0
+    C1 -->|"row_to_col / all_to_all\nin_dim=2, out_dim=1"| R1
+```
+
+来源：[comm.py](/fastfold/distributed/comm.py#L146-L203)，[triangle.py](/fastfold/model/fastnn/triangle.py#L241-L253)
+
+## 异步All-to-All：通信与计算重叠
+
+同步all-to-all是一个同步屏障——每个rank都会阻塞，直到所有数据交换完毕。对于Evoformer的内部循环，这是不可接受的，因为MSA堆栈和pair堆栈可以在不同的数据上并发执行。FastFold通过`All_to_All_Async`和`All_to_All_Async_Opp`解决了这个问题，这是一种**分阶段**的all-to-all，将发起与完成解耦。
+
+该模式如下：
+
+1. **发起** — `All_to_All_Async.apply(m, in_dim=1, out_dim=2)`以`async_op=True`调用`dist.all_to_all`，返回一个结果缓冲区（其内容尚无效）和一个异步`work`句柄。
+2. **重叠** — 调用方继续在不依赖all-to-all结果的数据上执行pair堆栈（`PairCore`），从而有效将通信延迟隐藏在有用的计算之后。
+3. **完成** — `All_to_All_Async_Opp.apply(m, work, in_dim=1, out_dim=2)`调用`work.wait()`进行同步，然后当`out_dim == 2`时应用`rearrange`重塑输出（使用einops从为gather优化的dim-1布局转换至目标dim-2布局）。
+
+```mermaid
+sequenceDiagram
+    participant E as Evoformer Block
+    participant A2A as All_to_All_Async
+    participant P as PairCore
+    participant A2AO as All_to_All_Async_Opp
+
+    E->>A2A: apply(m, 1, 2)
+    A2A-->>E: (m_partial, work_handle)
+    Note over E,P: 通信进行中 — 重叠开始
+    E->>P: execute(z, pair_mask)
+    P-->>E: z_updated
+    Note over E,A2AO: 通信完成 — 等待 + 重塑
+    E->>A2AO: apply(m_partial, work_handle, 1, 2)
+    A2AO-->>E: m_row_parallel
+```
+
+`All_to_All_Async_Opp`的反向传播在相反方向（`in_dim` ↔ `out_dim`）重新发起一次**异步**all-to-all，并将work/句柄存储在全局`WORLD_WORK_ALL2ALL`中。`All_to_All_Async`的反向传播在继续之前会等待此全局句柄，确保在梯度累加继续之前反向通信已完成。这种全局变量方法是一种刻意的权衡：它避免了在autograd计算图中进行复杂的句柄传递，代价是限制同一时刻只能有一个未完成的all-to-all以保证正确性——Evoformer的串行块结构恰好满足此条件。
+
+来源：[comm_async.py](/fastfold/distributed/comm_async.py#L129-L199)，[evoformer.py](/fastfold/model/fastnn/evoformer.py#L64-L69)
+
+## 异步Gather：偏置通信与注意力计算重叠
+
+第二种异步通信模式出现在计算pair偏置的注意力层内部。当`MSARowAttentionWithPairBias`计算`b = F.linear(Z, self.linear_b_weights)`时，偏置张量`b`处于行并行布局，但注意力计算需要其在dim 1上gathered。代码未在同步gather上阻塞，而是发起`gather_async(b, dim=1)`，将`(b, work)`元组向下游传递给注意力核心，该核心仅在偏置被实际消费时——即在Q/K/V投影已计算完毕之后——才调用`gather_async_opp`进行等待和重排。
+
+`GatherAsync` autograd函数在`ctx.dim`中保存`dim`，其反向传播对`dim == 2`具有特化的重排：当梯度回传时，它会在切分前将大小从`(n, h, w, c)`调整为`(n, h/mp_size, w*mp_size, c)`，这正是`GatherAsyncOpp`前向传播中`rearrange('n (x h) w c -> n h (x w) c')`的逆操作。
+
+| 层 | 异步原语 | 重叠的计算 |
+|-------|----------------|----------------------|
+| `MSARowAttentionWithPairBias` | `gather_async(b, dim=1)` | Q/K/V线性投影 |
+| `TriangleAttentionStartingNode` | `gather_async(b, dim=1)` | Q/K/V线性投影 |
+| `TriangleMultiplicationOutgoing` | `gather_async(right_act, dim=1)` | 输出门控 + 左置换 |
+| `TriangleMultiplicationIncoming` | `gather_async(left_act, dim=2)` | 输出门控 + 右置换 |
+| `Evoformer` / `ExtraMSABlock` | `All_to_All_Async(m, 1, 2)` | `PairCore`完整执行 |
+
+来源：[comm_async.py](/fastfold/distributed/comm_async.py#L66-L127)，[msa.py](/fastfold/model/fastnn/msa.py#L59-L72)，[triangle.py](/fastfold/model/fastnn/triangle.py#L40-L56)
+
+## Evoformer块中的DAP数据流
+
+将所有原语组合起来，单个Evoformer块执行以下精确的通信序列：
+
+```mermaid
+flowchart TD
+    A["Input: m (MSA), z (Pair)"] --> B["scatter(m, dim=1)\nscatter(z, dim=1)"]
+    B --> C["MSACore(m, z)"]
+    C --> D["row_to_col(m)\n[sync all-to-all]"]
+    D --> E["OutProductMean(m) → z"]
+    E --> F["All_to_All_Async(m, 1, 2)\n[initiate async]"]
+    F --> G["PairCore(z)\n[overlaps with a2a]"]
+    G --> H["All_to_All_Async_Opp(m, work, 1, 2)\n[complete async]"]
+    H --> I["gather(m), gather(z)"]
+    I --> J["Output: m, z"]
+
+    style F fill:#e8f5e9
+    style G fill:#e8f5e9
+```
+
+在`MSACore`内部，一次内部的`row_to_col`（同步all-to-all）在行注意力和列注意力之间将MSA表征从行并行转换为列并行。在`PairCore`内部，发生三次轴向转置操作：传入三角形乘法前的`row_to_col`，起始节点三角形注意力前的`col_to_row`，以及结束节点注意力后的最终`col_to_row`。`PairCore`内部的每个`row_to_col` / `col_to_row`均为同步all-to-all，因为pair堆栈的操作是顺序执行的，没有重叠机会。
+
+<CgxTip>异步all-to-all重叠是Evoformer中影响最大的通信优化。当pair堆栈的计算时间超过all-to-all传输时间时（这在长序列中很典型），all-to-all实际上变得免费。这就是为什么`All_to_All_Async`被应用于MSA张量而`PairCore`同时运行的原因——MSA all-to-all与pair计算处理的是独立的数据。</CgxTip>
+
+来源：[evoformer.py](/fastfold/model/fastnn/evoformer.py#L30-L91)，[msa.py](/fastfold/model/fastnn/msa.py#L140-L151)，[triangle.py](/fastfold/model/fastnn/triangle.py#L241-L253)
+
+## Autograd对偶性：前向-反向求逆
+
+`comm.py`中的每个通信原语均被实现为`torch.autograd.Function`，其反向传播是其前向传播的**精确逆运算**。这并非巧合——这是DAP的结构性要求。在前向传播期间，数据被切分和转置以匹配每个子操作的并行布局。在反向传播期间，梯度必须遵循相反的路径：`scatter`的反向传播是`gather`，`gather`的反向传播是`scatter`，`all_to_all(in_dim, out_dim)`的反向传播是`all_to_all(out_dim, in_dim)`。
+
+| 前向操作 | 反向操作 | 数学依据 |
+|---|---|---|
+| `Scatter.forward` → `_split` | `Scatter.backward` → `_gather` | 部分梯度之和 = 完整梯度 |
+| `Gather.forward` → `_gather` | `Gather.backward` → `_split` | 局部梯度 = 完整梯度之分片 |
+| `All_to_All.forward` → `_all_to_all(in, out)` | `All_to_All.backward` → `_all_to_all(out, in)` | All-to-all在维度交换下自逆 |
+| `Reduce.forward` → `_reduce` (all-reduce SUM) | `Reduce.backward` → 恒等(Identity) | 求和为线性操作；梯度无损传递 |
+| `Copy.forward` → 恒等(Identity) | `Copy.backward` → `_reduce` | 前向复制 → 反向归约求和 |
+
+`Reduce`和`Copy`函数是用于权重同步的辅助原语。`Copy`在前向传播中是一个无操作（输入已被复制），但在反向传播中归约梯度以确保跨rank一致性。`Reduce`在前向传播中执行all-reduce，并在反向传播中让梯度无损传递，用于必须在所有rank上相同的输出。
+
+来源：[comm.py](/fastfold/distributed/comm.py#L68-L143)，[comm.py](/fastfold/distributed/comm.py#8-L192-L203)
+
+## 填充与整除性
+
+所有scatter、gather和all-to-all操作均要求被切分的维度可被`world_size`整除。`core.py`中的`ensure_divisibility`断言在`_split`层强制执行了这一点。在Evoformer中，此要求通过计算`padding_size = (seq_length / dap_size + 1) * dap_size - seq_length`并在初始scatter前对MSA和pair张量进行零填充来处理。在最终gather之后，填充被切片剥离：`m = m[:, :-padding_size, :]`和`z = z[:-padding_size, :-padding_size, :]`。这确保了无论序列长度如何，昂贵的集合通信操作都不会遇到整除性错误。
+
+<CgxTip>在调试DAP通信问题时，请验证scatter维度在入口前已被正确填充，且填充在最终gather后被剥离。此处的不匹配将悄无声息地产生错误结果而非抛出错误，因为gather在切片前会重组包含填充在内的所有块。</CgxTip>
+
+来源：[core.py](/fastfold/distributed/core.py#L7-L9)，[evoformer.py](/fastfold/model/fastnn/evoformer.py#L40-L50)
+
+## API参考
+
+### 同步原语 (`comm.py`)
+
+| 函数 | 签名 | 描述 |
+|----------|-----------|-------------|
+| `scatter` | `(input: Tensor, dim: int = -1) → Tensor` | 沿`dim`切分，返回本地rank的块 |
+| `gather` | `(input: Tensor, dim: int = -1) → Tensor` | 沿`dim`全收集，拼接 |
+| `reduce` | `(input: Tensor) → Tensor` | 跨张量并行组的全归约求和 |
+| `copy` | `(input: Tensor) → Tensor` | 前向传播为恒等，反向传播为全归约 |
+| `col_to_row` | `(input_: Tensor) → Tensor` | All-to-all `in_dim=1, out_dim=2` |
+| `row_to_col` | `(input_: Tensor) → Tensor` | All-to-all `in_dim=2, out_dim=1` |
+
+### 异步原语 (`comm_async.py`)
+
+| 函数 | 签名 | 描述 |
+|----------|-----------|-------------|
+| `gather_async` | `(input: Tensor, dim: int) → (Tensor, Work)` | 发起异步全收集 |
+| `gather_async_opp` | `(output: Tensor, work, dim: int) → Tensor` | 等待 + 重排异步gather结果 |
+| `All_to_All_Async.apply` | `(input_, in_dim, out_dim) → (Tensor, Work)` | 发起异步all-to-all |
+| `All_to_All_Async_Opp.apply` | `(output, work, in_dim, out_dim) → Tensor` | 等待 + 重排异步all-to-all结果 |
+| `broadcast_sync` / `broadcast_async` | `(src, tensor, host) → ...` | 同步 / 异步广播 |
+
+所有异步原语均返回一个`(tensor, work_handle)`元组。在调用对应的`_opp`函数传入work句柄之前，张量的内容是**未定义**的。
+
+来源：[comm.py](/fastfold/distributed/comm.py#L85-L189)，[comm_async.py](/fastfold/distributed/comm_async.py#L66-L199)，[__init__.py](/fastfold/distributed/__init__.py#L1-L7)
+
+## 相关主题
+
+- 这些操作所基于的基础原语记录在[DAP通信原语](9-dap-communication-primitives)中。
+- 异步重叠的理念与分阶段操作模式在[对偶异步操作](10-duality-async-operation)中阐述。
+- 关于使用这些原语的模型级编排，请参阅[FastNN模块设计](6-fastnn-module-design)和[内存高效分块执行](8-memory-efficient-chunked-execution)。
+
+---
+
+## 数据处理流水线
+
+- [深入解析/数据处理流水线/面向 MSA 搜索的 Ray 工作流](https://zread.ai/hpcaitech/FastFold/12-ray-workflow-for-msa-search)
+
+---
+slug:12-ray-workflow-for-msa-search
+blog_type:normal
+---
+
+
+FastFold 使用 **Ray Workflow** 编排的 DAG（有向无环图）替代了 AlphaFold2 顺序执行的 MSA 搜索流水线，该 DAG 以声明式同时表达了依赖顺序与并行性。通过将每次生物信息学工具的调用建模为 Ray 远程函数节点，独立的搜索得以并发执行，而具有依赖关系的阶段（例如，MSA 生成后的模板搜索）则被自动排序——这显著减少了数据预处理瓶颈的实际耗时。
+
+## 架构概述
+
+该工作流系统分为三层：**工作流模板** 负责组合端到端的 MSA 搜索 DAG，**任务工厂** 负责生成封装了生物信息学工具的独立 Ray 函数节点，**数据工具** 则是调用 HMMER/HH-suite 二进制文件的子进程级运行器。这种分离确保了工作流拓扑、节点配置和工具执行能够独立测试与扩展。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     工作流模板                          │
+│  FastFoldDataWorkFlow          FastFoldMultimerDataWorkFlow    │
+│  (单体: HHSearch 路径)      (多聚体: HmmSearch 路径)     │
+└──────────────┬──────────────────────────┬──────────────────────┘
+              "             │                          │
+               ▼                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       任务工厂                            │
+│  JackHmmerFactory  HHBlitsFactory  HHSearchFactory             │
+│  HmmSearchFactory  HHfilterFactory  (基类: TaskFactory)        │
+│  ─ gen_node() → ray.remote FunctionNode with .bind()           │
+└──────────────┬──────────────────────────┬──────────────────────┘
+"             │                          │
+               ▼                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     数据工具 (子进程)                     │
+│  Jackhmmer  HHBlits  HHSearch  Hmmsearch  Hmmbuild             │
+│  ─ query() → subprocess.Popen → parse output                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+顶层的 `batch_run` 编排器将组合好的 DAG 提交至 Ray 的工作流运行时，由运行时自动处理调度、检查点与恢复。
+
+来源: [fastfold_data_workflow.py](/fastfold/workflow/template/fastfold_data_workflow.py#L1-L170), [fastfold_multimer_data_workflow.py](/fastfold/workflow/template/fastfold_multimer_data_workflow.py#L1-L193), [task_factory.py](/fastfold/workflow/factory/task_factory.py#L1-L51)
+
+## 单体 MSA 搜索 DAG
+
+`FastFoldDataWorkFlow` 为单链结构预测构建了一个四阶段的 DAG。其关键洞察在于**阶段 2、3 和 4 彼此独立**，并在阶段 1 完成后并行执行，这利用了在 PDB70 上运行 HHSearch、在 MGnify 上运行 JackHmmer 以及在 BFD 上运行 HHBlits 互不存在数据依赖——它们仅依赖于 UniRef90 结果这一事实。
+
+```mermaid
+flowchart TD
+    FASTA["FASTA 输入"] --> S1
+
+    subgraph Stage1["阶段 1: UniRef90 MSA"]
+        S1["JackHmmer<br/>UniRef90<br/>→ uniref90_hits.a3m"]
+    end
+
+    S1 --> S2
+    S1 -.->|并行| S3
+    S1 -.->|并行| S4
+
+    subgraph Parallel["阶段 2-4: 并行分支"]
+        S2["HHSearch<br/>PDB70<br/>→ pdb70_hits.hhr"]
+        S3["JackHmmer<br/>MGnify<br/>→ mgnify_hits.a3m"]
+        S4["HHBlits<br/>BFD<br/>→ bfd_uniref_hits.a3m"]
+    end
+
+    S2 --> BATCH["batch_run()"]
+    S3 --> BATCH
+    S4 --> BATCH
+```
+
+`run()` 方法通过工厂调用生成节点，并利用 `after` 参数显式表达依赖关系，从而构建此 DAG：
+
+| 步骤 | 工具 | 数据库 | 输出 | 依赖于 |
+|------|------|----------|--------|------------|
+| 1 | JackHmmer | UniRef90 | `uniref90_hits.a3m` | FASTA 输入 |
+| 2 | HHSearch | PDB70 | `pdb70_hits.hhr` | 步骤 1 输出 |
+| 3 | JackHmmer | MGnify | `mgnify_hits.a3m` | FASTA 输入 (并行) |
+| 4 | HHBlits / JackHmmer | BFD | `bfd_uniref_hits.a3m` | FASTA 输入 (并行) |
+
+当 `use_small_bfd=True` 时，阶段 4 会从 `HHBlitsFactory` 切换为指向 small BFD 变体的 `JackHmmerFactory`，且输出格式更改为 Stockholm (`.sto`)。
+
+来源: [fastfold_data_workflow.py](/fastfold/workflow/template/fastfold_data_workflow.py#L121-L169)
+
+## 多聚体 MSA 搜索 DAG
+
+`FastFoldMultimerDataWorkFlow` 扩展了单体流水线，具有两个关键差异：**HmmSearch 替代了 HHSearch** 用于模板搜索（使用 `pdb_seqres` 代替 `pdb70`），并新增了 **在 UniProt 上运行 JackHmmer** 的阶段用于链间 MSA 配对。所有输出格式默认为 Stockholm (`.sto`)，以支持多聚体特征处理路径。
+
+```mermaid
+flowchart TD
+    FASTA["FASTA 输入"] --> S1
+
+    subgraph Stage1["阶段 1: UniRef90 MSA"]
+        S1["JackHmmer<br/>UniRef90<br/>→ uniref90_hits.sto"]
+    end
+
+    S1 --> S2
+    S1 -.->|并行| S3
+    S1 -.->|并行| S4
+    FASTA -.->|并行| S5
+
+    subgraph Parallel["阶段 2-5: 并行分支"]
+        S2["HmmSearch<br/>pdb_seqres<br/>→ hmm_output.sto"]
+        S3["JackHmmer<br/>MGnify<br/>→ mgnify_hits.sto"]
+        S4["HHBlits / JackHmmer<br/>BFD<br/>→ bfd_uniref_hits.a3m/.sto"]
+        S5["JackHmmer<br/>UniProt<br/>→ uniprot_hits.sto"]
+    end
+
+    S2 --> BATCH["batch_run()"]
+    S3 --> BATCH
+    S4 --> BATCH
+    S5 --> BATCH
+```
+
+| 步骤 | 工具 | 数据库 | 输出 | 依赖于 |
+|------|------|----------|--------|------------|
+| 1 | JackHmmer | UniRef90 | `uniref90_hits.sto` | FASTA 输入 |
+| 2 | HmmSearch | pdb_seqres | `hmm_output.sto` | 步骤 1 输出 |
+| 3 | JackHmmer | MGnify | `mgnify_hits.sto` | FASTA 输入 (并行) |
+| 4 | HHBlits / JackHmmer | BFD | `bfd_uniref_hits.*` | FASTA 输入 (并行) |
+| 5 | JackHmmer | UniProt | `uniprot_hits.sto` | FASTA 输入 (并行) |
+
+来源: [fastfold_multimer_data_workflow.py](/fastfold/workflow/template/fastfold_multimer_data_workflow.py#L139-L193)
+
+## TaskFactory：节点生成模式
+
+工作流中的每个生物信息学工具都由继承自 `TaskFactory` 的**工厂类**封装。工厂模式具有双重目的：它通过 `isReady()` 在构造时验证配置的完整性，并通过 `gen_node()` 生成可组合为 DAG 的 Ray 可序列化 `FunctionNode` 实例。
+
+`TaskFactory` 基类定义了如下契约：
+
+```python
+class TaskFactory:
+    keywords = []  # 每个子类所需的配置键
+
+    def gen_node(self, after=None, *args, **kwargs) -> FunctionNode:
+        raise NotImplementedError  # 必须被重写
+
+    def isReady(self):
+        # 验证所有声明的关键字是否存在于 self.config 中
+```
+
+每个具体的工厂在 `gen_node()` 内部遵循相同的三步模式：**验证** 配置就绪状态，**实例化** 底层数据工具运行器，以及**定义** 一个 `@ray.remote` 函数（该函数在其闭包中捕获运行器与 I/O 路径），随后通过 `.bind(after)` 返回绑定的节点。
+
+### 工厂注册表
+
+| 工厂 | 关键字 | 数据工具 | 输入格式 | 输出格式 |
+|---------|----------|-----------|--------------|---------------|
+| `JackHmmerFactory` | `binary_path`, `database_path`, `n_cpu`, `uniref_max_hits` | `Jackhmmer` | FASTA 路径 | a3m 或 sto |
+| `HHBlitsFactory` | `binary_path`, `databases`, `n_cpu` | `HHBlits` | FASTA 路径 | a3m |
+| `HHSearchFactory` | `binary_path`, `databases`, `n_cpu` | `HHSearch` | a3m 字符串 | hhr |
+| `HmmSearchFactory` | `binary_path`, `hmmbuild_binary_path`, `database_path`, `n_cpu` | `Hmmsearch` | sto 字符串 | sto |
+| `HHfilterFactory` | `binary_path` | (内联子进程) | fasta 路径 | fasta |
+
+<CgxTip>`gen_node()` 中的 `after` 参数是**表达 DAG 依赖关系的唯一机制**。没有 `after` 依赖（或 `after=None`）的节点有资格立即并行执行。`batch_run()` 函数会同时提交所有独立的根节点。</CgxTip>
+
+来源: [task_factory.py](/fastfold/workflow/factory/task_factory.py#L8-L51), [jackhmmer.py](/fastfold/workflow/factory/jackhmmer.py#L12-L44), [hhblits.py](/fastfold/workflow/factory/hhblits.py#L9-L29), [hhsearch.py](/fastfold/workflow/factory/hhsearch.py#L11-L42), [hmmsearch.py](/fastfold/workflow/factory/hmmsearch.py#L14-L41), [hhfilter.py](/fastfold/workflow/factory/hhfilter.py#L10-L33)
+
+## DAG 执行：batch_run 与 Ray Workflow
+
+`batch_run` 函数是执行入口，负责将组合好的 DAG 提交至 Ray 的工作流运行时：
+
+```python
+def batch_run(workflow_id: str, dags: List[FunctionNode]) -> None:
+    @ray.remote
+    def batch_dag_func(dags) -> None:
+        return
+    batch = batch_dag_func.bind(dags)
+    workflow.run(batch, workflow_id=workflow_id)
+```
+
+该函数将 DAG 根节点列表封装为一个远程函数，并调用 `workflow.run()`，从而提供**持久执行**能力——Ray 会将中间结果检查点化，这样一旦某节点失败，在重试时仅重新计算该节点（及其下游依赖项）。工作流由基于时间戳的 `workflow_id` 标识，且在每次调用前，先前运行产生的过期工作流状态会被显式取消并删除。
+
+<CgxTip>Ray 工作流存储配置为 `file:///tmp/ray/<timestamp>/workflow_data`。此本地文件系统存储适用于单节点工作流；对于多节点集群，请通过工作流模板 `run()` 方法中的 `storage_dir` 参数配置共享存储后端（例如 S3）。</CgxTip>
+
+来源: [workflow_run.py](/fastfold/workflow/workflow_run.py#L1-L15), [fastfold_data_workflow.py](/fastfold/workflow/template/fastfold_data_workflow.py#L121-L138)
+
+## 与推理流水线的集成
+
+该工作流通过推理入口的 `--enable_workflow` CLI 标志激活。启用后，`FastFoldDataWorkFlow`（单体）或 `FastFoldMultimerDataWorkFlow`（多聚体）将替代传统数据流水线中顺序执行的 `AlignmentRunner` / `AlignmentRunnerMultimer`：
+
+```python
+if args.enable_workflow:
+    alignment_runner = FastFoldDataWorkFlow(...)     # 或 FastFoldMultimerDataWorkFlow
+else:
+    alignment_runner = data_pipeline.AlignmentRunner(...)
+```
+
+这两条路径会在相同的 `alignment_dir` 目录布局下生成一致的比对输出文件——工作流仅仅是通过利用并行性来加速计算过程。下游的 `DataPipeline.process_fasta()` 和 `FeaturePipeline.process_features()` 在消费这些比对文件时，不关心它们是由哪条路径生成的，处理方式完全一致。
+
+来源: [inference.py](/inference.py#L40-L41), [inference.py](/inference.py#L184-L276)
+
+## 工作流生命周期
+
+每次工作流调用都遵循以下生命周期：
+
+1. **初始化** — 若 Ray 尚未运行，则使用工作流存储初始化 Ray；取消并删除过期的工作流状态
+2. **DAG 构建** — 工厂 `gen_node()` 调用通过 `after` 参数生成带有依赖边的 `FunctionNode` 实例
+3. **提交** — `batch_run()` 封装所有根节点，并使用唯一的 `workflow_id` 调用 `workflow.run()`
+4. **执行** — Ray 在可用 CPU 间并行调度独立节点；依赖节点等待上游完成
+5. **完成** — 所有比对文件写入 `alignment_dir`；Ray 工作流数据持久化于 `/tmp/ray/` 以备潜在恢复
+
+`no_cpus` 参数控制每次工具调用的 CPU 分配。当为 `None` 时，默认为 `multiprocessing.cpu_count()`，即将所有可用核心分配给单个工具。对于包含并行分支的工作流，你可能需要将该值设置得更低，以避免多个工具子进程同时运行时出现超订。
+
+来源: [fastfold_data_workflow.py](/fastfold/workflow/template/fastfold_data_workflow.py#L121-L170)
+
+## 扩展工作流
+
+要向工作流中添加新的 MSA 工具，请实现这三层模式：
+
+1. **数据工具** — 在 `fastfold/data/tools/` 中创建一个运行器类，通过 `subprocess.Popen` 封装二进制文件，并实现 `query()`
+2. **任务工厂** — 在 `fastfold/workflow/factory/` 中创建一个继承 `TaskFactory` 的工厂，定义 `keywords` 以及包含 `@ray.remote` 内部函数的 `gen_node()`
+3. **工作流模板** — 将该工厂作为类属性添加到相应的工作流模板中，在 `run()` 方法中以正确的 `after` 依赖将其接入，并将其节点包含在 `batch_run()` DAG 列表中
+
+工厂的 `gen_node()` 必须通过 `func.bind(after)` 返回一个 `FunctionNode`，且底层数据工具的 `query()` 方法必须在 `tmpdir_manager` 上下文中处理所有文件 I/O，以确保失败时进行清理。
+
+来源: [task_factory.py](/fastfold/workflow/factory/task_factory.py#L8-L51), [jackhmmer.py](/fastfold/workflow/factory/jackhmmer.py#L12-L44)
+
+如需进一步了解工作流生成的比对结果如何被消费，请参阅 [Feature Pipeline and Transforms](13-feature-pipeline-and-transforms)。如需了解基于此工作流的多聚体特定数据处理，请参阅 [Multimer Data Processing](14-multimer-data-processing)。
+
+---
+
+- [深入解析/数据处理流水线/特征流水线与变换](https://zread.ai/hpcaitech/FastFold/13-feature-pipeline-and-transforms)
+
+---
+slug:13-feature-pipeline-and-transforms
+blog_type:normal
+---
+
+
+FastFold的特征流水线是原始生物信息学比对与Evoformer网络所消耗的张量表示之间的关键桥梁。它编排了一个两阶段架构：**DataPipeline**从MSA/模板搜索输出中组装NumPy特征字典，然后**FeaturePipeline**通过一个可组合的函数变换链，将这些字典转换为固定形状的PyTorch张量。这种分离确保了耗时的I/O约束特征组装只需运行一次，而GPU加速的变换则可以在循环迭代期间重新应用，无需冗余计算。
+
+## 两阶段架构
+
+端到端的特征处理流程遵循严格的生产者-消费者模式。**DataPipeline**阶段在NumPy空间中运行——解析FASTA输入，读取比对文件（`.a3m`、`.sto`、`.hhr`），合并MSA行并进行去重，以及从PDB命中中构建模板特征。**FeaturePipeline**阶段随后接收该`FeatureDict`（一个`Mapping[str, np.ndarray]`），将其转换为`TensorDict`（一个`Dict[str, torch.Tensor]`），并应用一系列分阶段的变换，逐步对特征进行重塑、增强和填充，使其达到网络就绪的形式。
+
+```mermaid
+flowchart TB
+    subgraph Phase1["DataPipeline (NumPy)"]
+        A[FASTA / PDB / mmCIF] --> B[parse MSA alignments]
+        B --> C[make_sequence_features]
+        B --> D[make_msa_features]
+        B --> E[make_template_features]
+        C --> F[merge FeatureDict]
+        D --> F
+        E --> F
+    end
+
+    subgraph Phase2["FeaturePipeline (PyTorch)"]
+        F --> G["np_to_tensor_dict<br/>filter by feature_names"]
+        G --> H[Non-ensembled Transforms]
+        H --> I["Ensembled Transforms<br/>× (recycling_iters + 1)"]
+        I --> J[Fixed-shape TensorDict]
+    end
+
+    style Phase1 fill:#e8f4e8,stroke:#2d7d2d
+    style Phase2 fill:#e8e8f4,stroke:#2d2d7d
+```
+
+来源：[feature_pipeline.py](/fastfold/data/feature_pipeline.py#L27-L129), [data_pipeline.py](/fastfold/data/data_pipeline.py#L784-L960)
+
+## DataPipeline：原始特征组装
+
+`DataPipeline`类负责从驻留在磁盘上的比对数据中构建初始`FeatureDict`。它暴露了三个主要入口点——`process_fasta`、`process_mmcif`和`process_pdb`——每个入口点都遵循相同的三步组装模式：**序列特征** → **模板特征** → **MSA特征**，通过字典解包进行合并。
+
+| 方法 | 输入来源 | 序列来源 | 用例 |
+|---|---|---|---|
+| `process_fasta` | FASTA文件 + 比对目录 | 从FASTA字符串解析 | 标准推理 |
+| `process_mmcif` | mmCIF对象 + 比对目录 | `chain_to_seqres`映射 | 来自PDB的训练 |
+| `process_pdb` | PDB文件 + 比对目录 | `protein.from_pdb_string` | 蒸馏训练 |
+
+### 序列特征构建
+
+`make_sequence_features`从输入的氨基酸字符串构建逐残基的特征集：独热编码的`aatype`（形状为`[N_res, 22]`）、`residue_index`数组、跨残基广播的`seq_length`，以及元数据字段（`domain_name`、`sequence`）。这些构成了所有后续变换增强所依赖的身份骨架。
+
+来源：[data_pipeline.py](/fastfold/data/data_pipeline.py#L90-L109), [data_pipeline.py](/fastfold/data/data_pipeline.py#L918-L960)
+
+### MSA特征构建
+
+`make_msa_features`接收一个已解析的`Msa`对象列表（来自`.a3m`和`.sto`文件），并跨所有MSA来源执行**序列去重**。每个唯一序列通过`HHBLITS_AA_TO_ID`映射为整数残基索引，并收集其删除矩阵行和物种标识符。输出特征为`msa`（`[N_seq, N_res]`）、`deletion_matrix_int`、`num_alignments`和`msa_species_identifiers`。
+
+去重至关重要：当多个比对数据库（UniRef90、MGnify、BFD）包含重叠的命中时，`seen_sequences`确保每个序列仅出现一次，保留首次出现的删除统计信息。
+
+来源：[data_pipeline.py](/fastfold/data/data_pipeline.py#L205-L242)
+
+### 模板特征构建
+
+`make_template_features`委托给`TemplateHitFeaturizer`或`HmmsearchHitFeaturizer`，以从PDB命中中提取结构模板。当不存在命中（或未提供特征化器）时，`empty_template_feats`返回具有正确秩的零填充数组：`template_aatype`为`[0, N_res]`，`template_all_atom_positions`为`[0, N_res, 37, 3]`，`template_sum_probs`为`[0, 1]`。这种优雅降级确保了流水线绝不会在缺乏结构模板的新颖序列上失败。
+
+来源：[data_pipeline.py](/fastfold/data/data_pipeline.py#L47-L87)
+
+## FeaturePipeline：张量转换与变换编排
+
+`FeaturePipeline`类是一个轻量级的配置容器，其唯一的公共方法`process_features`委托给`np_example_to_features`。该函数执行三个顺序操作：
+
+1. **配置解析**通过`make_data_config`完成，它深拷贝模型配置，从实际序列长度解析`crop_size`，并通过组合`unsupervised_features`、`template_features`（若`use_templates`）和`supervised_features`（若`mode_cfg.supervised`）来组装特征名称列表。
+
+2. **NumPy到张量的转换**通过`np_to_tensor_dict`完成，它不仅将数组转换为张量，**还过滤**特征字典，使其仅包含已解析的`feature_names`列表中指定的特征。此过滤至关重要——它会剥离那些构建时需要但模型不会使用的中间特征。
+
+3. **变换应用**通过`input_pipeline.process_tensors_from_config`（单体）或`input_pipeline_multimer.process_tensors_from_config`（多聚体）完成，并包裹在`torch.no_grad()`中。在Habana加速器上，额外的`hmp.disable_casts()`上下文会在特征处理期间防止不需要的混合精度类型转换。
+
+```python
+# 核心调度逻辑
+if is_multimer:
+    input_pipeline_fn = input_pipeline_multimer.process_tensors_from_config
+else:
+    input_pipeline_fn = input_pipeline.process_tensors_from_config
+
+with torch.no_grad():
+    features = input_pipeline_fn(tensor_dict, cfg.common, cfg[mode])
+```
+
+<CgxTip>删除矩阵在NumPy与PyTorch的边界处经历从`int32` → `float32`的类型提升：`np_example["deletion_matrix"] = np_example.pop("deletion_matrix_int").astype(np.float32)`。这种重命名（`deletion_matrix_int` → `deletion_matrix`）必须在张量转换之前发生，因为下游变换期望浮点类型的键。</CgxTip>
+
+来源：[feature_pipeline.py](/fastfold/data/feature_pipeline.py#L73-L108), [feature_pipeline.py](/fastfold/data/feature_pipeline.py#L111-L129)
+
+## 变换流水线：非集成阶段
+
+变换被组织为两个阶段——**非集成**（应用一次）和**集成**（每次循环迭代应用一次）。非集成变换处理数据类型归一化、残基类型校正，以及决不能在集成成员之间变化的确定性特征构建。
+
+| 变换 | 目的 | 关键输出特征 |
+|---|---|---|
+| `cast_to_64bit_ints` | 将所有`int32`归一化为`int64` | (原位数据类型变更) |
+| `correct_msa_restypes` | 将HHblits残基索引重新排序为内部顺序 | `msa`（重索引），`*profile*`（置换） |
+| `squeeze_features` | 移除独热输入中的单例维度 | `aatype`（argmax降为索引），`seq_length`（标量） |
+| `randomly_replace_msa_with_unknown(0.0)` | MSA破坏（推理时设为0.0禁用） | `msa`，`aatype`（当比例=0时不变） |
+| `make_seq_mask` | 构建逐残基的有效性掩码 | `seq_mask` |
+| `make_msa_mask` | 构建逐MSA条目的有效性掩码 | `msa_mask`，`msa_row_mask` |
+| `make_hhblits_profile` | 计算MSA位置频率谱 | `hhblits_profile` |
+
+当启用模板时（`common_cfg.use_templates`），会追加三个额外的变换：`fix_templates_aatype`（通过`MAP_HHBLITS_AATYPE_TO_OUR_AATYPE`将独热模板残基重新映射为整数索引）、`make_template_mask`和`make_pseudo_beta("template_")`。如果请求了模板扭转角，还会应用`atom37_to_torsion_angles("template_")`。
+
+对于有监督模式，一组几何变换构建了真实结构目标：`make_atom14_positions`、`atom37_to_frames`、`atom37_to_torsion_angles("")`、`make_pseudo_beta("")`、`get_backbone_frames`和`get_chi_angles`。
+
+来源：[input_pipeline.py](/fastfold/data/input_pipeline.py#L23-L67)
+
+## 变换流水线：集成阶段
+
+集成变换是数据增强和形状塑造阶段。它们被组合并在每次循环迭代时应用一次（加上初始传递的一次），生成一个特征字典列表，供模型在循环期间遍;历。
+
+```mermaid
+flowchart LR
+    A[sample_msa_distillation] --> B[s=sample_msa]
+    B --> C+{masked_msa<br/>enabled?}
+    C -->|Yes| D[make_masked_msa]
+    C -->|No| E+{msa_cluster_features?}
+    D --> E
+/E -->|Yes| F[nearest_neighbor_clusters]
+    F --> G[summarize_clusters]
+    E -->|No| H{max_extra_msa?}
+    G --> H
+    H -->|> 0| I[crop_extra_msa]
+    H -->|= 0| J[delete_extra_msa]
+    I --> K[make_msa_feat]
+    J --> K
+    K --> L{fixed_size?}
+    L -->|Yes| M[select_feat → random_crop_to_size → make_fixed_size]
+    L -->|No| N[crop_templates]
+```
+
+### MSA采样与聚类
+
+**`sample_msa`**是最具影响力的集成变换。它随机置换MSA行（将查询序列保留在索引0处），选择前`max_msa_clusters`行作为主MSA，并将其余行存储为`extra_*`特征（例如`extra_msa`、`extra_deletion_matrix`）。这种划分是Evoformer双轨架构的基础——“聚类MSA”馈入主MSA表示，而“额外MSA”由单独的栈处理。
+
+当`resample_msa_in_recycling`为`False`时，MSA采样种子固定为`ensemble_seed`，确保在所有循环迭代中使用相同的MSA子集。这种确定性对推理的可复现性至关重要。
+
+**`nearest_neighbor_clusters`**通过优化的矩阵乘法（`[N_extra, N_res×23] × [N_cluster, N_res×23]^T`）计算加权汉明一致性得分，将每个额外MSA序列分配给其最近的聚类MSA序列。其结果`extra_cluster_assignment`驱动后续的`summarize_clusters`变换，该变换聚合每个聚类的谱和删除统计信息。
+
+来源：[input_pipeline.py](/fastfold/data/input_pipeline.py#L70-L150), [data_transforms.py](/fastfold/data/data_transforms.py#L183-L208), [data_transforms.py](/fastfold/data/data_transforms.py#L280-L366)
+
+### MSA特征工程
+
+**`make_msa_feat`**构建Evoformer实际消耗的拼接特征向量。它产生两个关键张量：
+
+- **`msa_feat`** `[N_seq, N_res, C_msa]`：独热MSA（23类）、二值化删除指示器`clip(deletion_matrix, 0, 1)`和反正切缩放的删除值`atan(d/3) × (2/π)`的拼接。当存在聚类特征时，会追加`cluster_profile`和`cluster_deletion_mean`。
+- **`target_feat`** `[N_res, C_target]`：`between_segment_residues`指示器和21类独热`aatype`的拼接。
+
+反正切缩放`atan(d/3) × (2/π)`将删除概率从`[0, ∞)`映射到`[0, 1)`，提供了一个有界且平滑变化的特征，保留了弱删除和强删除位置之间的相对幅度差异。
+
+来源：[data_transforms.py](/fastfold/data/data_transforms.py#L524-L571)
+
+### 固定尺寸填充
+
+**`make_fixed_size`**是最终的形状塑造变换，将所有特征填充到编译模型所需的确定性维度。它使用一个`shape_schema`映射，其中维度占位符（`NUM_RES`、`NUM_MSA_SEQ`、`NUM_EXTRA_SEQ`、`NUM_TEMPLATES`）被解析为具体大小：
+
+| 占位符 | 解析为 |
+|---|---|
+| `NUM_RES` | `crop_size`（来自配置或序列长度） |
+| `NUM_MSA_SEQ` | `pad_msa_clusters` |
+| `NUM_EXTRA_SEQ` | `max_extra_msa` |
+| `NUM_TEMPLATES` | `max_templates` |
+
+每个特征张量使用`torch.nn.functional.pad`进行右填充，以匹配其模式指定的形状。`extra_cluster_assignment`张量被显式跳过，因为它是模型前向传播未使用的中间索引数组。
+
+来源：[data_transforms.py](/fastfold/data/data_transforms.py#L485-L520)
+
+## 几何特征变换
+
+几个变换将原子坐标转换为蒸馏头和结构模块所需的结构表示：
+
+**`atom37_to_frames`**使用`Rigid.from_3_points`为每个残基构建8个刚体组（骨架帧 + 7个侧链chi角帧）。它计算真实帧、用于模糊原子命名的替代帧（7个氨基酸具有可交换的原子名），以及存在掩码。输出包括`rigidgroups_gt_frames` `[N_res, 8, 4, 4]`（齐次变换矩阵）、`rigidgroups_gt_exists`和`rigidgroups_alt_gt_frames`。
+
+**`atom37_to_torsion_angles`**从原子位置计算骨架扭转角（pre-ω、φ、ψ）和侧链chi角。它使用`Rigid.from_3_points`构造放置每个扭转帧，然后从第四个原子的局部坐标中提取sin/cos表示。输出`torsion_angles_sin_cos` `[N_res, 7, 2]`将所有7个角编码为（sin，cos）对，`alt_torsion_angles_sin_cos`提供模糊chi角的π周期替代表示。
+
+**`make_atom14_masks`** / **`make_atom14_positions`**创建更密集的14原子表示（与标准的37原子格式相比），包括两种表示之间的映射索引，并通过置换矩阵处理原子重命名歧义。
+
+来源：[data_transforms.py](/fastfold/data/data_transforms.py#L774-L910), [data_transforms.py](/fastfold/data/data_transforms.py#L941-L1106), [data_transforms.py](/fastfold/data/data_transforms.py#L587-L771)
+
+## 组合模式与变换调度
+
+所有变换都遵循统一的**柯里化函数**签名：每个变换接受一个`protein`特征字典作为其第一个参数，并返回修改后的字典。配置参数通过`@curry1`装饰器进行部分应用，将`f(protein, arg)`转换为`f(arg)(protein)`。这使得变换可以在流水线构建时进行配置，并在运行时统一应用。
+
+`input_pipeline.py`中的`compose`函数将一系列已配置的变换规约（reduce）为一个单一的 callable：
+
+```python
+@data_transforms.curry1
+def compose(x, fs):
+    for f in fs:
+        x = f(x)
+    return x
+```
+
+`process_tensors_from_config`通过`compose`应用一次非集成变换，然后使用`map_fn`将(集成变换组合)映射到`torch.arange(num_recycling + 1)`上，生成一个特征字典列表——3每次循环迭代一个。每个集成成员接收一个`ensemble_index`字段以实现可追溯性。
+
+<CgxTip>`@curry1`装饰器是变换架构的关键。没有它，`compose`无法统一迭代具有异构参数签名的变换。该装饰器的实现使用`@wraps(f)`保留函数元数据，并返回`lambda x: f(x, *args, **kwargs)`——因此`sample_msa(max_seq=512, keep_extra=True)`返回一个仅等待`protein`字典的函数。</CgxTip>
+
+来源：[data_transforms.py](/fastfold/data/data_transforms.py#L72-L78), [input_pipeline.py](/fastfold/data/input_pipeline.py#L153-L209)
+
+## 完整变换序列摘要
+
+下表按执行顺序枚举了默认单体推理流水线中的每个变换：
+
+| # | 阶段 | 变换 | 条件 |
+|---|---|---|---|
+| 1 | 非集成 | `cast_to_64bit_ints` | 始终 |
+| 2 | 非集成 | `correct_msa_restypes` | 始终 |
+| 3 | 非集成 | `squeeze_features` | 始终 |
+| 4 | 非集成 | `randomly_replace_msa_with_unknown(0.0)` | 始终 |
+| 5 | 非集成 | `make_seq_mask` | 始终 |
+| 6 | 非集成 | `make_msa_mask` | 始终 |
+| 7 | 非集成 | `make_hhblits_profile` | 始终 |
+| 8 | 非集成 | `fix_templates_aatype` | `use_templates` |
+| 9 | 非集成 | `make_template_mask` | `use_templates` |
+| 10 | 非集成 | `make_pseudo_beta("template_")` | `use_templates` |
+| 11 | 非集成 | `atom37_to_torsion_angles("template_")` | `use_template_torsion_angles` |
+| 12 | 非集成 | `make_atom14_masks` | 始终 |
+| 13 | 集成 | `sample_msa_distillation` | 配置中包含`max_distillation_msa_clusters` |
+| 14 | 集成 | `sample_msa` | 始终 |
+| 15 | 集成 | `make_masked_msa` | 配置中包含`masked_msa` |
+| 16 | 集成 | `nearest_neighbor_clusters` | `msa_cluster_features` |
+| 17 | 集成 | `summarize_clusters` | `msa_cluster_features` |
+| 18 | 集成 | `crop_extra_msa`或`delete_extra_msa` | `max_extra_msa > 0` |
+| 19 | 集成 | `make_msa_feat` | 始终 |
+| 20 | 集成 | `select_feat` → `random_crop_to_size` → `make_fixed_size` | `fixed_size`模式 |
+
+对于多聚体路径，`input_pipeline_multimer.process_tensors_from_config`用其处理配对MSA和跨链特征的多聚体特定变体替换了步骤14的流水线。有关详细信息，请参见[多聚体数据处理](14-multimer-data-processing)。
+
+来源：[input_pipeline.py](/fastfold/data/input_pipeline.py#L23-L150), [feature_pipeline.py](/fastfold/data/feature_pipeline.py#L73-L108)
+
+## 导航
+
+- **上一节**：[用于MSA搜索的Ray工作流](12-ray-workflow-for-msa-search) —— 生成`DataPipeline`消耗的比对文件
+- **下一节**：[多聚体数据处理](14-multimer-data-processing) —— 将此流水线扩展为具有配对MSA的多链复合物
+
+---
+
+- [深入解析/数据处理流水线/多聚体数据处理](https://zread.ai/hpcaitech/FastFold/14-multimer-data-processing)
+
+---
+slug:14-multimer-data-processing
+blog_type:normal
+---
+
+
+FastFold 的多聚体数据处理流水线将单体特征提取工作流进行了扩展，以处理由多条链组成的蛋白质复合物。核心架构挑战在于**跨链 MSA 配对**：当不同的多肽链在同一个生物组装体内共同演化时，必须通过共享的物种标识符对跨链 MSA 进行比对，从而捕获它们之间的演化耦合关系。该流水线统筹协调了逐链特征提取、物种感知 MSA 配对、块对角合并以及多聚体专用的张量变换，最终生成供 Evoformer 使用的特征字典。
+
+## 架构概述
+
+多聚体数据处理系统由三个同心层组成：**比对运行器**使用外部工具（jackhmmer、hhblits、hmmsearch）为每条链发现同源序列；**特征处理层**对跨链 MSA 进行配对与合并；**输入流水线**应用 PyTorch 张量变换以供模型使用。数据从原始 FASTA 输入流经基于 NumPy 的特征工程，随后跨越 NumPy→PyTorch 边界，进入可微变换流水线。
+
+```mermaid
+flowchart TD
+    subgraph Alignment["Alignment Layer (NumPy)"]
+        A[FASTA per chain] --> B[AlignmentRunnerMultimer]
+        B --> C[jackhmmer: UniRef90 / MGnify / UniProt]
+        B --> D[hhblits: BFD+UniRef30]
+        B --> E[hmmsearch: PDB SeqRes]
+    end
+    subgraph FeatureProc["Feature Processing (NumPy)"]
+        F[Per-chain FeatureDicts] --> G[process_unmerged_features]
+        G --> H{_is_homomer_or_monomer?}
+        H -- Yes --> I[Skip pairing]
+        H -- No --> J[create_paired_features]
+        J --> K[deduplicate_unpaired_sequences]
+        K --> L[crop_chains]
+        I --> L
+        L --> M[merge_chain_features]
+        M --> N[process_final]
+    end
+    subgraph Transforms["Input Pipeline (PyTorch)"]
+        O[nonensembled transforms] --> P[ensembled transforms]
+        P --> Q[Ensemble stacking over recycling iters]
+    end
+    C & D & E --> F
+    N --> O
+```
+
+来源: [data_pipeline.py](fastfold/data/data_pipeline.py#L461-L599), [feature_processing_multimer.py](fastfold/data/feature_processing_multimer.py#L50-L84), [input_pipeline_multimer.py](fastfold/data/input_pipeline_multimer.py#L26-L78)
+
+## AlignmentRunnerMultimer：逐链 MSA 搜索
+
+`AlignmentRunnerMultimer` 类与其单体对应物 `AlignmentRunner` 在三个关键方面有所不同。首先，它通过 jackhmmer 增加了 **UniProt 数据库**搜索——UniProt 提供了跨链 MSA 配对所必需的物种标识符。其次，它将针对 `pdb_seqres` 的 hhsearch 替换为 **hmmsearch** 以进行模板检测，这更适用于多聚体模板搜索。第三，它引入了 `uniprot_max_hits`（默认值为 50,000）作为额外的命中上限，反映了复合物预测所需的更大搜索空间。
+
+| 参数 | 单体运行器 | 多聚体运行器 | 原理 |
+|---|---|---|---|
+| UniProt DB | — | jackhmmer | 用于 MSA 配对的物种 ID |
+| PDB 模板搜索 | hhsearch + PDB70 | hmmsearch + PDB SeqRes | 更广的结构覆盖率 |
+| `uniprot_max_hits` | — | 50,000 | 复合物需要更大的搜索空间 |
+| `hmmsearch` 二进制文件 | — | 必需 | 模板命中检测 |
+
+每条链的 FASTA 都会通过比对运行器独立处理，生成逐链的 MSA 命中结果，并存储为 Stockholm/A3M 文件。UniProt MSA 是配对的骨干——其物种标识符（通过 `msa_identifiers.get_identifiers` 解析）作为跨链连接的键。
+
+来源: [data_pipeline.py](fastfold/data/data_pipeline.py#L461-L599), [msa_identifiers.py](fastfold/data/msa_identifiers.py#L25-L91)
+
+## MSA 物种标识符提取
+
+配对机制依赖于从 MSA 序列描述中提取**物种标识符**。`msa_identifiers` 模块使用编译好的正则表达式解析 UniProtKB 格式的头信息（例如 `tr|A0A146SKV9|A0A146SKV9_FUNHE`），以捕获 1-5 个字符的物种助记码。`Identifiers` 数据类将其存储为 `species_id`，并作为跨链配对的分组键。当头信息与 UniProt 模式不匹配时，会返回空的 `species_id`，该序列将被排除在配对之外——它仅保留在合并后 MSA 的未配对（块对角）部分中。
+
+来源: [msa_identifiers.py](fastfold/data/msa_identifiers.py#L25-L91)
+
+## MSA 配对：跨链序列关联
+
+`msa_pairing` 模块实现了多聚体的核心创新：**物种感知 MSA 配对**。`pair_and_merge` 编排器首先检查 `_is_homomer_or_monomer`——如果所有链共享相同的 `entity_id`，则会完全跳过配对，因为相同链的 MSA 关联是显而易见的。对于异聚体，配对过程分为四个阶段：
+
+### 阶段 1：创建配对特征 (`create_paired_features`)
+
+对于每条链，使用 MSA 构建一个 pandas DataFrame，包含以下列：`msa_species_identifiers`、`msa_row`、`msa_similarity`（与查询序列匹配的残基比例）以及 `gap`（空位残基的比例）。序列按物种标识符进行分组。对于在**两条或多条链**中出现的每个物种（并且每个物种的序列数 ≤600，以限制开销），`_match_rows_by_sequence_similarity` 会对行进行配对：将每条链物种组内的序列按与查询序列的相似度排序，然后对前 k 行（k 为各链中的最小计数值）进行位置对齐。仅出现在单条链中的物种将被跳过——它们不提供跨链信号。
+
+### 阶段 2：重排配对行 (`reorder_paired_rows`)
+
+配对行索引按配对中的**链数**（降序）排序，使得全链配对排在最前。在每个组内，行按其索引的乘积（e值排序的代理指标）排序。这种排序确保了信息量最大、完全配对的序列占据最终 MSA 的顶部行。
+
+### 阶段 3：去重 (`deduplicate_unpaired_sequences`)
+
+配对后，未配对的 MSA 中可能包含已存在于配对 MSA 中的序列。`deduplicate_unpaired_sequences` 将配对的 MSA 行转换为哈希集，然后过滤未配对的 MSA 以移除重复项，从而防止信息冗余和空间浪费。
+
+### 阶段 4：合并链特征 (`merge_chain_features`)
+
+这是将逐链特征字典转化为单一复合物级特征字典的步骤。合并策略取决于特征类型：
+
+| 特征类别 | 合并策略 | 形状变换 |
+|---|---|---|
+| `MSA_FEATURES`（未配对） | 通过 `block_diag()` 进行块对角化 | `(N_msa, ΣN_res)`，带有非对角填充 |
+| `MSA_FEATURES`（配对，`_all_seq`） | 沿 `num_res` 维度拼接 | `(N_paired, ΣN_res)` |
+| `SEQ_FEATURES` | 沿 `num_res` 维度拼接 | `(ΣN_res,)` |
+| `TEMPLATE_FEATURES` | 沿 `num_res` 维度拼接 | `(N_tmpl, ΣN_res, ...)` |
+| `CHAIN_FEATURES` | 跨链求和 | 标量 |
+
+在配对模式下，最终的 MSA 通过沿序列轴拼接 `[paired_all_seq, unpaired_block_diag]` 来构建。随后，`_correct_post_merged_feats` 函数生成 `cluster_bias_mask`（确保每个链的查询序列始终包含在聚类采样中）和 `bert_mask`（在 BERT 风格的掩码 MSA 目标中屏蔽非对角块）。
+
+```mermaid
+flowchart LR
+    subgraph Unpaired["Unpaired MSA (Block Diagonal)"]
+        direction TB
+        C1A["Chain A MSA"]
+        C2A["Chain B MSA"]
+    end
+    subgraph Paired["Paired MSA (Concatenated)"]
+        direction TB
+        P1["Paired row 1: A_seq | B_seq"]
+        P2["Paired row 2: A_seq | B_seq"]
+    end
+    Paired --> Final["Final MSA = [Paired; Unpaired]"]
+    Unpaired --> Final
+```
+
+来源: [msa_pairing.py](fastfold/data/msa_pairing.py#L56-L88), [msa_pairing.py](fastfold/data/msa_pairing.py#L181-L232), [msa_pairing.py](fastfold/data/msa_pairing.py#L433-L460), [msa_pairing.py](fastfold/data/msa_pairing.py#L463-L483)
+
+## MSA 裁剪策略
+
+`_crop_single_chain` 函数实现了一种**预算感知裁剪**策略，该策略遵循全局 `MSA_CROP_SIZE`（默认 2048）限制。当配对生效时，预算会被拆分：配对的 MSA（`_all_seq` 特征）最多接收 `MSA_CROP_SIZE // 2` 行。随后，未配对预算会减去已被消耗的非空位配对行数，从而确保每条链满足 `paired + unpaired ≤ MSA_CROP_SIZE`。这种动态分配防止单条链独占 MSA 预算。模板独立裁剪至 `MAX_TEMPLATES`（默认 4）。
+
+来源: [feature_processing_multimer.py](fastfold/data/feature_processing_multimer.py#L87-L166)
+
+## 合并前与合并后的特征处理
+
+### `process_unmerged_features`（合并前）
+
+在链被配对或合并之前，每条链的特征都会进行逐链归一化：整型缺失矩阵被转换为 `float32`，`deletion_mean` 被计算为逐位置的平均值，`all_atom_mask` 和零初始化的 `all_atom_positions` 通过 `STANDARD_ATOM_MASK` 从 `aatype` 派生，`assembly_num_chains` 被设置为总链数。`entity_mask` 被计算为 `(entity_id != 0)`，用于区分真实残基与填充。
+
+### `process_final`（合并后）
+
+合并后，`_correct_msa_restypes` 将 MSA 残基类型从 HHblits 排序重新映射到内部 `residue_constants` 排序。`_make_seq_mask` 和 `_make_msa_mask` 分别从 `entity_id` 和 MSA 内容生成二值掩码。随后，`_filter_features` 丢弃不在 `REQUIRED_FEATURES` 冻结集中的任何特征，生成一个恰好包含 30 个所需特征键的干净字典。
+
+来源: [feature_processing_multimer.py](fastfold/data/feature_processing_multimer.py#L212-L245), [feature_processing_multimer.py](fastfold/data/feature_processing_multimer.py#L169-L209), [feature_processing_multimer.py](fastfold/data/feature_processing_multimer.py#L26-L35)
+
+## 多聚体张量变换 (PyTorch)
+
+`input_pipeline_multimer` 模块应用最终的可微变换，为模型使用准备 NumPy 特征。它沿用了单体流水线结构，但替换为多聚体专用的变换实现。
+
+### 非集成变换
+
+这些变换仅运行一次，与循环迭代无关：
+
+| 变换 | 操作 |
+|---|---|
+| `cast_to_64bit_ints` | 将整型特征向上转型，以保证数值稳定性 |
+| `make_msa_profile` | 通过 `masked_mean` 计算逐残基的 MSA 轮廓 |
+| `create_target_feat` | 将 `aatype` 独热编码为 21 类 |
+| `make_atom14_masks` | 生成 Atom14 表示的掩码 |
+| `make_pseudo_beta`（如有模板） | 为模板特征计算伪 beta 位点 |
+
+### 集成变换
+
+这些变换在每次循环迭代中运行，并带有随机变化：
+
+| 变换 | 操作 | 关键细节 |
+|---|---|---|
+| `sample_msa` | 基于 Gumbel-argsort 的 MSA 行采样 | 拆分为 `msa`（聚类）+ `extra_msa`；`cluster_bias_mask` 保留查询行 |
+| `make_masked_msa` | BERT 风格的 MSA 掩码 | 均匀随机氨基酸、轮廓和同概率替换的混合 |
+| `nearest_neighbor_clusters` | 将额外 MSA 分配至最近的聚类中心 | 在 `T=1e-3`（尖锐）下对一致性得分取 Softmax |
+| `create_msa_feat` | 拼接独热编码与缺失特征 | 49 维：23（独热）+ 1（has_deletion）+ 1（deletion_value）+ 23（cluster_profile）+ 1（cluster_deletion_mean） |
+
+### 基于 Gumbel 的随机采样
+
+多聚体变换在两种采样操作中采用了 **Gumbel-max 技巧**。`gumbel_argsort_sample_idx` 生成一个由输入对数加权的随机排列——用于 `sample_msa` 中，在保持可微性的同时随机优先选择信息量大的 MSA 行。`gumbel_max_sample` 抽取分类样本——用于 `make_masked_msa` 中，为掩码位置选择替换词元。两者均使用 `torch.Generator` 以实现可复现的种子设定，当禁用 `resample_msa_in_recycling` 时种子将被固定。
+
+### 集成堆叠
+
+`process_tensors_from_config` 函数首先组合非集成变换，然后通过 `map_fn` 将集成变换映射到 `max_recycling_iters + 1` 次迭代上。每次迭代产生一个独立的特征字典；`map_fn` 沿着新的尾部维度将它们堆叠，生成形状为 `(..., num_ensemble_iters)` 的张量，供模型在循环期间求平均。
+
+来源: [input_pipeline_multimer.py](fastfold/data/input_pipeline_multimer.py#L26-L137), [data_transforms_multimer.py](fastfold/data/data_transforms_multimer.py#L9-L70), [data_transforms_multimer.py](fastfold/data/data_transforms_multimer.py#L253-L304), [data_transforms_multimer.py](fastfold/data/data_transforms_multimer.py#L125-L180), [data_transforms_multimer.py](fastfold/data/data_transforms_multimer.py#L191-L219)
+
+## 全原子多聚体工具
+
+`all_atom_multimer.py` 模块为多聚体结构模块提供几何操作。`atom37_to_frames` 从全原子位点计算每个残基的 8 个刚体组帧（骨架 + pre-ω + φ + ψ + χ₁–χ₄），通过绕 x 轴旋转 180° 处理歧义旋转异构体组。`torsion_angles_to_frames` 通过链接 chi 组帧从预测扭转角重建帧。`frames_and_literature_positions_to_atom14_pos` 将文献原子位点映射到刚体组帧，以生成最终的 Atom14 坐标。`extreme_ca_ca_distance_violations` 函数通过标记 Cα–Cα 距离偏离预期键长 1.5Å 以上的残基来监控结构质量——这对于检测多聚体预测中的链间界面扭曲至关重要。
+
+来源: [all_atom_multimer.py](fastfold/utils/all_atom_multimer.py#L100-L208), [all_atom_multimer.py](fastfold/utils/all_atom_multimer.py#L280-L318), [all_atom_multimer.py](fastfold/utils/all_atom_multimer.py#L321-L339)
+
+## 同聚体与异聚体决策矩阵
+
+流水线的行为会根据链的组成产生分岔。下表总结了关键差异：
+
+| 方面 | 同聚体 / 单体 | 异聚体 |
+|---|---|---|
+| MSA 配对 | 跳过 | 物种感知配对生效 |
+| MSA 合并 | 仅块对角 | 配对拼接 + 块对角 |
+| `cluster_bias_mask` | 逐链查询行偏好 | 单行 0 偏好 |
+| `bert_mask` | 块对角 | `concat(paired_all_seq, block_diag_unpaired)` |
+| UniProt 搜索 | 仍对增加深度有用 | **配对键所必需** |
+| `_merge_homomers_dense_msa` | 合并具有相同 `entity_id` 的链 | 透传不同的实体 |
+| 去重 | 不应用 | 从未配对中移除已配对的序列 |
+
+<CgxTip>在配置多聚体推理时，请确保已下载 UniProt 数据库并设置了 `uniprot_database_path`——若无此设置，将无法提取物种标识符，MSA 配对将退化为仅块对角形式，从而丢失所有跨链演化信号。</CgxTip>
+
+<CgxTip>2048 的 `MSA_CROP_SIZE` 由所有链共享。对于包含许多链的复合物，每条链将获得按比例缩小的 MSA 预算。对于链间接触稀疏的大型异聚体复合物，请考虑增大此值。</CgxTip>
+
+来源: [feature_processing_multimer.py](fastfold/data/feature_processing_multimer.py#L41-L47), [msa_pairing.py](fastfold/data/msa_pairing.py#L270-L332), [msa_pairing.py](fastfold/data/msa_pairing.py#L391-L415)
+
+## 流水线集成
+
+从 FASTA 到模型就绪张量的完整多聚体数据流由工作流层统筹协调。若要深入了解为该流水线提供数据的基于 Ray 的分布式 MSA 搜索，请参阅 [Ray Workflow for MSA Search](12-ray-workflow-for-msa-search)。有关单体和多聚体路径共享的张量变换，请参阅 [Feature Pipeline and Transforms](13-feature-pipeline-and-transforms)。关于生成的特征如何配置 AlphaFold 模型，请参阅 [AlphaFold Model Configuration](16-alphafold-model-configuration)。
+
+---
+
+## 模型集成
+
+- [深入解析/模型集成/来自 JAX 的权重注入](https://zread.ai/hpcaitech/FastFold/15-weight-injection-from-jax)
+
+---
+slug:15-weight-injection-from-jax
+blog_type:normal
+---
+
+
+FastFold 是 AlphaFold2 的 PyTorch 重新实现，其原始训练参数以兼容 JAX 的 `.npz` 检查点文件形式存在。**权重注入流水线**通过两阶段流程弥合了这一框架差异：首先，加载 JAX 权重并通过转换字典将其语义映射到原生 PyTorch 模型中；其次，在保留所有已加载参数的前提下，将标准 PyTorch 子模块精准替换为高性能的 FastNN 等效模块。此架构确保 FastFold 在解锁 GPU 优化的融合内核与分块执行策略的同时，实现与 DeepMind 原始 JAX 实现的位级精确数值一致性。
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L1-L628), [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L1-L423)
+
+## 两阶段注入架构
+
+完整的注入流水线在推理初始化期间按顺序调用。在 [inference.py](/inference.py#L138-L141) 中，首先使用随机参数实例化 AlphaFold 模型，随后导入 JAX 权重，最后使用 FastNN 模块替换标准模块：
+
+```python
+model = AlphaFold(config)
+import_jax_weights_(model, args.param_path, version=args.model_name)
+model = inject_fastnn(model)
+```
+
+此顺序至关重要——JAX 导入针对的是**原始** `model.nn` 模块结构（该结构映射了 AlphaFold 的 JAX 参数命名），而 FastNN 注入则创建新的优化模块，并从已加载的标准模块中复制权重。下图展示了此数据流：
+
+```mermaid
+flowchart TD
+    A["JAX .npz Checkpoint<br/>(NumPy arrays)"] -->|"np.load()"| B["Flat Key-Value Store<br/>(JAX param names → arrays)"]
+    
+    C["PyTorch Model<br/>(AlphaFold, random init)"] -->|"get_translation_dict()"| D["Translation Dictionary<br/>(JAX keys → PyTorch Param refs)"]
+    
+    B -->|"assign()"| D
+    D -->|"Tensor transforms<br/>(transpose, reshape)"| E["PyTorch Model<br/>(Weights loaded)"]
+    
+    E -->|"inject_fastnn()"| F["FastNN Model<br/>(Optimized modules)"]
+    
+    subgraph "Phase 1: JAX → PyTorch"
+        A
+        B
+        D
+        E
+    end
+    
+    subgraph "Phase 2: Standard → FastNN"
+        F
+    end
+    
+    style A fill:#f9e79f,stroke:#f4d03f
+    style F fill:#82e0aa,stroke:#58d68d
+```
+
+<CgxTip>两阶段设计不仅是组织架构层面的考量，更是**正确性保证**。阶段 1 通过转置操作，将 JAX 的行主序权重布局映射为 PyTorch 的列主序约定。随后阶段 2 完全在 PyTorch 张量空间中运作，将已转置的权重复制到预期相同内存布局的融合内核模块中。</CgxTip>
+
+来源: [inference.py](/inference.py#L138-L141), [import_weights.py](/fastfold/utils/import_weights.py#L588-L608)
+
+## 阶段 1：JAX 权重导入 — 转换字典
+
+### ParamType 枚举与语义转换
+
+JAX 和 PyTorch 在线性层权重存储上采用根本不同的约定。JAX 以行主序存储 `(out_features, in_features)` 形状的权重，而 PyTorch 期望列主序的 `(out_features, in_features)` 形状——因此需要进行转置。此外，JAX 中多头注意力（MHA）的权重存储了领先的头维度，在赋值前必须将其展平。`ParamType` 枚举对这些语义转换进行了编码：
+
+| ParamType | 转换 | 应用于 |
+|---|---|---|
+| `LinearWeight` | `w.transpose(-1, -2)` | 标准线性层权重 |
+| `LinearWeightMHA` | `w.reshape(..., -1).transpose(-1, -2)` | MHA 查询/键/值权重（头维度展平） |
+| `LinearMHAOutputWeight` | `w.reshape(..., -1, w.shape[-1]).transpose(-1, -2)` | MHA 输出投影权重 |
+| `LinearBiasMHA` | `w.reshape(..., -1)` | MHA 偏置（头维度展平） |
+| `LinearWeightOPM` | `w.reshape(..., -1, w.shape[-1]).transpose(-1, -2)` | 外积均值输出权重 |
+| `LinearWeightMultimer` | `w.unsqueeze(-1)` 或 `w.reshape(..., -1).transpose(-1, -2)` | Multimer 专属线性权重 |
+| `LinearBiasMultimer` | `w.reshape(-1)` | Multimer 专属偏置 |
+| `Other` | 恒等变换 (`w`) | 偏置、层归一化参数、非线性参数 |
+
+每个 `ParamType` 将其转换操作作为 `partial` 包装的 lambda 表达式携带，并在 `assign()` 步骤中被调用。`Param` 数据类将张量引用与其类型以及用于处理重复块的 `stacked` 标志捆绑在一起。
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L29-L59)
+
+### 构建转换字典
+
+`get_translation_dict(model, version)` 函数构建了一个嵌套字典，将 **JAX 检查点键路径**映射到模型内的**活跃 PyTorch 张量引用**。它定义了一组参数提取 lambda 表达式词汇表，用于遍历模型的模块树：
+
+- **`LinearParams(l)`** → 提取 `l.weight`（作为 `LinearWeight`）和 `l.bias`（作为 `Other`）
+- **`LayerNormParams(l)`** → 提取 `l.weight` 作为 `"scale"`，提取 `l.bias` 作为 `"offset"`（匹配 JAX 命名）
+- **`AttentionParams(att)`** → 提取 Q/K/V 权重作为 `LinearWeightMHA`，输出作为 `LinearMHAOutputWeight`
+- **`AttentionGatedParams(att)`** → 扩展 `AttentionParams` 以包含门控权重和偏置
+- **`GlobalAttentionParams(att)`** → 将 K/V 覆盖为使用 `LinearWeight`（全局注意力使用非 MHA 布局）
+- **`TriMulOutParams` / `TriMulInParams`** → 处理融合与非融合的三角形乘法变体
+
+该字典围绕根植于 `alphafold/alphafold_iteration/` 的 JAX 键层级进行组织，涵盖了 **evoformer**、**structure module** 以及所有辅助头部（预测的 LDDT、距离图、实验解析、掩码 MSA，以及 PTM/multimer 模型的预测对齐误差）。
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L131-L585)
+
+### 堆叠块参数
+
+AlphaFold 的 Evoformer、ExtraMSA 和模板对堆栈均由重复的相同块组成。`stacked()` 工具函数并非单独列出每个块的参数，而是将各块的参数聚合成列表，并设置 `stacked=True`。在 `assign()` 过程中，堆叠参数沿维度 0 从 JAX 数组中解绑，每个切片独立进行转换并复制到其对应的块中。这反映了 JAX 将堆叠参数作为带有前导块维度的单一数组进行存储的方式。
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L81-L107)
+
+### 键展平与赋值
+
+`_process_translations_dict()` 函数将嵌套的转换字典展平为从全限定 JAX 键字符串（例如 `alphafold/alphafold_iteration/evoformer/evoformer_iteration/msa_row_attention_with_pair_bias/query_norm/scale`）到 `Param` 对象的扁平映射。前缀 `alphafold/alphafold_iteration/` 在顶层被添加。
+
+随后，`assign()` 函数执行实际的权重加载：对于每个键，它从 `.npz` 数据中检索 NumPy 数组，将其转换为 PyTorch 张量，应用 `ParamType` 转换，并通过 `p.copy_(w)` 在 `torch.no_grad()` 上下文中将结果复制到活跃的模型参数中。健全性检查断言所有转换键均存在于检查点中（反之则不强制，因为某些 JAX 参数可能未被使用）。
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L62-L129), [import_weights.py](/fastfold/utils/import_weights.py#L588-L608)
+
+### 融合三角形乘法修正
+
+当启用融合三角形乘法时（通过参数路径中的 `"v3"` 检测），相对于伪代码，AlphaFold 的 JAX 实现交换了**传入**三角形乘法变体的“左”和“右”投影。`_change_tri_mul_in_left_right()` 后处理函数通过交换所有 `tri_mul_in` 模块中拼接的左/右权重和偏置张量的两半来纠正这一点，这些模块分布在模板对堆栈、额外 MSA 堆栈和 evoformer 块中。
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L610-L628)
+
+### 模型版本变体
+
+`version` 参数控制两个行为分支：
+
+| 条件 | 效果 |
+|---|---|
+| `"multimer" in version` | 使用 Multimer 专属参数类型（`LinearWeightMultimer`、`LinearBiasMultimer`），具有独立 Q/K/V 标量和点投影的 Multimer IPA 参数，以及 Multimer 模板嵌入结构 |
+| `version in ["model_3", "model_4", "model_5", ...]` | 从转换字典中移除所有与模板相关的条目（这些模型不使用模板） |
+| `"_ptm" in version` 或 multimer | 将 `predicted_aligned_error_head` 添加到字典中 |
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L131-L134), [import_weights.py](/fastfold/utils/import_weights.py#L565-L584)
+
+## 阶段 2：FastNN 模块注入
+
+在 JAX 权重填充标准模型后，`inject_fastnn(model)` 将四个关键子模块替换为其优化的 FastNN 对应项，从已加载的标准模块中复制权重。这是**模块替换**，而非权重重新加载——FastNN 模块被全新构建，并通过直接张量复制进行填充。
+
+### 注入目标
+
+| 注入函数 | 替换 | 替换为 | 覆盖范围 |
+|---|---|---|---|
+| `inject_evoformer()` | `model.evoformer` | `EvoformerStack` | 所有 MSA 行/列注意力、过渡层、外积均值、三角形注意力/乘法、对过渡层 |
+| `inject_extramsa()` | `model.extra_msa_stack` | `ExtraMSAStack` | 与 Evoformer 子结构相同，但具有全局列注意力 |
+| `inject_template()` | `model.template_embedder` | `TemplateEmbedder` 或 `TemplateEmbedderMultimer` | 模板角度/对嵌入器、模板对堆栈、逐点注意力 |
+| `inject_embedder()` | `model.recycling_embedder` + `model.input_embedder` | `RecyclingEmbedder` + `InputEmbedder` | 循环位置嵌入，输入 MSA/目标/相对位置嵌入 |
+
+来源: [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L318-L423)
+
+### 权重复制原语
+
+注入依赖于一组底层复制函数，这些函数处理标准与 FastNN 模块布局之间的结构差异：
+
+- **`copy_linear(model_fast, model_ori)`** — 布局匹配模块的直接权重/偏置复制
+- **`copy_layernorm(model_fast, model_ori)`** — 复制缩放（权重）和偏移（偏置）
+- **`copy_qkv_linear(model_fast, ori_q, ori_k, ori_v)`** — 将独立的 Q、K、V 权重拼接成单一融合的 `[3*heads*c, input]` 权重张量，反映 FastNN 的融合 QKV 投影
+- **`copy_kv_linear(model_fast, ori_k, ori_v)`** — 拼接 K 和 V 用于全局注意力的融合 KV 投影
+- **`copy_left_right(model_fast, ori_left, ori_right)`** — 将独立的左/右投影权重拼接成单一融合张量，用于三角形乘法
+- **`copy_attention(model_fast, model_ori)`** — 为完整的注意力模块编排 QKV 融合、门控线性复制和输出线性复制
+- **`copy_triangle(model_fast, model_ori)`** — 处理融合与非融合的三角形乘法布局，对非融合变体使用 `copy_left_right`
+
+<CgxTip>关键的架构洞察在于，FastNN 模块**融合**了标准实现中保持独立的部分。标准注意力模块拥有独立的 `linear_q`、`linear_k`、`linear_v` 投影；而 FastNN 的等效项则具有单一的 `to_qkv` 线性层。`copy_qkv_linear` 函数沿维度 0 拼接权重以构造此融合权重，随后该权重被单一融合 CUDA 内核消费，从而改善内存局部性并减少内核启动开销。</CgxTip>
+
+来源: [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L24-L95)
+
+### Evoformer 块参数映射
+
+`copy_evoformer_para()` 函数展示了最复杂的映射，涵盖了单个 Evoformer 块内所有六个子操作：
+
+```mermaid
+flowchart LR
+    subgraph "Standard Module"
+        A1["msa_att_row<br/>(MSARowAttWithPairBias)"]
+        A2["msa_att_col<br/>(MSAColAtt)"]
+        A3["core.msa_transition"]
+        A4["core.outer_product_mean"]
+        A5["core.tri_mul_out<br/>core.tri_mul_in"]
+        A6["core.tri_att_start<br/>core.tri_att_end"]
+        A7["core.pair_transition"]
+    end
+    
+    subgraph "FastNN Module"
+        B1["msa.MSARowAttentionWithPairBias"]
+        B2["msa.MSAColumnAttention"]
+        B3["msa.MSATransition"]
+        B4["communication<br/>(OuterProductMean)"]
+        B5["pair.TriangleMultOut<br/>pair.TriangleMultIn"]
+        B6["pair.TriAttStart<br/>pair.TriAttEnd"]
+        B7["pair.PairTransition"]
+    end
+    
+    A1 -->|"copy_attention<br/>+ pair bias weights"| B1
+    A2 -->|"copy_attention"| B2
+    A3 -->|"copy_transition"| B3
+    A4 -->|"copy_linear × 3"| B4
+    A5 -->|"copy_triangle"| B5
+    A6 -->|"copy_triangle_att"| B6
+    A7 -->|"copy_transition"| B7
+```
+
+每个块复制操作都被包装在 `torch.no_grad()` 中，并通过 `if target_block.training == False: fast_block.eval()` 保留原始模块的训练/评估模式。
+
+来源: [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L107-L153)
+
+## Multimer 与 Monomer 分支
+
+两个注入阶段都会适应模型变体。在阶段 1 中，`get_translation_dict()` 检查 `is_multimer = "multimer" in version` 以在 `IPAParams`（单体，具有融合 Q/KV 标量投影）和 `IPAParamsMultimer`（具有独立 Q/K/V 标量投影和用于点注意力的 `PointProjectionParams`）之间进行选择。模板嵌入结构也有所不同：单体使用单一的 `embedding2d` 线性层，而多聚体则分解为 9 个独立的嵌入线性层（dgram、aatype × 2、查询嵌入、伪 beta 掩码、xyz 坐标、骨干掩码）。
+
+在阶段 2 中，`inject_template()` 检查 `model.evoformer.blocks[0].is_multimer` 以在 `TemplateEmbedder` 和 `TemplateEmbedderMultimer` 之间进行选择，而 `inject_embedder()` 对多聚体模型提前返回（在多聚体路径中不替换循环和输入嵌入器）。
+
+来源: [import_weights.py](/fastfold/utils/import_weights.py#L270-L316), [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L358-L374), [inject_fastnn.py](/fastfold/utils/inject_fastnn.py#L376-L379)
+
+## 端到端权重加载概览
+
+| 步骤 | 输入 | 输出 | 机制 |
+|---|---|---|---|
+| 1. 模型实例化 | `model_config(name)` | 带有随机参数的 `AlphaFold(config)` | 标准 PyTorch `__init__` |
+| 2. 融合三角形标志 | `"v3" in param_path` | `set_fused_triangle_multiplication()` | 用于内核选择的全局标志 |
+| 3. JAX 权重导入 | `.npz` 文件 + 模型 | 带有正确权重的模型 | 转换字典 + 带转置的 `assign()` |
+| 4. 三角形修正 | 启用融合三角形的模型 | `tri_mul_in` 中交换的左/右 | `_change_tri_mul_in_left_right()` |
+| 5. FastNN 注入 | 加载权重的标准模型 | 带有优化子模块的模型 | 模块构造 + 权重复制 |
+| 6. 评估 + CUDA | 注入后的模型 | `model.eval().cuda()` | 标准 PyTorch 部署 |
+
+此流水线确保 FastFold 从与原始 JAX 检查点**数值一致**的权重启动，同时完全在优化的 PyTorch 执行图中运行。有关模型变体的配置详情，请参见 [AlphaFold 模型配置](16-alphafold-model-configuration)；有关 Habana 专属注入路径，请参见 [Habana 平台支持](17-habana-platform-support)。
+
+---
+
+- [深入解析/模型集成/AlphaFold 模型配置](https://zread.ai/hpcaitech/FastFold/16-alphafold-model-configuration)
+
+---
+slug:16-alphafold-model-configuration
+blog_type:normal
+---
+
+
+FastFold 的模型配置系统是掌控 AlphaFold 推理与训练流水线各个方面的唯一事实来源——从 MSA 特征维度和 Evoformer 块深度，到损失权重和弛豫容差。该系统基于 DeepMind 的 `ml_collections.ConfigDict` 构建，并策略性地放置了 `FieldReference` 锚点，从而确保对核心维度的修改（例如 `c_z = 128`）能自动传播至每一个依赖它的子模块，免去了在长达 600 多行的庞大定义中进行手动同步的麻烦。`model_config()` 工厂函数位于该系统的顶层，负责将人类可读的模型预设名称转化为一个完全实例化且自洽的配置字典，供 `AlphaFold` 模块、`AlphaFoldLoss` 和数据流水线直接使用。
+
+来源: [config.py](/fastfold/config.py#L1-L607), [alphafold.py](/fastfold/model/hub/alphafold.py#L46-L105)
+
+## 配置架构
+
+配置系统遵循**工厂加覆盖**模式：整块基础配置仅定义一次，随后 `model_config()` 对其进行深拷贝，并针对所请求的模型预设应用定向修改。这种设计将*共享基础*（所有 AlphaFold 变体的公共部分）与*变体特有增量*（模板使用、额外 MSA 深度、pTM 头、多聚体调整）分离开来，使得无需复制整段定义即可轻松理清不同预设之间的差异。
+
+```mermaid
+flowchart TD
+    A["FieldReferences<br/>(c_z, c_m, c_t, c_e, c_s, ...)"] --> B["Base Config<br/>(mlc.ConfigDict)"]
+    B --> C["model_config(name, train, low_prec)"]
+    C --> D["Deep Copy"]
+    D --> E{"Preset Branch"}
+    E -->|"model_1–5"| F["Monomer Overlays<br/>(templates, extra_msa)"]
+    E -->|"model_*_ptm"| G["pTM Overlays<br/>(+ tm head, loss weight)"]
+    E -->|"initial_training / finetuning"| H["Training Overlays<br/>(crop, violation loss)"]
+    E -->|"multimer"| I["Multimer Overlays<br/>(+ multimer_model_config_update)"]
+    F --> J["Runtime Flags"]
+    G --> J
+    H --> J
+    I --> J
+    J -->|"train=True"| K["blocks_per_ckpt=1<br/>chunk_size=None"]
+    J -->|"low_prec=True"| L["eps=1e-4<br/>inf=1e4"]
+    K --> M["Final ConfigDict"]
+    L --> M
+```
+
+`FieldReference` 机制是架构的基石。当在模块作用域中定义 `c_z = mlc.FieldReference(128, field_type=int)` 时，配置字典内后续对 `c_z` 的每一次引用都将指向**同一个**可变插槽。在一处修改 `c_z` 便会同时更新所有依赖它的子配置——这对于维持 Evoformer 堆栈的配对通道维度、结构模块的输入维度以及 Distogram 头的特征维度之间的一致性至关重要。
+
+来源: [config.py](/fastfold/config.py#L128-L146), [config.py](/fastfold/config.py#L30-L125)
+
+## 核心维度参数
+
+五个由 `FieldReference` 支撑的维度常量定义了整个模型的数学形状。切忌随意更改这些常量——每一层权重矩阵的形状均派生自它们。
+
+| 参数 | 默认值 | 语义角色 | 主要消费者 |
+|-----------|---------|---------------|-------------------|
+| **`c_z`** | 128 | 配对表征通道 | EvoformerStack, StructureModule, TemplateEmbedder, DistogramHead, TMHead |
+| **`c_m`** | 256 | MSA 表征通道 | EvoformerStack, InputEmbedder, RecyclingEmbedder, MaskedMSAHead |
+| **`c_t`** | 64 | 模板配对通道 | TemplatePairStack, TemplatePairEmbedder, TemplatePointwiseAttention |
+| **`c_e`** | 64 | 额外 MSA 通道 | ExtraMSAEmbedder, ExtraMSAStack |
+| **`c_s`** | 384 | 单一表征通道 | StructureModule, LDDTHead, ExperimentallyResolvedHead |
+
+另外两个 `FieldReference` 参数控制的是执行策略而非模型架构：**`blocks_per_ckpt`**（梯度检查点粒度，默认为 `None`）和 **`chunk_size`**（节省内存的分块执行分片大小，默认为 `None`）。当 `train=True` 时，它们会被分别强制设为 `1` 和 `None`，从而为受内存限制的反向传播启用逐块检查点机制。
+
+来源: [config.py](/fastfold/config.py#L128-L134), [config.py](/fastfold/config.py#L115-L123)
+
+## 模型预设
+
+`model_config(name, train=False, low_prec=False)` 函数将预设名称映射到配置覆盖。每个预设对应 AlphaFold 2 补充表 4–5 中的一行，忠实地复现了原论文的训练与推理配置。
+
+### 单体预设（模型 1–5）
+
+| 预设 | `max_extra_msa` | 模板 | 模板扭转角 | `reduce_max_clusters_by_max_templates` | AF2 补充表 |
+|--------|-----------------|-----------|------------------------|---------------------------------------|------------------|
+| `model_1` | 5120 | ✅ 启用 | ✅ 启用 | ✅ True | 5, Model 1.1.1 |
+| `model_2` | 1024 (默认) | ✅ 启用 | ✅ 启用 | ✅ True | 5, Model 1.1.2 |
+| `model_3` | 5120 | ❌ 禁用 | — | — | 5, Model 1.2.1 |
+| `model_4` | 5120 | ❌ 禁用 | — | — | 5, Model 1.2.2 |
+| `model_5` | 1024 (默认) | ❌ 禁用 | — | — | 5, Model 1.2.3 |
+
+核心架构区别在于**启用模板**的模型（1、2）与**无模板**的模型（3–5）之间。启用模板的预设会激活 `model.template.enabled`、`data.common.use_templates` 和 `data.common.use_template_torsion_angles`，将来自 PDB 模板的结构同源信息引入配对表征中。模型 1 和 3 将 `max_extra_msa` 从默认的 1024 提升至 5120，扩展了额外 MSA 堆栈的容量，以进行更深层的进化信号处理。
+
+### pTM 预设（带 pTM 的模型 1–5）
+
+每个单体预设都有一个对应的 `_ptm` 变体，该变体会额外启用**预测 TM-score 头**（`model.heads.tm.enabled = True`）并将其损失权重设为 `0.1`（`loss.tm.weight = 0.1`）。pTM 头用于预测所预测结构与真实结构之间的 TM-score，提供逐样本的置信度指标，这在 CASP 类基准测试中对预测结果排序尤为有用。
+
+### 训练预设
+
+| 预设 | `max_extra_msa` | `crop_size` | `max_msa_clusters` | `violation.weight` |
+|--------|-----------------|-------------|---------------------|---------------------|
+| `initial_training` | 1024 (默认) | 256 (默认) | 128 (默认) | 0.0 (默认) |
+| `finetuning` | 5120 | 384 | 512 | 1.0 |
+
+**`finetuning`** 预设拓宽了 MSA 上下文（额外 MSA 增至 5 倍，簇数增至 4 倍），将裁剪尺寸从 256 个残基增至 384 个，并激活冲突损失（权重 `1.0`），对立体化学冲突（原子碰撞及键长/键角偏差）进行惩罚。这反映了 AlphaFold 2 补充材料中的两阶段训练策略：初始训练学习结构先验，随后微调在更强的物理约束下进行精炼。
+
+来源: [config.py](/fastfold/config.py#L30-L113)
+
+## 多聚体配置
+
+当预设名称包含 `"multimer"` 时，配置会通过 `multimer_model_config_update` 进行大幅覆盖。这并非简单的标志位切换——它重构了多个子模块以处理多链蛋白质复合物。
+
+关键的多聚体特有覆盖如下：
+
+| 参数 | 单体 | 多聚体 | 原理 |
+|-----------|---------|----------|-----------|
+| `globals.is_multimer` | `False` | `True` | 将 InputEmbedder/TemplateEmbedder 切换为多聚体变体 |
+| `data.predict.max_msa_clusters` | 128 | 252 | 跨链配对 MSA 需要更多簇 |
+| `model.structure_module.trans_scale_factor` | 10 | 20 | 链间距离需要更大的平移范围 |
+| `model.input_embedder.use_chain_relative` | — | `True` | 启用链相对位置编码 |
+| `model.input_embedder.max_relative_chain` | — | 2 | 最大相对链索引偏移量 |
+| `model.input_embedder.max_relative_idx` | — | 32 | 最大相对残基索引偏移量 |
+| `model.heads.tm.enabled` | `False` (默认) | `True` | 多聚体置信度评估始终开启 pTM 头 |
+
+此外，多聚体模式通过五个链标识特征扩展了 `data.common.unsupervised_features`：**`msa_mask`**、**`seq_mask`**、**`asym_id`**（不对称单元标识符）、**`entity_id`**（唯一序列标识符）和 **`sym_id`**（对称群标识符）。这些特征使模型能够区分复合物中的链，并应用链感知的注意力模式。模板嵌入器也被替换为多聚体感知变体，新增了 `template_single_embedder` (c_in=34, c_m=256) 和修改后的 `template_pair_embedder`（包含 `c_dgram=39` 和 `c_aatype=22` 通道）。
+
+来源: [config.py](/fastfold/config.py#L96-L111), [config.py](/fastfold/config.py#L535-L606)
+
+## 配置层级深入探讨
+
+完整的配置树包含六个顶层部分，分别供不同的子系统使用：
+
+```mermaid
+graph LR
+    CFG["ConfigDict"] --> DATA["data"]
+    CFG --> GLB["globals"]
+    CFG --> MDL["model"]
+    CFG --> RLX["relax"]
+    CFG --> LOSS["loss"]
+    CFG --> EMA["ema"]
+    
+    DATA --> DATA_COMMON["common<br/>(features, MSA params)"]
+    DATA --> DATA_PREDICT["predict"]
+    DATA --> DATA_EVAL["eval"]
+    DATA --> DATA_TRAIN["train"]
+    DATA --> DATA_MODULE["data_module"]
+    DATA --> DATA_SUPERVISED["supervised"]
+    
+    MDL --> MDL_IE["input_embedder"]
+    MDL --> MDL_RE["recycling_embedder"]
+    MDL --> MDL_TPL["template"]
+    MDL --> MDL_EM["extra_msa"]
+    MDL --> MDL_EVO["evoformer_stack"]
+    MDL --> MDL_SM["structure_module"]
+    MDL --> MDL_HEADS["heads"]
+```
+
+### `data` 部分
+
+`data` 部分控制特征流水线，并细分为针对特定模式的配置（`predict`、`eval`、`train`），用于管理 MSA 裁剪、模板下采样和有监督特征包含。`common.feat` 字典使用占位常量（`NUM_RES`、`NUM_MSA_SEQ`、`NUM_EXTRA_SEQ`、`NUM_TEMPLATES`）将每个特征名称映射至其预期的张量形状，从而在数据加载时实现形状校验。`common.masked_msa` 子配置指定了 BERT 风格的 MSA 掩码策略，包含三个概率分量：`profile_prob=0.1`、`same_prob=0.1`、`uniform_prob=0.1`。
+
+### `model` 部分
+
+`model` 部分体量最大，定义了每个神经子模块的超参数。**Evoformer 堆栈**内的关键参数包括 `no_blocks=48`（完整的 48 块主干）、`no_heads_msa=8`、`no_heads_pair=4`，以及 `0.15`（MSA）和 `0.25`（配对）的 dropout 率。**结构模块**运行 `no_blocks=8` 次 IPA 迭代，`no_heads_ipa=12`，`trans_scale_factor=10`。**模板**子树包含距离图分箱（`min_bin=3.25`、`max_bin=50.75`、`no_bins=39`）、模板配对堆栈和模板逐点注意力——全部由 `template.enabled` 门控。
+
+### `loss` 部分
+
+`loss` 部分定义了七个损失分量及其权重和超参数。主要结构损失为 **FAPE**（权重 `1.0`，主链截断值 10Å，侧链长度尺度 10Å）和 **distogram**（权重 `0.3`，从 2.3125Å 到 21.6875Å 的 64 个分箱）。**冲突**损失（默认权重 `0.0`，在微调期间激活）以 12.0（冲突）和 1.5（碰撞重叠）的容差因子惩罚立体化学错误。**TM 损失**（默认权重 `0.0`）与 pTM 头一同激活。
+
+来源: [config.py](/fastfold/config.py#L146-L532), [config.py](/fastfold/config.py#L468-L530)
+
+## 运行时配置覆盖
+
+尽管 `model_config()` 返回的是静态字典，调用代码通常会在实例化模型之前应用**运行时覆盖**。这些覆盖是在不修改基础配置文件的前提下，将配置适配到执行环境的主要机制。
+
+### 推理覆盖
+
+在推理流水线中，调用 `model_config()` 之后通常会覆盖三个全局参数：
+
+```python
+config = model_config(args.model_name)
+if args.chunk_size:
+    config.globals.chunk_size = args.chunk_size  # 节省内存的分块
+config.globals.inplace = args.inplace             # 原地操作以节省内存
+config.globals.is_multimer = args.model_preset == 'multimer'
+```
+
+**`chunk_size`** 覆盖对性能的影响最为关键：将其设为 `128` 或 `256` 等值可启用分块注意力计算，以计算换内存，使得原本会 OOM（内存溢出）的序列也能完成推理。**`inplace`** 标志在模板嵌入期间启用原地张量操作，以牺牲中间激活值的调试便利性为代价降低峰值内存。当参数路径包含 `"v3"`（AlphaFold-Multimer v3 权重）时，还会通过 `set_fused_triangle_multiplication()` 激活融合三角乘法。
+
+来源: [inference.py](/inference.py#L129-L143), [demo.py](/demo.py#L94-L106)
+
+### 训练覆盖
+
+训练流水线应用两个确定性覆盖：
+
+```python
+config = model_config(args.config_preset, train=True)
+config.globals.inplace = False  # 训练期间始终禁用
+```
+
+`train=True` 标志会在 `model_config()` 内部触发两项修改：**`blocks_per_ckpt = 1`**（为每个 Evoformer 块设置检查点以实现节省内存的反向传播）和 **`chunk_size = None`**（禁用分块——分块执行是仅限推理的优化）。随后原地操作会被显式禁用，以确保计算图中的梯度能够正确保留。
+
+来源: [train.py](/train.py#L171-L173), [config.py](/fastfold/config.py#L115-L117)
+
+### 低精度模式
+
+`low_prec=True` 标志使配置适应低精度算术（例如 FP16/BF16 训练或推理）：
+
+```python
+if low_prec:
+    c.globals.eps = 1e-4      # 宽松的 epsilon（从 1e-8 调整）
+    set_inf(c, 1e4)           # 封顶的无穷大（从 1e8/1e9 调整）
+```
+
+递归辅助函数 `set_inf()` 遍历整个配置树，将每个 `"inf"` 键的值替换为 `1e4` 而非默认的 `1e8`–`1e9`。这可以在半精度浮点数下防止溢出，同时为注意力掩码和距离分箱保留足够的动态范围。
+
+来源: [config.py](/fastfold/config.py#L22-L27), [config.py](/fastfold/config.py#L119-L123)
+
+## 模型对配置的消费
+
+`fastfold/model/hub/alphafold.py` 中的 `AlphaFold` 模块是配置的主要消费者。其 `__init__` 方法将配置拆分为两个作用域：
+
+```python
+self.globals = config.globals          # 执行级参数
+config = config.model                  # 架构级参数
+```
+
+`globals` 作用域（包含 `chunk_size`、`c_z`、`c_m`、`is_multimer`、`eps`）被存储为 `self.globals`，并在前向传播中被全程访问以控制分块大小和模式分支。`model` 作用域被解构为子配置，通过 `**config["sub_module"]` 直接解包至子模块构造器中：
+
+| 子模块 | 配置键 | 消费的关键参数 |
+|------------|------------|------------------------|
+| `InputEmbedder` / `InputEmbedderMultimer` | `model.input_embedder` | `tf_dim=22`, `msa_dim=49`, `c_z`, `c_m`, `relpos_k=32` |
+| `RecyclingEmbedder` | `model.recycling_embedder` | `c_z`, `c_m`, `min_bin`, `max_bin`, `no_bins=15` |
+| `TemplateEmbedder` | `model.template` | 整个模板子树（distogram, pair stack, attention） |
+| `ExtraMSAStack` | `model.extra_msa.extra_msa_stack` | `c_e`, `c_z`, `no_blocks=4`, `no_heads_msa=8` |
+| `EvoformerStack` | `model.evoformer_stack` | `c_m`, `c_z`, `no_blocks=48`, `no_heads_msa=8` |
+| `StructureModule` | `model.structure_module` | `c_s`, `c_z`, `no_heads_ipa=12`, `no_blocks=8` |
+| `AuxiliaryHeads` | `model.heads` | LDDT, distogram, TM, masked MSA, experimentally resolved |
+
+损失模块通过 `AlphaFoldLoss(config.loss)` 独立消费 `config.loss`，数据流水线通过 `FeaturePipeline(config.data)` 消费 `config.data`。这种三方消费模式意味着配置同时管辖着数据准备、模型架构和优化目标——即完整训练/推理运行的三根支柱。
+
+<CgxTip>`ml_collections.FieldReference` 模式意味着你**绝不能**直接修改全局 `config` 对象——必须始终使用 `copy.deepcopy()`（由 `model_config()` 提供）。由于 FieldReferences 是共享指针而非独立值，修改基础配置会悄无声息地破坏后续所有的 `model_config()` 调用。</CgxTip>
+
+<CgxTip>在调试维度不匹配问题时，请追踪 FieldReference 链：Evoformer 配对注意力中的形状错误很可能源于 `c_z` 在某处预设覆盖中被修改。请首先检查 `config.globals.c_z`——它是所有子模块应当引用的权威事实来源。</CgxTip>
+
+来源: [alphafold.py](/fastfold/model/hub/alphafold.py#L53-L105), [loss.py](/fastfold/model/hub/loss.py#L1E-L36), [train.py](/train.py#L206-L210), [inference.py](/inference.py#L138-L139)
+
+## 预设选择快速参考
+
+| 用例 | 推荐预设 | `model_config()` 调用 | 备注 |
+|----------|-------------------|----------------------|-------|
+| 单体推理（含模板） | `model_1` | `model_config("model_1")` | 具有同源物的单链最高精度 |
+| 单体推理（无模板） | `model_5` | `model_config("model_5")` | 适用于无 PDB 模板的孤儿序列 |
+| 单体 + pTM 置信度 | `model_1_ptm` | `model_config("model_1_ptm")` | 增加预测 TM-score 输出 |
+| 多聚体推理 | `model_1_multimer` | `model_config("model_1_multimer")` | 带有链感知特征的多链复合物 |
+| 从头训练 | `initial_training` | `model_config("initial_training", train=True)` | 无冲突损失，标准裁剪 |
+| 微调 | `finetuning` | `model_config("finetuning", train=True)` | 开启冲突损失，更大裁剪和 MSA |
+| 低精度推理 | 任意 + `low_prec=True` | `model_config("model_1", low_prec=True)` | FP16/BF16 安全的 eps 和 inf 值 |
+
+来源: [config.py](/fastfold/config.py#L30-L125)
+
+若要深入了解配置的架构参数如何转化为高性能 CUDA 内核，请参阅 [FastNN 模块设计](6-fastnn-module-design)。若要了解通过 `chunk_size` 全局变量实现的运行时内存优化，请参阅 [节省内存的分块执行](8-memory-efficient-chunked-execution)。若要了解如何将 JAX 权重加载至由此配置构建的模型中，请参阅 [从 JAX 注入权重](15-weight-injection-from-jax)。
+
+---
+
+- [深入解析/模型集成/Habana 平台支持](https://zread.ai/hpcaitech/FastFold/17-habana-platform-support)
+
+---
+slug:17-habana-platform-support
+blog_type:normal
+---
+
+
+FastFold 的 Habana 集成提供了一条在 Intel Habana Gaudi/Gaudi2 加速器上运行 AlphaFold 推理和训练的完整路径。该集成涵盖四个架构层：**运行时初始化**、**自定义算子融合**、**针对 Habana 优化的 Evoformer 重实现**，以及**基于 HCCL 的分布式并行**。这并非一个简单的设备移植层，而是一个专用加速栈，它用 HPU 优化的等效模块替换了核心计算模块，同时通过严格的权重注入机制保持数值等效性。
+
+来源: [__init__.py](/fastfold/habana/__init__.py#L1-L21), [inject_habana.py](/fastfold/habana/inject_habana.py#L1-L404)
+
+## 架构概述
+
+Habana 支持系统遵循**模块替换**策略：首先使用标准 PyTorch 操作构建原始 AlphaFold 模型，随后 `inject_habana()` 精准地将 Evoformer、ExtraMSA、Template 和 Embedder 子模块替换为 Habana 优化的实现，并逐参数迁移其预训练权重。此设计确保 Habana 路径在利用 HPU 特定性能特征的同时，产生与 GPU 路径完全一致的结果。
+
+```mermaid
+graph TD
+    A[原始 AlphaFold 模型] -->|inject_habana| B[Habana 优化模型]
+    B --> C[EvoformerStack]
+    B --> D[ExtraMSAStack]
+    B --> E[TemplateEmbedder]
+    B --> F[RecyclingEmbedder / InputEmbedder]
+    
+    C --> G[MSAStack]
+    C --> H[OutProductMean]
+    C --> I[PairStack]
+    
+    G --> J[MSARowAttentionWithPairBias]
+    G --> K[MSAColumnAttention]
+    G --> L[Transition]
+    
+    I --> M[TriangleMultiplication]
+    I --> N[TriangleAttention]
+    
+    O[fastfold/habana/__init__.py] -->|enable_habana| P[habana_frameworks.torch.core]
+    O -->|enable_hmp| Q[HMP 混合精度]
+    
+    R[自定义 FusedSoftmax 算子] -->|C++ TPC 插件| S[HPU 融合 Softmax]
+    
+    T[HCCL 后端] -->|init_dist| U[DAP 通信]
+    U --> V[scatter / gather]
+    U --> W[All-to-All]
+```
+
+来源: [inject_habana.py](/fastfold/habana/inject_habana.py#L358-L404), [__init__.py](/fastfold/habana/fastnn/__init__.py#L1-L200)
+
+## 运行时初始化
+
+Habana 激活的入口点位于 `fastfold/habana/__init__.py`，该文件暴露了两个全局标志及其控制函数：
+
+| 标志 | 默认值 | 激活函数 | 作用 |
+|------|---------|---------------------|--------|
+| `ENABLE_HABANA` | `False` | `enable_habana()` | 导入 `habana_frameworks.torch.core`，启用 Lazy 模式 |
+| `ENABLE_HMP` | `False` | `enable_hmp()` | 激活 Habana 混合精度 (HMP) |
+
+`enable_habana()` 调用必须先于任何 HPU 张量操作。它启用了 Habana 的**延迟执行模式**（`ENABLE_LAZY_MODE = True`），在该模式下，操作被累积到计算图中，仅在调用 `htcore.mark_step()` 时才执行——这是 Habana 硬件上关键的性能优化模式，能够分摊算子启动开销。`is_habana()` 和 `is_hmp()` 查询函数允许在整个代码库中设置条件代码路径。
+
+来源: [__init__.py](/fastfold/habana/__init__.py#L1-L21)
+
+## 针对 Habana 优化的 FastNN 模块
+
+`fastfold/habana/fastnn/` 包提供了 Evoformer 计算核心的完整重实现，专为 HPU 执行特征而构建。这些模块在权重注入后替换了标准的 `fastfold/model/fastnn/` 等效模块。
+
+### 模块组成
+
+| 模块 | 文件 | 替换目标 | 关键 HPU 优化 |
+|--------|------|----------|---------------------|
+| `EvoformerStack` | `__init__.py` | `EvoformerStack` | 逐块 `mark_step()`，在块边界融合 scatter/gather |
+| `MSAStack` | `msa.py` | MSA 注意力模块 | 用于 DAP 感知列注意力的 `row_to_col` / `scatter` |
+| `PairStack` | `triangle.py` | Triangle 模块 | Triangle 乘法中 matmul 前的融合 `gather` |
+| `SelfAttention` | `ops.py` | 标准注意力 | 融合 QKV 投影，自定义融合 softmax |
+| `OutProductMean` | `ops.py` | 外积均值 | 带 DAP gather/scatter 的分块 matmul |
+| `Linear` | `ops.py` | `nn.Linear` | AlphaFold 特定的初始化器支持 |
+
+### EvoformerStack — 核心调度
+
+`Evoformer` 块通过在块边界显式执行 scatter/gather 来编排 DAP 感知的执行过程。第一个块沿 MSA 维度散射 MSA 表示，沿序列维度散射 pair 表示，而最后一个块将它们收集回来并裁剪填充。每个块以 `htcore.mark_step()` 结束，以刷新延迟执行图：
+
+```python
+# Evoformer.forward() 的简化流程
+if self.first_block:
+    m = scatter(m, dim=1)   # 跨 DAP 秩划分 MSA
+    z = scatter(z, dim=1)   # 跨 DAP 秩划分 pair
+
+m = self.msa(m, z, msa_mask)
+z = self.communication(m, msa_mask, z)
+m = All_to_All.apply(m, 1, 2)  # 轉置 MSA 以進行列注意力計算
+z = self.pair(z, pair_mask)
+
+if self.last_block:
+    m = gather(m, dim=0)   # 重新組裝完整 MSA
+    z = gather(z, dim=0)   # 重新組裝完整 pair
+```
+
+<CgxTip>在 scatter 之前会应用填充，以确保序列长度能被 DAP world size 整除：`padding_size = (seq_length // dap_size + 1) * dap_size - seq_length`。在 gather 之后，填充将被裁剪掉：`m = m[:, :-padding_size, :]`。此填充策略至关重要——若没有它，scatter 操作将在不均匀的分区上失败。</CgxTip>
+
+来源: [__init__.py](/fastfold/habana/fastnn/__init__.py#L34-L115), [msa.py](/fastfold/habana/fastnn/msa.py#L1-L159)
+
+### 带 DAP 通信的 MSA 注意力
+
+Habana 路径中的 `MSAStack` 将 DAP 通信原语直接集成到注意力流中。`MSARowAttentionWithPairBias` 在注意力计算前对 pair 偏置应用 `gather`，而从行注意力到列注意力的转换则使用 `row_to_col` 全互通信原语：
+
+```python
+# MSAStack.forward() — DAP 感知的 row→column 转換
+node_mask_row = scatter(node_mask, dim=1)
+node = self.MSARowAttentionWithPairBias(node, pair, node_mask_row)
+node = row_to_col(node)              # all-to-all: 重新分佈 MSA rows→columns
+node_mask_col = scatter(node_mask, dim=2)
+node = self.MSAColumnAttention(node, node_mask_col)
+```
+
+`ExtraMSACore` 遵循相同的模式，但将 `MSAColumnAttention` 替换为 `MSAColumnGlobalAttention`，后者按照 AlphaFold ExtraMSA 堆栈的要求使用 `GlobalAttention` 模块（独立的 Q/KV 投影而非融合 QKV）。
+
+来源: [msa.py](/fastfold/habana/fastnn/msa.py#L83-L159), [ops.py](/fastfold/habana/fastnn/ops.py#L108-L200)
+
+### Triangle 乘法 — 融合 Gather + Matmul
+
+Habana 三角乘法模块（`TriangleMultiplicationOutgoing` 和 `TriangleMultiplicationIncoming`）将 DAP `gather` 直接融合到计算路径中。对于外向乘法，右投影在批量 matmul 之前沿 dim=1 收集；对于内向乘法，左投影沿 dim=2 收集。这消除了冗余的同步点：
+
+```python
+# TriangleMultiplicationOutgoing.forward()
+right_proj_act = gather(right_proj_act.contiguous(), dim=1)
+p = torch.matmul(
+    permute_final_dims(left_proj_act, (2, 0, 1)),
+    permute_final_dims(right_proj_act, (2, 1, 0)),
+)
+```
+
+来源: [triangle.py](/fastfold/habana/fastnn/triangle.py#L27-L93)
+
+## 自定义融合 Softmax 算子
+
+`custom_op/` 子包提供了用于融合 softmax 操作的 Habana TPC (Tensor Processing Core) 自定义算子，该算子作为通过 Habana 自定义算子框架注册的 C++ 插件实现。
+
+### 算子注册架构
+
+`hpu_fusedsoftmax.cpp` 中的 C++ 实现向 Habana 图编译器注册了三个自定义操作：
+
+| 操作 | 模式 | GUID (Gaudi) | GUID (Gaudi2) | 用途 |
+|-----------|--------|---------------|---------------|---------|
+| `fusedsoftmax` | `(Tensor, Tensor, int) → Tensor` | `fusedsoftmax_fwd_f32` | `fusedsoftmax_fwd_f32_gaudi2` | 前向: softmax(input + mask) |
+| `fusedsoftmax_bias` | `(Tensor, Tensor, Tensor, int) → Tensor` | `fusedsoftmax_bias_fwd_f32` | `fusedsoftmax_bias_fwd_f32_gaudi2` | 前向: softmax(input + mask + bias) |
+| `fusedsoftmax_backward` | `(Tensor, Tensor, int) → Tensor` | `softmax_bwd_f32` | `softmax_bwd_f32` | 反向: y * (grad - sum(grad * y)) |
+
+该算子通过 Habana 的 `CppExtension` 构建系统编译，链接 `habana_pytorch_plugin`。`GAUDI2` 预处理宏在编译时选择适当的 TPC 算子 GUID。构建出的共享对象（`libcustom_tpc_perf_lib.so`）在运行时通过 `GC_KERNEL_PATH` 环境变量加载。
+
+### Python Autograd 集成
+
+Python 侧（`fusedsoftmax.py`）将 C++ 算子封装在带有适当反向传播支持的 `torch.autograd.Function` 子类中：
+
+```python
+class FusedSoftmaxBiasFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input, mask, bias, dim):
+        tensor = torch.ops.custom_op.fusedsoftmax_bias(input, mask, bias, dim)
+        ctx.y = tensor  # 保存以供反向傳播使用
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input = torch.ops.custom_op.fusedsoftmax_backward(ctx.y, grad_output, ctx.dim)
+        grad_bias = torch.sum(grad_input, dim=-4, keepdim=True) if ctx.use_bias else None
+        return grad_input, None, grad_bias, None
+```
+
+`fused_softmax_bias` 函数包含形状兼容性守卫：仅当 `input[..., :, :1, :1, :].shape == mask.shape` 且 `input[..., :1, :, :, :].shape == bias.shape` 时才调用自定义算子，否则回退到标准 PyTorch 操作。
+
+来源: [hpu_fusedsoftmax.cpp](/fastfold/habana/fastnn/custom_op/hpu_fusedsoftmax.cpp#L1-L200), [fusedsoftmax.py](/fastfold/habana/fastnn/custom_op/fusedsoftmax.py#L1-L82), [setup.py](/fastfold/habana/fastnn/custom_op/setup.py#L1-L27)
+
+## 权重注入机制
+
+`inject_habana()` 函数是 Habana 集成的核心枢纽。它执行**精准的模块替换**与精确的权重迁移，确保 Habana 优化模型与原始模型数值完全一致。该过程遵循严格的协议：
+
+```mermaid
+flowchart LR
+    A[構建原始模型] --> B[加載 JAX 權重]
+    B --> C[創建 Habana FastNN 模塊]
+    C --> D[逐塊複製參數<br/>block-by-block]
+    D --> E[替換模型上的<br/>原始模塊]
+    E --> F[設置 eval 模式]
+```
+
+### 注入范围
+
+按顺序应用四个注入函数：
+
+| 函数 | 目标模块 | 功能描述 |
+|----------|---------------|--------------|
+| `inject_evoformer()` | `model.evoformer` | 替换为 `EvoformerStack`，复制所有 48 个块 |
+| `inject_extramsa()` | `model.extra_msa_stack` | 替换为 `ExtraMSAStack`，复制所有 4 个块 |
+| `inject_template()` | `model.template_embedder` | 替换为 `TemplateEmbedder` 或 `TemplateEmbedderMultimer` |
+| `inject_embedder()` | `model.recycling_embedder` + `model.input_embedder` | 替换为 `RecyclingEmbedder` + `InputEmbedder`（仅单体） |
+
+### 参数复制原语
+
+注入依赖于一组参数复制函数库，在原始模块和 Habana 模块的参数布局之间进行映射：
+
+| 复制函数 | 源 → 目标 | 关键转换 |
+|---------------|-----------------|-------------------|
+| `copy_qkv_linear()` | `linear_q, linear_k, linear_v` → `to_qkv` | 拼接 Q, K, V 权重：`cat((Q.w, K.w, V.w), dim=0)` |
+| `copy_kv_linear()` | `linear_k, linear_v` → `to_kv` | 拼接 K, V 权重用于全局注意力 |
+| `copy_attention()` | 完整注意力模块 | 融合 QKV，复制门控和输出线性层 |
+| `copy_triangle()` | Triangle 乘法 | 复制左/右投影、门控、输出投影 |
+| `copy_layernorm()` | LayerNorm | 直接复制权重和偏置 |
+
+融合 QKV 投影（`copy_qkv_linear`）是一项关键优化——Habana 路径不再执行三次独立的线性传递，而是将权重矩阵拼接成单个 `to_qkv` 线性层，通过一次 matmul 生成完整的 QKV 张量，从而减少了 HPU 上的算子启动开销。
+
+<CgxTip>所有参数复制均在 `torch.no_grad()` 上下文中执行，以防止注入期间的梯度追踪。复制完成后，若原始模块处于 eval 模式（`training == False`），快速模块也将通过 `fast_module.eval()` 设置为 eval 模式。这确保了批归一化和 dropout 在推理期间行为正确。</CgxTip>
+
+来源: [inject_habana.py](/fastfold/habana/inject_habana.py#L23-L100), [inject_habana.py](/fastfold/habana/inject_habana.py#L280-L404)
+
+## HCCL 分布式通信
+
+Habana 分布式后端使用 **HCCL**（Habana Collective Communication Library）替换了 NCCL，同时保留了相同的 DAP（动态轴向并行）通信原语。
+
+### 通过 MPI + HCCL 初始化
+
+`core.py` 中的 `init_dist()` 函数通过 MPI 秩发现引导分布式训练，然后初始化 HCCL：
+
+```python
+def init_dist(tensor_model_parallel_size_=1):
+    comm = MPI.COMM_WORLD
+    world_size = comm.Get_size()
+    rank = comm.Get_rank()
+    
+    import habana_frameworks.torch.distributed.hccl
+    dist.init_process_group(backend='hccl', rank=rank, world_size=world_size)
+```
+
+HCCL 初始化后，将构建两个进程组——**张量模型并行**（用于模型内的 DAP）和**数据并行**（用于跨模型副本的梯度同步）——遵循与 GPU 分布式后端相同的组构建逻辑。
+
+### 通信原语
+
+`comm.py` 模块提供了具有正确反向传播实现的自动求分感知集合操作：
+
+| 原语 | 前向 | 反向 | DAP 角色 |
+|-----------|---------|----------|----------|
+| `scatter(input, dim)` | 沿 dim `_split` | 沿 dim `_gather` | 跨 DAP 秩分區張量 |
+| `gather(input, dim)` | 沿 dim `_gather` | 沿 dim `_split` | 從 DAP 秩重新組裝張量 |
+| `reduce(input)` | `all_reduce(SUM)` | 恆等 | 同步複製的張量 |
+| `copy(input)` | 恆等 | `_reduce` | 梯度同步鈎子 |
+| `col_to_row(input)` | `_all_to_all(dim=1→2)` | `_all_to_all(dim=2→1)` | MSA row↔column 佈局轉換 |
+| `row_to_col(input)` | `_all_to_all(dim=2→1)` | `_all_to_all(dim=1→2)` | `col_to_row` 的逆操作 |
+
+每个原语均实现为 `torch.autograd.Function` 子类，确保梯度能正确流经分布式边界。`All_to_All` 类尤为关键——它使 MSA 表示能够在 Evoformer 块内的行并行和列并行布局之间重新分布。
+
+来源: [core.py](/fastfold/habana/distributed/core.py#L1-L123), [comm.py](/fastfold/habana/distributed/comm.py#L1-L189), [__init__.py](/fastfold/habana/distributed/__init__.py#L1-L9)
+
+## HPU 性能辅助器
+
+`hpuhelper.py` 模块提供了 `hpu_perf`，这是一个轻量级分析器，它使用 `mark_step()` 边界和可选的内存追踪来检测训练步骤：
+
+| 方法 | 行为 |
+|--------|----------|
+| `__init__(module, ...)` | 记录开始时间，可选地重置峰值内存统计 |
+| `checknow(log)` | 调用 `mark_step()` + 可选同步，打印*当前*阶段的耗时 |
+| `checkahead(log)` | 调用 `mark_step()` + 可选同步，打印*前一*阶段的耗时 |
+
+`checkahead` 方法实现了非侵入式性能分析，其时间标签与前一个阶段而非当前阶段匹配，从而产生更清晰的输出（如 `forward: 120ms`, `backward: 340ms`），而不会干扰训练循环。
+
+来源: [hpuhelper.py](/habana/hpuhelper.py#L1-L44)
+
+## 使用 HMP 的混合精度
+
+Habana 混合精度 (HMP) 在训练中通过 `--hmp` 标志控制。启用后，它使用算子级别的 BF16/FP32 列表应用 O1 级别的混合精度：
+
+**BF16 操作** (`ops_bf16.txt`)：`addmm`, `conv2d`, `max_pool2d`, `sum`, `relu`, `mm`, `bmm`, `mv`, `linear`, `t`, `mul`, `sub`, `add`, `truediv`, `layer_norm`
+
+**FP32 操作** (`ops_fp32.txt`)：`cross_entropy`, `log_softmax`, `nll_loss`, `softmax`
+
+FP32 列表为对归约敏感的操作（softmax, cross_entropy）保留了数值精度，同时允许大量线性代数运算在 BF16 下运行。HMP 通过以下方式激活：
+
+```python
+hmp.convert(opt_level='O1',
+            bf16_file_path=args.hmp_bf16,
+            fp32_file_path=args.hmp_fp32,
+            isVerbose=args.hmp_verbose)
+```
+
+在优化器步骤期间，通过 `with hmp.disable_casts(): optimizer.step()` 禁用类型转换操作，以防止梯度更新中意外的精度提升。
+
+来源: [train.py](/habana/train.py#L147-L210), [ops_bf16.txt](/habana/ops_bf16.txt#L1-L16), [ops_fp32.txt](/habana/ops_fp32.txt#L1-L5)
+
+## 推理流水线
+
+Habana 推理脚本（`habana/inference.py`）遵循以下执行流程：
+
+1. 通过 `habana.enable_habana()` 和 `init_dist()` **启用 Habana 运行时**
+2. 在 CPU 上使用 `AlphaFold(config)` **构建模型**
+3. 通过 `import_jax_weights_(model, param_path)` **加载 JAX 权重**
+4. 通过 `inject_habana(model)` **注入 Habana 模块**
+5. 通过 `model.to(device="hpu")` **转移至 HPU**
+6. 在 `torch.no_grad()` 下**运行推理**，并在前向传播后调用 `htcore.mark_step()`
+
+单体和多聚体模式均受支持。当设置 `--enable_workflow` 时，多聚体路径使用 `FastFoldMultimerDataWorkFlow` 进行并行 MSA 搜索。`--chunk_size` 参数控制 OutProductMean 和注意力模块内的内存高效分块执行。
+
+来源: [inference.py](/habana/inference.py#L82-L130), [inference.sh](/habana/inference.sh#L1-L21)
+
+## 训练流水线
+
+Habana 训练脚本（`habana/train.py`）支持多 HPU 分布式训练，包含以下组件：
+
+| 组件 | 实现 |
+|-----------|---------------|
+| 分布式启动 | `mpirun` 搭带 `--allow-run-as-root --bind-to none` |
+| 后端 | 通过 `habana_frameworks.torch.distributed.hccl` 实现 HCCL |
+| 数据并行 | 搭带 `gradient_as_bucket_view=True`, `bucket_cap_mb=400` 的 `DistributedDataParallel` |
+| 优化器 | 来自 `habana_frameworks.torch.hpex.optimizers` 的 `FusedAdamW` |
+| 混合精度 | 搭带可配置 BF16/FP32 算子列表的 HMP O1 |
+| 性能分析 | 搭带 `mark_step()` 的逐步计时 `hpu_perf` |
+
+训练循环在每次验证前向传播后应用 `htcore.mark_step()`，以确保延迟图在度量计算之前执行。
+
+来源: [train.py](/habana/train.py#L1-L250), [train.sh](/habana/train.sh#L1-L32)
+
+## 环境设置
+
+推理和训练脚本均需设置两个关键环境变量：
+
+```bash
+# 加載自定義 TPC 算子庫
+export GC_KERNEL_PATH=./fastfold/habana/fastnn/custom_op/libcustom_tpc_perf_lib.so:$GC_KERNEL_PATH
+
+# 將項目根目錄添加至 Python 路徑
+export PYTHONPATH=./:$PYTHONPATH
+```
+
+`GC_KERNEL_PATH` 变量告知 Habana 运行时在何处查找自定义融合 softmax TPC 算子共享对象。若未设置，融合 softmax 自定义算子将在运行时加载失败。
+
+来源: [inference.sh](/habana/inference.sh#L1-L3), [train.sh](/habana/train.sh#L1-L3)
+
+## Habana 与 GPU 集成对比
+
+| 方面 | GPU 路径 | Habana 路径 |
+|--------|----------|-------------|
+| 设备 | `cuda` | `hpu` |
+| 集合通信后端 | NCCL | HCCL |
+| 分布式初始化 | 直接使用 `torch.distributed` | MPI 秩发现 → HCCL |
+| 自定义算子 | CUDA 融合算子 | 通过 `hpu_custom_op.h` 实现的 TPC 自定义算子 |
+| 执行模型 | 即时执行 (默认) | 搭带 `mark_step()` 的延遲執行模式 |
+| 混合精度 | AMP (autocast/GradScaler) | HMP (基於算子列表的 BF16/FP32) |
+| 优化器 | `torch.optim.AdamW` | 來自 `habana_frameworks` 的 `FusedAdamW` |
+| Softmax 融合 | 自定義 CUDA 算子 | 搭帶 Gaudi/Gaudi2 GUID 的自定義 TPC 算子 |
+| DAP 原語 | `fastfold/distributed/` | `fastfold/habana/distributed/` (相同 API，HCCL 後端) |
+| 權重注入 | `inject_fastnn()` | `inject_habana()` (融合 QKV 佈局) |
+
+来源: [inject_habana.py](/fastfold/habana/inject_habana.py#L1-L404), [core.py](/fastfold/habana/distributed/core.py#L30-L50)
+
+## 后续步骤
+
+- 有关 GPU 和 Habana 路径共享的底层 DAP 通信设计，请参阅 [DAP 通信原语](9-dap-communication-primitives)
+- 有关 Habana 模块所效仿的 FastNN 模块架构，请参阅 [FastNN 模块设计](6-fastnn-module-design)
+- 有关为两条路径提供权重的 JAX 权重注入，请参阅 [从 JAX 注入权重](15-weight-injection-from-jax)
+- 有关性能测量方法，请参阅 [性能基准测试](18-performance-benchmarking)
+
+---

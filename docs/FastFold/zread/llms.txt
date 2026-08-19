@@ -1,0 +1,39 @@
+# hpcaitech/FastFold
+
+Source: https://zread.ai/hpcaitech/FastFold
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/推理指南](3-inference-guide.md)
+- [入门/训练设置](4-training-setup.md)
+
+## 深入解析
+
+- [深入解析/架构概述](5-architecture-overview.md)
+- [深入解析/性能基准测试](18-performance-benchmarking.md)
+### 高性能 Evoformer
+
+- [深入解析/高性能 Evoformer/FastNN 模块设计](6-fastnn-module-design.md)
+- [深入解析/高性能 Evoformer/融合内核实现](7-fused-kernel-implementations.md)
+- [深入解析/高性能 Evoformer/内存高效的分块执行](8-memory-efficient-chunked-execution.md)
+
+### 动态轴向并行
+
+- [深入解析/动态轴向并行/DAP 通信原语](9-dap-communication-primitives.md)
+- [深入解析/动态轴向并行/对偶异步操作](10-duality-async-operation.md)
+- [深入解析/动态轴向并行/Scatter-Gather 与 All-to-All](11-scatter-gather-and-all-to-all.md)
+
+### 数据处理流水线
+
+- [深入解析/数据处理流水线/面向 MSA 搜索的 Ray 工作流](12-ray-workflow-for-msa-search.md)
+- [深入解析/数据处理流水线/特征流水线与变换](13-feature-pipeline-and-transforms.md)
+- [深入解析/数据处理流水线/多聚体数据处理](14-multimer-data-processing.md)
+
+### 模型集成
+
+- [深入解析/模型集成/来自 JAX 的权重注入](15-weight-injection-from-jax.md)
+- [深入解析/模型集成/AlphaFold 模型配置](16-alphafold-model-configuration.md)
+- [深入解析/模型集成/Habana 平台支持](17-habana-platform-support.md)
+
