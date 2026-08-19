@@ -1,0 +1,50 @@
+# RosettaCommons/foundry
+
+Source: https://zread.ai/RosettaCommons/foundry
+
+## 快速入门
+
+- [快速入门/概述](1-overview.md)
+- [快速入门/快速开始](2-quick-start.md)
+- [快速入门/端到端设计流程教程](3-end-to-end-design-pipeline-tutorial.md)
+- [快速入门/Google Colab 快速开始](4-google-colab-quick-start.md)
+
+## 深度剖析
+
+- [深度剖析/架构与设计理念](5-architecture-and-design-philosophy.md)
+### 核心基础设施
+
+- [深度剖析/核心基础设施/推理引擎架构](6-inference-engine-architecture.md)
+- [深度剖析/核心基础设施/使用 FabricTrainer 的训练框架](7-training-harness-with-fabrictrainer.md)
+- [深度剖析/核心基础设施/检查点管理系统](8-checkpoint-management-system.md)
+
+### 特定模型的实现
+
+- [深度剖析/特定模型的实现/RFdiffusion3：全原子生成模型](9-rfdiffusion3-all-atom-generative-model.md)
+- [深度剖析/特定模型的实现/RosettaFold3：结构预测网络](10-rosettafold3-structure-prediction-network.md)
+- [深度剖析/特定模型的实现/ProteinMPNN 和 LigandMPNN：逆向折叠](11-proteinmpnn-and-ligandmpnn-inverse-folding.md)
+
+### 配置与 Hydra 集成
+
+- [深度剖析/配置与 Hydra 集成/Hydra 配置系统](12-hydra-configuration-system.md)
+- [深度剖析/配置与 Hydra 集成/动态配置的自定义解析器](13-custom-resolvers-for-dynamic-configs.md)
+- [深度剖析/配置与 Hydra 集成/数据集实例化与采样](14-dataset-instantiation-and-sampling.md)
+
+### 训练基础设施
+
+- [深度剖析/训练基础设施/基于 DDP 的分布式训练](15-distributed-training-with-ddp.md)
+- [深度剖析/训练基础设施/指数移动平均实现](16-exponential-moving-average-implementation.md)
+- [深度剖析/训练基础设施/回调与指标记录](17-callbacks-and-metrics-logging.md)
+
+### 组件与 Contig 系统
+
+- [深度剖析/组件与 Contig 系统/组件解析与验证](18-component-parsing-and-validation.md)
+- [深度剖析/组件与 Contig 系统/带约束的设计模式](19-design-pattern-with-constraints.md)
+- [深度剖析/组件与 Contig 系统/部分设计的掩码生成](20-mask-generation-for-partial-design.md)
+
+### 扩展 Foundry
+
+- [深度剖析/扩展 Foundry/向 Foundry 添加新模型](21-adding-new-models-to-foundry.md)
+- [深度剖析/扩展 Foundry/特定模型的配置结构](22-model-specific-configuration-structure.md)
+- [深度剖析/扩展 Foundry/实现自定义推理引擎](23-implementing-custom-inference-engines.md)
+
