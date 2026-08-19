@@ -17,8 +17,38 @@ The AlphaFold2 training system provides two primary training approaches:
 
 The system includes support for gradient accumulation to handle larger effective batch sizes, embedding integration from protein language models, and hooks for distributed training frameworks.
 
-```
+```mermaid
+flowchart TD
 
+embeddings["Embedding Systems"]
+data["Data Handling"]
+preproc["Data Preprocessing"]
+training["Training Approaches"]
+framework["Training Frameworks"]
+end2end["End-to-End Training (train_end2end.py)"]
+pretrain["Pretraining (train_pre.py)"]
+dist["Distributed Training (placeholders)"]
+
+subgraph subGraph2 ["Training System Components"]
+    data
+    preproc
+    training
+    data --> preproc
+    preproc --> training
+    embeddings --> training
+    training --> framework
+
+subgraph subGraph1 ["External Components"]
+    embeddings
+    framework
+end
+
+subgraph subGraph0 ["Training Approaches"]
+    end2end
+    pretrain
+    dist
+end
+end
 ```
 
 Sources: [train_end2end.py](https://github.com/lucidrains/alphafold2/blob/931466e4/train_end2end.py)
@@ -33,8 +63,34 @@ Sources: [train_end2end.py](https://github.com/lucidrains/alphafold2/blob/931466
 
 The training system uses the SidechainNet dataset for both training approaches. SidechainNet provides protein sequences, coordinates, and masks that are used to train the model.
 
-```
+```mermaid
+flowchart TD
 
+sidechainnet["SidechainNet Dataset"]
+loader["DataLoader"]
+cycle["cycle() Helper Function"]
+filtering["Length Filtering"]
+batching["Batch Processing"]
+seq_proc["Sequence Processing"]
+coord_proc["Coordinate Processing"]
+mask_proc["Mask Processing"]
+distogram["Distogram Calculation<br>(Pretraining only)"]
+
+sidechainnet --> loader
+loader --> cycle
+cycle --> filtering
+filtering --> batching
+batching --> seq_proc
+batching --> coord_proc
+batching --> mask_proc
+
+subgraph subGraph0 ["Data Preprocessing"]
+    seq_proc
+    coord_proc
+    mask_proc
+    distogram
+    coord_proc --> distogram
+end
 ```
 
 The data handling follows these steps:
@@ -47,8 +103,8 @@ The data handling follows these steps:
 
 ### Code Implementation
 
-```
-
+```markdown
+# Data loadingdata = scn.load(    casp_version = 12,    thinning = 30,    with_pytorch = 'dataloaders',    batch_size = 1,    dynamic_batching = False) # Data filtering and cyclingdata = iter(data['train'])data_cond = lambda t: t[1].shape[1] < THRESHOLD_LENGTHdl = cycle(data, data_cond)
 ```
 
 The `cycle()` helper function creates an infinite iterator that continuously yields data batches meeting a specified condition.
@@ -63,8 +119,38 @@ Sources: [train_end2end.py L53-L73](https://github.com/lucidrains/alphafold2/blo
 
 The end-to-end training approach trains the complete AlphaFold2 model, including the structure module that predicts 3D coordinates. This is implemented in `train_end2end.py`.
 
-```
+```mermaid
+flowchart TD
 
+data["SidechainNet Data"]
+process["Data Processing"]
+embed["Optional Embedding Integration"]
+model["AlphaFold2 Model<br>(with Structure Module)"]
+coords["Predicted 3D Coordinates"]
+align["Kabsch Alignment"]
+loss["Loss Calculation<br>(RMSE + Dispersion)"]
+update["Parameter Update"]
+vis["Optional PDB Visualization"]
+
+subgraph subGraph0 ["End-to-End Training Pipeline"]
+    data
+    process
+    embed
+    model
+    coords
+    align
+    loss
+    update
+    vis
+    data --> process
+    process --> embed
+    embed --> model
+    model --> coords
+    coords --> align
+    align --> loss
+    loss --> update
+    update --> vis
+end
 ```
 
 Key components of end-to-end training:
@@ -82,8 +168,33 @@ Sources: [train_end2end.py L76-L166](https://github.com/lucidrains/alphafold2/bl
 
 The pretraining approach focuses on training the model to predict distograms (inter-residue distance matrices) without the structure module. This is implemented in `train_pre.py`.
 
-```
+```mermaid
+flowchart TD
 
+data["SidechainNet Data"]
+process["Data Processing"]
+dist_calc["Distogram Calculation<br>(get_bucketed_distance_matrix)"]
+model["AlphaFold2 Model<br>(without Structure Module)"]
+dist_pred["Predicted Distogram"]
+loss["Loss Calculation<br>(Cross Entropy)"]
+update["Parameter Update"]
+
+subgraph subGraph0 ["Pretraining Pipeline"]
+    data
+    process
+    dist_calc
+    model
+    dist_pred
+    loss
+    update
+    data --> process
+    process --> dist_calc
+    process --> model
+    model --> dist_pred
+    dist_pred --> loss
+    dist_calc --> loss
+    loss --> update
+end
 ```
 
 Key components of pretraining:
@@ -100,20 +211,16 @@ Sources: [train_pre.py L49-L96](https://github.com/lucidrains/alphafold2/blob/93
 
 Both training approaches initialize the AlphaFold2 model with specific parameters, but with notable differences based on the training objective.
 
-```
-
-```
-
 ### End-to-End Model Configuration
 
 ```
-
+model = Alphafold2(    dim = 256,    depth = 1,    heads = 8,    dim_head = 64,    predict_coords = True,    structure_module_dim = 8,    structure_module_depth = 2,    structure_module_heads = 4,    structure_module_dim_head = 16,    structure_module_refinement_iters = 2).to(DEVICE)
 ```
 
 ### Pretraining Model Configuration
 
 ```
-
+model = Alphafold2(    dim = 256,    depth = 1,    heads = 8,    dim_head = 64).to(DEVICE)
 ```
 
 Sources: [train_end2end.py L76-L88](https://github.com/lucidrains/alphafold2/blob/931466e4/train_end2end.py#L76-L88)
@@ -136,8 +243,8 @@ Both training approaches share common training configuration parameters:
 
 Both training implementations use gradient accumulation to effectively increase batch size without increasing memory requirements:
 
-```
-
+```sql
+for _ in range(NUM_BATCHES):    for _ in range(GRADIENT_ACCUMULATE_EVERY):        # Forward pass        # Loss calculation        # Backward pass        # Parameter update    optim.step()    optim.zero_grad()
 ```
 
 Sources: [train_end2end.py L24-L32](https://github.com/lucidrains/alphafold2/blob/931466e4/train_end2end.py#L24-L32)
@@ -156,20 +263,40 @@ The end-to-end training script supports integration with external protein langua
 * `"msa"` - Use embeddings from MSA (placeholder)
 * `None` - No external embeddings
 
-```
+```mermaid
+flowchart TD
 
+features["FEATURES Constant"]
+esm["ESM-1b Embeddings"]
+msa["MSA Embeddings (Placeholder)"]
+none["No External Embeddings"]
+model["AlphaFold2 Model"]
+
+subgraph subGraph0 ["Embedding Integration"]
+    features
+    esm
+    msa
+    none
+    model
+    features --> esm
+    features --> msa
+    features --> none
+    esm --> model
+    msa --> model
+    none --> model
+end
 ```
 
 The ESM-1b model is loaded using PyTorch hub:
 
-```
-
+```python
+if FEATURES == "esm":    # from pytorch hub (almost 30gb)    embedd_model, alphabet = torch.hub.load("facebookresearch/esm", "esm1b_t33_650M_UR50S")    batch_converter = alphabet.get_batch_converter()
 ```
 
 During training, the appropriate embeddings are provided to the model:
 
 ```
-
+refined = model(    seq,    msa = msa,    embedds = embedds,    mask = mask)
 ```
 
 Sources: [train_end2end.py L24](https://github.com/lucidrains/alphafold2/blob/931466e4/train_end2end.py#L24-L24)
@@ -202,7 +329,7 @@ The training approaches use different loss functions:
 The end-to-end training uses a combination of RMSE (Root Mean Square Error) loss for coordinate prediction and a dispersion term:
 
 ```
-
+loss = torch.sqrt(criterion(coords_aligned[flat_chain_mask], labels_aligned[flat_chain_mask])) + \                  dispersion_weight * torch.norm( (1/weights)-1 )
 ```
 
 Where:
@@ -216,7 +343,7 @@ Where:
 The pretraining uses cross-entropy loss for distogram prediction:
 
 ```
-
+loss = F.cross_entropy(    distogram,    discretized_distances,    ignore_index = IGNORE_INDEX)
 ```
 
 Where:

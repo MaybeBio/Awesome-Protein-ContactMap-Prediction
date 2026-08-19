@@ -21,8 +21,35 @@ The testing framework is built using pytest and is organized into two primary te
 
 ### Test Organization
 
-```
+```mermaid
+flowchart TD
 
+A["Testing Framework"]
+B["Model Tests<br>test_attention.py"]
+C["Utility Tests<br>test_utils.py"]
+B1["Basic Functionality"]
+B2["Model Configurations"]
+B3["Coordinate Prediction"]
+B4["Recycling Mechanism"]
+B5["Confidence Scores"]
+C1["Matrix/Mask Handling"]
+C2["Distogram Processing"]
+C3["Structure Alignment"]
+C4["Structure Quality Metrics"]
+C5["Sidechain Handling"]
+
+A --> B
+A --> C
+B --> B1
+B --> B2
+B --> B3
+B --> B4
+B --> B5
+C --> C1
+C --> C2
+C --> C3
+C --> C4
+C --> C5
 ```
 
 Sources: [tests/test_attention.py](https://github.com/lucidrains/alphafold2/blob/931466e4/tests/test_attention.py)
@@ -37,8 +64,21 @@ The `test_attention.py` file contains tests that validate the core AlphaFold2 mo
 
 Most model tests follow a consistent pattern:
 
-```
+```mermaid
+flowchart TD
 
+A["Initialize Model<br>with Configuration"]
+B["Generate Random<br>Input Data"]
+C["Run Forward Pass"]
+D["Verify Output Shape<br>and Properties"]
+E["Test-specific<br>Checks"]
+F["For Some Tests:<br>Run Backward Pass"]
+
+A --> B
+B --> C
+C --> D
+D --> E
+E --> F
 ```
 
 Sources: [tests/test_attention.py L8-L385](https://github.com/lucidrains/alphafold2/blob/931466e4/tests/test_attention.py#L8-L385)
@@ -136,8 +176,44 @@ Sources: [tests/test_utils.py L71-L101](https://github.com/lucidrains/alphafold2
 
 The following diagram shows how the test files map to components of the AlphaFold2 implementation:
 
-```
+```mermaid
+flowchart TD
 
+testAttention["test_attention.py"]
+testUtils["test_utils.py"]
+model["Alphafold2 Model"]
+evoformer["Evoformer Module"]
+structure["Structure Module"]
+coords["Coordinate Processing"]
+metrics["Structure Evaluation Metrics"]
+masks["Mask Generation"]
+distogram["Distogram Processing"]
+
+testAttention --> model
+testUtils --> coords
+testUtils --> metrics
+testUtils --> masks
+testUtils --> distogram
+
+subgraph subGraph2 ["Utility Components"]
+    coords
+    metrics
+    masks
+    distogram
+end
+
+subgraph subGraph1 ["AlphaFold2 Core Components"]
+    model
+    evoformer
+    structure
+    model --> evoformer
+    model --> structure
+end
+
+subgraph subGraph0 ["Testing Framework"]
+    testAttention
+    testUtils
+end
 ```
 
 Sources: [tests/test_attention.py](https://github.com/lucidrains/alphafold2/blob/931466e4/tests/test_attention.py)
@@ -160,19 +236,19 @@ python_files = tests/*.py
 To run all tests:
 
 ```
-
+python -m pytest
 ```
 
 To run a specific test file:
 
 ```
-
+python -m pytest tests/test_attention.py
 ```
 
 To run a specific test:
 
 ```
-
+python -m pytest tests/test_attention.py::test_coords
 ```
 
 Sources: [setup.cfg L1-L6](https://github.com/lucidrains/alphafold2/blob/931466e4/setup.cfg#L1-L6)

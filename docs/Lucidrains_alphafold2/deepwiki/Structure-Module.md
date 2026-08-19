@@ -18,10 +18,6 @@ Sources: [alphafold2_pytorch/alphafold2.py L17-L21](https://github.com/lucidrain
 
 The Structure Module takes learned representations from the Evoformer and progressively refines them into 3D coordinates through an iterative process that maintains geometric equivariance, which is crucial for accurate protein structure prediction.
 
-```
-
-```
-
 Sources: [alphafold2_pytorch/alphafold2.py L838-L905](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L838-L905)
 
  [alphafold2_pytorch/alphafold2.py L603-L624](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L603-L624)
@@ -37,8 +33,18 @@ The Structure Module begins by extracting two key inputs from the Evoformer outp
 
 These inputs are processed through linear projections to the appropriate dimension:
 
-```
+```mermaid
+flowchart TD
 
+m["m (MSA Representation)"]
+single_msa_repr_row["single_msa_repr_row"]
+single_repr["Single Representation"]
+x["x (Pairwise Representation)"]
+pairwise_repr["Pairwise Representation"]
+
+m --> single_msa_repr_row
+single_msa_repr_row --> single_repr
+x --> pairwise_repr
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L844-L847](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L844-L847)
@@ -67,8 +73,29 @@ The Structure Module uses an iterative refinement process with the following ste
 2. **For each iteration**: * Convert quaternions to rotation matrices * Apply IPA to update single representation * Predict quaternion and translation updates * Update frame (rotations and translations)
 3. **Final Coordinate Generation**: Convert final representations to local points and transform using the final frame
 
-```
+```mermaid
+flowchart TD
 
+init["Initialize Quaternions and Translations"]
+convert["Convert Quaternions to Rotation Matrices"]
+ipa_apply["Apply IPA Block with Current Frame"]
+pred["Predict Quaternion and Translation Updates"]
+update["Update Quaternions and Translations"]
+final["Generate Final Coordinates"]
+
+init --> convert
+update --> final
+
+subgraph subGraph0 ["Refinement Loop (structure_module_depth iterations)"]
+    convert
+    ipa_apply
+    pred
+    update
+    convert --> ipa_apply
+    ipa_apply --> pred
+    pred --> update
+    update --> convert
+end
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L855-L891](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L855-L891)
@@ -79,8 +106,8 @@ Sources: [alphafold2_pytorch/alphafold2.py L855-L891](https://github.com/lucidra
 
 The Structure Module components are initialized in the Alphafold2 class constructor:
 
-```
-
+```markdown
+# Single/pair representation transformationself.msa_to_single_repr_dim = nn.Linear(dim, dim)self.trunk_to_pairwise_repr_dim = nn.Linear(dim, dim) # IPA block for equivariant attention (forced to use float32 precision)with torch_default_dtype(torch.float32):    self.ipa_block = IPABlock(        dim = dim,        heads = structure_module_heads,    )    self.to_quaternion_update = nn.Linear(dim, 6) # Point generationself.to_points = nn.Linear(dim, 3) # Confidence predictionself.lddt_linear = nn.Linear(dim, 1)
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L603-L624](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L603-L624)
@@ -122,8 +149,25 @@ The final step converts the refined representations to 3D coordinates:
 2. Transform local points using the final rotation matrices
 3. Add the final translations to get global coordinates
 
-```
+```mermaid
+flowchart TD
 
+single_repr["Single Representation"]
+points_local["Local Points"]
+quaternions["Final Quaternions"]
+rotations["Rotation Matrices"]
+transform["Transform Points<br>(Matrix Multiplication)"]
+add["Add Translations"]
+translations["Final Translations"]
+coords["3D Coordinates"]
+
+single_repr --> points_local
+quaternions --> rotations
+points_local --> transform
+rotations --> transform
+transform --> add
+translations --> add
+add --> coords
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L889-L891](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L889-L891)
@@ -146,8 +190,8 @@ Sources: [alphafold2_pytorch/alphafold2.py L895-L904](https://github.com/lucidra
 
 The Structure Module requires high numerical precision for stable equivariant operations. It enforces float32 precision during computation regardless of the model's overall dtype:
 
-```
-
+```markdown
+# prepare float32 precision for equivarianceoriginal_dtype = single_repr.dtypesingle_repr, pairwise_repr = map(lambda t: t.float(), (single_repr, pairwise_repr)) # iterative refinement with equivariant transformer in high precisionwith torch_default_dtype(torch.float32):    # Structure Module operations here... # Restore original dtypecoords.type(original_dtype)
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L850-L893](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L850-L893)
@@ -156,8 +200,17 @@ Sources: [alphafold2_pytorch/alphafold2.py L850-L893](https://github.com/lucidra
 
 The Structure Module forms the final stage of the AlphaFold2 prediction pipeline:
 
-```
+```mermaid
+flowchart TD
 
+input["Sequence + MSA Input"]
+evoformer["Evoformer Module"]
+structure["Structure Module"]
+output["3D Structure + Confidence"]
+
+input --> evoformer
+evoformer --> structure
+structure --> output
 ```
 
 The Structure Module is only activated when `predict_coords=True` is set during model initialization, otherwise the model only returns distance and angle predictions from the trunk.

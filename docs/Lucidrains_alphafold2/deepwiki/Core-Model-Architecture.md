@@ -10,8 +10,54 @@ This document details the core architecture of the AlphaFold2 PyTorch implementa
 
 The AlphaFold2 implementation follows the architecture described in the original DeepMind papers, adapted for PyTorch. The model transforms amino acid sequences and multiple sequence alignments (MSAs) into 3D protein structures through a series of specialized neural network modules.
 
-```
+```mermaid
+flowchart TD
 
+seq["Sequence"]
+msa["MSA"]
+templates["Templates (Optional)"]
+embedds["Embeddings (Optional)"]
+input_proc["Input Processing"]
+evoformer["Evoformer Module"]
+structure["Structure Module"]
+output_proc["Output Processing"]
+distogram["Distogram"]
+angles["Angles (Optional)"]
+coords["3D Coordinates (Optional)"]
+confidence["Confidence Scores (Optional)"]
+
+seq --> input_proc
+msa --> input_proc
+templates --> input_proc
+embedds --> input_proc
+output_proc --> distogram
+output_proc --> angles
+output_proc --> coords
+output_proc --> confidence
+
+subgraph Outputs ["Outputs"]
+    distogram
+    angles
+    coords
+    confidence
+end
+
+subgraph subGraph1 ["Alphafold2 Model"]
+    input_proc
+    evoformer
+    structure
+    output_proc
+    input_proc --> evoformer
+    evoformer --> structure
+    structure --> output_proc
+end
+
+subgraph Inputs ["Inputs"]
+    seq
+    msa
+    templates
+    embedds
+end
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L469-L905](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L469-L905)
@@ -20,8 +66,8 @@ Sources: [alphafold2_pytorch/alphafold2.py L469-L905](https://github.com/lucidra
 
 The `Alphafold2` class is the main entry point for the model implementation. It accepts numerous parameters that configure the behavior and capacity of the model.
 
-```
-
+```markdown
+model = Alphafold2(    dim=256,             # Embedding dimension    depth=48,            # Number of Evoformer blocks    heads=8,             # Number of attention heads    dim_head=64,         # Dimension per attention head    predict_angles=True, # Whether to predict torsion angles    predict_coords=True  # Whether to predict 3D coordinates    # ... many other parameters)
 ```
 
 Key parameters include:
@@ -61,8 +107,46 @@ The model accepts several types of inputs:
 
 The input processing stage converts these inputs into internal representations:
 
-```
+```mermaid
+flowchart TD
 
+seq["seq: [B, N]"]
+token_emb["Token Embedding"]
+seq_repr["seq_repr: [B, N, D]"]
+pairwise_repr["Pairwise Representation<br>[B, N, N, D]"]
+msa["msa: [B, M, N]"]
+msa_emb["MSA Embedding"]
+msa_repr["msa_repr: [B, M, N, D]"]
+templates["templates_feats<br>[B, T, N, N, D_t]"]
+template_embed["Template Embedding"]
+template_repr["template_repr: [B, T, N, N, D]"]
+template_attn["Template Attention"]
+seq_idx["Sequence Indices"]
+rel_pos["Relative Position<br>Calculation"]
+pos_emb["Position Embedding"]
+pos_encoding["pos_encoding: [N, N, D]"]
+
+seq --> token_emb
+token_emb --> seq_repr
+seq_repr --> pairwise_repr
+msa --> msa_emb
+msa_emb --> msa_repr
+seq_repr --> msa_repr
+templates --> template_embed
+template_embed --> template_repr
+template_repr --> template_attn
+template_attn --> pairwise_repr
+pos_encoding --> pairwise_repr
+
+subgraph subGraph0 ["Position Encoding"]
+    seq_idx
+    rel_pos
+    pos_emb
+    pos_encoding
+    seq_idx --> rel_pos
+    rel_pos --> pos_emb
+    pos_emb --> pos_encoding
+end
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L630-L786](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L630-L786)
@@ -74,8 +158,42 @@ The Evoformer is the central component that processes MSA and pairwise represent
 1. **MSA Representation**: Captures evolutionary information from multiple sequence alignments
 2. **Pairwise Representation**: Captures relationships between residue pairs
 
-```
+```mermaid
+flowchart TD
 
+msa_attn["MSA Attention Block"]
+msa_ff["MSA FeedForward"]
+pair_attn["Pairwise Attention Block"]
+pair_ff["Pairwise FeedForward"]
+msa_in["MSA Repr [B, M, N, D]"]
+pair_in["Pairwise Repr [B, N, N, D]"]
+msa_out["Updated MSA Repr"]
+pair_out["Updated Pairwise Repr"]
+
+msa_in --> msa_attn
+pair_in --> pair_attn
+msa_ff --> msa_out
+pair_ff --> pair_out
+
+subgraph Evoformer ["Evoformer"]
+
+subgraph EvoformerBlock[1...depth] ["EvoformerBlock[1...depth]"]
+    msa_attn --> pair_attn
+    pair_attn --> msa_attn
+
+subgraph subGraph1 ["Pairwise Processing"]
+    pair_attn
+    pair_ff
+    pair_attn --> pair_ff
+end
+
+subgraph subGraph0 ["MSA Processing"]
+    msa_attn
+    msa_ff
+    msa_attn --> msa_ff
+end
+end
+end
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L412-L467](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L412-L467)
@@ -94,8 +212,8 @@ Sources: [alphafold2_pytorch/alphafold2.py L353-L409](https://github.com/lucidra
 
 The Evoformer uses PyTorch's checkpoint mechanism to reduce memory usage during training:
 
-```
-
+```markdown
+# In Evoformer forward methodx, m, *_ = checkpoint_sequential(self.layers, 1, inp)
 ```
 
 This allows training of deeper models by trading computation for memory. For more details, see [Memory-Efficient Computation](/lucidrains/alphafold2/2.3-memory-efficient-computation).
@@ -106,8 +224,49 @@ Sources: [alphafold2_pytorch/alphafold2.py L458-L467](https://github.com/lucidra
 
 When `predict_coords=True`, the model includes a Structure Module that converts Evoformer outputs into 3D protein structures using invariant point attention (IPA).
 
-```
+```mermaid
+flowchart TD
 
+pairwise_repr["Pairwise Representation"]
+trunk_projection["Trunk Projection"]
+msa_repr["MSA Representation (Row 0)"]
+single_projection["Single Projection"]
+pairwise_rep_refined["Refined Pairwise Repr"]
+single_repr["Refined Single Repr"]
+ipa["Invariant Point Attention<br>(IPABlock)"]
+quat_update["Quaternion Update"]
+trans_update["Translation Update"]
+rotations["Rotation Matrices"]
+translations["Translations"]
+points["Local Points"]
+final_coords["Final Coordinates"]
+
+pairwise_repr --> trunk_projection
+msa_repr --> single_projection
+trunk_projection --> pairwise_rep_refined
+single_projection --> single_repr
+single_repr --> points
+rotations --> final_coords
+translations --> final_coords
+points --> final_coords
+
+subgraph subGraph0 ["Structure Module Iterations [1...depth]"]
+    pairwise_rep_refined
+    single_repr
+    ipa
+    quat_update
+    trans_update
+    rotations
+    translations
+    single_repr --> ipa
+    pairwise_rep_refined --> ipa
+    ipa --> quat_update
+    ipa --> trans_update
+    quat_update --> rotations
+    trans_update --> translations
+    rotations --> ipa
+    translations --> ipa
+end
 ```
 
 The Structure Module iteratively refines a set of rotations and translations to produce the final 3D coordinates.
@@ -131,8 +290,27 @@ Sources: [alphafold2_pytorch/alphafold2.py L30-L37](https://github.com/lucidrain
 
 ## Model Lifecycle
 
-```
+```mermaid
+sequenceDiagram
+  participant Input
+  participant Alphafold2
+  participant Evoformer
+  participant Structure
+  participant Output
 
+  Input->>Alphafold2: seq, msa, templates, etc.
+  Alphafold2->>Alphafold2: Process inputs
+  Alphafold2->>Evoformer: x(pairwise), m(msa)
+  loop [depth times]
+    Evoformer->>Evoformer: Process MSA and pairwise repr
+    Evoformer->>Alphafold2: Updated representations
+    Alphafold2->>Alphafold2: Generate distogram
+    Alphafold2->>Alphafold2: Generate angle predictions
+    Alphafold2->>Structure: single and pairwise repr
+    Structure->>Structure: Update quaternions and translations
+    Structure->>Alphafold2: 3D coordinates
+  end
+  Alphafold2->>Output: ReturnValues or coordinates
 ```
 
 Sources: [alphafold2_pytorch/alphafold2.py L630-L905](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/alphafold2.py#L630-L905)
@@ -156,8 +334,20 @@ Sources: [alphafold2_pytorch/alphafold2.py L743-L786](https://github.com/lucidra
 
 The model supports iterative refinement through recycling:
 
-```
+```mermaid
+flowchart TD
 
+inputs["Inputs"]
+alphafold2["Alphafold2 Model"]
+output["Outputs"]
+recyclables["Recyclables"]
+next_iteration["Next Iteration"]
+
+inputs --> alphafold2
+alphafold2 --> output
+alphafold2 --> recyclables
+recyclables --> next_iteration
+next_iteration --> alphafold2
 ```
 
 Recyclable information includes:

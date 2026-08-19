@@ -102,9 +102,6 @@ Sources: [alphafold2_pytorch/__init__.py L1-L2](https://github.com/lucidrains/al
 
 The following diagram shows the detailed architecture of the core model components:
 
-```
-
-```
 
 Key architectural components:
 
@@ -119,10 +116,6 @@ Sources: [README.md L88-L126](https://github.com/lucidrains/alphafold2/blob/9314
 ## Feature Diagram
 
 The following diagram illustrates the key features and options available in this implementation:
-
-```
-
-```
 
 This implementation provides numerous configuration options:
 

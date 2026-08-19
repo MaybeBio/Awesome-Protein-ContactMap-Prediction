@@ -13,8 +13,55 @@ For information about the Core Model Architecture, see [Core Model Architecture]
 
 The embedding system consists of three wrapper classes that encapsulate different pre-trained protein language models:
 
-```
+```mermaid
+flowchart TD
 
+seq["Protein Sequence"]
+msa["Multiple Sequence Alignment"]
+esm["ESMEmbedWrapper"]
+msa_tr["MSAEmbedWrapper"]
+prot["ProtTranEmbedWrapper"]
+esm_model["ESM-1b Model"]
+msa_model["MSA Transformer"]
+prot_model["ProtBERT Model"]
+proj["Projection Layer"]
+alphafold["AlphaFold2 Model"]
+
+seq --> esm
+seq --> prot
+msa --> msa_tr
+msa --> prot
+seq --> msa_tr
+msa --> msa_tr
+esm --> esm_model
+msa_tr --> msa_model
+prot --> prot_model
+esm_model --> proj
+msa_model --> proj
+prot_model --> proj
+
+subgraph Integration ["Integration"]
+    proj
+    alphafold
+    proj --> alphafold
+end
+
+subgraph subGraph2 ["Pre-trained Models"]
+    esm_model
+    msa_model
+    prot_model
+end
+
+subgraph subGraph1 ["Embedding Wrappers"]
+    esm
+    msa_tr
+    prot
+end
+
+subgraph subGraph0 ["Input Data"]
+    seq
+    msa
+end
 ```
 
 Sources: [alphafold2_pytorch/embeds.py](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/embeds.py)
@@ -32,8 +79,25 @@ Each wrapper class follows a similar pattern:
 
 The `ESMEmbedWrapper` uses the ESM-1b protein language model, which is a transformer model trained on millions of protein sequences.
 
-```
+```mermaid
+sequenceDiagram
+  participant Input (seq, msa)
+  participant ESMEmbedWrapper
+  participant ESM-1b Model
+  participant Projection Layer
+  participant AlphaFold2
 
+  Input (seq, msa)->>ESMEmbedWrapper: Forward sequence and optional MSA
+  ESMEmbedWrapper->>ESM-1b Model: Process sequence through ESM-1b
+  ESM-1b Model->>ESMEmbedWrapper: Return sequence embeddings
+  loop [MSA provided]
+    ESMEmbedWrapper->>ESM-1b Model: Process flattened MSA through ESM-1b
+    ESM-1b Model->>ESMEmbedWrapper: Return MSA embeddings
+  end
+  ESMEmbedWrapper->>Projection Layer: Project embeddings to AlphaFold2 dimension
+  Projection Layer->>ESMEmbedWrapper: Return projected embeddings
+  ESMEmbedWrapper->>AlphaFold2: Forward with projected embeddings
+  AlphaFold2->>ESMEmbedWrapper: Return protein structure predictions
 ```
 
 Implementation details:
@@ -50,8 +114,29 @@ Sources: [alphafold2_pytorch/embeds.py L77-L103](https://github.com/lucidrains/a
 
 The `MSAEmbedWrapper` uses the MSA Transformer, which is specifically designed to process multiple sequence alignments.
 
-```
+```mermaid
+sequenceDiagram
+  participant Input (seq, msa)
+  participant MSAEmbedWrapper
+  participant MSA Transformer
+  participant Projection Layer
+  participant AlphaFold2
 
+  Input (seq, msa)->>MSAEmbedWrapper: Forward sequence and MSA
+  MSAEmbedWrapper->>MSAEmbedWrapper: Combine sequence and MSA data
+  loop [For each batch element]
+    MSAEmbedWrapper->>MSAEmbedWrapper: Process each batch element individually
+    MSAEmbedWrapper->>MSA Transformer: Process valid rows through MSA Transformer
+    MSA Transformer->>MSAEmbedWrapper: Return embeddings
+    MSAEmbedWrapper->>MSAEmbedWrapper: Pad embeddings back to full size
+    MSAEmbedWrapper->>MSA Transformer: Process combined data through MSA Transformer
+    MSA Transformer->>MSAEmbedWrapper: Return embeddings for all rows
+  end
+  MSAEmbedWrapper->>Projection Layer: Project embeddings to AlphaFold2 dimension
+  Projection Layer->>MSAEmbedWrapper: Return projected embeddings
+  MSAEmbedWrapper->>MSAEmbedWrapper: Split into sequence and MSA embeddings
+  MSAEmbedWrapper->>AlphaFold2: Forward with separated embeddings
+  AlphaFold2->>MSAEmbedWrapper: Return protein structure predictions
 ```
 
 Implementation details:
@@ -69,8 +154,28 @@ Sources: [alphafold2_pytorch/embeds.py L33-L75](https://github.com/lucidrains/al
 
 The `ProtTranEmbedWrapper` uses ProtBERT (from the ProtTrans family), which is a BERT-based model adapted for protein sequences.
 
-```
+```mermaid
+sequenceDiagram
+  participant Input (seq, msa)
+  participant ProtTranEmbedWrapper
+  participant HuggingFace Tokenizer
+  participant ProtBERT Model
+  participant Projection Layer
+  participant AlphaFold2
 
+  Input (seq, msa)->>ProtTranEmbedWrapper: Forward sequence and MSA
+  ProtTranEmbedWrapper->>ProtTranEmbedWrapper: Flatten MSA data
+  ProtTranEmbedWrapper->>HuggingFace Tokenizer: Tokenize sequence
+  HuggingFace Tokenizer->>ProtBERT Model: Process sequence tokens
+  ProtBERT Model->>ProtTranEmbedWrapper: Return sequence embeddings
+  ProtTranEmbedWrapper->>HuggingFace Tokenizer: Tokenize flattened MSA
+  HuggingFace Tokenizer->>ProtBERT Model: Process MSA tokens
+  ProtBERT Model->>ProtTranEmbedWrapper: Return MSA embeddings
+  ProtTranEmbedWrapper->>Projection Layer: Project embeddings to AlphaFold2 dimension
+  Projection Layer->>ProtTranEmbedWrapper: Return projected embeddings
+  ProtTranEmbedWrapper->>ProtTranEmbedWrapper: Reshape MSA embeddings to original dimensions
+  ProtTranEmbedWrapper->>AlphaFold2: Forward with projected embeddings
+  AlphaFold2->>ProtTranEmbedWrapper: Return protein structure predictions
 ```
 
 Implementation details:
@@ -88,8 +193,39 @@ Sources: [alphafold2_pytorch/embeds.py L10-L31](https://github.com/lucidrains/al
 
 All wrapper classes include a projection layer to ensure the embeddings are compatible with the AlphaFold2 model's expected dimensions.
 
-```
+```mermaid
+flowchart TD
 
+esm_out["ESM: 1280 dimensions"]
+msa_out["MSA Transformer: 768 dimensions"]
+prot_out["ProtBERT: 1024 dimensions"]
+esm_proj["ESM Projection"]
+msa_proj["MSA Projection"]
+prot_proj["ProtTrans Projection"]
+af2["AlphaFold2 embedding dimension"]
+
+esm_out --> esm_proj
+msa_out --> msa_proj
+prot_out --> prot_proj
+esm_proj --> af2
+msa_proj --> af2
+prot_proj --> af2
+
+subgraph subGraph2 ["AlphaFold2 Input"]
+    af2
+end
+
+subgraph subGraph1 ["Projection Layers"]
+    esm_proj
+    msa_proj
+    prot_proj
+end
+
+subgraph subGraph0 ["Pre-trained Model Outputs"]
+    esm_out
+    msa_out
+    prot_out
+end
 ```
 
 Implementation details:
@@ -108,8 +244,44 @@ Sources: [alphafold2_pytorch/embeds.py L16](https://github.com/lucidrains/alphaf
 
 The embedding wrappers integrate with the AlphaFold2 model by providing pre-computed embeddings as arguments to the model's forward function.
 
-```
+```mermaid
+flowchart TD
 
+seq_in["Input Sequence"]
+msa_in["Input MSA"]
+pretrained["Pre-trained Model"]
+projection["Projection Layer"]
+raw["Raw Embeddings"]
+projected["Projected Embeddings"]
+af2_forward["forward() method"]
+evof["Evoformer"]
+structure["Structure Module"]
+
+seq_in --> af2_forward
+msa_in --> af2_forward
+projected --> af2_forward
+
+subgraph subGraph1 ["AlphaFold2 Model"]
+    af2_forward
+    evof
+    structure
+    af2_forward --> evof
+    evof --> structure
+end
+
+subgraph subGraph0 ["Embedding Wrapper"]
+    seq_in
+    msa_in
+    pretrained
+    projection
+    raw
+    projected
+    seq_in --> pretrained
+    msa_in --> pretrained
+    pretrained --> raw
+    raw --> projection
+    projection --> projected
+end
 ```
 
 Implementation details:
@@ -128,8 +300,8 @@ Sources: [alphafold2_pytorch/embeds.py L31](https://github.com/lucidrains/alphaf
 
 To use one of these embedding wrappers, you first create an AlphaFold2 model instance and then wrap it with the desired embedding wrapper:
 
-```
-
+```sql
+# Create an AlphaFold2 modelalphafold2_model = Alphafold2(...) # Wrap it with an embedding wrappermodel = ESMEmbedWrapper(alphafold2=alphafold2_model) # Use the wrapped modeloutput = model(seq, msa)
 ```
 
 This approach allows for easy experimentation with different embedding strategies while keeping the core AlphaFold2 model unchanged.

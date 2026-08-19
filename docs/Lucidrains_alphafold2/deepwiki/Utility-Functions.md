@@ -13,10 +13,6 @@ For information about the core model architecture, see [Core Model Architecture]
 
 The utility functions in the AlphaFold2 PyTorch implementation are organized into several categories, each serving a specific purpose in the protein structure prediction pipeline.
 
-```
-
-```
-
 Sources: [alphafold2_pytorch/utils.py L1-L1344](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/utils.py#L1-L1344)
 
 ## Basic Helper Functions
@@ -27,8 +23,22 @@ The codebase provides various helper functions that facilitate backend flexibili
 
 Many utility functions are designed to work with either PyTorch tensors or NumPy arrays through decorator patterns:
 
-```
+```mermaid
+flowchart TD
 
+input["Input Data<br>(Tensor or Array)"]
+detect["Backend Detection<br>@set_backend_kwarg"]
+branch["Backend Type?"]
+torch["PyTorch Implementation"]
+numpy["NumPy Implementation"]
+output["Consistent Output Format"]
+
+input --> detect
+detect --> branch
+branch --> torch
+branch --> numpy
+torch --> output
+numpy --> output
 ```
 
 Key decorators include:
@@ -60,8 +70,32 @@ Sources: [alphafold2_pytorch/utils.py L149-L237](https://github.com/lucidrains/a
 
 Functions for transforming and aligning 3D protein structures:
 
-```
+```mermaid
+flowchart TD
 
+A["Structure A"]
+center["Center Structures"]
+B["Structure B"]
+covar["Calculate Covariance Matrix"]
+svd["SVD Decomposition"]
+rotation["Optimal Rotation Matrix"]
+aligned["Aligned Structure"]
+
+subgraph subGraph0 ["Kabsch Alignment"]
+    A
+    center
+    B
+    covar
+    svd
+    rotation
+    aligned
+    A --> center
+    B --> center
+    center --> covar
+    covar --> svd
+    svd --> rotation
+    rotation --> aligned
+end
 ```
 
 The key coordinate transformation functions include:
@@ -86,8 +120,19 @@ Sources: [alphafold2_pytorch/utils.py L881-L957](https://github.com/lucidrains/a
 
 The `sidechain_container` function builds complete atom coordinates from backbone coordinates:
 
-```
+```mermaid
+flowchart TD
 
+seq["Sequence"]
+backbones["Backbone Coordinates<br>(N, CA, C)"]
+mask["Atom Mask"]
+scn["SideChain Building<br>(MP_NERF)"]
+full["Complete Coordinates<br>(All Atoms)"]
+
+seq --> scn
+backbones --> scn
+mask --> scn
+scn --> full
 ```
 
 Sources: [alphafold2_pytorch/utils.py L653-L714](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/utils.py#L653-L714)
@@ -107,8 +152,35 @@ Sources: [alphafold2_pytorch/utils.py L257-L294](https://github.com/lucidrains/a
 
 Functions for generating embeddings from various pre-trained protein language models:
 
-```
+```mermaid
+flowchart TD
 
+esm["get_esm_embedd<br>ESM-1b"]
+seq["Protein Sequence"]
+msa["get_msa_embedd<br>MSA Transformer"]
+t5["get_t5_embedd<br>ProtT5-XL"]
+prot["get_prottran_embedd<br>ProtTrans"]
+embed["Protein Embeddings"]
+
+subgraph subGraph1 ["Embedding Generation"]
+    seq
+    embed
+    seq --> esm
+    seq --> msa
+    seq --> t5
+    seq --> prot
+    esm --> embed
+    msa --> embed
+    t5 --> embed
+    prot --> embed
+
+subgraph subGraph0 ["Model Interfaces"]
+    esm
+    msa
+    t5
+    prot
+end
+end
 ```
 
 The implementation supports various protein language models through dedicated functions:
@@ -151,8 +223,21 @@ Sources: [alphafold2_pytorch/utils.py L45-L50](https://github.com/lucidrains/alp
 
 Functions for converting distance matrices to 3D coordinates:
 
-```
+```mermaid
+flowchart TD
 
+distogram["Distogram<br>(Distance Histogram)"]
+central["Central Estimate<br>center_distogram_torch"]
+distmat["Distance Matrix"]
+mds["MDS<br>mds_torch/mds_numpy"]
+mirror["Mirror Correction<br>calc_phis_torch"]
+coords3d["3D Coordinates"]
+
+distogram --> central
+central --> distmat
+distmat --> mds
+mds --> mirror
+mirror --> coords3d
 ```
 
 Key functions include:
@@ -169,8 +254,41 @@ Sources: [alphafold2_pytorch/utils.py L765-L1201](https://github.com/lucidrains/
 
 The implementation provides a comprehensive set of metrics for evaluating protein structure predictions:
 
-```
+```mermaid
+flowchart TD
 
+rmsd["RMSD<br>Root Mean Square Deviation"]
+predA["Predicted Structure A"]
+gdt["GDT<br>Global Distance Test"]
+tm["TM-Score<br>Template Modeling Score"]
+lddt["LDDT<br>Local Distance Difference Test"]
+trueB["True Structure B"]
+quality["Structure Quality Assessment"]
+
+subgraph subGraph1 ["Structure Metrics"]
+    predA
+    trueB
+    quality
+    predA --> rmsd
+    predA --> gdt
+    predA --> tm
+    predA --> lddt
+    trueB --> rmsd
+    trueB --> gdt
+    trueB --> tm
+    trueB --> lddt
+    rmsd --> quality
+    gdt --> quality
+    tm --> quality
+    lddt --> quality
+
+subgraph subGraph0 ["Pairwise Metrics"]
+    rmsd
+    gdt
+    tm
+    lddt
+end
+end
 ```
 
 ### Key Metric Functions
@@ -208,8 +326,29 @@ The utility functions follow several patterns that enable flexibility and perfor
 3. **Function Wrappers**: Higher-level wrappers (like `MDScaling`, `Kabsch`, `RMSD`) provide easy interfaces to complex operations
 4. **Mirror Handling**: Special handling for protein mirror structures when reconstructing 3D coordinates
 
-```
+```mermaid
+flowchart TD
 
+wrapper["High-Level Wrapper<br>(e.g., RMSD)"]
+dec1["@expand_arg_dims"]
+dec2["@set_backend_kwarg"]
+dec3["@invoke_torch_or_numpy"]
+torch["PyTorch Implementation"]
+numpy["NumPy Implementation"]
+
+subgraph subGraph0 ["Function Implementation Pattern"]
+    wrapper
+    dec1
+    dec2
+    dec3
+    torch
+    numpy
+    wrapper --> dec1
+    dec1 --> dec2
+    dec2 --> dec3
+    dec3 --> torch
+    dec3 --> numpy
+end
 ```
 
 Sources: [alphafold2_pytorch/utils.py L1253-L1344](https://github.com/lucidrains/alphafold2/blob/931466e4/alphafold2_pytorch/utils.py#L1253-L1344)
@@ -218,8 +357,40 @@ Sources: [alphafold2_pytorch/utils.py L1253-L1344](https://github.com/lucidrains
 
 The utility functions interface with other components of the AlphaFold2 PyTorch implementation:
 
-```
+```mermaid
+flowchart TD
 
+pdb["PDB Processing"]
+utils["Utility Functions"]
+loss["Loss Functions"]
+eval["Evaluation Metrics"]
+struct["Structure Module"]
+embeds["Embedding Systems"]
+evo["Evoformer Module"]
+
+subgraph subGraph3 ["System Integration"]
+    utils
+    utils --> pdb
+    utils --> loss
+    utils --> eval
+    utils --> struct
+    utils --> embeds
+
+subgraph Data ["Data"]
+    pdb
+    embeds
+end
+
+subgraph Training ["Training"]
+    loss
+    eval
+end
+
+subgraph subGraph0 ["Core Model"]
+    struct
+    evo
+end
+end
 ```
 
 The utility functions provide essential services to:

@@ -13,8 +13,46 @@ For information about the complete end-to-end training process, see [End-to-End 
 
 The pretraining system trains the AlphaFold2 model on a more focused task of distogram prediction, which is a critical component of the full protein structure prediction pipeline.
 
-```
+```mermaid
+flowchart TD
 
+seq["Protein Sequence"]
+mask["Sequence Mask"]
+coords["3D Coordinates from SCN"]
+dist["Discretized Distance Matrix"]
+model["Alphafold2(dim=256, depth=1)"]
+distogram["Distogram Prediction"]
+loss["Cross Entropy Loss"]
+optim["Adam Optimizer"]
+
+seq --> model
+mask --> model
+distogram --> loss
+dist --> loss
+optim --> model
+
+subgraph Training ["Training"]
+    loss
+    optim
+    loss --> optim
+end
+
+subgraph subGraph2 ["AlphaFold2 Model"]
+    model
+    distogram
+    model --> distogram
+end
+
+subgraph subGraph1 ["Ground Truth"]
+    coords
+    dist
+    coords --> dist
+end
+
+subgraph Input ["Input"]
+    seq
+    mask
+end
 ```
 
 Sources: [train_pre.py L50-L56](https://github.com/lucidrains/alphafold2/blob/931466e4/train_pre.py#L50-L56)
@@ -25,8 +63,39 @@ Sources: [train_pre.py L50-L56](https://github.com/lucidrains/alphafold2/blob/93
 
 The pretraining process uses SideChainNet (SCN) as its data source, which provides protein sequences, coordinates, and masks.
 
-```
+```mermaid
+flowchart TD
 
+scn["SideChainNet (CASP12)"]
+filter["Length Filtering (<250 residues)"]
+cycle["Cycle Function"]
+batch["Batch Processing"]
+seq_proc["Sequence Processing<br>(argmax, to device)"]
+coord_proc["Coordinate Reshaping"]
+dist_calc["Distance Matrix Bucketing"]
+
+scn --> filter
+batch --> seq_proc
+batch --> coord_proc
+
+subgraph subGraph2 ["Data Transformation"]
+    seq_proc
+    coord_proc
+    dist_calc
+    coord_proc --> dist_calc
+end
+
+subgraph subGraph1 ["Data Processing"]
+    filter
+    cycle
+    batch
+    filter --> cycle
+    cycle --> batch
+end
+
+subgraph subGraph0 ["Data Source"]
+    scn
+end
 ```
 
 Sources: [train_pre.py L28-L47](https://github.com/lucidrains/alphafold2/blob/931466e4/train_pre.py#L28-L47)
@@ -58,8 +127,8 @@ The pretraining script:
 2. Filters proteins to those with length less than 250 residues
 3. Creates a cyclic iterator over the training data
 
-```
-
+```python
+# Example data loading from the codedata = scn.load(    casp_version = 12,    thinning = 30,    with_pytorch = 'dataloaders',    batch_size = 1,    dynamic_batching = False)
 ```
 
 Sources: [train_pre.py L36-L47](https://github.com/lucidrains/alphafold2/blob/931466e4/train_pre.py#L36-L47)
@@ -76,8 +145,34 @@ The pretraining process uses gradient accumulation to effectively train with lar
 6. Calculate cross-entropy loss
 7. Backpropagate and update weights
 
-```
+```mermaid
+flowchart TD
 
+A["Start Training Loop"]
+B["Get Next Batch"]
+C["Process Inputs<br>(seq, coords, mask)"]
+D["Calculate Ground Truth<br>Discretized Distances"]
+E["Generate Distogram Prediction"]
+F["Calculate Cross-Entropy Loss"]
+G["Backward Pass"]
+H["Optimizer Step"]
+I["Zero Gradients"]
+
+A --> B
+B --> C
+C --> D
+D --> E
+E --> F
+F --> G
+G --> H
+H --> I
+I --> B
+
+subgraph subGraph0 ["Gradient Accumulation Loop"]
+    B
+    G
+    B --> G
+end
 ```
 
 Sources: [train_pre.py L64-L96](https://github.com/lucidrains/alphafold2/blob/931466e4/train_pre.py#L64-L96)
@@ -92,8 +187,8 @@ A critical component of the pretraining process is the conversion of 3D coordina
 2. Discretizes these distances into buckets
 3. Handles masking for padded positions
 
-```
-
+```markdown
+discretized_distances = get_bucketed_distance_matrix(    coords[:, :, 1],  # Cβ atom coordinates    mask,     DISTOGRAM_BUCKETS,     IGNORE_INDEX)
 ```
 
 Sources: [train_pre.py L76](https://github.com/lucidrains/alphafold2/blob/931466e4/train_pre.py#L76-L76)
@@ -102,8 +197,8 @@ Sources: [train_pre.py L76](https://github.com/lucidrains/alphafold2/blob/931466
 
 The pretraining uses cross-entropy loss to compare predicted distograms with the ground truth discretized distance matrices:
 
-```
-
+```markdown
+loss = F.cross_entropy(    distogram,               # Model predictions (shape: batch x classes x length x length)    discretized_distances,   # Ground truth (shape: batch x length x length)    ignore_index = IGNORE_INDEX)
 ```
 
 The `IGNORE_INDEX` (-100) is used to exclude padded positions from loss calculation.
@@ -133,8 +228,29 @@ The pretraining phase focuses specifically on the distogram prediction capabilit
 
 Once pretraining is complete, the model can be further trained end-to-end for complete structure prediction as described in the [End-to-End Training](/lucidrains/alphafold2/4.1-end-to-end-training) page.
 
-```
+```mermaid
+flowchart TD
 
+A["Protein Sequence Input"]
+B["Pretrained Model<br>(Distogram Prediction)"]
+C["Full AlphaFold2 Model<br>(Structure Prediction)"]
+D["Distogram Loss"]
+E["Structure Loss"]
+
+A --> B
+B --> C
+
+subgraph subGraph1 ["End-to-End Training"]
+    C
+    E
+    C --> E
+end
+
+subgraph subGraph0 ["Pretraining Phase"]
+    B
+    D
+    B --> D
+end
 ```
 
 Sources: [train_pre.py L50-L56](https://github.com/lucidrains/alphafold2/blob/931466e4/train_pre.py#L50-L56)
