@@ -424,6 +424,8 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Modeling disordered protein interactions from biophysical principles](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005485) (PLOS Computational Biology, 2017)
 - **Docs:** [Read more →](docs/IDP-LZerD/) *to be written*
 - **Code:** https://github.com/kiharalab/idp_lzerd
+- **Approach:** docking + MD
+- **For IDR**
 </details>
 
 #### <!-- PLACEHOLDER --> AlphaFold-IDR (dropout / multi-sequence augmented sampling)
@@ -605,6 +607,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - Paper: [Benchmarking all-atom biomolecular structure prediction with FoldBench](https://www.nature.com/articles/s41467-025-67127-3) (Nature Communications, 2025)
 - Code: https://github.com/BEAM-Labs/FoldBench
 
+</details>
 
 ## Entry template
 
@@ -619,11 +622,11 @@ Each tool uses a collapsible `<details>` block with consistent fields. The `<sum
 <summary><Type tag> · <subtype></summary>
 
 - **Paper:** [Title](link) (Journal, year) | [preprint](link)
+- **Docs:** [Read more →](docs/<tool>/) — abstract/method + deepwiki/zread annotations
 - **Code:** official implementation repo (N/A if none)
 - **Web server:** link (only when it exists)
-- **Docs:** [Read more →](docs/<tool>/) — abstract/method + deepwiki/zread annotations
-- **Input:** what it takes (sequence / MSA / embedding)
-- **Output:** what L1×L2 matrix it produces (contact probability / distance distribution)
+- **Approach:** DL / docking / MD (here DL = deep learning, docking = molecular docking, MD = molecular dynamics simulation)
+- **For IDR:** optional, only if the method is designed for intrinsically disordered proteins (IDPs)
 </details>
 ```
 
