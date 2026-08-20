@@ -362,6 +362,19 @@ A curated collection of computational tools for `intermolecular interaction pred
 --- 
 
 <details>
+<summary>AlphaFlow/ESMFlow</summary>
+
+> ⚠️ AlphaFlow and ESMFlow are related but distinct models that share the same repository (bjing2016/alphaflow). AlphaFlow fine-tunes AlphaFold, while ESMFlow fine-tunes ESMFold, both using a flow-matching training objective. So we group them together here as a single family.
+
+- **Paper:** [AlphaFold Meets Flow Matching for Generating Protein Ensembles](https://arxiv.org/abs/2402.04845) (arxiv, 2024)
+- **Docs:** [Read more →](docs/AlphaFlow/) *to be written*
+- **Code:** https://github.com/bjing2016/alphaflow
+- **Approach:** DL
+</details>
+
+--- 
+
+<details>
 <summary>BioEmu</summary>
 
 - **Paper:** [Scalable emulation of protein equilibrium ensembles with generative deep learning](https://www.science.org/doi/10.1126/science.adv9817) (Science, 2025)
@@ -436,8 +449,6 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **For IDR**
 </details>
 
-
-- https://www.nature.com/articles/s41586-026-10141-2/figures/10
 
 <!-- More idr ensemble placeholders can be added here -->
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
