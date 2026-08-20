@@ -462,11 +462,29 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **For IDR**
 </details>
 
+---
+
+<details>
+<summary>AlphaFlex (AFX-IDPForge)</summary>
+
+> ⚠️ IDPForge is the core generative diffusion model that samples individual disordered region (IDR) conformers . AlphaFlex is an extension pipeline in the AlphaFlex/ subdirectory that orchestrates IDPForge at scale to build full-length, multi-domain protein ensembles.
+>
+> IDPForge and AlphaFlex are combined because they share the same repository.
+
+- **Paper:** [AlphaFlex: Ensembles of the human proteome representing disordered regions](https://www.biorxiv.org/content/10.1101/2025.11.24.690279v2) (bioRxiv, 2026)
+- **Docs:** [Read more →](docs/AlphaFlex/) *to be written*
+- **Code:** https://github.com/THGLab/IDPForge/tree/main/AlphaFlex
+- **Data:** https://zenodo.org/records/17684898 
+- **Approach:** DL
+- **For IDR** 
+</details>
+
 <!-- More idr ensemble placeholders can be added here -->
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
 <!-- PLACEHOLDER: enhanced-sampling MD post-processing ensemble tool -->
 
 ---
+
 
 ### B. Sequence-based contact-map like prediction
 
