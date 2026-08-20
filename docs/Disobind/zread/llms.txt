@@ -1,0 +1,48 @@
+# isblab/disobind
+
+Source: https://zread.ai/isblab/disobind
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/输入格式与示例](3-input-formats-and-examples.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+### 神经网络设计
+
+- [深入解析/神经网络设计/Epsilon_3 模型架构](5-epsilon_3-model-architecture.md)
+- [深入解析/神经网络设计/投影与交互张量](6-projection-and-interaction-tensor.md)
+- [深入解析/神经网络设计/粗粒度预测策略](7-coarse-grained-prediction-strategy.md)
+
+### 预测流水线
+
+- [深入解析/预测流水线/基于 ProtT5 的嵌入生成](8-embedding-generation-with-prott5.md)
+- [深入解析/预测流水线/Disobind 及 Disobind+AF2 预测](9-disobind-and-disobind-af2-prediction.md)
+- [深入解析/预测流水线/输出解读](10-output-interpretation.md)
+
+### 训练与优化
+
+- [深入解析/训练与优化/模型训练工作流](11-model-training-workflow.md)
+- [深入解析/训练与优化/损失函数与校准](12-loss-functions-and-calibration.md)
+- [深入解析/训练与优化/超参数搜索](13-hyperparameter-search.md)
+
+### 数据集构建
+
+- [深入解析/数据集构建/无序蛋白数据库](14-disorder-protein-databases.md)
+- [深入解析/数据集构建/四步数据集流水线](15-four-step-dataset-pipeline.md)
+- [深入解析/数据集构建/非冗余数据集划分](16-non-redundant-dataset-splitting.md)
+
+### 模型配置
+
+- [深入解析/模型配置/YAML 配置参数](17-yaml-config-parameters.md)
+- [深入解析/模型配置/模型版本注册表](18-model-version-registry.md)
+
+### 评估与分析
+
+- [深入解析/评估与分析/评估指标](19-evaluation-metrics.md)
+- [深入解析/评估与分析/OOD 基准分析](20-ood-benchmark-analysis.md)
+- [深入解析/评估与分析/竞争方法对比](21-competing-method-comparisons.md)
+
