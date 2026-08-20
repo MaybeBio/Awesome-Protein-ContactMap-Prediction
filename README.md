@@ -50,6 +50,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Highly accurate protein structure prediction with AlphaFold](https://www.nature.com/articles/s41586-021-03819-2) (Nature, 2021) 
 - **Code:** https://github.com/google-deepmind/alphafold
 - **Docs:** [Read more →](docs/AlphaFold2/) *to be written*
+- **Approach:** DL
 </details>
 
 --- 
@@ -61,6 +62,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/AlphaFold3/) *to be written*
 - **Code:** https://github.com/google-deepmind/alphafold3
 - **Web server:** https://alphafoldserver.com/
+- **Approach:** DL
 </details>
 
 --- 
@@ -71,6 +73,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Protein complex prediction with AlphaFold-Multimer](https://www.biorxiv.org/content/10.1101/2021.10.04.463034v2) (bioRxiv, 2022) 
 - **Docs:** [Read more →](docs/AlphaFold-Multimer/) *to be written*
 - **Code:** https://github.com/jcheongs/alphafold-multimer
+- **Approach:** DL
 </details> 
 
 --- 
@@ -83,6 +86,7 @@ A curated collection of computational tools for `intermolecular interaction pred
   - [Easy and accurate protein structure prediction using ColabFold](https://www.nature.com/articles/s41596-024-01060-5) (Nature Protocols, 2024)
 - **Docs:** [Read more →](docs/ColabFold/) *to be written*
 - **Code:** https://github.com/sokrypton/colabfold
+- **Approach:** DL
 </details>
 
 --- 
@@ -93,6 +97,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Evolutionary-scale prediction of atomic-level protein structure with a language model](https://www.science.org/doi/10.1126/science.ade2574) (Science, 2023)
 - **Docs:** [Read more →](docs/esmfold/) *to be written*
 - **Code:** https://github.com/facebookresearch/esm | https://github.com/facebookresearch/esm#esmfold
+- **Approach:** DL
 </details>
 
 --- 
@@ -103,6 +108,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Language Modeling Materializes a World Model of Protein Biology](https://www.biorxiv.org/content/10.64898/2026.06.03.729735v1) (bioRxiv, 2026)
 - **Docs:** [Read more →](docs/ESMFold2/) *to be written*
 - **Code:** https://github.com/Biohub/esm#esmfold2 | https://huggingface.co/biohub/ESMFold2
+- **Approach:** DL
 </details>
 
 --- 
@@ -114,6 +120,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/RoseTTAFold/) *to be written*
 - **Code:** https://github.com/RosettaCommons/RoseTTAFold
 - **Web server:** https://robetta.bakerlab.org/
+- **Approach:** DL
 </details>
 
 --- 
@@ -124,6 +131,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Efficient and accurate prediction of protein structure using RoseTTAFold2](https://www.biorxiv.org/content/10.1101/2023.05.24.542179v1) (bioRxiv, 2023)
 - **Docs:** [Read more →](docs/RoseTTAFold2/) *to be written*
 - **Code:** https://github.com/uw-ipd/RoseTTAFold2
+- **Approach:** DL
 </details>
 
 ---
@@ -134,6 +142,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Accurate prediction of protein–nucleic acid complexes using RoseTTAFoldNA](https://www.nature.com/articles/s41592-023-02086-5) (Nature Methods, 2023)
 - **Docs:** [Read more →](docs/RoseTTAFold2NA/) *to be written*
 - **Code:** https://github.com/uw-ipd/RoseTTAFold2NA
+- **Approach:** DL
 </details>
 
 ---
@@ -144,6 +153,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Accelerating Biomolecular Modeling with AtomWorks and RF3](https://www.biorxiv.org/content/10.1101/2025.08.14.670328v2) (bioRxiv, 2025)
 - **Docs:** [Read more →](docs/RoseTTAFold3/) *to be written*
 - **Code:** https://github.com/RosettaCommons/foundry/tree/production/models/rf3
+- **Approach:** DL
 </details>
 
 ---
@@ -154,6 +164,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [OpenFold: retraining AlphaFold2 yields new insights into its learning mechanisms and capacity for generalization](https://www.nature.com/articles/s41592-024-02272-z) (Nature Methods, 2024)
 - **Docs:** [Read more →](docs/OpenFold/) *to be written*
 - **Code:** https://github.com/aqlaboratory/openfold
+- **Approach:** DL
 </details>
 
 
@@ -165,6 +176,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Uni-Fold: An Open-Source Platform for Developing Protein Folding Models beyond AlphaFold](https://www.biorxiv.org/content/10.1101/2022.08.04.502811v3) (bioRxiv, 2022)
 - **Docs:** [Read more →](docs/Uni-Fold/) *to be written*
 - **Code:** https://github.com/dptech-corp/Uni-Fold
+- **Approach:** DL
 </details>
 
 --- 
@@ -175,6 +187,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [High-resolution de novo structure prediction from primary sequence](https://www.biorxiv.org/content/10.1101/2022.07.21.500999v1) (bioRxiv, 2022)
 - **Docs:** [Read more →](docs/OmegaFold/) *to be written*
 - **Code:** https://github.com/HeliXonProtein/OmegaFold
+- **Approach:** DL
 </details>
 
 ---
@@ -185,6 +198,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [EquiFold: Protein Structure Prediction with a Novel Coarse-Grained Structure Representation](https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2) (bioRxiv, 2023)
 - **Docs:** [Read more →](docs/EquiFold/) *to be written*
 - **Code:** https://github.com/Genentech/equifold
+- **Approach:** DL
 </details>
 
 ---
@@ -195,6 +209,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [EquiFold: Protein Structure Prediction with a Novel Coarse-Grained Structure Representation](https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2) (bioRxiv, 2023)
 - **Docs:** [Read more →](docs/RoseTTAFold-All-Atom/) *to be written*
 - **Code:** https://github.com/baker-laboratory/RoseTTAFold-All-Atom
+- **Approach:** DL
 </details>
 
 --- 
@@ -207,6 +222,7 @@ A curated collection of computational tools for `intermolecular interaction pred
   - Boltz-2: [Boltz-2: Towards Accurate and Efficient Binding Affinity Prediction](https://www.biorxiv.org/content/10.1101/2025.06.14.659707v1) (bioRxiv, 2025)
 - **Docs:** [Read more →](docs/Boltz/) *to be written*
 - **Code:** https://github.com/jwohlwend/boltz 
+- **Approach:** DL
 </details>
 
 --- 
@@ -218,6 +234,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/Chai-1/) *to be written*
 - **Code:** https://github.com/chaidiscovery/chai-lab 
 - **Web server:** https://lab.chaidiscovery.com/dashboard
+- **Approach:** DL
 </details>
 
 --- 
@@ -227,7 +244,8 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 - **Paper:** [Zero-shot antibody design in a 24-well plate](https://www.biorxiv.org/content/10.1101/2025.07.05.663018v1) (bioRxiv, 2025)
 - **Docs:** [Read more →](docs/Chai-2/) *to be written*
-- **Code:** 
+- **Code:** N/A
+- **Approach:** DL
 </details>
 
 --- 
@@ -239,6 +257,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
 - **Code:** https://github.com/PaddlePaddle/PaddleHelix/tree/dev/apps/protein_folding/helixfold
 - **Web server:** https://paddlehelix.baidu.com/
+- **Approach:** DL
 </details>
 
 --- 
@@ -250,6 +269,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
 - **Code:** https://github.com/PaddlePaddle/PaddleHelix/tree/dev/apps/protein_folding/helixfold-single
 - **Web server:** https://paddlehelix.baidu.com/
+- **Approach:** DL
 </details>
 
 --- 
@@ -259,6 +279,8 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 - **Paper:** [HelixFold-Multimer: Elevating Protein Complex Structure Prediction to New Heights](https://arxiv.org/abs/2404.10260) (arxiv, 2024)
 - **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
+- **Code:** N/A
+- **Approach:** DL
 </details>
 
 --- 
@@ -270,6 +292,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/HelixFold-Family/) *to be written*
 - **Code:** https://github.com/PaddlePaddle/PaddleHelix/tree/dev/apps/protein_folding/helixfold3
 - **Web server:** https://paddlehelix.baidu.com/
+- **Approach:** DL
 </details>
 
 --- 
@@ -280,6 +303,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Protenix-Mini: Efficient Structure Predictor via Compact Architecture, Few-Step Diffusion and Switchable pLM](https://arxiv.org/abs/2507.11839) (arxiv, 2025)
 - **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
 - **Code:** https://github.com/bytedance/Protenix
+- **Approach:** DL
 </details>
 
 --- 
@@ -290,6 +314,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Protenix - Advancing Structure Prediction Through a Comprehensive AlphaFold3 Reproduction](https://www.biorxiv.org/content/10.1101/2025.01.08.631967v1) (bioRxiv, 2025)
 - **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
 - **Code:** https://github.com/bytedance/Protenix
+- **Approach:** DL
 </details>
 
 --- 
@@ -300,6 +325,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Protenix-v1: Toward High-Accuracy Open-Source Biomolecular Structure Prediction](https://www.biorxiv.org/content/10.64898/2026.02.05.703733v1) (bioRxiv, 2026)
 - **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
 - **Code:** https://github.com/bytedance/Protenix
+- **Approach:** DL
 </details>
 
 --- 
@@ -310,6 +336,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Protenix-v2: Broadening the Reach of Structure Prediction and Biomolecular Design](https://www.biorxiv.org/content/10.64898/2026.04.10.717613v1) (bioRxiv, 2026)
 - **Docs:** [Read more →](docs/Protenix-Family/) *to be written*
 - **Code:** https://github.com/bytedance/Protenix
+- **Approach:** DL
 </details>
 
 --- 
@@ -332,6 +359,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Scalable emulation of protein equilibrium ensembles with generative deep learning](https://www.science.org/doi/10.1126/science.adv9817) (Science, 2025)
 - **Docs:** [Read more →](docs/BioEmu/) *to be written*
 - **Code:** https://github.com/microsoft/bioemu
+- **Approach:** DL
 </details>
 
 --- 
@@ -342,6 +370,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Phanto-IDP: compact model for precise intrinsically disordered protein backbone generation and enhanced sampling](https://academic.oup.com/bib/article/25/1/bbad429/7453435) (Briefings in Bioinformatics, 2024)
 - **Docs:** [Read more →](docs/Phanto-IDP/) *to be written*
 - **Code:** https://github.com/Junjie-Zhu/Phanto-IDP
+- **Approach:** DL
 - **For IDR**
 </details>
 
@@ -354,6 +383,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Accurate Generation of Conformational Ensembles for Intrinsically Disordered Proteins with IDPFold](https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202511636) (Advanced Science, 2025)
 - **Docs:** [Read more →](docs/IDPFold/) *to be written*
 - **Code:** https://github.com/Junjie-Zhu/IDPFold
+- **Approach:** DL
 - **For IDR**
 </details>
 
@@ -367,6 +397,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Extending Conformational Ensemble Prediction to Multidomain Proteins and Protein Complex](https://www.biorxiv.org/content/10.64898/2026.01.14.699584v1) (bioRxiv, 2026)
 - **Docs:** [Read more →](docs/IDPFold2/) *to be written*
 - **Code:** https://github.com/Junjie-Zhu/IDPFold2
+- **Approach:** DL
 - **For IDR**
 </details>
 
@@ -379,6 +410,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Accurate predictions of disordered protein ensembles with STARLING](https://www.nature.com/articles/s41586-026-10141-2) (Nature, 2026)
 - **Docs:** [Read more →](docs/STARLING/) *to be written*
 - **Code:** https://github.com/idptools/starling | https://idptools-starling.readthedocs.io/en/latest/ | https://github.com/holehouse-lab/supportingdata/tree/master/2026/starling_2026 | https://github.com/idptools/idpcolab/blob/main/STARLING/STARLING_demo.ipynb
+- **Approach:** DL
 - **For IDR**
 </details>
 
@@ -386,18 +418,12 @@ A curated collection of computational tools for `intermolecular interaction pred
 ---
 
 
-
-
-#### IDP-LZerD
-
 <details>
-<summary>Structure-based · ensemble</summary>
+<summary>IDP-LZerD</summary>
 
-- **Paper:** [TBD]
-- **Docs:** [Read more →](docs/idp-lzerd/) *to be written*
-- **Input:** [TBD]
-- **Output:** structural ensemble → contact-probability matrix (ensemble contact frequency)
-- **Code:** https://github.com/aanastasiou/IDP-LZerD
+- **Paper:** [Modeling disordered protein interactions from biophysical principles](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005485) (PLOS Computational Biology, 2017)
+- **Docs:** [Read more →](docs/IDP-LZerD/) *to be written*
+- **Code:** https://github.com/kiharalab/idp_lzerd
 </details>
 
 #### <!-- PLACEHOLDER --> AlphaFold-IDR (dropout / multi-sequence augmented sampling)
