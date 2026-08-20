@@ -1,0 +1,38 @@
+# idptools/starling
+
+Source: https://zread.ai/idptools/starling
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/CLI 参考](3-cli-reference.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/相似性搜索](16-similarity-search.md)
+- [深入解析/配置参考](17-configuration-reference.md)
+### 生成流水线
+
+- [深入解析/生成流水线/序列编码器](5-sequence-encoder.md)
+- [深入解析/生成流水线/VAE 潜在空间](6-vae-latent-space.md)
+- [深入解析/生成流水线/扩散模型设计](7-diffusion-model-design.md)
+- [深入解析/生成流水线/采样策略](8-sampling-strategies.md)
+
+### 集成与结构
+
+- [深入解析/集成与结构/集成对象 API](9-ensemble-object-api.md)
+- [深入解析/集成与结构/距离图至 3D 坐标](10-distance-map-to-3d-coordinates.md)
+- [深入解析/集成与结构/BME 重加权](11-bme-reweighting.md)
+
+### 引导与约束
+
+- [深入解析/引导与约束/约束类型](12-constraint-types.md)
+- [深入解析/引导与约束/约束引导采样](13-constraint-guided-sampling.md)
+
+### 模型内部机制
+
+- [深入解析/模型内部机制/Vision Transformer 去噪器](14-vision-transformer-denoiser.md)
+- [深入解析/模型内部机制/模型加载与编译](15-model-loading-and-compilation.md)
+

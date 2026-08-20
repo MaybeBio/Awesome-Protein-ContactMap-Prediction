@@ -1,0 +1,4182 @@
+# idptools/starling
+
+Source: https://zread.ai/idptools/starling
+
+# 入门
+
+- [入门/概述](https://zread.ai/idptools/starling/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**STARLING**（con**ST**ruction of intrinsic**A**lly diso**R**dered proteins ensembles efficient**L**y v**I**a multi-dime**N**sional **G**enerative models，即基于多维生成模型高效构建本质无序蛋白质系综）是一种隐空间概率去噪扩散模型，用于预测本质无序蛋白质（IDP）和本质无序区域（IDR）的粗粒化构象系综。STARLING 由 Holehouse 实验室开发，能将氨基酸序列转换为结构多样的 3D 构象系综——在 GPU 上仅需数秒，在 CPU 上仅需数分钟——从而实现对无序蛋白质物理特性的快速计算表征。
+
+来源: [README.md](/README.md#L1-L27), [starling/__init__.py](/starling/__init__.py#L1-L14)
+
+---
+
+## STARLING 解决了什么问题？
+
+本质无序蛋白质缺乏稳定的折叠结构，而是分布在一个广阔的相互转换的构象系综中。对这些系综的实验表征通常十分困难，且往往只能间接进行（例如 SAXS、NMR 化学位移、FRET）。传统的分子动力学模拟虽然可以对这些系综进行采样，但需要微秒到毫秒级的时间尺度——这在常规使用中计算成本过高。**STARLING 弥合了这一鸿沟**，利用深度生成模型仅从序列出发*直接预测*构象系综，在单步 MD 模拟所需的时间内即可生成数百个结构。
+
+来源: [README.md](/README.md#L16-L27)
+
+---
+
+## STARLING 的工作原理 — 端到端流程
+
+从宏观上看，STARLING 实现了一个**两阶段的隐空间扩散流程**，将 1D 氨基酸序列转换为一组 3D 蛋白质构象：
+
+```mermaid
+flowchart LR
+    A["氨基酸<br>序列"] --> B["序列<br>编码器<br>(Transformer)"]
+    B --> C["隐空间<br>嵌入"]
+    C --> D["扩散<br>采样器<br>(ViT 去噪器)"]
+    D --> E["隐空间<br>距离图"]
+    E --> F["VAE<br>解码器"]
+    F --> G["真实空间<br>距离图"]
+    G --> H["MDS + 梯度<br>精修"]
+    H --> I["3D 笛卡尔<br>坐标<br>(PDB + XTC)"]
+    
+    style A fill:#e1f5fe
+    style I fill:#e8f5e9
+    style D fill:#fff3e0
+    style F fill:#fff3e0
+```
+
+| 阶段 | 组件 | 输入 → 输出 | 模型架构 |
+|-------|-----------|----------------|-------------------|
+| **1. 编码** | 序列编码器 | 氨基酸字符串 → 上下文嵌入 (512维) | 12层 Transformer，8个注意力头 |
+| **2. 隐空间扩散** | DDIM/DDPM 采样器 + ViT 去噪器 | 噪声 + 上下文 → 隐空间距离图 | 带有 DiT 块的 Vision Transformer，patch 大小为 3 |
+| **3. 解码** | VAE 解码器 | 隐空间图 → 真实空间距离图 | 基于 ResNet 的 VAE (编码器/解码器) |
+| **4. 重建** | MDS + 梯度下降 | 距离图 → 3D Cα 坐标 | 多起点度量 MDS + torch.optim 精修 |
+
+该流程是**条件生成**的：序列编码器生成每个蛋白质的上下文向量，引导扩散过程为该特定序列生成物理上真实的距离图。离子强度（溶剂条件）作为额外的条件变量被包含在内。
+
+来源: [starling/inference/model_loading.py](/starling/inference/model_loading.py#L16-L61), [starling/models/vit.py](/starling/models/vit.py#L31-L78), [starling/models/vae.py](/starling/models/vae.py#L86-L151), [starling/samplers/ddim_sampler.py](/starling/samplers/ddim_sampler.py#L19-L58), [starling/structure/coordinates.py](/starling/structure/coordinates.py#L1-L80)
+
+---
+
+## 核心功能
+
+除基本的系综生成外，STARLING 还提供四项主要功能：
+
+| 功能 | 描述 | 入口 |
+|------------|-------------|-------------|
+| **系综生成** | 从序列生成 N 个构象，可选输出 3D 结构 | `starling.generate()` 或 `starling` CLI |
+| **约束引导采样** | 在生成过程中使用 Rg、端到端距离或螺旋度约束引导扩散 | `generate()` 中的 `constraint` 参数 |
+| **BME 重加权** | 使用贝叶斯最大熵根据实验可观测值（SAXS、NMR、FRET）对系综进行重加权 | `ensemble.reweight_bme()` |
+| **相似性搜索** | 基于预构建的约 100 万蛋白质嵌入数据库，通过 FAISS 驱动的 ANN 搜索 | `starling.search.SearchEngine` |
+
+<CgxTip>`generate()` 函数是 Python API 和 CLI 使用的统一入口点。它处理输入解析、序列验证、模型加载、扩散采样、距离图解码以及可选的 3D 重建——所有这些均在一次调用中完成。</CgxTip>
+
+来源: [starling/frontend/ensemble_generation.py](/starling/frontend/ensemble_generation.py#L160-L260), [starling/inference/constraints.py](/starling/inference/constraints.py#L41-L78), [starling/structure/bme.py](/starling/structure/bme.py#L1-L48), [starling/search/search_engine.py](/starling/search/search_engine.py#L1-L59)
+
+---
+
+## 项目架构
+
+`starling` 包被组织为职责明确的分离子系统：
+
+```
+starling/
+├── frontend/          # 面向用户的高层 API
+│   ├── ensemble_generation.py   ← generate() 及输入处理
+│   └── starling_viz.py         ← 可视化辅助工具
+├── inference/         # 推理编排
+│   ├── generation.py           ← 后端: 编码器 → 采样器 → 解码器 → MDS
+│   ├── model_loading.py        ← 延迟加载的 ModelManager 单例
+│   ├── constraints.py          ← 约束引导采样 (Rg, 距离, 螺旋度)
+│   └── benchmark_mds.py        ← 性能分析
+├── models/            # 神经网络架构
+│   ├── transformer.py          ← SequenceEncoder, DiTBlock, SinusoidalPosEmb
+│   ├── vit.py                  ← 带有 patch 嵌入的 Vision Transformer 去噪器
+│   ├── vae.py                  ← 变分自编码器 (ResNet 编码器/解码器)
+│   ├── diffusion.py            ← DiffusionModel: q_sample, 噪声调度
+│   └── attention.py            ← 自/交叉注意力模块
+├── samplers/          # 扩散采样策略
+│   ├── ddim_sampler.py         ← DDIM (快速, 确定性)
+│   ├── ddpm_sampler.py         ← DDPM (随机基线)
+│   └── plms_sampler.py         ← PLMS (伪线性多步)
+├── structure/         # 推理后结构工具
+│   ├── ensemble.py             ← Ensemble 对象 (距离图 + 分析)
+│   ├── coordinates.py          ← MDS + 梯度下降 3D 重建
+│   └── bme.py                  ← 贝叶斯最大熵重加权
+├── search/            # 相似性搜索基础设施
+│   ├── search_engine.py        ← FAISS 驱动的 SearchEngine
+│   ├── builder.py              ← 索引构建
+│   └── store.py                ← 基于 SQLite 的序列存储
+├── data/              # 数据处理工具
+│   ├── tokenizer.py            ← StarlingTokenizer (字节级氨基酸编码)
+│   ├── schedulers.py           ← Beta 调度 (余弦, 线性, S型)
+│   └── distributions.py        ← 用于 VAE 的 DiagonalGaussianDistribution
+├── configs/           # YAML 模型配置文件
+├── configs.py         ← 全局默认值, 路径, 用户配置覆盖
+└── scripts/           # CLI 入口点
+    ├── starling_main_cli.py
+    ├── starling_converter.py
+    └── starling_search.py
+```
+
+来源: [starling/__init__.py](/starling/__init__.py#L1-L14), [starling/configs.py](/starling/configs.py#L1-L35)
+
+---
+
+## 模型规格
+
+STARLING v2.0.0 提供了两个预训练检查点，两者均在首次使用时延迟加载并在此会话生命周期内缓存：
+
+| 模型 | 检查点 | 架构 | 作用 |
+|-------|-----------|--------------|------|
+| **序列编码器** | `STARLING_v2.0.0_ViT_VAE_2025_10_14.ckpt` | VAE (基于 ResNet) | 将距离图编码至/解码自隐空间；提供条件嵌入 |
+| **扩散模型** | `STARLING_v2.0.0_ViT_DDPM_2025_10_14.ckpt` | 封装 ViT(12层, 512维, 8头) 的 DiffusionModel | 基于序列上下文条件对隐空间距离图进行去噪 |
+
+模型在首次运行时从 GitHub Releases 自动下载，并缓存在 `~/.starling_weights/` 中。可以通过 `encoder_path` / `ddpm_path` 参数或 `STARLING_ENCODER_PATH` / `STARLING_DDPM_PATH` 环境变量提供自定义检查点。CUDA 工作负载可选使用 `torch.compile()` 加速。
+
+来源: [starling/configs.py](/starling/configs.py#L14-L15), [starling/inference/model_loading.py](/starling/inference/model_loading.py#L16-L131)
+
+---
+
+## 关键设计决策
+
+| 决策 | 依据 |
+|----------|-----------|
+| **隐空间扩散**（而非像素空间） | 通过 VAE 压缩距离图降低了扩散模型必须学习的维度，从而实现更快的采样和更高质量的输出。这遵循了隐空间扩散模型范式（Rombach 等人，2021）。 |
+| **Vision Transformer 去噪器**（而非 U-Net） | 带有 DiT 块的 ViT 提供了卓越的全局感受野，能够捕捉距离图中长程残基-残基的相关性。 |
+| **MDS + 梯度精修**用于 3D 重建 | 距离图无法完美嵌入 3D 空间。多起点 MDS 提供初始猜测；在距离匹配损失上进行梯度下降精修坐标以最小化畸变。 |
+| **延迟单例 ModelManager** | 模型仅加载一次并在多次 `generate()` 调用中复用，避免了重复的 GPU 显存分配和权重下载。 |
+| **用户可配置的默认值** | `~/.starling_weights/` 中的 `configs.py` 文件可以覆盖任何全局默认值，无需修改代码即可实现用户级自定义。 |
+
+来源: [starling/inference/model_loading.py](/starling/inference/model_loading.py#L63-L100), [starling/models/diffusion.py](/starling/models/diffusion.py#L55-L63), [starling/configs.py](/starling/configs.py#L54-L69)
+
+---
+
+## 安装与快速验证
+
+STARLING 要求 **Python ≥ 3.10**，并在 PyPI 上以 `idptools-starling` 分发：
+
+```bash
+conda create -n starling python=3.11 -y && conda activate starling
+pip install idptools-starling
+starling --help    # 验证安装
+```
+
+我们还提供 Docker 镜像和 Google Colab 笔记本，以实现零安装使用。该包包含类型标记（`py.typed`），支持 CPU、CUDA 和 Apple MPS 后端，并具备自动设备选择功能。
+
+来源: [README.md](/README.md#L40-L67), [starling/configs.py](/starling/configs.py#L17-L24)
+
+---
+
+## STARLING 是什么 — 以及不是什么
+
+| ✅ STARLING 是 | ❌ STARLING 不是 |
+|---|---|
+| 面向 IDP/IDR 的**序列到系综**预测器 | 折叠蛋白质结构预测器（请使用 AlphaFold/EsmFold） |
+| **粗粒化**（仅 Cα）构象采样器 | 全原子分子动力学引擎 |
+| 生成统计多样系综的**生成模型** | 确定性的单结构预言机 |
+| 已在长达 **380 个残基**的序列上验证 | 为任意长蛋白质或多链复合物设计 |
+| 通过 BME 重加权实现**实验整合**的工具 | 替代严谨的生物物理实验设计的工具 |
+
+来源: [starling/configs.py](/starling/configs.py#L23), [starling/structure/ensemble.py](/starling/structure/ensemble.py#L42-L75)
+
+---
+
+## 接下来去哪
+
+文档的组织方式将带你从初次使用走向深入的技术理解：
+
+1. **[快速开始](2-quick-start)** — 在 5 分钟内运行你的第一个系综
+2. **[CLI 参考](3-cli-reference)** — 完整的命令行工具文档
+3. **[架构概览](4-architecture-overview)** — 详细的系统设计与数据流
+4. **[序列编码器](5-sequence-encoder)** → **[VAE 隐空间](6-vae-latent-space)** → **[扩散模型设计](7-diffusion-model-design)** → **[采样策略](8-sampling-strategies)** — 生成流程，逐阶段解析
+5. **[系综对象 API](9-ensemble-object-api)** → **[距离图到 3D 坐标](10-distance-map-to-3d-coordinates)** → **[BME 重加权](11-bme-reweighting)** — 处理生成的系综
+6. **[约束类型](12-constraint-types)** → **[约束引导采样](13-constraint-guided-sampling)** — 使用先验引导生成
+7. **[相似性搜索](16-similarity-search)** — 在 FAISS 索引中查找相关序列
+
+---
+
+- [入门/快速开始](https://zread.ai/idptools/starling/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+在五分钟内，从零开始生成你的首个本征无序蛋白质系综。本页将带你走完安装流程、首次生成运行（CLI 和 Python），以及你将在每个 `Ensemble` 对象上使用的核心分析操作——不多不少。
+
+---
+
+## 安装
+
+STARLING 需要 **Python ≥ 3.10**，并依赖 PyTorch。推荐的工作流程从一个全新的 conda 环境开始：
+
+```bash
+conda create -n starling python=3.11 -y
+conda activate starling
+pip install idptools-starling
+```
+
+或者，直接从 GitHub 安装最新开发版：
+
+```bash
+pip install git+https://github.com/idptools/starling.git
+```
+
+通过运行 CLI 帮助信息来验证安装是否成功——如果能正常打印输出，说明已准备就绪：
+
+```bash
+starling --help
+```
+
+<CgxTip>首次使用时，STARLING 会自动将预训练的 VAE 和扩散模型权重（约 200 MB）下载到 `~/.starling_weights/`。后续运行将复用已缓存的权重。你可以设置 `STARLING_ENCODER_PATH` 和 `STARLING_DDPM_PATH` 环境变量来覆盖默认的下载路径。</CgxTip>
+
+此外，也提供了 Docker 镜像用于容器化工作流——详情请参阅 [Docker 文档](docker/readme.md)。
+
+来源: [README.md](/README.md#L49-L68), [pyproject.toml](/pyproject.toml#L8-L12), [starling/configs.py](/starling/configs.py#L8-L16)
+
+---
+
+## 你的首个系综 (CLI)
+
+`starling` 命令行工具是从序列生成系综的最快途径。传入原始氨基酸序列，使用 `-c` 指定构象数量，并添加 `-r` 来重建 3D 结构：
+
+```bash
+starling MDVFMKGLSKAKEGVVAAAEKTKQGVAEAAGKTKEGVLYVGSKTKEGVVHGVATVAEKTKEQVTNVGGAVVTGVTAVAQKTVEGAGSIAAATGFVKKDQLGKNEEGAPQEGILEDMPVDPDNEAYEMPSEEGYQDYEPEA \
+  --outname synuclein -c 400 -r
+```
+
+这将在当前目录下生成三个文件：
+
+| 文件 | 描述 |
+|------|-------------|
+| `synuclein.starling` | 二进制归档文件 — 距离图 + 元数据（可重新加载） |
+| `synuclein_STARLING.pdb` | 系综的 PDB 拓扑文件 |
+| `synuclein_STARLING.xtc` | 包含所有构象的压缩 XTC 轨迹文件 |
+
+CLI 还接受 `.fasta` 文件、`.tsv` 文件（`名称<TAB>序列`）以及 `.seq.in` 文件以进行批处理。你最常使用的核心标志：
+
+| 标志 | 默认值 | 用途 |
+|------|---------|---------|
+| `-c, --conformations` | 400 | 采样的构象数量 |
+| `--steps` | 30 | DDIM 去噪步数（越少越快，但精度越低） |
+| `-d, --device` | auto | 计算设备：`cpu`、`cuda:0`、`mps` |
+| `--ionic_strength` | 150 | 溶剂离子强度，单位 mM（20、150 或 300） |
+| `-r, --return_structures` | off | 生成 PDB + XTC 3D 坐标 |
+| `--outname` | auto | 输出文件名前缀（仅限单序列） |
+| `-o, --output_directory` | `.` | 输出文件的目录 |
+
+来源: [README.md](/README.md#L77-L112), [starling/scripts/starling_main_cli.py](/starling/scripts/starling_main_cli.py#L54-L99), [starling/configs.py](/starling/configs.py#L18-L28)
+
+---
+
+## 你的首个系综 (Python)
+
+Python API 与 CLI 功能相对应，但为你提供了实时的 `Ensemble` 对象，以便通过编程方式进行检视与分析。你最常使用的两个符号是 [`generate`](/starling/frontend/ensemble_generation.py#L111-L525) 和 [`load_ensemble`](/starling/structure/ensemble.py)：
+
+```python
+from starling import generate, load_ensemble
+
+# 在生理离子强度下生成包含 100 个构象的系综
+sequence = "MQDRVKRPMNAFIVWSRDQRRKMALENPRMRNSEISKQLGYQWKMLTEAEKWPFFQEAQKLQAMHREKYPNYKYRPRRKAKMLPK"
+ensemble = generate(sequence, conformations=100, ionic_strength=150, return_single_ensemble=True)
+
+# 立即计算生物物理可观测量
+mean_rg = ensemble.radius_of_gyration(return_mean=True)
+print(f"Mean Rg: {mean_rg:.2f} Å")
+
+# 持久化保存到磁盘，以便后续重新加载
+ensemble.save("my_ensemble")
+reloaded = load_ensemble("my_ensemble.starling")
+```
+
+`generate` 函数接受多种输入格式——单个序列字符串、字符串列表、`{名称: 序列}` 字典，或 FASTA/TSV 文件路径。当 `return_single_ensemble=True` 时，它返回一个单独的 `Ensemble` 对象；否则返回一个以序列名称为键的 `dict`。
+
+```mermaid
+flowchart LR
+    A["输入<br/>(str / list / dict / file)"] --> B["generate()"]
+    B --> C["序列编码器<br/>(VAE 潜空间)"]
+    C --> D["扩散采样器<br/>(DDIM 去噪)"]
+    D --> E["距离图"]
+    E --> F{"return_structures?"}
+    F -- Yes --> G["MDS 重建<br/>→ 3D 坐标"]
+    F -- No --> H["Ensemble 对象<br/>(仅含距离图)"]
+    G --> H
+    H --> I["保存 / 分析"]
+```
+
+日常使用中 `generate()` 函数最重要的参数：
+
+| 参数 | 默认值 | 用途 |
+|-----------|---------|---------|
+| `conformations` | 400 | 每条序列采样的构象数量 |
+| `ionic_strength` | 150 | 溶剂离子强度，单位 mM（20、150 或 300） |
+| `steps` | 30 | DDIM 去噪步数 |
+| `device` | auto | `None` 会自动选择最佳可用加速器 |
+| `return_structures` | `False` | 包含 3D 坐标重建 |
+| `return_single_ensemble` | `False` | 返回单独的 `Ensemble` 而非 `dict` |
+| `constraint` | `None` | 在采样期间应用约束 |
+| `batch_size` | 100 | 采样迭代的批处理大小 |
+
+<CgxTip>超过 380 个残基的序列将被自动跳过并发出警告——这是当前模型的上下文窗口。包含非标准残基的序列将在输入验证阶段引发 `ValueError`，此阶段早于任何 GPU 计算的启动。</CgxTip>
+
+来源: [starling/__init__.py](/starling/__init__.py#L6-L9), [starling/frontend/ensemble_generation.py](/starling/frontend/ensemble_generation.py#L111-L200), [starling/structure/ensemble.py](/starling/structure/ensemble.py#L1-L60), [demos/basic_usage.ipynb](/demos/basic_usage.ipynb)
+
+---
+
+## 分析 Ensemble 对象
+
+一旦你拥有了一个 `Ensemble` 对象，一系列分析方法即可立即使用——无需额外导入。所有返回逐构象数组的方法也接受 `return_mean=True` 以获取单一标量，以及在你执行 BME 重加权后可使用 `use_bme_weights=True`。
+
+### 核心分析方法
+
+| 方法 | 返回值 | 描述 |
+|--------|---------|-------------|
+| `radius_of_gyration()` | `ndarray` 或 `float` | 每个构象的全局 Rg (Å) |
+| `local_radius_of_gyration(start, end)` | `ndarray` 或 `float` | 残基子区域的 Rg |
+| `hydrodynamic_radius()` | `ndarray` 或 `float` | 通过 Nygaard 或 Kirkwood-Riseman 方法计算的 Rh |
+| `end_to_end_distance()` | `ndarray` 或 `float` | 每个构象的 N 端到 C 端距离 (Å) |
+| `rij(i, j)` | `ndarray` 或 `float` | 残基 i 和 j 之间的距离（从 0 开始索引） |
+| `distance_maps(return_mean=True)` | `ndarray` | 平均或逐帧距离图 |
+| `contact_map(contact_thresh=11)` | `ndarray` | 接触概率图（阈值单位为 Å） |
+| `check_for_errors(remove_errors=True)` | `list` | 查找并可选地移除物理上不可能的帧 |
+
+### 快速分析示例
+
+```python
+from starling import generate
+
+ensemble = generate("GS" * 30, conformations=200, return_single_ensemble=True)
+
+# 回转半径
+all_rg = ensemble.radius_of_gyration()            # 包含 200 个值的数组
+mean_rg = ensemble.radius_of_gyration(return_mean=True)  # 单个浮点数
+
+# 端到端距离
+ete = ensemble.end_to_end_distance()
+
+# 残基间距离（从 0 开始索引：残基 10 → 第 11 个残基）
+d_11_51 = ensemble.rij(10, 50)
+
+# 12 Å 阈值下的接触图
+contacts = ensemble.contact_map(contact_thresh=12.0, return_mean=True)
+
+# 流体力学半径（默认为 Nygaard 模式）
+rh = ensemble.hydrodynamic_radius(return_mean=True)
+```
+
+### 保存、加载与 3D 轨迹
+
+```python
+# 保存完整的 .starling 归档文件（距离图 + 元数据）
+ensemble.save("my_protein")
+
+# 从磁盘重新加载
+from starling import load_ensemble
+reloaded = load_ensemble("my_protein.starling")
+
+# 生成并保存 3D 轨迹（PDB 拓扑 + XTC）
+ensemble.save_trajectory("my_protein")          # .pdb + .xtc
+ensemble.save_trajectory("my_protein", pdb_trajectory=True)  # 仅多模型 .pdb
+```
+
+`.starling` 归档文件是标准的存储格式——它保留了原始距离图和所有元数据，可实现无损的往返操作。PDB/XTC 文件是衍生产品，用于在 VMD、PyMOL 或 MDAnalysis 等工具中进行可视化。
+
+来源: [starling/structure/ensemble.py](/starling/structure/ensemble.py#L349-L500), [starling/structure/ensemble.py](/starling/structure/ensemble.py#L850-L920), [demos/basic_usage.ipynb](/demos/basic_usage.ipynb)
+
+---
+
+## 选择离子强度
+
+STARLING 的生成模型在三种溶剂条件下进行了训练。选择最接近你实验条件的那一种，可以提高物理真实性：
+
+| 离子强度 | 条件 | 适用场景 |
+|---------------|-----------|-------------|
+| 20 mM | 低盐 | 稀释的体外实验，低盐 NMR |
+| 150 mM | 生理 | 模拟细胞条件（默认） |
+| 300 mM | 高盐 | 拥挤环境，高盐缓冲液 |
+
+```python
+# 低盐系综
+ensemble_low = generate(sequence, ionic_strength=20, return_single_ensemble=True)
+
+# 生理条件（默认）
+ensemble_phys = generate(sequence, ionic_strength=150, return_single_ensemble=True)
+
+# 高盐
+ensemble_high = generate(sequence, ionic_strength=300, return_single_ensemble=True)
+```
+
+来源: [starling/configs.py](/starling/configs.py#L25-L26), [demos/basic_usage.ipynb](/demos/basic_usage.ipynb)
+
+---
+
+## 性能一览
+
+STARLING **在 GPU 上非常快**（对于典型的 140 残基 IDR 生成 400 个构象仅需数秒），并通过 MPS 后端 **在 Apple Silicon 上同样极快**。CPU 推理耗时在分钟级而非秒级——对于大多数用例仍具实用性。要显式选择设备：
+
+```python
+# 强制使用 GPU
+ensemble = generate(sequence, device="cuda:0", return_single_ensemble=True)
+
+# Apple Silicon
+ensemble = generate(sequence, device="mps", return_single_ensemble=True)
+
+# 显式使用 CPU
+ensemble = generate(sequence, device="cpu", return_single_ensemble=True)
+```
+
+对于重复的 GPU 工作负载，启用 PyTorch 编译以摊销内核启动开销：
+
+```python
+import starling
+starling.set_compilation_options(enabled=True, mode="reduce-overhead")
+ensemble = starling.generate(sequence, return_single_ensemble=True)
+```
+
+来源: [README.md](/README.md#L114-L116), [starling/__init__.py](/starling/__init__.py#L23-L77), [starling/configs.py](/starling/configs.py#L30-L39)
+
+---
+
+## 首次运行排障
+
+| 症状 | 原因 | 解决方案 |
+|---------|-------|-----|
+| `starling: command not found` | pip 安装未添加至 PATH | 使用 `python -m starling.scripts.starling_main_cli` 或在活动环境中重新安装 |
+| 首次 `generate()` 时下载缓慢 | 正在获取模型权重（约 200 MB） | 等待；首次下载后会缓存至 `~/.starling_weights/` |
+| `ValueError: Invalid amino acid detected` | 序列中存在非标准残基 | 在传入 STARLING 之前移除或转换非标准残基 |
+| `Warning: Sequence … is too long` | 序列超过 380 个残基 | STARLING 的最大上下文为 380；请拆分或截断序列 |
+| 输出时出现 `FileNotFoundError` | 输出目录不存在 | 先创建目录或使用已有路径 |
+
+来源: [starling/frontend/ensemble_generation.py](/starling/frontend/ensemble_generation.py#L28-L106), [starling/configs.py](/starling/configs.py#L26-L27)
+
+---
+
+## 接下来的去向
+
+你现在已拥有一个可用的 STARLING 安装，并能够生成和分析系综。以下是深入探索的逻辑进阶路径：
+
+1. **[CLI 参考](3-cli-reference)** — 完整的标志参考、使用 FASTA/TSV 进行批处理、文件转换工具（`starling2pdb`、`starling2xtc`）
+2. **[架构概览](4-architecture-overview)** — 了解三阶段流水线（编码器 → 扩散 → MDS 重建）
+3. **[Ensemble 对象 API](9-ensemble-object-api)** — 完整的方法目录、BME 重加权、错误诊断
+4. **[约束引导采样](12-constraint-guided-sampling)** — 通过距离、Rg 或螺旋度约束引导系综
+5. **[BME 重加权](11-bme-reweighting)** — 根据实验可观测量（SAXS、FRET、NMR）精修系综
+
+如果你发现 STARLING 在你的研究中很有用，请引用：
+
+> Novak, B., Lotthammer, J. M., Emenecker, R. J. & Holehouse, A. S. **Accurate predictions of disordered protein ensembles with STARLING.** *Nature* **652**, 240–250 (2026).
+
+---
+
+- [入门/CLI 参考](https://zread.ai/idptools/starling/3-cli-reference)
+
+---
+slug:3-cli-reference
+blog_type:normal
+---
+
+
+Starling 提供了一套命令行工具，覆盖了内禀无序蛋白质构象系综生成的完整生命周期——从序列输入到构象采样、格式转换、相似性搜索及性能基准测试。当你执行 `pip install idptools-starling` 时，每个 CLI 命令都会自动安装，并在项目配置中被定义为控制台脚本入口点。本页面记录了每个命令的用途、参数及典型使用模式。
+
+来源: [pyproject.toml](/pyproject.toml#L50-L66)
+
+## 命令概述
+
+Starling CLI 被组织为**四个功能组**：系综生成、格式转换、相似性搜索和模型训练。下图展示了这些组之间及其与核心数据格式的关系。
+
+```mermaid
+flowchart TB
+    subgraph GEN["Ensemble Generation"]
+        S["starling"]
+        SB["starling-benchmark"]
+    end
+    subgraph CONV["Format Conversion"]
+        S2X["starling2xtc"]
+        S2P["starling2pdb"]
+        S2N["starling2numpy"]
+        S2I["starling2info"]
+        S2S["starling2sequence"]
+        S2SL["starling2starling"]
+        N2S["numpy2starling"]
+        X2S["xtc2starling"]
+    end
+    subgraph SEARCH["Similarity Search"]
+        SS["starling-search"]
+        SP["starling-pretokenize"]
+    end
+    subgraph TRAIN["Model Training"]
+        VT["starling-vae-train"]
+        DT["starling-ddpm-train"]
+    end
+
+    SEQ["\"FASTA / .tsv / String\""] --> S
+    S --> CL[".starling file"]
+    CL --> S2X
+    CL --> S2P
+    CL --> S2N
+    CL --> S2I
+    CL --> S2S
+    CL --> S2SL
+    N2S --> CL
+    X2S --> CL
+    SP --> TOKENS["Tokenized .pt files"]
+    TOKENS --> SS
+```
+
+| 组 | 命令 | 用途 |
+|---|---|---|
+| **生成** | `starling` | 从序列生成 IDP 构象系综 |
+| **生成** | `starling-benchmark` | 基准测试运行时和输出质量 |
+| **转换** | `starling2xtc` | `.starling` → PDB 拓扑 + XTC 轨迹 |
+| **转换** | `starling2pdb` | `.starling` → 多模型 PDB |
+| **转换** | `starling2numpy` | `.starling` → NumPy 距离图数组 |
+| **转换** | `starling2info` | 显示 `.starling` 系综元数据 |
+| **转换** | `starling2sequence` | 将 `.starling` 中的序列打印到标准输出 |
+| **转换** | `starling2starling` | 修复或错误检查 `.starling` 文件 |
+| **转换** | `numpy2starling` | 旧版 NumPy 数组 → `.starling`（向后兼容） |
+| **转换** | `xtc2starling` | XTC 轨迹 → `.starling` |
+| **搜索** | `starling-search` | 构建和查询 FAISS 相似性索引 |
+| **搜索** | `starling-pretokenize` | 为索引构建预分词 FASTA |
+| **训练** | `starling-vae-train` | 训练 VAE 序列编码器 |
+| **训练** | `starling-ddpm-train` | 训练扩散去噪模型 |
+
+来源: [pyproject.toml](/pyproject.toml#L50-L66)
+
+---
+
+## `starling` — 系综生成
+
+这是用于生成构象系综的**主命令**。它接受一个蛋白质序列（或包含序列的文件），运行完整的生成流水线（VAE 编码 → 扩散采样 → MDS 重建），并将结果写为 `.starling` 文件。
+
+### 输入格式
+
+位置参数 `user_input` 很灵活，可以是以下任意一种：
+
+| 输入类型 | 示例 | 备注 |
+|---|---|---|
+| **FASTA 文件** | `sequences.fasta` | 使用 `protfasta` 解析；重复名称会导致错误 |
+| **TSV / seq.in 文件** | `seqs.tsv` 或 `seqs.in` | 以制表符分隔的 `name\tsequence` 行 |
+| **原始序列字符串** | `"MDVFMKGLSK"` | 内联传递的单个序列 |
+
+### 参数
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `user_input` | str | *(必选)* | 序列、FASTA 路径或 TSV 路径 |
+| `-c` / `--conformations` | int | 400 | 要生成的构象数量 |
+| `-d` / `--device` | str | 自动检测 | 计算设备 (`cpu`, `cuda`, `mps`) |
+| `-s` / `--steps` | int | 30 | 扩散模型采样步数 |
+| `-b` / `--batch_size` | int | 100 | 采样批大小 |
+| `-o` / `--output_directory` | str | `.` | 输出目录 |
+| `--outname` | str | None | 自定义输出文件名前缀（仅限单个序列） |
+| `-r` / `--return_structures` | 标志 | False | 生成 3D 坐标 (PDB + XTC) |
+| `--num-cpus` | int | min(4, cpu_count) | MDS 重建的最大 CPU 数 |
+| `--num-mds-init` | int | 4 | 并行 MDS 作业（为获最佳性能请匹配 `--num-cpus`） |
+| `--ionic_strength` | int | 150 | 离子强度，单位 mM |
+| `--disable_progress_bar` | 标志 | off | 隐藏进度条 |
+| `-v` / `--verbose` | 标志 | off | 启用详细日志 |
+| `--info` | 标志 | off | 打印配置信息并退出 |
+| `--version` | 标志 | off | 打印版本并退出 |
+
+### 示例
+
+```bash
+# 从原始序列生成 400 个构象
+starling "MDVFMKGLSKAKEGVVAAAEKTKQGVAEAAG" -o ./output
+
+# 生成 1000 个构象并输出 3D 结构
+starling sequences.fasta -c 1000 -r -o ./ensembles
+
+# 检查 Starling 配置和模型路径
+starling --info
+```
+
+<CgxTip>为获得最快生成速度，请将 `--num-mds-init` 设置为与 `--num-cpus` 相等。每个 MDS 作业彼此独立，因此跨所有可用核心并行化可避免距离图到坐标重建的单线程瓶颈。</CgxTip>
+
+来源: [starling_main_cli.py](/starling/scripts/starling_main_cli.py#L37-L197), [configs.py](/starling/configs.py#L14-L25), [ensemble_generation.py](/starling/frontend/ensemble_generation.py#L8-L79)
+
+---
+
+## `starling-benchmark` — 性能基准测试
+
+运行受控的系综生成基准测试，测量不同构象数量下的运行时和平均回转半径。默认情况下，它生成 10 个在 10 到 1000 之间线性等距的构象计数，并在运行之间加入硬件冷却时间。
+
+### 参数
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--device` | str | 自动检测 | 计算设备 |
+| `--batch-size` | int | 100 | 采样批大小 |
+| `--steps` | int | 30 | 扩散步数 |
+| `--sequence` | str | α-突触核蛋白 | 基准测试的蛋白质序列 |
+| `--cooltime` | int | 20 | 运行间等待的秒数 |
+| `--single-run` | int | 0 | 在此构象计数下运行单次基准测试 |
+| `--compile` | 标志 | off | 启用 `torch.compile`（仅限 CUDA） |
+
+### 输出
+
+基准测试结果保存为 CSV 文件：`runtime_matrix_*.csv` 和 `rg_matrix_*.csv`，每个文件包含列 `[conformations, value]`。
+
+```bash
+# 单次基准测试：在 GPU 上生成 500 个构象
+starling-benchmark --single-run 500 --device cuda
+
+# 启用编译的全量扫描
+starling-benchmark --compile --device cuda
+```
+
+来源: [starling_main_cli.py](/starling/scripts/starling_main_cli.py#L210-L367)
+
+---
+
+## 格式转换命令
+
+Starling 使用自定义的 **`.starling`** 归档格式（基于 HDF5）来存储距离图、元数据和可选的 3D 结构。以下转换器命令允许你将这些归档转换为标准结构生物学格式，反之亦然。
+
+### `starling2xtc` — 转换为 PDB + XTC
+
+从 `.starling` 系综生成 PDB 拓扑文件和 XTC 轨迹。如果 3D 结构尚未重建，将自动触发 MDS 重建。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_file` | str | *(必选)* | 输入 `.starling` 文件 |
+| `-o` / `--output` | str | `.` | 输出路径 |
+| `--device` | str | None | 用于 MDS 重建的设备 |
+| `--remove-errors` | 标志 | off | 移除具有物理不可能距离的帧 |
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L14-L45)
+
+### `starling2pdb` — 转换为 PDB 轨迹
+
+与 `starling2xtc` 相同，但输出多模型 PDB 文件而非 PDB+XTC。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_file` | str | *(必选)* | 输入 `.starling` 文件 |
+| `-o` / `--output` | str | `.` | 输出路径 |
+| `--device` | str | None | 用于 MDS 重建的设备 |
+| `--remove-errors` | 标志 | off | 移除具有物理不可能距离的帧 |
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L48-L80)
+
+### `starling2numpy` — 转换为 NumPy 数组
+
+从 `.starling` 文件中提取距离图张量，并将其保存为 `.npy` 文件。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_file` | str | *(必选)* | 输入 `.starling` 文件 |
+| `-o` / `--output` | str | `.` | 输出路径 |
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L83-L103)
+
+### `starling2info` — 显示系综元数据
+
+打印系综的摘要：构象数量、生成日期、模型权重路径、回转半径、端到端距离以及是否包含 3D 结构。
+
+```bash
+starling2info my_protein.starling
+```
+
+**示例输出:**
+```
+-------------------------------
+STARLING Generated ensemble
+-------------------------------
+Number of conformations     : 400
+Generate with STARLING      : 2.0.0
+Generate on ....            : Mon Oct 14 10:00:00 2025
+Average radius of gyration  : 3.72
+Average end-to-end distance : 8.15
+Sequence                    : MDVFMKGLSKAKEGVVAAAEKTKQGVAEAAG
+Structures?                 : [X] (400 structures)
+-------------------------------
+```
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L106-L155)
+
+### `starling2sequence` — 打印序列
+
+将与 `.starling` 文件关联的氨基酸序列写入标准输出。
+
+```bash
+starling2sequence my_protein.starling
+# 输出: MDVFMKGLSKAKEGVVAAAEKTKQGVAEAAG
+```
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L158-L175)
+
+### `starling2starling` — 修复 / 错误检查
+
+重新处理 `.starling` 文件，可选地扫描错误构象（具有不可能残基间距离的帧）并写入修正后的归档。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_file` | str | *(必选)* | 输入 `.starling` 文件 |
+| `-o` / `--output` | str | `.` | 输出路径 |
+| `--error-check` | 标志 | off | 扫描系综以排查问题 |
+| `--remove-errors` | 标志 | off | 移除不良构象并保存 |
+| `--overwrite` | 标志 | off | 原地覆盖输入文件 |
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L158-L213)
+
+### `numpy2starling` — 旧版 NumPy 转为 `.starling`
+
+将先前生成的 NumPy 距离图数组转换为 `.starling` 格式。**此命令出于向后兼容目的而存在**，并将在未来版本中移除。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_file` | str | *(必选)* | 输入 `.npy` 文件 |
+| `-s` / `--sequence` | str | None | 氨基酸序列（除非提供 `-p` 否则必选） |
+| `-o` / `--output` | str | `.` | 输出路径 |
+| `-x` / `--xtc` | str | None | XTC 轨迹文件 |
+| `-p` / `--pdb` | str | None | PDB 拓扑文件 |
+| `--build-structures` | 标志 | off | 重建 3D 系综 |
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L216-L305)
+
+### `xtc2starling` — XTC 轨迹转为 `.starling`
+
+通过从轨迹帧计算残基间距离图，将 MD 轨迹 (XTC + PDB) 转换为 `.starling` 系综。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--xtc` | str | *(必选)* | 输入 XTC 轨迹 |
+| `--pdb` | str | *(必选)* | PDB 拓扑文件 |
+| `-o` / `--output` | str | `.` | 输出路径 |
+
+```bash
+xtc2starling --xtc simulation.xtc --pdb topology.pdb -o ./converted
+```
+
+来源: [starling_converter.py](/starling/scripts/starling_converter.py#L308-L395)
+
+---
+
+## `starling-search` — 相似性搜索
+
+一个两阶段的 CLI，用于基于蛋白质序列嵌入构建和查询 FAISS 近邻索引。使用 `build` 子命令从预分词数据创建索引，使用 `query` 子命令查找相似序列。
+
+### `starling-search build`
+
+从分词序列数据构建 FAISS 索引。需要先前由 `starling-pretokenize` 创建的分词目录。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--root` | str | *(必选)* | 索引产物的根目录 |
+| `--index` | str | *(必选)* | 输出 FAISS 索引路径 |
+| `--tokens` | str | *(必选)* | 分词后的 `.pt` 文件目录 |
+| `--metric` | `cosine` \| `l2` | `cosine` | 距离度量 |
+| `--sample-size` | int | 655360 | IVF 的训练样本大小 |
+| `--nlist` | int | 16384 | IVF 单元格数量 |
+| `--m` | int | 64 | 乘积量子量化子量化器 |
+| `--nbits` | int | 8 | 每个 PQ 子码的比特数 |
+| `--nprobe` | int | 16 | 搜索时探测的单元格数 |
+| `--use-gpu` | 标志 | on | 启用 GPU 构建索引 |
+| `--gpu-device` | int | 0 | GPU 设备索引 |
+| `--opq` | 标志 | off | 使用 OPQ 旋转 |
+| `--compress` | 标志 | off | 压缩存储的序列 |
+| `--shard-regex` | str | None | 用于过滤分词分片的正则表达式 |
+| `--verbose` | 标志 | on | 详细日志 |
+
+```bash
+starling-search build --root /data/starling --tokens /data/tokens --index myindex.faiss
+```
+
+来源: [starling_search.py](/starling/scripts/starling_search.py#L28-L72)
+
+### `starling-search query`
+
+使用一个或多个蛋白质序列查询已构建的 FAISS 索引。如果使用 `--index default` 或文件缺失，Starling 会自动从 Zenodo 下载并缓存默认的预构建索引。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--index` | str | `default` | FAISS 索引路径（或 `default` 以自动获取） |
+| `--metric` | `cosine` \| `l2` | `cosine` | 距离度量（必须与构建时匹配） |
+| `--seq` | str\* | None | 查询序列（通过重复传递多个） |
+| `--k` | int | 10 | 近邻数量 |
+| `--nprobe` | int | 64 | 探测的单元格数 |
+| `--exclude-exact` | 标志 | on | 排除精确匹配 |
+| `--sequence-identity-max` | float | None | 最大序列同一性过滤器 |
+| `--identity-denominator` | str | `query` | 同一性分母：`query`, `target`, `max`, `min`, `avg` |
+| `--max-cosine-similarity` | float | None | 最大余弦相似度阈值 |
+| `--min-l2-distance` | float | None | 最小 L2 距离阈值 |
+| `--length-min` | int | None | 最小目标序列长度 |
+| `--length-max` | int | None | 最大目标序列长度 |
+| `--rerank` | 标志 | on | 启用结构感知比较的重排 |
+| `--rerank-ionic-strength` | int | None | 重排的离子强度 |
+| `--device` | str | `cuda:0` | 计算设备 |
+| `--batch-size` | int | 256 | 嵌入批大小 |
+| `--ionic-strength` | int | 150 | 嵌入的离子强度 |
+| `--out` | str | `nearest_neighbors` | 输出基本名称（扩展名自动设置） |
+| `--out-format` | `csv` \| `jsonl` | `csv` | 输出格式 |
+| `--verbose` | 标志 | on | 详细日志 |
+
+```bash
+# 在默认索引中查询两个序列
+starling-search query --seq "MDVFMKGLSKAKEGVV" --seq "MSTESDQLV" --k 20 --out results
+
+# 启用重排和序列同一性过滤进行查询
+starling-search query --index myindex.faiss --seq "MDVFMKGLSK" \
+  --k 50 --rerank --sequence-identity-max 0.8 --out-format jsonl
+```
+
+**查询输出列** (CSV/JSONL)：`query_index`, `query_seq`, `rank`, `gid`, `score`, `similarity`, `header`, `length`, `sequence`。同时还会写入一个包含命中序列的配套 `.fasta` 文件。
+
+<CgxTip>在首次运行时使用 `--index default`，让 Starling 从 Zenodo 自动下载预构建的搜索索引（GB 级别）。后续查询将使用位于 `~/.starling_search/` 的缓存副本。设置环境变量 `STARLING_FAISS_INDEX_PATH` 和 `STARLING_SEQSTORE_PATH` 可覆盖缓存位置。</CgxTip>
+
+来源: [starling_search.py](/starling/scripts/starling_search.py#L74-L112), [starling_search.py](/starling/scripts/starling_search.py#L230-L337), [configs.py](/starling/configs.py#L157-L208)
+
+---
+
+## `starling-pretokenize` — FASTA 预分词
+
+使用 Starling 的序列编码器对 FASTA 蛋白质序列文件进行分词，生成 `starling-search build` 所需的 `.pt` 张量文件。支持跨多个工作进程的并行处理。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `fastas` | str\* | None | 输入 FASTA 文件路径 |
+| `--sequences` | str | None | 列出绝对 FASTA 路径的文本文件（每行一个） |
+| `-o` / `--output` | str | *(必选)* | 输出目录 |
+| `--combined` | 标志 | off | 将所有条目写入单个合并的 `.pt` 文件 |
+| `--prefix` | str | `pretokenized` | 合并输出的文件名前缀 |
+| `--workers` | int | 1 | 并行工作进程数 |
+| `--no-progress` | 标志 | off | 禁用进度条 |
+
+```bash
+# 分词单个 FASTA 文件
+starling-pretokenize uniprot_sprot.fasta swissprot.fasta -o ./tokens
+
+# 从路径列表文件分词，合并输出，4 个工作进程
+starling-pretokenize --sequences fasta_list.txt -o ./tokens --combined --prefix all_seqs --workers 4
+```
+
+**输出**：每个 FASTA 对应的 `<basename>.tokens.pt` 文件（或在使用 `--combined` 时的单个 `<prefix>.pt`），每个文件包含一个 `{header, sequence, tokenized}` 字典列表。
+
+来源: [starling_pretokenize.py](/starling/scripts/starling_pretokenize.py#L1-L126)
+
+---
+
+## 训练命令
+
+这些命令面向想要重新训练或微调 Starling 神经网络组件的**高级用户**。两者均使用 Hydra 配置和 PyTorch Lightning，并可选配 Weights & Biases 日志记录。
+
+### `starling-vae-train` — 训练 VAE 编码器
+
+训练 Vision Transformer VAE，将蛋白质序列编码为潜在表示。配置通过 Hydra YAML 文件管理。
+
+```bash
+starling-vae-train  # 使用 starling/training/config.yaml 中的默认 Hydra 配置
+```
+
+来源: [pyproject.toml](/pyproject.toml#L50-L51), [vae_train.py](/starling/training/vae_train.py#L1-L50)
+
+### `starling-ddpm-train` — 训练扩散模型
+
+训练基于 ViT 的扩散去噪模型，该模型生成以 VAE 潜向量为条件的距离图。同样通过 Hydra 配置。
+
+```bash
+starling-ddpm-train  # 使用默认 Hydra 配置
+```
+
+来源: [pyproject.toml](/pyproject.toml#L52), [diffusion_train.py](/starling/training/diffusion_train.py#L1-L50)
+
+---
+
+## 默认配置值
+
+下表总结了控制 CLI 行为的内置默认值。所有值均可通过创建 `~/.starling_weights/configs.py` 文件或设置相应的环境变量来覆盖。
+
+| 参数 | 默认值 | 环境变量覆盖 |
+|---|---|---|
+| 模型目录 | `~/.starling_weights/` | — |
+| VAE 权重 | `STARLING_v2.0.0_ViT_VAE_2025_10_14.ckpt` | `STARLING_ENCODER_PATH` |
+| DDPM 权重 | `STARLING_v2.0.0_ViT_DDPM_2025_10_14.ckpt` | `STARLING_DDPM_PATH` |
+| 构象数量 | 400 | — |
+| 批大小 | 100 | — |
+| 扩散步数 | 30 | — |
+| MDS 初始化作业 | 4 | — |
+| 离子强度 | 150 mM | — |
+| 最大序列长度 | 380 残基 | — |
+| 默认采样器 | DDIM | — |
+| 搜索索引目录 | `~/.starling_search/` | `STARLING_FAISS_INDEX_PATH` |
+
+来源: [configs.py](/starling/configs.py#L12-L30), [configs.py](/starling/configs.py#L157-L208)
+
+---
+
+## 快速参考：常见工作流
+
+以下流程图展示了从序列输入到最终结构输出的最常见 CLI 工作流。
+
+```mermaid
+flowchart LR
+    A["FASTA or sequence string"] -->|starling| B[".starling file"]
+    B -->|starling2xtc| C["PDB + XTC"]
+    B -->|starling2pdb| D["multi-model PDB"]
+    B -->|starling2numpy| E["distance_maps.npy"]
+    B -->|starling2info| F["metadata summary"]
+    
+    G["MD trajectory"] -->|xtc2starling| B
+    
+    A -->|starling-pretokenize| H["tokenized .pt"]
+    H -->|starling-search build| I["FAISS index"]
+    I -->|starling-search query| J["nearest neighbors"]
+```
+
+**典型的系综生成工作流:**
+```bash
+# 步骤 1：生成系综
+starling my_protein.fasta -c 1000 -r -o ./results
+
+# 步骤 2：检查元数据
+starling2info ./results/my_protein.starling
+
+# 步骤 3：转换为 XTC 用于下游分析
+starling2xtc ./results/my_protein.starling -o ./results/my_protein --remove-errors
+```
+
+**典型的搜索工作流:**
+```bash
+# 步骤 1：对数据库进行预分词
+starling-pretokenize uniprot.fasta -o ./tokens --combined
+
+# 步骤 2：构建索引
+starling-search build --root ./search --tokens ./tokens --index my_index.faiss
+
+# 步骤 3：使用感兴趣的序列进行查询
+starling-search query --index my_index.faiss --seq "MDVFMKGLSKAKEGVVAAAEKTKQGVAEAAG" --k 20
+```
+
+要了解 `starling` 命令生成流水线内部发生的事情，请参阅[架构概览](4-architecture-overview)。有关 `.starling` 格式和 Ensemble 对象的详细信息，请参阅 [Ensemble 对象 API](9-ensemble-object-api)。
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/idptools/starling/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+STARLING 实现了一个**潜空间概率去噪扩散模型**，用于预测内禀无序蛋白质的粗粒化构象系综。系统在架构上被组织为一个两阶段的生成流水线——VAE 将蛋白质距离图压缩至学习到的潜空间中，条件扩散模型则在该空间内学习去噪，并以序列编码的上下文作为引导。本页映射了完整的系统架构，从顶层 API 接口一直到模型内部细节和后处理子系统。
+
+来源: [__init__.py](/starling/__init__.py#L1-L77), [README.md](/README.md#L1-L200)
+
+## 系统架构
+
+下图展示了 STARLING 中的主要数据流，从氨基酸序列输入到 3D 结构输出。每个标记节点对应 `starling/` 包内的一个具体模块。
+
+```mermaid
+graph TD
+    subgraph Frontend["frontend/ — 面向用户的 API"]
+        GEN["generate()"]
+        SE["sequence_encoder()"]
+        CLI["starling CLI"]
+    end
+
+    subgraph Inference["inference/ — 编排调度"]
+        ML["ModelManager<br/>(延迟加载 + 编译)"]
+        GB["generate_backend()"]
+        CON["constraints<br/>(Rg, 距离, 螺旋度)"]
+    end
+
+    subgraph Models["models/ — 神经网络架构"]
+        TOK["StarlingTokenizer"]
+        ENC["SequenceEncoder<br/>(Transformer)"]
+        VAE["VAE<br/>(ResNet 编码器/解码器)"]
+        DIFF["DiffusionModel<br/>(LightningModule)"]
+        VIT["ViT Denoiser<br/>(DiT 模块)"]
+    end
+
+    subgraph Samplers["samplers/ — 采样策略"]
+        DDIM["DDIMSampler"]
+        DDPM["DDPMSampler"]
+        PLMS["PLMSSampler"]
+    end
+
+    subgraph Structure["structure/ — 后处理"]
+        ENS["Ensemble<br/>(距离图容器)"]
+        COORD["coordinates<br/>(MDS → 3D)"]
+        BME["BME Reweighting"]
+    end
+
+    subgraph Search["search/ — 相似度搜索"]
+        SE_ENG["SearchEngine<br/>(FAISS + SQLite)"]
+    end
+
+    CLI --> GEN
+    GEN --> GB
+    SE --> GB
+    GB --> ML
+    ML --> |"加载与缓存"| VAE
+    ML --> |"加载与缓存"| DIFF
+    DIFF --> VIT
+    GB --> TOK
+    TOK --> ENC
+    ENC --> |"上下文"| DIFF
+    GB --> DDIM
+    GB --> DDPM
+    GB --> PLMS
+    DDIM --> CON
+    DDPM --> CON
+    PLMS --> CON
+    DDIM --> |"潜空间样本"| VAE
+    VAE --> |"解码 → 距离图"| ENS
+    ENS --> COORD
+    ENS --> BME
+    ENS --> SE_ENG
+```
+
+来源: [ensemble_generation.py](/starling/frontend/ensemble_generation.py#L1-L200), [generation.py](/starling/inference/generation.py#L1-L200), [model_loading.py](/starling/inference/model_loading.py#L1-L131)
+
+## 两阶段生成流水线
+
+STARLING 的生成核心遵循 Rombach 等人 (2021) 提出的**潜空间扩散**范式。该设计将表征学习（VAE）与生成建模（扩散过程）解耦，带来了几项实用优势：扩散模型在紧凑的 24×24 潜空间网格而非完整的 N×N 距离图上运行；VAE 的解码器可在训练和推理阶段共享；潜空间展现出更平滑的流形几何结构，使去噪器更容易导航。
+
+| 阶段 | 组件 | 输入 | 输出 | 目的 |
+|-------|-----------|-------|--------|---------|
+| **1 — 编码** | `SequenceEncoder` | 分词后的氨基酸序列 + 离子强度 | 上下文嵌入 `(B, L, 512)` | 将蛋白质序列转化为去噪器的条件信号 |
+| **2a — 扩散** | `DiffusionModel` + `ViT` | 带噪潜变量 + 时间步 + 上下文 | 去噪潜变量 `(B, 1, 24, 24)` | 以序列为条件，在潜空间中迭代去噪 |
+| **2b — 解码** | `VAE.decoder` | 去噪潜变量 | 距离图 `(N, N)` | 将潜变量映射回完整的残基对距离空间 |
+
+**VAE** (`starling.models.vae.VAE`) 采用基于 ResNet 的编码器/解码器架构（ResNet18 或 ResNet34 变体），并具有对角高斯潜变量分布。在训练期间，ELBO 损失结合了重建损失（MSE 或 NLL）与 Kullback-Leibler 散度正则化项，其权重由 `KLDWeightScheduler` 通过周期性或线性预热计划进行控制。**扩散模型** (`starling.models.diffusion.DiffusionModel`) 将 `ViT` 去噪器封装在 PyTorch Lightning 模块中，管理完整的前向/噪声调度（余弦、线性或 S 型 β 调度），并将所有扩散过程缓冲区（α, ᾱ, 后验方差）注册为模型缓冲区。
+
+来源: [vae.py](/starling/models/vae.py#L1-L200), [diffusion.py](/starling/models/diffusion.py#L1-L200), [vit.py](/starling/models/vit.py#L1-L123)
+
+## 序列编码器与分词
+
+`StarlingTokenizer` 提供了一个快速的字节级转换表，将 20 种标准氨基酸映射为整数 ID（1–20，0 保留用于填充）。它完全避免了正则表达式或字典查找，在编码和解码时均使用 Python 的 `bytes.translate()`。`SequenceEncoder` 是一个 12 层的 Transformer 编码器（嵌入维度 512，8 个注意力头），它接收分词后的序列并生成逐残基的嵌入。这些嵌入在每个去噪步骤中作为 ViT 去噪器的**交叉注意力上下文**，将生成过程锚定到特定的蛋白质序列上。
+
+离子强度条件（20、150 或 300 mM）与序列 token 一起注入，允许模型根据溶剂条件调整其预测——这对于构象系综对静电屏蔽高度敏感的无序蛋白质而言是一个关键因素。
+
+来源: [tokenizer.py](/starling/data/tokenizer.py#L1-L94), [transformer.py](/starling/models/transformer.py#L1-L200)
+
+## ViT 去噪器架构
+
+去噪器 (`starling.models.vit.ViT`) 是一个在 24×24 潜空间网格上运行的**视觉 Transformer**。其架构遵循**扩散 Transformer (DiT)** 设计模式：潜变量被分块化（默认块大小为 3），通过学习的位置编码投影为 token 嵌入，然后通过 12 个 `DiTBlock` 层进行处理，每一层都应用以时间步为条件的**自适应层归一化** (AdaLN)，外加针对序列编码器上下文的**交叉注意力**。
+
+前向传播过程应用：(1) `Conv2d` 主干将单通道潜变量提升至 64 通道；(2) 通过 `PatchEmbed` 进行块嵌入；(3) 依赖时间步的缩放/偏移调制（自适应归一化）；(4) 包含自注意力和针对序列上下文的交叉注意力的 12 个 DiT 模块；(5) 线性投影回块 token；(6) 最终的 `Conv2d` 产生单通道残差预测。该架构取代了早期扩散模型中常见的 U-Net 去噪器，提供了更优异的缩放特性和跨空间分辨率更均匀的计算量。
+
+来源: [vit.py](/starling/models/vit.py#L1-L123), [attention.py](/starling/models/attention.py#L1-L100)
+
+## 采样策略
+
+STARLING 提供了三种采样器，每种实现了不同的扩散过程轨迹：
+
+| 采样器 | 模块 | 速度 | 随机性 | 核心特征 |
+|---------|--------|-------|---------------|-------------------|
+| **DDIM** | `samplers.ddim_sampler` | ★★★ 快 | 确定性 (η=0) | 非马尔可夫过程；生成步数远少于训练时间步 |
+| **DDPM** | `samplers.ddpm_sampler` | ★ 慢 | 随机 | 完整马尔可夫链；与训练目标精确匹配 |
+| **PLMS** | `samplers.plms_sampler` | ★★ 适中 | 伪线性 | 伪线性多步；在某些分布上优于 DDIM |
+
+三种采样器共享一个通用接口：它们接受一个 `DiffusionModel`、一个 `VAE` 编码器和一个条件序列，并返回解码后的距离图。**DDIM** 是默认采样器（默认 30 步），因其相比 DDPM 具有 10–100 倍的速度优势而被推荐用于生产环境。所有采样器均支持**约束引导采样**——当提供 `Constraint` 对象时，采样器在去噪轨迹期间应用基于梯度的引导，以将生成的构象导向满足约束条件。
+
+来源: [ddim_sampler.py](/starling/samplers/ddim_sampler.py#L1-L200), [ddpm_sampler.py](/starling/samplers/ddpm_sampler.py#L1-L80), [plms_sampler.py](/starling/samplers/plms_sampler.py#L1-L80)
+
+## 系综对象与结构重建
+
+`Ensemble` 类 (`starling.structure.ensemble.Ensemble`) 是贯穿 STARLING 的核心数据容器。它封装了一个 `(n_conformations, n_residues, n_residues)` 的对称化距离图 numpy 数组及相应的氨基酸序列，提供派生可观测量的延迟缓存计算：
+
+- **回转半径** (Rg) 和 **流体力学半径** (Rh)
+- **末端距**
+- 可配置距离阈值下的**接触图**
+- 通过多维缩放 (MDS) 得到的**3D 坐标轨迹**
+- **BME 重加权**结果（已缓存）
+
+3D 坐标重建 (`starling.structure.coordinates`) 通过两阶段方法将距离图转换为笛卡尔坐标：**sklearn MDS** 提供初始坐标，随后通过 **PyTorch 梯度下降**精细化，最小化目标与重建残基对距离之间的 MSE。运行多个并行 MDS 初始化（默认 4 个）以避免局部极小值。生成的轨迹表示为 SOURSOP `SSProtein` 对象，并可导出为 PDB 拓扑 + XTC 轨迹文件。
+
+来源: [ensemble.py](/starling/structure/ensemble.py#L1-L200), [coordinates.py](/starling/structure/coordinates.py#L1-L200)
+
+## 约束引导采样
+
+约束系统 (`starling.inference.constraints`) 支持将扩散过程导向满足实验或结构要求的构象。系统提供了三种约束类型：
+
+| 约束 | 类 | 可观测量 | 引导模式 |
+|------------|-------|------------|---------------|
+| **回转半径** | `RgConstraint` | ⟨Rg⟩ | 基于梯度的潜空间扰动 |
+| **距离** | `DistanceConstraint` | 特定残基对的 d(i, j) | 基于梯度的潜空间扰动 |
+| **螺旋度** | `HelicityConstraint` | 螺旋残基比例 | 基于梯度的潜空间扰动 |
+
+所有约束均继承自抽象 `Constraint` 基类，该基类提供依赖于时间的调度（余弦、钟形）、自适应梯度裁剪以及可配置的引导窗口（`guidance_start` / `guidance_end`），用于控制在去噪过程中的何时应用约束。`ConstraintLogger` 跟踪去噪步骤中的约束满足情况以供诊断。
+
+来源: [constraints.py](/starling/inference/constraints.py#L1-L200)
+
+## BME 重加权
+
+贝叶斯最大熵重加权 (`starling.structure.bme`) 为将实验可观测数据（SAXS、FRET、NMR 等）整合到系综中提供了一个原则性框架。`BME` 优化器对单个构象进行重加权，以最小化相对熵（与均匀先验的 KL 散度），同时满足匹配实验约束的条件，这些约束可以是**等式**（在不确定性范围内匹配）、**上界**或**下界**约束。结果缓存在 `Ensemble` 对象中，并在指定 `use_bme_weights=True` 时自动传播至所有下游可观测量的计算中。
+
+来源: [bme.py](/starling/structure/bme.py#L1-L100)
+
+## 模型管理与编译
+
+`ModelManager` 单例 (`starling.inference.model_loading.ModelManager`) 实现了带缓存的**延迟加载**——模型在首次访问时从磁盘加载（或从 GitHub Releases 下载），并在后续调用中复用。这对于反复调用 `generate()` 的批处理工作流至关重要。管理器还通过 `torch.compile()` 支持 **PyTorch 编译**，该功能默认禁用，但可通过 `starling.set_compilation_options()` 编程开启。启用编译后，ViT 去噪器和 VAE 解码器将被编译（通常使用 `inductor` 后端），在 CUDA 上提供显著的推理加速，代价是一次性的编译开销。
+
+模型权重默认从 GitHub Releases URL 下载，但可通过环境变量（`STARLING_ENCODER_PATH`、`STARLING_DDPM_PATH`）或本地 `~/.starling_weights/` 目录进行覆盖。
+
+来源: [model_loading.py](/starling/inference/model_loading.py#L1-L131), [configs.py](/starling/configs.py#L1-L200)
+
+## 相似度搜索
+
+搜索子系统 (`starling.search`) 提供了在蛋白质嵌入空间上的高性能**近似最近邻 (ANN)** 搜索，基于 FAISS 索引并以 SQLite 作为序列元数据后端。`SearchEngine` 支持多级过滤（余弦相似度<边界>、序列长度门控、精确匹配排除、序列同一性阈值）、使用完整编码器对 top-k 候选进行精确重排序以及批量查询处理。预构建的索引托管在 Zenodo 上，并在本地 `~/.starling_search/` 下缓存。
+
+来源: [search_engine.py](/starling/search/search_engine.py#L1-L80), [configs.py](/starling/configs.py#L150-L200)
+
+## 模块映射
+
+下表总结了 `starling/` 中的每个子包及其架构角色：
+
+| 子包 | 角色 | 关键导出 |
+|------------|------|-------------|
+| `frontend/` | 高层 API 接口 | `generate()`, `sequence_encoder()`, `handle_input()` |
+| `inference/` | 编排调度、模型加载、约束 | `ModelManager`, `generate_backend()`, `Constraint` 子类 |
+| `models/` | 神经网络架构 | `VAE`, `DiffusionModel`, `ViT`, `SequenceEncoder`, 注意力模块 |
+| `samplers/` | 扩散采样策略 | `DDIMSampler`, `DDPMSampler`, `PLMSSampler` |
+| `data/` | 分词、数据加载、调度 | `StarlingTokenizer`, `DiagonalGaussianDistribution`, β-调度 |
+| `structure/` | 系综表示与后处理 | `Ensemble`, `BME`, 坐标重建 |
+| `search/` | FAISS 相似度搜索 | `SearchEngine`, `CandidateFilter` 子类 |
+| `training/` | 训练循环 | `diffusion_train`, `vae_train` |
+| `scripts/` | CLI 入口点 | `starling_main_cli`, `starling_converter`, `starling_search` |
+| `configs/` | YAML 配置文件 | 模型、数据加载器、训练器、扩散配置 |
+
+<CgxTip>在批处理工作流中使用 STARLING 时，对每个序列调用一次 `generate()`，但依赖 `ModelManager` 单例以避免重复加载权重。为实现最大 GPU 吞吐量，可通过 `starling.set_compilation_options(enabled=True, mode="reduce-overhead")` 启用编译——一次性的编译成本会在多次推理中迅速摊销。</CgxTip>
+
+<CgxTip>`Ensemble` 对象延迟计算所有可观测数据并缓存结果。如果你在构造后修改了距离图，请使用 `force_recompute=True` 调用相关方法或构造一个新的 `Ensemble`，以避免命中过期的缓存。</CgxTip>
+
+来源: [__init__.py](/starling/__init__.py#L1-L77), [configs.py](/starling/configs.py#L1-L200)
+
+## 接下来去哪
+
+架构概述映射了全局概貌——以下页面将按照生成流水线的自然顺序，深入到每个子系统的细节：
+
+1. **[序列编码器](5-sequence-encoder)** — 分词和 Transformer 编码器如何生成序列上下文嵌入
+2. **[VAE 潜空间](6-vae-latent-space)** — ResNet VAE 架构、KL 调度与潜空间几何结构
+3. **[扩散模型设计](7-diffusion-model-design)** — DiffusionModel Lightning 模块、噪声调度与训练目标
+4. **[采样策略](8-sampling-strategies)** — DDIM、DDPM 和 PLMS 采样器内部机制与性能权衡
+5. **[系综对象 API](9-ensemble-object-api)** — `Ensemble` 类 API、延迟计算与序列化
+6. **[约束引导采样](13-constraint-guided-sampling)** — 约束如何引导去噪轨迹
+7. **[视觉 Transformer 去噪器](14-vision-transformer-denoiser)** — DiT 模块、AdaLN、块嵌入与交叉注意力细节
+
+---
+
+- [深入解析/相似性搜索](https://zread.ai/idptools/starling/16-similarity-search)
+
+---
+slug:16-similarity-search
+blog_type:normal
+---
+
+
+STARLING 的相似度搜索子系统在蛋白质序列嵌入上提供了**基于 FAISS 的近似最近邻（ANN）搜索**，并配备了多层过滤管道、精确重排序以及基于 SQLite 的元数据存储。它是生成的序列或查询序列在大型数据库中寻找其结构邻居的机制——在生成管道的潜在空间与真实序列仓库之间架起了桥梁。
+
+## 架构概述
+
+搜索模块由四个协同组件构成，每个组件在“构建后查询”的生命周期中各司其职：
+
+```mermaid
+flowchart TD
+    subgraph Build["构建阶段"]
+        IB[IndexBuilder] -->|发现分片| FS["特征分片<br/>sequence_features.pt"]
+        IB -->|OPQ + IVF-PQ| FI["FAISS 索引<br/>.faiss"]
+        IB -->|tokens_dir| SS[序列存储<br/>.seqs.sqlite]
+        IB -->|元数据| MF["清单文件<br/>.manifest.json"]
+    end
+
+    subgraph Query["查询阶段"]
+        SE[SearchEngine] -->|加载| FI
+        SE -->|附加| SS
+        Q["查询嵌入<br/>(Q × 768)"] --> SE
+        SE -->|ANN 查找| C["原始候选集"]
+        C -->|过滤管道| F["过滤后结果"]
+        F -->|可选重排序| R["重排序后的 Top-k"]
+    end
+
+    SS -.->|长度预过滤| SE
+    style Build fill:#e8f0fe,stroke:#4285f4
+    style Query fill:#fce8e6,stroke:#ea4335
+```
+
+**构建阶段**从分片特征文件中构建压缩的 FAISS 索引和附带的 SQLite 数据库。**查询阶段**将这些产物加载到 `SearchEngine` 中，并执行带有可配置过滤和可选精确重评分的 ANN 搜索。这两个阶段完全解耦——索引是可移植的产物，可以跨环境共享。
+
+来源：[\_\_init\_\_.py](/starling/search/__init__.py#L1-L36), [builder.py](/starling/search/builder.py#L1-L200)
+
+## 使用 IndexBuilder 构建索引
+
+`IndexBuilder` 将分片嵌入文件转换为生产就绪的 FAISS 索引。它采用 **OPQ + IVF-PQ 压缩**——一种三阶段量化策略，将 768 维的 float32 向量（每个约 3 KB）缩减为约 64–128 字节的编码，同时保持检索质量。
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `sample_size` | 655,360 | 用于量化器学习的训练向量 |
+| `nlist` | 16,384 | IVF 分区数（若训练集过小则自动减少） |
+| `m` | 64 | PQ 子量化器数（必须能整除嵌入维度） |
+| `nbits` | 8 | 每个子量化器码本条目的比特数 |
+| `use_opq` | `True` | 学习旋转以改善量化 |
+| `use_gpu` | `True` | GPU 加速训练 |
+| `compress_sequences` | `False` | 附带 SQLite 中的 zstd 压缩 |
+
+构建器通过在指定 `root` 下全局匹配 `**/sequence_features.pt` 来发现特征分片，从目录名解析分片 ID，并按数字对它们进行排序以保证稳定的 GID 分配。它会验证分片间的维度一致性，并在训练样本数不足以满足请求的分区数时，自动向下调整 `nlist`（至最接近的 2 的幂）。
+
+**快速构建示例：**
+
+```python
+from starling.search import IndexBuilder, build_index
+
+# 函数式 API
+index = build_index(
+    root="/data/feature_shards",
+    index_path="/data/uniref_index.faiss",
+    tokens_dir="/data/tokenized_sequences",
+    metric="cosine",
+    sample_size=655_360,
+    nlist=16384,
+    m=64,
+)
+
+# 面向对象 API（控制更精细）
+builder = IndexBuilder(root="/data/feature_shards", metric="cosine")
+index = builder.build_index(
+    index_path="/data/uniref_index.faiss",
+    tokens_dir="/data/tokenized_sequences",
+    use_opq=True,
+    use_gpu=True,
+)
+```
+
+构建过程产生三个产物：`.faiss` 索引文件、带有元数据（维度、总向量数、IVF-PQ 配置、构建日期）的 `.manifest.json`，以及提供 `tokens_dir` 时生成的 `.seqs.sqlite` 序列存储。
+
+来源：[builder.py](/starling/search/builder.py#L450-L649), [builder.py](/starling/search/builder.py#L200-L399)
+
+## 序列元数据存储
+
+`SequenceStore` 是一个基于 SQLite 的数据库，为过滤和重排序所需的序列数据提供 **O(log N) 索引查找**。它遵循构建后发布模式以保证原子性：写入器在隔离的临时文件中构建数据库，然后通过 `os.replace()` 原子地替换正式路径。
+
+| 操作 | 方法 | 已索引？ | 备注 |
+|-----------|--------|----------|-------|
+| 单序列获取 | `get_seq(gid)` | ✓ (PK) | LRU 缓存（32K 条目） |
+| 头部 + 长度 | `get_header_len(gid)` | ✓ (PK) | 单行查找 |
+| 批量元数据 | `get_many_meta(gids)` | ✓ (PK) | 大批量使用临时表 JOIN |
+| 长度范围查询 | `get_gids_by_length_range(min, max)` | ✓ (len) | 用于 IVF ID 选择器 |
+| 批量插入 | `insert_rows(rows)` | — | 写入优化的 PRAGMA |
+| 哈希计算 | `hash8(seq)` | — | SHA1 截断至 8 字节 |
+
+**模式：**
+
+```sql
+CREATE TABLE sequences (
+    gid       INTEGER PRIMARY KEY,
+    len       INTEGER NOT NULL,
+    hash8     INTEGER,          -- 用于去重的 8 字节哈希
+    seq       BLOB NOT NULL,    -- [标志:1B][有效载荷] (0=UTF-8, 1=zstd)
+    shard     INTEGER,
+    local_idx INTEGER,
+    header    BLOB              -- 与 seq 编码相同
+);
+CREATE INDEX idx_len ON sequences(len);
+CREATE INDEX idx_hash8 ON sequences(hash8);
+```
+
+序列和头部使用 1 字节标志前缀进行编码：`0x00` 表示普通 UTF-8，`0x01` 表示 zstd 压缩的有效载荷。这允许在同一数据库中混合压缩和未压缩的数据。读取器以 `immutable=1` 和 `mode=ro` 打开——它们从不加锁，并支持跨线程和进程的无限并发访问。
+
+来源：[store.py](/starling/search/store.py#L1-L200), [store.py](/starling/search/store.py#L400-L587)
+
+## SearchEngine：查询索引
+
+`SearchEngine` 是主要的查询接口。它封装了训练好的 FAISS 索引和可选的 `SequenceStore`，以提供带有多层过滤和精确重排序的高级搜索。
+
+### 加载
+
+```python
+from starling.search import SearchEngine, load_engine
+
+# 函数式 API
+engine = load_engine("/data/uniref_index.faiss", metric="cosine")
+
+# 类方法（等效）
+engine = SearchEngine.load("/data/uniref_index.faiss", metric="cosine", verbose=True)
+```
+
+加载器读取 `.faiss` 文件，并在同级目录下存在 `.seqs.sqlite` 时自动附加。如果序列存储不存在，依赖它的过滤和重排序将在查询时引发 `RuntimeError`。
+
+### 核心搜索方法
+
+`search()` 方法编排整个管道：ANN 查找 → 元数据收集 → 过滤应用 → 可选重排序。其签名暴露了所有可调参数：
+
+| 参数 | 默认值 | 用途 |
+|-----------|---------|---------|
+| `queries` | *(必填)* | 查询嵌入，形状为 `(Q, D)` |
+| `k` | 10 | 每次查询的最终结果数 |
+| `nprobe` | `None` | IVF 探测次数（越高 = 召回率越好，速度越慢） |
+| `return_similarity` | `False` | 返回余弦相似度 ∈ [0,1] 还是距离 |
+| `length_min` / `length_max` | `None` | 序列长度边界 |
+| `max_cosine_similarity` | `None` | 相似度上限阈值（排除近乎重复项） |
+| `exclude_exact` | `False` | 移除完全序列匹配项 |
+| `sequence_identity_max` | `None` | 序列同一性上限阈值 |
+| `overfetch` | `None` | 过滤前将 `k` 乘以的倍数（自动：若有活跃过滤器则为 5×） |
+| `rerank` | `False` | 重新嵌入候选者并精确重评分 |
+| `rerank_device` | `None` | 用于重排序编码器的设备 |
+
+**基本搜索：**
+
+```python
+import torch
+
+queries = torch.randn(10, 768)
+queries = torch.nn.functional.normalize(queries, dim=1)
+
+results = engine.search(queries=queries, k=100, nprobe=128, return_similarity=True)
+# results[i] = [(score, gid, header, length), ...] 对应查询 i
+```
+
+<CgxTip>对于余弦度量，在将查询向量传递给 `search()` 之前，务必进行 L2 归一化。该方法会进行防御性归一化，但预归一化可避免不必要的计算。较高的 `nprobe` 值能以适中的延迟代价显著提升召回率——典型的生产值范围在 64 到 256 之间。</CgxTip>
+
+来源：[search_engine.py](/starling/search/search_engine.py#L1-L200), [search_engine.py](/starling/search/search_engine.py#L760-L957)
+
+## 多层过滤管道
+
+过滤器作为顺序管道应用，其中第一个失败的过滤器会短路该候选者的评估。顺序经过刻意选择，将**廉价操作置于昂贵操作之前**——嵌入级检查先于元数据查找，元数据查找先于完整序列比较，完整序列比较先于比对计算。
+
+```mermaid
+flowchart LR
+    C["来自 ANN 查找<br/>的候选者"] --> F1["ValidGidFilter<br/>(gid ≥ 0)"]
+    F1 --> F2["CosineSimFilter /<br/>L2DistanceFilter"]
+    F2 --> F3["LengthFilter<br/>(min ≤ len ≤ max)"]
+    F3 --> F4["ExactMatchFilter<br/>(哈希 → 完整序列)"]
+    F4 --> F5["SequenceIdentityFilter<br/>(比对)"]
+    F5 --> P["通过 → 加入<br/>top-k 结果"]
+
+    F1 -->|拒绝| X["丢弃"]
+    F2 -->|拒绝| X
+    F3 -->|拒绝| X
+    F4 -->|拒绝| X
+    F5 -->|拒绝| X
+
+    style F1 fill:#e8f5e9
+    style F2 fill:#e3f2fd
+    style F3 fill:#fff3e0
+    style F4 fill:#fce4ec
+    style F5 fill:#f3e5f5
+    style X fill:#ffebee,stroke:#c62828
+```
+
+| 过滤器 | 开销 | 触发条件 | 需要 SeqStore？ |
+|--------|------|-------------|---------------------|
+| `ValidGidFilter` | 可忽略 | 始终活跃 | 否 |
+| `CosineSimFilter` | 可忽略 | `max_cosine_similarity` | 否 |
+| `L2DistanceFilter` | 可忽略 | `min_l2_distance` | 否 |
+| `LengthFilter` | O(1) 查找 | `length_min` / `length_max` | 是（用于长度数据） |
+| `ExactMatchFilter` | 哈希比较 + 完整序列 | `exclude_exact` | 是 |
+| `SequenceIdentityFilter` | 比对计算 | `sequence_identity_max` | 是 |
+
+**过获取**机制补偿了由过滤引起的结果损失。当 `ValidGidFilter` 之外的任何过滤器处于活跃状态且未显式设置 `overfetch` 时，引擎会自动从 FAISS 请求 `5 × k` 个候选者，然后过滤至所需的 `k` 个。
+
+### 长度预过滤优化
+
+当指定了 `length_min` 和/或 `length_max` 时，引擎执行**两阶段长度优化**：首先，它查询 SQLite `idx_len` 索引以收集长度范围内的所有 GID，然后通过 `SearchParametersIVF` 将这些作为 `IDSelectorBatch` 传递给 FAISS。这将 ANN 搜索限制在仅相关的 IVF 分区，当长度范围相对于整个数据库较窄时，比事后过滤提供了显著加速。
+
+来源：[search_utils.py](/starling/search/search_utils.py#L200-L384), [search_engine.py](/starling/search/search_engine.py#L200-L399)
+
+## 精确重排序
+
+重排序路径解决了压缩 ANN 搜索的根本准确性局限：IVF-PQ 分数是**近似的**，因为它们操作的是量化表示。当高精度至关重要时，重排序阶段通过完整的 STARLING 编码器重新嵌入存留的候选序列，并重新计算精确分数。
+
+```mermaid
+sequenceDiagram
+    participant SE as SearchEngine
+    participant SS as SequenceStore
+    participant ENC as 序列编码器
+    
+    SE->>SS: 获取存留 GID 的序列
+    SS-->>SE: 原始序列字符串
+    SE->>ENC: 重新编码序列（批量）
+    ENC-->>SE: 精确嵌入 (float32)
+    SE->>SE: 计算精确余弦/L2 分数
+    SE->>SE: 排序并返回 top-k
+```
+
+重排序通过 `rerank=True` 启用，并受三个附加参数控制：`rerank_device`（CUDA 设备或 CPU）、`rerank_batch_size`（编码器批大小，默认为 64）和 `rerank_ionic_strength`（转发给编码器的确定性 dropout 逻辑）。编码器导入是惰性的——`starling.inference.generation.sequence_encoder_backend`——因此除非激活，否则重排序不会产生启动开销。
+
+<CgxTip>重排序开销很大：它需要对所有查询中的每个唯一候选者进行一次编码器的完整前向传递。仅在精度至关重要的最终精选阶段使用它。对于探索性搜索，增加 `nprobe`（例如，128→256）是提升召回率的更廉价方式。</CgxTip>
+
+来源：[search_engine.py](/starling/search/search_engine.py#L600-L760), [search_engine.py](/starling/search/search_engine.py#L760-L957)
+
+## 常见搜索模式
+
+过滤参数可自然组合以服务于不同的分析目标：
+
+| 模式 | 目标 | 关键参数 |
+|---------|------|----------------|
+| **近重复移除** | 寻找相似但不完全相同的序列 | `exclude_exact=True`, `max_cosine_similarity=0.99`, `nprobe=256` |
+| **聚焦长度的邻域** | 目标长度 ±ΔL 范围内的序列 | `length_min=L-50`, `length_max=L+50`, `k=1000` |
+| **多样化相似序列** | 具有同一性上限的广泛覆盖 | `max_cosine_similarity=0.80`, `sequence_identity_max=0.70`, `length_min=50`, `length_max=500` |
+| **高精度精选** | 候选者的精确分数 | `rerank=True`, `rerank_device="cuda:0"`, `nprobe=128` |
+
+**近重复搜索示例：**
+
+```python
+results = engine.search(
+    queries=queries,
+    k=100,
+    nprobe=256,
+    exclude_exact=True,
+    max_cosine_similarity=0.99,
+    return_similarity=True,
+)
+```
+
+**带重排序的长度约束搜索：**
+
+```python
+results = engine.search(
+    queries=queries,
+    k=50,
+    nprobe=128,
+    length_min=100,
+    length_max=300,
+    rerank=True,
+    rerank_device="cuda:0",
+    query_sequences=sequence_list,  # 重排序所需
+)
+```
+
+## 自定义过滤器扩展
+
+`CandidateFilter` 抽象基类支持内置集之外的自定义过滤逻辑。过滤器实现两个方法：`apply(candidate, query_seq) → bool`（返回 `True` 以保留）和 `get_name() → str`（用于日志记录）。
+
+```python
+from starling.search.search_utils import CandidateFilter, Candidate
+
+class MinScoreFilter(CandidateFilter):
+    """排除低于最低分数阈值的候选者。"""
+    def __init__(self, min_score: float):
+        self.min_score = min_score
+
+    def apply(self, candidate: Candidate, query_seq: str = None) -> bool:
+        return candidate.score >= self.min_score
+
+    def get_name(self) -> str:
+        return "min_score"
+```
+
+自定义过滤器可以通过子类化 `SearchEngine` 或在将结果列表传递给下游分析之前对其进行预过滤，从而与内置管道组合。
+
+来源：[search_utils.py](/starling/search/search_utils.py#L200-L384)
+
+## 分数转换语义
+
+`ScoreConverter` 处理 FAISS 原始分数与面向用户输出之间的非平凡映射，这取决于度量和 `return_similarity` 标志：
+
+| 度量 | FAISS 原始输出 | `return_similarity=True` | `return_similarity=False` |
+|--------|-----------------|------------------------|--------------------------|
+| **cosine** | 内积（越高 = 越相似） | 相似度 ∈ [0, 1] | 距离 = 1 − 相似度 |
+| **l2** | 平方 L2 距离（越低 = 越相似） | 距离（无转换） | 距离（无转换） |
+
+对于具有归一化向量的余弦度量，内积直接等于余弦相似度。转换器确保无论选择何种组合，输出语义都是一致的。
+
+来源：[search_utils.py](/starling/search/search_utils.py#L330-L384)
+
+## 序列同一性计算
+
+内置的同一性函数（`_seq_identity`）是一种**快速的无空位启发式算法**：它计算两个序列重叠前缀上的精确字符匹配数，并除以可配置的分母。它**不**执行比对——没有空位，没有插入，没有缺失。
+
+| 分母模式 | 公式 | 用例 |
+|-----------------|---------|----------|
+| `query` | 匹配数 / len(query) | 默认；相对于查询的同一性 |
+| `target` | 匹配数 / len(target) | 相对于数据库命中项的同一性 |
+| `max` | 匹配数 / max(len1, len2) | 最保守 |
+| `min` | 匹配数 / min(len1, len2) | 最不保守 |
+| `avg` | 匹配数 / 0.5×(len1+len2) | 平衡 |
+
+这种启发式方法适用于粗略过滤（例如，`sequence_identity_max=0.95` 以排除近乎相同的命中项），但对于具有短插入缺失的序列，会低估真实同一性。若要获得比对准确的同一性，请向 `SequenceIdentityFilter` 提供自定义 `identity_func`。
+
+来源：[search_engine.py](/starling/search/search_engine.py#L400-L530)
+
+## 产物摘要
+
+构建阶段生成一组可独立于训练基础设施部署的自包含文件：
+
+| 文件 | 格式 | 包含内容 |
+|------|--------|----------|
+| `index.faiss` | FAISS 二进制 | 训练好的包含所有向量的 OPQ+IVF-PQ 索引 |
+| `index.faiss.manifest.json` | JSON | 构建元数据（维度、总数、nlist、m、nbits、日期） |
+| `index.faiss.seqs.sqlite` | SQLite | 序列、头部、长度、哈希、分片来源 |
+
+查询阶段仅需 `.faiss` 文件即可进行基本 ANN 搜索。`.seqs.sqlite` 文件是可选的，但任何需要序列内容或元数据的过滤或重排序操作都必须依赖它。
+
+---
+
+**下一步**：对于生成输入此搜索系统的嵌入的编码器，参见[序列编码器](5-sequence-encoder)。关于搜索结果如何输入集成构建，参见[集成对象 API](9-ensemble-object-api)。有关完整参数参考，参见[配置参考](17-configuration-reference)。
+
+---
+
+- [深入解析/配置参考](https://zread.ai/idptools/starling/17-configuration-reference)
+
+---
+slug:17-configuration-reference
+blog_type:normal
+---
+
+
+Starling 的配置系统在**三个层级**中运行——硬编码默认值、用户级覆盖文件和环境变量——每一层的优先级逐级递增。理解此层级结构对于自定义模型路径、推理参数和搜索产物路径至关重要，且无需修改已安装的包。
+
+## 配置层级
+
+Starling 通过严格的优先级链解析运行时参数。后层会静默覆盖前层，当应用用户配置覆盖时，系统会打印一条确认信息。
+
+```mermaid
+flowchart TD
+    A["<b>Layer 1</b><br/>硬编码默认值<br/><i>starling/configs.py</i>"] --> B["<b>Layer 2</b><br/>用户配置文件<br/><i>~/.starling_weights/configs.py</i>"]
+    B --> C["<b>Layer 3</b><br/>环境变量<br/><i>STARLING_ENCODER_PATH 等</i>"]
+    C --> D["<b>Layer 4</b><br/>CLI / API 参数<br/><i>--steps, conformations=, …</i>"]
+    style A fill:#e8e8e8,stroke:#666
+    style B fill:#d4e8d4,stroke:#4a8a4a
+    style C fill:#d4d4e8,stroke:#4a4a8a
+    style D fill:#e8d4d4,stroke:#8a4a4a
+```
+
+**Layer 1** 随包附带，定义了合理的默认值。**Layer 2** 是你在 `~/.starling_weights/` 中创建的可选 Python 文件——任何与 Layer 1 符号名匹配的变量名都会在导入时被覆盖。**Layer 3** 使用环境变量（例如 `STARLING_ENCODER_PATH`）来重定向模型权重和搜索产物，这在容器化或 CI 环境中尤为实用。**Layer 4**——CLI 标志或 Python API 关键字参数——提供单次调用的覆盖，且始终具有最高优先级。
+
+来源：[configs.py](/starling/configs.py#L1-L69), [ensemble_generation.py](/starling/frontend/ensemble_generation.py#L160-L182)
+
+## 运行时默认值 (Layer 1)
+
+下表列举了 `starling/configs.py` 中定义的每个可配置常量、其默认值及用途。
+
+| 变量 | 默认值 | 描述 |
+|---|---|---|
+| `DEFAULT_MODEL_DIR` | `~/.starling_weights` | 下载模型检查点的基础目录 |
+| `DEFAULT_ENCODE_WEIGHTS` | `STARLING_v2.0.0_ViT_VAE_2025_10_14.ckpt` | VAE 编码器检查点文件名 |
+| `DEFAULT_DDPM_WEIGHTS` | `STARLING_v2.0.0_ViT_DDPM_2025_10_14.ckpt` | 扩散 (DDPM) 检查点文件名 |
+| `DEFAULT_ENCODER_WEIGHTS_PATH` | `STARLING_ENCODER_PATH` 环境变量或 GitHub 发布 URL | 编码器权重的解析路径或 URL |
+| `DEFAULT_DDPM_WEIGHTS_PATH` | `STARLING_DDPM_PATH` 环境变量或 GitHub 发布 URL | DDPM 权重的解析路径或 URL |
+| `DEFAULT_NUMBER_CONFS` | `400` | 每条序列生成的构象数 |
+| `DEFAULT_BATCH_SIZE` | `100` | 采样批大小 |
+| `DEFAULT_STEPS` | `30` | 去噪扩散步数 |
+| `DEFAULT_MDS_NUM_INIT` | `4` | 每条序列的独立 MDS 初始化次数 |
+| `DEFAULT_STRUCTURE_GEN` | `"mds"` | 3D 重建后端（当前仅为 `mds`） |
+| `DEFAULT_IONIC_STRENGTH` | `150` | 离子强度（单位 mM） |
+| `DEFAULT_SAMPLER` | `"ddim"` | 扩散采样器：`"ddim"`、`"ddpm"` 或 `"plms"` |
+| `MAX_SEQUENCE_LENGTH` | `380` | 最大残基数；超长序列将被静默跳过 |
+| `UNET_LABELS_DIM` | `512` | U-Net / ViT 去噪器内部的标签嵌入维度 |
+| `CONVERT_ANGSTROM_TO_NM` | `10` | Å → nm 转换的乘法因子 |
+| `DEFAULT_CPU_COUNT_MDS` | `min(DEFAULT_MDS_NUM_INIT, os.cpu_count())` | MDS 优化的 CPU 工作进程数 |
+| `VALID_AA` | `"ACDEFGHIKLMNPQRSTVWY"` | 标准的 20 个氨基酸字母表 |
+
+来源：[configs.py](/starling/configs.py#L6-L97)
+
+## 用户配置覆盖 (Layer 2)
+
+你可以通过在 `~/.starling_weights/configs.py` 创建一个纯 Python 文件来覆盖任何 Layer 1 变量。在导入时，`starling` 会发现此文件，将其作为模块执行，并将每个匹配的符号名复制到 `starling.configs` 命名空间中。每项覆盖都会打印到标准输出以保证透明度。
+
+**示例 `~/.starling_weights/configs.py`：**
+
+```python
+# 覆盖推理默认值
+DEFAULT_NUMBER_CONFS = 1000
+DEFAULT_STEPS = 50
+DEFAULT_BATCH_SIZE = 200
+
+# 启用 PyTorch 编译以加速重复推理
+TORCH_COMPILATION = {
+    "enabled": True,
+    "options": {
+        "mode": "reduce-overhead",
+        "fullgraph": True,
+        "backend": "inductor",
+        "dynamic": None,
+    },
+}
+```
+
+`load_user_config()` 函数遍历 `vars(user_config)`，跳过双下划线名称，并且只替换 `globals()` 中已存在的键——拼写错误的变量名会被静默忽略，因此请验证你期望的每一项覆盖是否都出现了 `[Starling Config] Overriding …` 消息。
+
+<CgxTip>由于用户配置是常规的 Python 文件，你可以导入辅助模块或动态计算值（例如 `DEFAULT_CPU_COUNT_MDS = max(1, os.cpu_count() - 2)`）。然而，请避免产生副作用——该文件在**导入时**执行，这意味着任何 print 语句或 I/O 操作都会在每次导入 `starling` 时运行。</CgxTip>
+
+来源：[configs.py](/starling/configs.py#L42-L69)
+
+## 环境变量覆盖 (Layer 3)
+
+对于模型权重和搜索产物路径，环境变量的优先级高于硬编码默认值和用户配置文件。它们在用户配置加载后立即被解析。
+
+### 模型权重路径
+
+| 变量 | 覆盖 | 回退 |
+|---|---|---|
+| `STARLING_ENCODER_PATH` | `DEFAULT_ENCODER_WEIGHTS_PATH` | v2.0.0 的 GitHub Releases URL |
+| `STARLING_DDPM_PATH` | `DEFAULT_DDPM_WEIGHTS_PATH` | v2.0.0 的 GitHub Releases URL |
+
+将这些变量设置为本地文件路径或替代的 HTTP URL，会使 `ModelManager` 从该位置加载，而非从官方发布处下载。当提供 URL 时，PyTorch 的 `hub.download_url_to_file` 会将文件缓存到 `torch.hub.get_dir()/checkpoints/` 下。
+
+### 搜索产物路径
+
+| 变量 | 覆盖 | 回退 |
+|---|---|---|
+| `STARLING_FAISS_INDEX_PATH` | `DEFAULT_FAISS_INDEX_PATH` | `~/.starling_search/<index_name>` |
+| `STARLING_SEQSTORE_PATH` | `DEFAULT_SEQSTORE_DB_PATH` | `~/.starling_search/<seqstore_name>` |
+| `STARLING_FAISS_MANIFEST_PATH` | `DEFAULT_FAISS_MANIFEST_PATH` | `~/.starling_search/<manifest_name>` |
+| `STARLING_ZENODO_FAISS_URL` | `ZENODO_FAISS_INDEX_URL` | Zenodo 记录 17342150 |
+| `STARLING_ZENODO_SEQSTORE_URL` | `ZENODO_SEQSTORE_URL` | Zenodo 记录 17342150 |
+| `STARLING_ZENODO_MANIFEST_URL` | `ZENODO_MANIFEST_URL` | Zenodo 记录 17342150 |
+| `STARLING_FAISS_INDEX_MD5` | `FAISS_INDEX_MD5` | 硬编码的 MD5 摘要 |
+| `STARLING_SEQSTORE_MD5` | `SEQSTORE_MD5` | 硬编码的 MD5 摘要 |
+| `STARLING_FAISS_MANIFEST_MD5` | `MANIFEST_MD5` | 硬编码的 MD5 摘要 |
+
+`ensure_search_artifacts()` 函数会检查每个产物是否存在于本地；如果缺失且 `download=True`，它将从配置的 URL 下载，支持断点续传和可选的 MD5 校验。下载内容会写入 `.part` 临时文件，并在成功后进行原子重命名。
+
+来源：[configs.py](/starling/configs.py#L82-L178), [model_loading.py](/starling/inference/model_loading.py#L21-L46)
+
+## PyTorch 编译设置
+
+`TORCH_COMPILATION` 字典控制是否在加载后将 `torch.compile` 应用于扩散模型的 ViT 去噪器和 VAE 解码器。默认情况下编译处于**禁用**状态。
+
+| 键 | 默认值 | 选项 |
+|---|---|---|
+| `enabled` | `False` | `True` / `False` |
+| `options.mode` | `"default"` | `"default"`、`"reduce-overhead"`、`"max-autotune"` |
+| `options.fullgraph` | `True` | `True` / `False` —— 尝试将整个前向传播编译为单一计算图 |
+| `options.backend` | `"inductor"` | `torch.compile` 接受的任何后端 |
+| `options.dynamic` | `None` | `True` / `False` / `None` —— 处理动态张量形状 |
+
+启用后，编译会在 `ModelManager.get_models()` 期间发生一次，并将完整的 `options` 字典作为关键字参数传递给 `torch.compile`。后续推理将受益于算子融合和减少的 Python 开销，但首次调用会产生显著的一次性编译开销。
+
+来源：[configs.py](/starling/configs.py#L27-L35), [model_loading.py](/starling/inference/model_loading.py#L95-L130)
+
+## 训练 YAML 配置 (Hydra)
+
+`starling/configs/` 目录包含由 Hydra 组合的 YAML 文件，它们**仅在模型训练期间使用**。推理时不会参考这些文件——它们是 `starling-vae-train` 和 `starling-ddpm-train` CLI 入口点的打包产物。
+
+### 组合结构
+
+```mermaid
+flowchart LR
+    subgraph DDPM 训练
+        A["configs.yaml"] --> B["dataloader.yaml"]
+        A --> C["trainer.yaml"]
+        A --> D["diffusion.yaml"]
+        A --> E["sequence_encoder.yaml"]
+    end
+    subgraph VAE 训练
+        F["vae_configs.yaml"] --> G["vae_dataloader.yaml"]
+        F --> H["vae_trainer.yaml"]
+        F --> I["model.yaml"]
+    end
+```
+
+### 扩散训练 — `diffusion.yaml`
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `type` | `"discrete"` | 扩散类型（仅支持 `discrete`） |
+| `discrete.beta_scheduler` | `"cosine"` | 噪声调度 |
+| `discrete.timesteps` | `1000` | 训练扩散时间步 |
+| `discrete.set_lr` | `0.0001` | 学习率 |
+| `discrete.config_scheduler` | `"CosineAnnealingLR"` | 学习率调度器 |
+| `discrete.min_snr_loss` | `False` | 是否使用 min-SNR 加权 |
+| `discrete.min_snr_gamma` | `5.0` | min-SNR 损失的 Gamma 值 |
+
+### 序列编码器 — `sequence_encoder.yaml`
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `num_layers` | `12` | Transformer 编码器层数 |
+| `embed_dim` | `512` | 嵌入维度 |
+| `num_heads` | `8` | 多头注意力头数 |
+
+### VAE 模型 — `vae_model/model.yaml`
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `model_type` | `"Resnet18"` | 编码器架构 |
+| `in_channels` | `1` | 输入通道数（灰度距离图） |
+| `latent_dim` | `1` | 隐变量分布维度参数 |
+| `dimension` | `384` | 隐空间维度 |
+| `loss_type` | `"nll"` | 重建损失 |
+| `KLD_weight` | `1e-6` | KL 散度损失权重 |
+| `KLD_warmup_fraction` | `0` | KLD 预热的 epoch 占比 |
+| `KLD_scheduler_type` | `"cyclical"` | KLD 退火调度 |
+| `set_lr` | `0.00001` | 学习率 |
+| `optimizer` | `"Adam"` | 优化器 |
+| `norm` | `"instance"` | 归一化类型 |
+| `base` | `64` | 基础通道数 |
+| `compile_mode` | `"max-autotune-no-cudagraphs"` | 训练用的 `torch.compile` 模式 |
+
+### 训练器 — `trainer.yaml` / `vae_trainer.yaml`
+
+| 参数 | 训练器默认值 | VAE 训练器默认值 | 描述 |
+|---|---|---|---|
+| `cuda` | `1` | `1` | GPU 数量 |
+| `num_nodes` | `1` | `1` | 分布式节点数 |
+| `num_workers` | `8` | `8` | DataLoader 工作进程数 |
+| `num_epochs` | `50` | `1` | 训练 epoch 数 |
+| `gradient_clip_val` | `1.0` | `1.0` | 梯度裁剪 |
+| `precision` | `"bf16-mixed"` | `"bf16-mixed"` | 混合精度模式 |
+| `output_path` | `"20mM_model"` | `"ionic-strength-model"` | 检查点输出目录 |
+| `fine_tune` | `False` | `True` | 从检查点恢复 |
+| `checkpoint` | `null` | `.ckpt` 的路径 | 要恢复的检查点 |
+
+### 数据加载器 — `dataloader.yaml` / `vae_dataloader.yaml`
+
+| 参数 | DDPM 默认值 | VAE 默认值 | 描述 |
+|---|---|---|---|
+| `type` | `"tar"` | `"tar"` | 数据集格式：`"tar"` 或 `"h5"` |
+| `tar.batch_size` | `64` | `16` | 每 GPU 批大小 |
+| `tar.num_workers` | `8` | `8` | DataLoader 工作进程数 |
+| `tar.prefetch_factor` | `4` | `4` | 预取乘数 |
+| `tar.train_size` | `null` | `11_420_000` | 预估训练集大小 |
+| `tar.val_size` | `null` | `2_450_000` | 预估验证集大小 |
+
+来源：[configs.yaml](/starling/configs/configs.yaml#L1-L8), [diffusion.yaml](/starling/configs/diffusion/diffusion.yaml#L1-L12), [sequence_encoder.yaml](/starling/configs/sequence_encoder/sequence_encoder.yaml#L1-L3), [model.yaml](/starling/configs/vae_model/model.yaml#L1-L17), [trainer.yaml](/starling/configs/trainer/trainer.yaml#L1-L12), [vae_trainer.yaml](/starling/configs/trainer/vae_trainer.yaml#L1-L12), [dataloader.yaml](/starling/configs/dataloader/dataloader.yaml#L1-L16), [vae_dataloader.yaml](/starling/configs/dataloader/vae_dataloader.yaml#L1-L18)
+
+## CLI 参数映射
+
+`starling` CLI 将最常调整的推理参数作为标志暴露。每个标志的默认值均从 `starling.configs` 提取，因此 Layer 2 的覆盖会自动传播。
+
+| CLI 标志 | 配置变量 | API 参数 | 默认值 |
+|---|---|---|---|
+| `-c / --conformations` | `DEFAULT_NUMBER_CONFS` | `conformations` | `400` |
+| `-s / --steps` | `DEFAULT_STEPS` | `steps` | `30` |
+| `-b / --batch_size` | `DEFAULT_BATCH_SIZE` | `batch_size` | `100` |
+| `-d / --device` | *(自动检测)* | `device` | `None` |
+| `--num-cpus` | `DEFAULT_CPU_COUNT_MDS` | `num_cpus_mds` | `min(4, cpu_count)` |
+| `--num-mds-init` | `DEFAULT_MDS_NUM_INIT` | `num_mds_init` | `4` |
+| `--ionic_strength` | `DEFAULT_IONIC_STRENGTH` | `ionic_strength` | `150` |
+| `-r / --return_structures` | — | `return_structures` | `False` |
+| `-o / --output_directory` | — | `output_directory` | `"."` |
+| `--outname` | — | `output_name` | `None` |
+| `-v / --verbose` | — | `verbose` | `False` |
+| `--disable_progress_bar` | — | `show_progress_bar` | `True` |
+| `--info` | — | *(打印配置摘要并退出)* | — |
+| `--version` | — | *(打印版本并退出)* | — |
+
+`--info` 标志在调试时尤为实用：它无需运行推理即可打印出解析后的模型权重路径、关键默认值和自动检测到的设备。
+
+来源：[starling_main_cli.py](/starling/scripts/starling_main_cli.py#L45-L200), [ensemble_generation.py](/starling/frontend/ensemble_generation.py#L160-L244)
+
+## 氨基酸映射字典
+
+导出了两个查找表用于残基代码转换。它们在序列验证期间内部使用，也可以直接导入。
+
+| 字典 | 键 → 值 | 示例 |
+|---|---|---|
+| `AA_THREE_TO_ONE` | 3 字母 → 1 字母 | `"ALA" → "A"` |
+| `AA_ONE_TO_THREE` | 1 字母 → 3 字母 | `"A" → "ALA"` |
+
+这两个字典涵盖了 `VALID_AA` 中定义的 20 个标准残基。
+
+来源：[configs.py](/starling/configs.py#L97-L125)
+
+## 快速配置方案
+
+以下是一个精简的 `~/.starling_weights/configs.py`，它为典型的 IDP 集合生成平衡了质量与速度：
+
+```python
+# 更高质量的集合
+DEFAULT_NUMBER_CONFS = 800
+DEFAULT_STEPS = 50
+
+# 如果有足够的核数，使用更多的并行 MDS 作业
+DEFAULT_MDS_NUM_INIT = 8
+
+# 启用 torch 编译以加速重复推理运行
+TORCH_COMPILATION = {
+    "enabled": True,
+    "options": {
+        "mode": "reduce-overhead",
+        "fullgraph": True,
+        "backend": "inductor",
+        "dynamic": None,
+    },
+}
+```
+
+创建或编辑此文件后，运行 `starling --info` 以确认你的覆盖已生效——你应当能看到所更改的每个变量对应的 `[Starling Config] Overriding …` 日志行。
+
+若要深入探索这些参数如何在生成流水线中流转，请参阅[架构概述](4-architecture-overview)和[采样策略](8-sampling-strategies)。若要了解约束如何与采样器参数交互，请参阅[约束引导采样](13-constraint-guided-sampling)。
+
+---
+
+## 生成流水线
+
+- [深入解析/生成流水线/序列编码器](https://zread.ai/idptools/starling/5-sequence-encoder)
+
+---
+slug:5-sequence-encoder
+blog_type:normal
+---
+
+
+**序列编码器** 是将原始氨基酸序列转换为连续向量表示（嵌入）的组件，这些向量表示用于条件化 STARLING 的潜扩散模型。它位于生成流水线的最前端——在 VAE 潜空间之前，在扩散采样之前——将离散的生物序列转换为去噪器所需的数学对象。理解该组件对于任何想要推演序列信息如何流入生成的距离图、并最终流入 3D 结构系综的人来说都是必不可少的。
+
+## 架构角色
+
+序列编码器在 STARLING 的生成流水线中占据着精确的位置：它是离散氨基酸序列与输入去噪网络的连续条件信号之间的**唯一桥梁**。没有它，扩散模型将没有序列特异性信息来引导其去噪轨迹，每个生成的结构都将从学习到的先验中无条件采样——这在生物学上是毫无意义的。
+
+```mermaid
+flowchart LR
+    A["氨基酸<br>序列"] --> B["StarlingTokenizer<br>(分词)"]
+    B --> C["整型 Token ID<br>+ 注意力掩码"]
+    C --> D["Transformer 编码器<br>(嵌入)"]
+    D --> E["逐残基<br>嵌入 (L, D)"]
+    E --> F{"聚合?"}
+    F -- 是 --> G["平均池化<br>嵌入 (D,)"]
+    F -- 否 --> H["完整嵌入<br>(L, D)"]
+    G --> I["扩散模型<br>条件化"]
+    H --> I
+```
+
+该编码器被 `DiffusionModel` 作为 `self.sequence_encoder` 持有，并通过 `sequence2labels` 方法调用，该方法只需单地委托给编码器的前向传播，传入分词后的序列、其注意力掩码以及离子强度条件标量。
+
+来源: [diffusion.py](starling/models/diffusion.py#L55-L137), [diffusion.py](starling/models/diffusion.py#L228-L251)
+
+## 分词：从残基到整数
+
+在 Transformer 运行之前，氨基酸序列必须转换为整型 Token ID。这是 `StarlingTokenizer` 的职责，这是一个轻量级的字节级分词器，它将 20 种标准氨基酸映射到整数范围 `[1, 20]`，其中 `0` 保留用于填充。
+
+| 氨基酸 | Token ID | 氨基酸 | Token ID | 氨基酸 | Token ID |
+|:----------:|:--------:|:----------:|:--------:|:----------:|:--------:|
+| A (Ala)    | 1        | G (Gly)    | 6        | P (Pro)    | 13       |
+| C (Cys)    | 2        | H (His)    | 7        | Q (Gln)    | 14       |
+| D (Asp)    | 3        | I (Ile)    | 8        | R (Arg)    | 15       |
+| E (Glu)    | 4        | K (Lys)    | 9        | S (Ser)    | 16       |
+| F (Phe)    | 5        | L (Leu)    | 10       | T (Thr)    | 17       |
+| —          | —        | M (Met)    | 11       | V (Val)    | 18       |
+| —          | —        | N (Asn)    | 12       | W (Trp)    | 19       |
+| —          | —        | —          | —        | Y (Tyr)    | 20       |
+
+该分词器使用 Python 的 `bytes.translate` 进行了批量处理优化——这是一个 C 级别的查找表，可在单次遍历中将每个 ASCII 字节映射到其词表 ID。这避免了逐字符的 Python 循环，对于长序列或大批量而言速度显著提升。解码使用相同的表驱动方法，在进行反向转换之前剥离填充 Token (`0`)。未知字符会在其出现的位置引发 `KeyError`。
+
+```python
+from starling.data.tokenizer import StarlingTokenizer
+
+tok = StarlingTokenizer()
+ids = tok.encode("ACDE")   # [1, 2, 3, 4]
+seq = tok.decode(ids)       # "ACDE"
+```
+
+<CgxTip>非规范残基（B, J, O, U, X, Z）**不**在词表中，在编码期间将引发 `KeyError`。前端的 `handle_input` 会在这些字符到达分词器之前对其进行验证和过滤，但如果你直接调用分词器，则必须确保你的序列仅包含 20 种标准氨基酸。</CgxTip>
+
+来源: [tokenizer.py](starling/data/tokenizer.py#L1-L94)
+
+## Transformer 编码器架构
+
+序列编码器是一个 **Transformer 编码器**，通过堆叠的自注意力和前馈层处理分词后的序列。其在 `starling/models/transformer.py` 中定义的关键架构元素包括：
+
+- **自注意力** (`MultiHeadAttention`)：捕获整个序列中成对的残基关系，使编码器能够学习对蛋白质结构至关重要的长程依赖。
+- **GeGLU 前馈** (`GeGLU` + `Linear`)：一种门控激活变体，其输出为 `x * GELU(gate)`，与基于标准 ReLU 的前馈层相比，提供了更丰富的梯度流。
+- **自适应层归一化** (`AdaLayerNorm`)：通过从条件向量生成动态缩放 (γ) 和偏移 (β) 参数来注入条件信息（离子强度 + 时间步），而不是使用静态的学习参数。
+- **正弦位置嵌入** (`SinusoidalPosEmb`)：使用具有可配置基频 θ 的正弦和余弦函数对位置信息进行编码，使模型能够按位置区分残基。
+
+编码器在其前向传播期间接受三个输入：
+
+| 输入 | 形状 | 描述 |
+|-------|-------|-------------|
+| `sequences` | `(B, L)` | 分词 ID 序列的批次（整数 0–20） |
+| `sequence_mask` | `(B, L)` | 布尔注意力掩码——真实残基为 `True`，填充为 `False` |
+| `ionic_strength` | `(1, 1)` | 以 mM 为单位的标量离子强度，用作全局条件信号 |
+
+输出是形状为 `(B, L, D)` 的张量，其中 `D` 是嵌入维度——每个序列的每个残基对应一个稠密向量。
+
+来源: [transformer.py](starling/models/transformer.py#L1-L200), [transformer.py](starling/models/transformer.py#L194-L200)
+
+## 编码流水线：`sequence_encoder_backend`
+
+编码序列的高级入口是 `starling.inference.generation` 中的 `sequence_encoder_backend`。该函数编排了从原始氨基酸字符串到嵌入张量的完整流水线，处理分词、批处理、填充和可选的聚合。
+
+### 逐步流程
+
+```mermaid
+flowchart TD
+    A["输入: sequence_dict<br>{名称: 氨基酸字符串}"] --> B{"已分词?"}
+    B -- 否 --> C["StarlingTokenizer.encode()"]
+    B -- 是 --> D["直接使用 Token"]
+    C --> E["已准备: (名称, token_列表)"]
+    D --> E
+    E --> F{"bucket=True?"}
+    F -- 是 --> G["按长度桶分组<br>(bucket_size 的倍数)"]
+    F -- 否 --> H["按长度降序排序"]
+    G --> I["迭代批次"]
+    H --> I
+    I --> J["构建填充后的 sequence_tensor (B, L_max)"]
+    J --> K["构建 attention_mask (B, L_max)"]
+    K --> L["diffusion.sequence2labels()<br>→ 嵌入 (B, L_max, D)"]
+    L --> M{"aggregate=True?"}
+    M -- 是 --> N["沿 L 维度平均池化:<br>嵌入 (D,)"]
+    M -- 否 --> O["切片至真实长度:<br>嵌入 (L_i, D)"]
+    N --> P["存储 / 保存"]
+    O --> P
+```
+
+### 关键参数
+
+| 参数 | 默认值 | 用途 |
+|-----------|---------|---------|
+| `sequence_dict` | 必需 | 将序列名称映射到氨基酸字符串（或预分词的 ID 列表）的字典 |
+| `device` | 必需 | 计算设备 (`"cuda"`, `"cpu"`, `"mps"`) |
+| `batch_size` | 必需 | 每次前向传播处理的序列数量 |
+| `ionic_strength` | 必需 | 以 mM 为单位的离子强度，作为条件信号注入编码器 |
+| `pretokenized` | `False` | 跳过分词——值已经是整型 Token ID 集合 |
+| `bucket` | `False` | 将序列分组到粗略的长度桶中以减少填充浪费 |
+| `bucket_size` | `32` | `bucket=True` 时的桶分辨率；`L // bucket_size` 相同的序列会被分到同一桶中一起批处理 |
+| `aggregate` | `True` | 将逐残基嵌入平均池化为每个序列的单个向量 |
+| `free_cuda_cache` | `False` | 在每个批次之后调用 `torch.cuda.empty_cache()` |
+| `return_on_cpu` | `True` | 返回前将嵌入转移到 CPU |
+
+### 批处理与填充策略
+
+批次内的序列使用 Token `0`（填充/保留 Token）填充到该批次中最长序列的长度。相应的注意力掩码将真实残基标记为 `True`，填充位置标记为 `False`，从而确保 Transformer 的自注意力忽略填充位置。为了尽量减少计算浪费，序列在批处理前按长度降序排序。当 `bucket=True` 时，按长度分位数的额外粗粒度分组进一步减少了每个批次内序列长度的方差——这在处理具有广泛长度分布的数据集时尤为有利。
+
+<CgxTip>当编码长度差异很大的大型蛋白质集合时，请启用 `bucket=True` 并设置适当的 `bucket_size`。与简单的按长度排序批处理相比，这可以减少 30–50% 的填充浪费，因为相似长度的序列可以确保共享批次，而不是与长得多或短得多的序列交错在一起。</CgxTip>
+
+### 聚合模式
+
+编码器生成形状为 `(L, D)` 的逐残基嵌入。可用两种模式：
+
+- **聚合** (`aggregate=True`)：沿序列维度进行平均池化，为每个序列生成单个 `(D,)` 向量。这是默认设置，在嵌入用作全局条件信号时使用。
+- **逐残基** (`aggregate=False`)：返回完整的 `(L, D)` 张量，保留位置特定信息。适用于需要残基级特征的下游任务，例如接触预测或逐残基相似性搜索。
+
+来源: [generation.py](starling/inference/generation.py#L64-L232)
+
+## 与扩散模型的集成
+
+在常规生成期间，序列编码器不会被单独调用——它在训练和推理期间均由 `DiffusionModel` 内部调用。`DiffusionModel.sequence2labels` 方法是唯一的调度点：
+
+```python
+# 在 DiffusionModel 内部 (starling/models/diffusion.py)
+def sequence2labels(self, sequences, sequence_mask, ionic_strength):
+    encoded = self.sequence_encoder(sequences, sequence_mask, ionic_strength)
+    return encoded
+```
+
+在**训练**期间，`p_loss` 方法调用 `sequence2labels`，在去噪器预测噪声之前将原始序列 Token 转换为条件标签。在**推理**（采样）期间，遵循相同的路径：编码后的序列嵌入作为 `labels` 参数传递给去噪器的前向传播，将反向扩散过程引向与输入序列一致的距离图。
+
+`sequence_encoder_backend` 函数提供了一个独立接口，用于在不运行完整扩散流水线的情况下计算嵌入——这对于为相似性搜索、可视化或迁移学习预计算嵌入非常有用。
+
+来源: [diffusion.py](starling/models/diffusion.py#L228-L251), [diffusion.py](starling/models/diffusion.py#L253-L326)
+
+## 离子强度条件化
+
+STARLING 序列编码器的一个显著特征是其**离子强度条件化**。离子强度（以 mM 为单位）作为额外的标量输入传递给编码器，编码器将其整合到自适应层归一化机制中。这使得编码器能够生成感知蛋白质所在溶液条件的序列表示——这至关重要，因为离子强度直接影响静电相互作用，进而影响可行构象的系综。
+
+离子强度张量的形状为 `(1, 1)`，并在编码器的前向传播期间进行广播。在高级 `generate` API 中，其默认值为 `configs.DEFAULT_IONIC_STRENGTH`（150 mM，近似生理条件）。
+
+来源: [generation.py](starling/inference/generation.py#L64-L128), [ensemble_generation.py](starling/frontend/ensemble_generation.py#L160-L245)
+
+## 独热编码（旧版）
+
+`starling.data.data_wrangler` 中存在一个独立的 `one_hot_encode` 函数，用于保持旧版兼容性。它使用相同的氨基酸词表将序列映射到 `(N, L, 21)` 的独热张量。当前生成流水线**不**使用此函数——Transformer 编码器直接操作整型 Token ID，这远比其内存高效，且与学习的嵌入层兼容。
+
+| 方面 | 独热 (`data_wrangler`) | 分词 (`StarlingTokenizer`) |
+|--------|---------------------------|----------------------------------|
+| 输入表示 | `(N, L, 21)` float32 | `(N, L)` int64 |
+| 每个残基的内存 | 21 × 4 = 84 字节 | 8 字节 |
+| 在流水线中使用 | 否（旧版） | 是（活跃） |
+| 支持批处理 | 需手动填充 | 与注意力掩码集成 |
+
+来源: [data_wrangler.py](starling/data/data_wrangler.py#L9-L55)
+
+## 数据流总结
+
+下表追踪了单个序列从输入字符串到条件信号的每一次转换：
+
+| 阶段 | 输入 | 输出 | 组件 |
+|-------|-------|--------|-----------|
+| 1. 输入验证 | 原始字符串 | 清洗后的字符串 | `handle_input` |
+| 2. 分词 | `"ACDEFGHIK"` | `[1,2,3,4,5,6,7,8,9]` | `StarlingTokenizer.encode` |
+| 3. 填充 + 掩码 | Token 列表 | `(1, L_max)` 张量 + `(1, L_max)` 布尔掩码 | `sequence_encoder_backend` |
+| 4. Transformer 编码 | Token + 掩码 + 离子强度 | `(1, L_max, D)` 嵌入 | `DiffusionModel.sequence2labels` |
+| 5. 截断 | 填充后的嵌入 | `(1, L, D)` 逐残基嵌入 | 按真实长度切片 |
+| 6. 聚合 | `(1, L, D)` | `(D,)` | 平均池化 (若 `aggregate=True`) |
+
+来源: [generation.py](starling/inference/generation.py#L176-L222), [tokenizer.py](starling/data/tokenizer.py#L63-L76)
+
+---
+
+**流水线的下一步**：序列编码器生成的嵌入会在 VAE 压缩的潜空间内条件化扩散模型的去噪过程。继续阅读 [VAE 潜空间](6-vae-latent-space) 以了解距离图是如何被压缩的，或跳至 [扩散模型设计](7-diffusion-model-design) 以查看这些嵌入如何引导反向扩散过程。
+
+---
+
+- [深入解析/生成流水线/VAE 潜在空间](https://zread.ai/idptools/starling/6-vae-latent-space)
+
+---
+slug:6-vae-latent-space
+blog_type:normal
+---
+
+
+变分自编码器 (VAE) 是 Starling 两阶段生成流水线的第一阶段，它将蛋白质距离图压缩为结构化的潜在表示，供下游扩散模型在其中运作。该潜在空间并非一维扁平向量，而是一个**空间特征图**，它在降低分辨率的同时保留了距离图的二维几何结构，使扩散模型能够在经过压缩且语义更丰富的空间中进行结构去噪，而非在原始像素域中操作。该设计遵循了潜在扩散模型范式 (Rombach et al., 2022)，其中 VAE 首先学习感知压缩表示，随后扩散模型在该压缩空间内进行生成。
+
+来源: [vae.py](starling/models/vae.py#L86-L151), [vae.py](starling/models/vae.py#L446-L470)
+
+## 架构概述
+
+VAE 实现了对称的 **ResNet 编码器-解码器**架构，其间夹着对角高斯潜在分布。编码器通过四个 ResNet 阶段对输入距离图进行逐步下采样，通过瓶颈卷积将最终特征图投影到均值和对数方差通道，然后重参数化技巧生成采样潜在张量。解码器反向镜像此过程，通过四个 ResNet 阶段进行上采样，恢复至原始空间分辨率。
+
+```mermaid
+flowchart TB
+    subgraph Encoder["ResNet Encoder"]
+        E0["Input<br/>(B, C_in, D, D)"] --> E1["first_conv<br/>Conv2d k=7, s=2<br/>+ Norm"]
+        E1 --> E2["Layer1<br/>stride=1"]
+        E2 --> E3["Layer2<br/>stride=2"]
+        E3 --> E4["Layer3<br/>stride=2"]
+        E4 --> E5["Layer4<br/>stride=2"]
+    end
+
+    E5 --> BT["encoder_to_latent<br/>Conv2d→Conv2d k=1<br/>output: 2×latent_dim"]
+
+    BT --> GAUSS["DiagonalGaussianDistribution<br/>Split → μ and log σ²"]
+
+    subgraph Latent["Latent Space"]
+        GAUSS --> REPARAM["Reparameterization<br/>z = μ + ε·σ<br/>ε ~ N(0, I)"]
+    end
+
+    REPARAM --> INV["latent_to_decoder<br/>Conv2d k=1→Conv2d k=3<br/>output: final_channels"]
+
+    subgraph Decoder["ResNet Decoder"]
+        INV --> D1["Layer1<br/>stride=2"]
+        D1 --> D2["Layer2<br/>stride=2"]
+        D2 --> D3["Layer3<br/>stride=2"]
+        D3 --> D4["Layer4<br/>stride=1"]
+        D4 --> D5["output_layer<br/>ResizeConv2d k=7, s=2"]
+    end
+
+    D5 --> OUT["Reconstructed<br/>(B, C_in, D, D)"]
+
+    style Latent fill:#e8f4e8,stroke:#2d7d2d
+    style GAUSS fill:#d4edda,stroke:#28a745
+    style REPARAM fill:#d4edda,stroke:#28a745
+```
+
+编码器将空间维度缩减为原来的 1/2⁴ = 1/16（一次初始步长为 2 的卷积加上三次步长为 2 的 ResNet 层），因此大小为 **D × D** 的距离图会生成大小为 **(D/16) × (D/16)** 的潜在特征图。通道数在每个阶段从基础宽度开始扩展，遵循标准 ResNet 的倍增模式。
+
+来源: [vae.py](starling/models/vae.py#L202-L245), [vae_components.py](starling/models/vae_components.py#L13-L105)
+
+## 编码器-解码器构建
+
+编码器和解码器均由相同的 ResNet 模块族构建。**编码器**使用带有步长卷积进行下采样的 `ResBlockEncBasic` 模块 (expansion=1)，而**解码器**使用带有 `ResizeConv2d` 上采样的 `ResBlockDecBasic` 模块 (contraction=1)——该上采样执行最近邻插值后接卷积，以避免 `ConvTranspose2d` 常产生的棋盘格伪影。
+
+| 架构 | 模块配置 | 编码器模块 | 解码器模块 |
+|---|---|---|---|
+| **ResNet18** | `[2, 2, 2, 2]` | 共 8 个残差模块 | 共 8 个残差模块 |
+| **ResNet34** | `[3, 4, 6, 3]` | 共 16 个残差模块 | 共 16 个残差模块 |
+
+每个编码器阶段将通道宽度加倍（基础模块为：base → 2×base → 4×base → 8×base），而解码器则反转此过程。`base` 参数 (默认: 64) 控制起始通道数，从而控制整体模型容量。
+
+来源: [vae_components.py](starling/models/vae_components.py#L220-L256), [blocks.py](starling/models/blocks.py#L259-L368)
+
+## 潜在瓶颈设计
+
+编码器输出与潜在空间之间——以及潜在空间与解码器输入之间——的过渡，由两个充当可学习投影的小型卷积序列处理：
+
+| 层 | 结构 | 输入通道 | 输出通道 | 用途 |
+|---|---|---|---|---|
+| **encoder_to_latent** | Conv2d(k=3, s=1, p=1) → Conv2d(k=1, s=1) | `final_channels` | `2 × latent_dim` | 将特征投影到 μ 和 log σ² |
+| **latent_to_decoder** | Conv2d(k=1, s=1) → Conv2d(k=3, s=1, p=1) | `latent_dim` | `final_channels` | 将采样的 z 投影回解码器空间 |
+
+`encoder_to_latent` 层输出 `2 × latent_dim` 个通道，因为 `DiagonalGaussianDistribution` 沿通道维度将它们均分为均值 (μ) 和对数方差 (log σ²)。`latent_to_decoder` 层仅接收 `latent_dim` 个通道——即采样的潜在 z——并必须扩展回解码器期望的完整通道宽度。
+
+来源: [vae.py](starling/models/vae.py#L223-L245), [distributions.py](starling/data/distributions.py#L5-L26)
+
+## 对角高斯分布
+
+潜在空间被建模为**对角 (因式分解) 高斯分布**——潜在特征图中的每个空间位置都有其独立的均值和方差，位置之间没有协方差。`DiagonalGaussianDistribution` 类封装了此逻辑：
+
+- **参数拆分**: 将包含 `2 × latent_dim` 个通道的传入张量沿 dim=1 拆分为 μ 和 log σ²。
+- **数值稳定性**: 在求幂之前，log σ² 被截断至 **[−30, 20]**，以防止计算 σ = exp(0.5 · log σ²) 时出现上溢/下溢。
+- **重参数化采样**: z = μ + σ · ε，其中 ε ~ N(0, I)。这使得梯度能够流过随机采样操作。
+- **确定性模式**: 当 `deterministic=True` 时，σ 设为零，采样直接返回 μ——在你需要最可能的潜在编码而非随机采样时，这对于推理非常有用。
+
+来源: [distributions.py](starling/data/distributions.py#L5-L87)
+
+## ELBO 损失与 KLD 正则化
+
+VAE 通过最大化证据下界 (ELBO) 进行训练，ELBO 可分解为**重构损失**加上一个 **Kullback-Leibler 散度 (KLD)** 惩罚项，该惩罚项将潜在空间向标准正态先验 N(0, I) 进行正则化：
+
+**ℒ = ℒ_recon + β · D_KL(q(z|x) ‖ p(z))**
+
+### 重构损失
+
+支持两种重构损失模式：
+
+| 模式 | 公式 | 备注 |
+|---|---|---|
+| **`mse`** | Σ (x̂ − x)² / (x + ε) | 距离加权 MSE；较近的残基 (较小的 x) 通过 1/(x+ε) 获得更高的权重 |
+| **`nll`** | −log p(x\|z) under N(x̂, exp(log_std)) | 带有*可学习的*逐像素对数标准差的负对数似然 |
+
+在上述两种情况下，损失**仅在距离图的上三角部分**计算（因为距离图是对称的），使用一个将下三角和任何填充区域（原始数据为零的区域）置零的掩码。
+
+### KLD 损失
+
+近似后验 q(z|x) 与先验 p(z) = N(0, I) 之间的 KLD 对于对角高斯分布具有闭式解：
+
+**D_KL = −0.5 · Σ(1 + log σ² − μ² − σ²)**
+
+对所有维度 [1, 2, 3] (通道、高度、宽度) 求和，并在批次中取平均。
+
+来源: [vae.py](starling/models/vae.py#L361-L444)
+
+## KLD 权重调度
+
+KLD 项上的 β 权重对训练动态至关重要。过早且过高的权重会在潜在空间学到有意义的表示之前，强迫其匹配先验（**后验坍塌**）。Starling 实现了支持两种调度策略的 `KLDWeightScheduler`：
+
+| 调度器 | 行为 |
+|---|---|
+| **`linear`** | 在总步数的 `warmup_fraction` 期间内从 0 线性增加至 `max_weight`，随后保持恒定。 |
+| **`cyclical`** | 将训练划分为多个周期（每个周期为总步数的 20%）。在每个周期内，于前 `warmup_fraction` 阶段递增，随后保持在 `max_weight`。这在完整训练过程中创建了 5 个周期，允许模型周期性地探索正则化较弱的潜在空间。 |
+
+调度器在训练开始时的 `on_train_start` 中配置，其中总训练步数根据数据加载器长度和最大轮数计算得出。在验证期间，始终使用完整的 `max_weight`。
+
+<CgxTip>周期性 KLD 调度对于处理距离图等结构化数据的 VAE 尤为有效。KL 惩罚的周期性放宽使模型能够摆脱潜在空间过度正则化且缺乏信息量的局部极小值——这是在具有强空间相关性的图像上训练 VAE 时的常见失败模式。</CgxTip>
+
+来源: [vae.py](starling/models/vae.py#L21-L84), [vae.py](starling/models/vae.py#L732-L736)
+
+## 空间维度流
+
+理解张量形状在 VAE 中的变换对于配置模型和推导潜在空间至关重要。对于大小为 **L × L** 的单通道距离图（其中 L 为序列长度），且 `base=64` 并使用基础模块 ResNet 时：
+
+| 阶段 | 操作 | 形状 (B, C, H, W) | 备注 |
+|---|---|---|---|
+| 输入 | — | (B, 1, L, L) | 单通道距离图 |
+| first_conv | Conv2d k=7, s=2 + AvgPool | (B, 64, L/2, L/2) | 初始空间降维 |
+| Layer 1 | 2 个 ResBlock, stride=1 | (B, 64, L/2, L/2) | 仅通道扩展 |
+| Layer 2 | 2 个 ResBlock, stride=2 | (B, 128, L/4, L/4) | 首次主要下采样 |
+| Layer 3 | 2 个 ResBlock, stride=2 | (B, 256, L/8, L/8) | 第二次主要下采样 |
+| Layer 4 | 2 个 ResBlock, stride=2 | (B, 512, L/16, L/16) | 最终编码器特征 |
+| encoder_to_latent | Conv2d 投影 | (B, 2×latent_dim, L/16, L/16) | 拆分为 μ 和 log σ² |
+| **潜在 z** | 重参数化采样 | **(B, latent_dim, L/16, L/16)** | **此即为潜在空间** |
+| latent_to_decoder | Conv2d 投影 | (B, 512, L/16, L/16) | 投影回解码器空间 |
+| 解码器 Layer 1–4 | 编码器的镜像 | (B, 64, L/2, L/2) | 逐步上采样 |
+| output_layer | ResizeConv2d k=7, s=2 | (B, 1, L, L) | 最终重构 |
+
+因此，潜在空间是一个 **3D 张量**，而非 1D 向量——它在原始分辨率 1/16 的尺度上保留了空间结构。这是一个经过深思熟虑的设计选择：扩散模型在此空间潜在图上运作，这意味着它能够学习独立地对距离图的*局部*区域进行去噪，同时仍通过卷积感受野维持全局一致性。
+
+来源: [vae.py](starling/models/vae.py#L209-L221), [vae_components.py](starling/models/vae_components.py#L33-L64)
+
+## 归一化策略
+
+ResNet 模块支持多种归一化层，可通过 `norm` 参数选择。此选择显著影响训练稳定性和潜在空间质量：
+
+| 归一化类型 | 模块 | 特性 |
+|---|---|---|
+| **`instance`** (默认) | `InstanceNorm2d` | 逐样本逐通道归一化；与批次大小无关；适用于具有不同序列长度的距离图 |
+| **`batch`** | `BatchNorm2d` | 跨批次归一化；需要足够的批次大小；引入样本间耦合 |
+| **`layer`** | `LayerNorm` (通道优先) | 逐样本跨通道归一化；与位置无关；改编自 ConvNeXt |
+| **`group`** | `GroupNorm(32, C)` | 将通道分为 32 组；实例归一化与层归一化的折中；适用于任意批次大小 |
+
+实例归一化是默认设置，因为来自不同蛋白质的距离图具有截然不同的统计特性——小蛋白距离图的值分布与大蛋白的截然不同。实例归一化能够独立地适应每个样本。
+
+来源: [blocks.py](starling/models/blocks.py#L172-L178), [vae_components.py](starling/models/vae_components.py#L26-L31)
+
+## 训练配置
+
+VAE 使用带有 Hydra 配置的 PyTorch Lightning 进行训练。训练脚本支持三种模式：
+
+| 模式 | 描述 |
+|---|---|
+| **从头训练** | 从 Hydra 配置实例化模型，并从随机初始化开始训练 |
+| **恢复训练** | 自动检测输出目录中的 `last.ckpt` 并恢复训练 |
+| **微调** | 将检查点中的权重加载到新实例化的模型中（可能具有不同的架构），通过 `strict=True` 权重加载启用迁移学习 |
+
+模型检查点基于 `epoch_val_loss` (监控指标) 保存，并始终维护一个 `last.ckpt` 用于恢复。训练使用 WandB 进行实验跟踪，包含梯度和参数日志记录。
+
+来源: [vae_train.py](starling/training/vae_train.py#L79-L98), [vae_train.py](starling/training/vae_train.py#L106-L195)
+
+## 优化器与学习率调度
+
+支持三种优化器，各自具有不同的参数处理方式：
+
+| 优化器 | 配置 | 备注 |
+|---|---|---|
+| **SGD** | momentum=0.875, Nesterov=True | NVIDIA 推荐的 ResNet 设置 |
+| **AdamW** | β=(0.9, 0.999), ε=1e-8 | 编码器参数: weight_decay=1e-4；其他参数: weight_decay=0.0 |
+| **Adam** | β=(0.9, 0.999), ε=1e-8 | 标准 Adam，无差异化权重衰减 |
+
+AdamW 配置应用了**差异化权重衰减**：编码器参数接收 L2 正则化 (weight_decay=1e-4)，而潜在瓶颈和解码器参数的权重衰减为零。这反映了一种设计直觉：编码器应学习稳定且可泛化的特征，而解码器和瓶颈需要灵活性以重构精细细节。
+
+提供四种学习率调度器：
+
+| 调度器 | 间隔 | 关键参数 |
+|---|---|---|
+| `CosineAnnealingWarmRestarts` | epoch | T_0=5, eta_min=1e-4 |
+| `OneCycleLR` | step | max_lr=0.01 |
+| `LinearWarmupCosineAnnealingLR` | step | 1% 线性预热 → 余弦衰减 |
+| `CosineAnnealingLR` | epoch | eta_min=1e-6 |
+
+来源: [vae.py](starling/models/vae.py#L574-L702)
+
+## 推理：编码与解码
+
+在推理时，VAE 在生成流水线中扮演两个不同的角色：
+
+**编码** — `VAE.encode(data)` 接收距离图并返回包含 μ 和 log σ² 的 `DiagonalGaussianDistribution` 对象。下游扩散模型使用此分布的**模式** (μ) 作为引导生成的条件输入。
+
+**解码** — `VAE.decode(latents)` 接收潜在张量（从编码器后验采样或由扩散模型生成）并重构距离图。在生成过程中，扩散模型产生新的潜在编码，VAE 解码器将其映射回合理的距离图。
+
+完整的前向传播 (`VAE.forward`) 串联编码 → 采样 → 解码，返回重构结果和分布矩，用于训练期间的损失计算。
+
+来源: [vae.py](starling/models/vae.py#L259-L301), [model_loading.py](starling/inference/model_loading.py#L49-L61)
+
+## 距离图对称化
+
+由于蛋白质距离图是对称矩阵 (d(i,j) = d(j,i))，VAE 的重构通过 `VAE.symmetrize()` 进行事后对称化，该操作提取上三角，将其镜像至下三角，并将对角线置零。这确保了输出是有效的距离图，而不受卷积解码器引入的任何不对称性影响。
+
+损失函数也通过**仅在上三角部分**计算重构误差来强制对称性——下三角在损失计算前被掩码排除。这防止了模型浪费容量去学习冗余的对称项。
+
+来源: [vae.py](starling/models/vae.py#L704-L730), [vae.py](starling/models/vae.py#L402-L427)
+
+## 评估流水线
+
+`evaluate_vae.py` 模块提供了独立的命令行接口，用于评估存储在 HDF5 中的距离图上的 VAE 重构质量。它报告逐序列和聚合统计数据：
+
+| 指标 | 描述 |
+|---|---|
+| **mse** | 距离图上三角部分的均方误差 |
+| **bond_mse** | 限制为主干键距 (第一条非对角线) 的 MSE |
+| **std_mse / max_mse** | 集成中逐样本 MSE 的标准差和最大值 |
+| **std_bond_mse / max_bond_mse** | 仅针对键距的相同统计量 |
+
+键 MSE 尤为重要，因为主干键长 (沿链的 Cα–Cα 距离) 必须被精确重构，距离图才能在下游产生有效的 3D 坐标。
+
+<CgxTip>在评估 VAE 质量时，应重点关注 bond_mse 而非整体 mse。距离图可能具有较低的整体 MSE，但如果主干键距错误，仍会产生物理上不可能的结构——这些距离直接决定了 MDS 能否恢复有效的 3D 坐标。</CgxTip>
+
+来源: [evaluate_vae.py](starling/inference/evaluate_vae.py#L134-L156), [evaluate_vae.py](starling/inference/evaluate_vae.py#L269-L288)
+
+## 模型加载与编译
+
+`ModelManager` 使用 `VAE.load_from_checkpoint()` 从 PyTorch Lightning 检查点加载 VAE。如果本地未找到，则从 GitHub Releases 获取默认检查点 (`STARLING_v2.0.0_ViT_VAE_2025_10_14.ckpt`)。在推理时，可选的 `torch.compile()` 可以仅应用于**解码器**——编码器保持未编译状态，因为它通常每个序列仅调用一次，而解码器在每个扩散采样步骤中都会被调用。
+
+来源: [model_loading.py](starling/inference/model_loading.py#L102-L130), [configs.py](starling/configs.py#L14-L15)
+
+## VAE 在完整流水线中的位置
+
+VAE 是 Starling 潜在扩散流水线的**第一阶段**。它建立了压缩表示，使基于扩散的高分辨率距离图生成变得可行。后续阶段为：
+
+1. **[序列编码器](5-sequence-encoder)** — 将氨基酸序列嵌入为条件向量
+2. **本 VAE** — 定义生成发生的潜在空间
+3. **[扩散模型设计](7-diffusion-model-design)** — 学习在序列嵌入条件下对潜在编码去噪
+4. **[采样策略](8-sampling-strategies)** — 使用 DDIM/DDPM/PLMS 采样器生成新的潜在编码
+5. **[距离图到 3D 坐标](10-distance-map-to-3d-coordinates)** — 将解码后的距离图转换为原子结构
+
+---
+
+- [深入解析/生成流水线/扩散模型设计](https://zread.ai/idptools/starling/7-diffusion-model-design)
+
+---
+slug:7-diffusion-model-design
+blog_type:normal
+---
+
+
+Starling 实现了一个**潜扩散模型**，该模型在预训练 VAE 的压缩表示空间中运行，生成以氨基酸序列为条件的蛋白质距离图。该设计遵循了 Sohl-Dickstein 等人 (2015)、Ho 等人 (2020) 和 Rombach 等人 (2021) 的基础框架，并将其适应于结构生物学领域，其中生成的潜变量被解码为表示蛋白质构象的成对距离图。
+
+## 架构概述
+
+Starling 中的扩散模型是一个离散时间去噪扩散概率模型 (DDPM)，它在 **24×24 潜空间表示**而非原始距离图上运行。这种潜空间设计大幅降低了计算成本，同时保持了结构保真度——VAE 编码器将 384×384 的距离图压缩为紧凑的 24×24 潜变量，扩散过程则学习在这种高效的表示内进行去噪。
+
+```mermaid
+graph TB
+    subgraph Training Pipeline
+        DM[Distance Map 384x384] --> VAE_E[VAE Encoder]
+        VAE_E --> Z[Latent z 24x24]
+        SEQ[Sequence Tokens] --> SE[Sequence Encoder]
+        SE --> C[Conditioning c]
+        Z --> QS[q_sample: Add Noise]
+        QS --> ZT[Noised Latent z_t]
+        ZT --> D[ViT Denoiser]
+        C --> D
+        T[Timestep t] --> D
+        D --> EPS_PRED[Predicted Noise ε_θ]
+        EPS[Predicted Noise ε_θ] --> LOSS[MSE / Min-SNR Loss]
+    end
+
+    subgraph Inference Pipeline
+        NOISE[Noise ~ N 0 I] --> SAMPLE[Sampler]
+        SEQ2[Sequence] --> SE2[Sequence Encoder]
+        SE2 --> C2[Conditioning c]
+        C2 --> SAMPLE
+        SAMPLE --> Z_CLEAN[Clean Latent z_0]
+        Z_CLEAN --> VAE_D[VAE Decoder]
+        VAE_D --> DM_OUT[Distance Map 384x384]
+    end
+
+    style Training Pipeline fill:#f0f4ff,stroke:#4a6fa5
+    style Inference Pipeline fill:#fff4f0,stroke:#a54a4a
+```
+
+核心 `DiffusionModel` 类继承自 `pl.LightningModule`，将完整的训练循环、损失计算和优化器配置整合在一个内聚的模块中。三个关键子组件是：(1) **ViT 去噪器**，根据加噪潜变量、时间步和序列条件预测噪声；(2) **SequenceEncoder**，将分词后的氨基酸序列转换为条件向量；(3) 可选的**冻结 VAE 距离图编码器**，在训练期间用于从原始距离图生成潜空间目标。
+
+来源: [diffusion.py](starling/models/diffusion.py#L55-L188), [diffusion_train.py](starling/training/diffusion_train.py#L81-L112)
+
+## 前向扩散过程 (q-sample)
+
+前向过程在 **T** 个离散时间步内，逐渐将干净的潜变量 **z₀** 破坏为纯高斯噪声。在每个时间步 *t*，加噪潜变量通过闭式重参数化计算得出：
+
+**z_t = √(ᾱ_t) · z₀ + √(1 - ᾱ_t) · ε**，其中 ε ~ N(0, I)
+
+这在 `q_sample` 中实现，该函数提取预计算的 √ᾱ_t 和 √(1 - ᾱ_t) 缓冲区并应用仿射噪声变换。由于在噪声调度数学中观察到 float16 存在数值不稳定性，此操作显式**禁用**了混合精度 (`autocast(enabled=False)`)。
+
+来源: [diffusion.py](starling/models/diffusion.py#L196-L226)
+
+## 噪声调度设计
+
+扩散过程由一个 **beta 调度**控制，它定义了方差在时间步间的演变方式。Starling 提供了三种调度类型，每种都生成一个 β 值张量，所有派生量 (α, ᾱ, 后验方差) 均由此计算得出：
+
+| 调度 | 公式 / 行为 | 用例 |
+|----------|-------------------|----------|
+| **cosine** (默认) | ᾱ_t = cos²(((t/T) + s)/(1+s) · π/2), s=0.008 | 平滑噪声爬升；避免在早期步骤信号接近零；**推荐用于潜扩散** |
+| **linear** | β 在 0.0001 到 0.02 之间线性间隔 (按 1000/T 缩放) | 简单基线；可能在后期步骤过快破坏结构 |
+| **sigmoid** | ᾱ_t 派生自具有 start/end/τ 参数的 sigmoid 变换 | 灵活的形状控制；实验性 |
+
+余弦调度是潜扩散模型的默认且最合理的选择——其偏移参数 *s = 0.008* 防止调度在开始时过于激进，确保模型不会过早破坏潜变量结构。所有调度都以 `float64` 精度生成 β 值，以避免在累积乘积 ᾱ_t 中出现累积误差。
+
+来源: [schedulers.py](starling/data/schedulers.py#L1-L83), [diffusion.py](starling/models/diffusion.py#L65-L69), [diffusion.yaml](starling/configs/diffusion/diffusion.yaml#L1-L12)
+
+## 预计算的扩散缓冲区
+
+在初始化时，`DiffusionModel` 计算并将训练和推理所需的全部量注册为**非持久化缓冲区**。这避免了在每一步中进行冗余计算：
+
+| 缓冲区 | 定义 | 用途 |
+|--------|-----------|---------|
+| `betas` | β_t | 每步的噪声方差 |
+| `alphas_cumprod` | ᾱ_t = ∏(1 - β_s) | 信号保留因子 |
+| `alphas_cumprod_prev` | ᾱ_{t-1} | 上一步的信号因子 |
+| `sqrt_recip_alphas` | 1/√α_t | 去噪均值系数 |
+| `sqrt_alphas_cumprod` | √ᾱ_t | 前向过程信号权重 |
+| `sqrt_one_minus_alphas_cumprod` | √(1 - ᾱ_t) | 前向过程噪声权重 |
+| `posterior_variance` | β_t · (1 - ᾱ_{t-1}) / (1 - ᾱ_t) | 反向过程方差 |
+| `latent_space_scaling_factor` | 1/σ_z | Z-score 标准化 (在第一个训练步骤计算) |
+
+`extract` 辅助函数对这些 1D 缓冲区进行索引，并重塑它们的形状以便在批次和空间维度上进行广播——这一模式借鉴自成熟的 DDPM 实现。
+
+来源: [diffusion.py](starling/models/diffusion.py#L162-L187)
+
+## 潜空间标准化
+
+遵循 Rombach 等人 (2021) 的一个关键设计细节是**潜空间缩放因子**。VAE 编码器的潜分布可能不具有单位方差，这将与扩散模型在时间步 0 时假设 z₀ ~ N(0, I) 不匹配。在**第一个训练步骤** (`global_step == 0 and batch_idx == 0`)，模型计算：
+
+1. 通过 `all_gather` 跨所有进程计算编码批次的标准差 σ_z
+2. 缩放因子 = 1/σ_z
+3. 所有后续的潜编码都乘以此因子：**z_scaled = z · (1/σ_z)**
+
+在推理期间，采样器会反转此操作：在传递给 VAE 解码器之前执行 **z_original = z_denoised / (1/σ_z)**。这确保了扩散模型在标准化的潜空间上训练，而 VAE 在其原始域中运行。
+
+<CgxTip>潜空间缩放因子被注册为缓冲区并随模型检查点保存。当加载预训练模型进行推理时，该因子会自动恢复——无需手动标准化。然而，如果使用*不同*的 VAE 编码器进行微调，缩放因子将在第一步重新计算，覆盖之前的值。</CgxTip>
+
+来源: [diffusion.py](starling/models/diffusion.py#L354-L399), [ddpm_sampler.py](starling/samplers/ddpm_sampler.py#L233-L243), [ddim_sampler.py](starling/samplers/ddim_sampler.py#L242-L248)
+
+## 训练目标与 Min-SNR 加权
+
+核心训练损失是**简化的 ε 预测目标**：模型学习预测添加到潜变量中的噪声 ε，损失为预测噪声与实际噪声之间的 MSE。在每个训练步骤中：
+
+1. 为每个批次元素随机采样时间步 *t* ~ Uniform({0, ..., T-1})
+2. 抽取噪声 ε ~ N(0, I) 并通过 `q_sample` 应用
+3. ViT 去噪器基于序列条件预测 ε_θ(z_t, t, c)
+4. 损失计算为 MSE(ε, ε_θ)
+
+Starling 可选支持 **Min-SNR-γ 加权** (Hang 等人, 2023)，它通过 min(SNR(t), γ) / SNR(t) 重新加权每个时间步的损失。这解决了一个众所周知的问题，即标准的 ε 预测损失过分强调高噪声时间步。SNR 计算为 (α_t / σ_t)²，权重将有效 SNR 钳制在 γ (默认 5.0)，确保低噪声时间步 (模型已经能很好地去噪的地方) 不会主导梯度。当 `min_snr_loss=True` 时，在计算批次均值之前，会对每个样本应用 SNR 权重来计算损失。
+
+来源: [diffusion.py](starling/models/diffusion.py#L253-L326), [diffusion.py](starling/models/diffusion.py#L450-L462)
+
+## 序列条件架构
+
+扩散模型在设计上是**无分类器**的——条件通过序列编码器路径注入，而不是通过单独的分类器模型。条件流如下：
+
+```mermaid
+graph LR
+    SEQ[Raw Sequence String] --> TOK[StarlingTokenizer]
+    TOK --> TOKENS["Token IDs + Attention Mask"]
+    ION[Ionic Strength] --> SE[SequenceEncoder Transformer]
+    TOKENS --> SE
+    SE --> C[Conditioning Vector c]
+    C --> VIT[ViT Denoiser Cross-Attention]
+```
+
+`sequence2labels` 方法对输入序列进行分词，应用序列编码器（一个处理带有位置和注意力信息的氨基酸 token 的 Transformer），并生成条件表示，供 ViT 去噪器通过交叉注意力层进行关注。离子强度 (默认 150 mM) 也作为标量条件信号传入，允许模型根据溶液条件调整其预测。
+
+来源: [diffusion.py](starling/models/diffusion.py#L228-L251), [ddpm_sampler.py](starling/samplers/ddpm_sampler.py#L67-L90)
+
+## 训练期间冻结的 VAE 编码器
+
+当提供了 `distance_map_encoder` 检查点路径时，VAE 将被加载并**冻结** (`requires_grad = False`，评估模式)。这意味着训练流水线可以接受原始距离图作为输入，并即时自动将其编码到潜空间。`training_step` 和 `validation_step` 都会检查编码器是否存在，如果找到，则应用 `encode().mode()` (变分后验的众数) 以生成确定性潜变量目标。如果没有冻结的编码器，训练数据必须是预编码好的潜向量。
+
+来源: [diffusion.py](starling/models/diffusion.py#L138-L192), [diffusion.py](starling/models/diffusion.py#L379-L448)
+
+## 优化器与学习率调度
+
+优化器为 **AdamW**，权重衰减为 0.01，联合应用于 ViT 去噪器和序列编码器参数。提供四种学习率调度器策略：
+
+| 调度器 | 间隔 | 特点 |
+|-----------|----------|-----------------|
+| **LinearWarmupCosineAnnealingLR** (默认) | step | 1% 线性预热 → 余弦退火至 η_min=1e-8；对扩散训练最鲁棒 |
+| **CosineAnnealingLR** | epoch | 整个最大 epoch 期间的纯余弦退火；无预热 |
+| **CosineAnnealingWarmRestarts** | epoch | 周期性重启 (T₀=5)；实现循环探索 |
+| **OneCycleLR** | step | 单周期策略，max_lr=0.01；激进但收敛快 |
+
+<CgxTip>`LinearWarmupCosineAnnealingLR` 调度器将预热实现为总步数 (而非 epoch 数) 的 1%，这对于扩散模型至关重要，因为在早期训练步骤中，随机权重可能会产生极端的噪声预测从而破坏训练稳定性。预热比例被硬编码为 `0.01`——对于非常小的数据集，请考虑增加此比例。</CgxTip>
+
+来源: [diffusion.py](starling/models/diffusion.py#L464-L554)
+
+## 配置参考
+
+扩散模型通过 `configs/diffusion/diffusion.yaml` 进行配置，该配置由基于 Hydra 的训练脚本使用：
+
+```yaml
+type: discrete              # 目前仅支持 "discrete"
+
+discrete:
+  beta_scheduler: cosine     # "linear"、"cosine" 或 "sigmoid"
+  timesteps: 1000            # 总扩散时间步 T
+  set_lr: 0.0001             # 初始学习率
+  config_scheduler: CosineAnnealingLR  # 学习率调度器名称
+  min_snr_loss: False        # 启用 Min-SNR-γ 损失加权
+  min_snr_gamma: 5.0         # SNR 钳制值 γ
+  distance_map_encoder: /path/to/vae.ckpt  # 冻结的 VAE 检查点 (可选)
+```
+
+在训练设置期间，ViT 去噪器被实例化为 `ViT(12, 512, 8, 512)`——12 个 DiT 块、512 维嵌入、8 个注意力头和 512 维上下文——而 `SequenceEncoder` 则通过 Hydra `instantiate` 从其自身的配置块进行配置。
+
+来源: [diffusion.yaml](starling/configs/diffusion/diffusion.yaml#L1-L12), [diffusion_train.py](starling/training/diffusion_train.py#L81-L112)
+
+## 设计理念：为何对蛋白质结构使用潜扩散
+
+在潜空间而非像素/体素空间中运行的决定是 Starling 效率的基础。全分辨率 (384×384) 的蛋白质距离图将需要在约 147K 维空间上进行扩散过程——考虑到距离图结构中存在强相关性，这在计算上是令人望而却步且浪费的。VAE 压缩至 24×24 潜变量 (**256 倍压缩**) 保留了必要的自由度，同时实现了：
+
+- **更快的训练**：ViT 去噪器在 576 个空间位置 (24×24，patch 大小为 3 → 64 个 patch) 上运行，而非 147K
+- **更快的采样**：每个去噪步骤处理一个 24×24 张量，而 VAE 解码器仅为单次前向传播
+- **更好的学习表示**：VAE 已经学会了解耦距离图结构，因此扩散模型只需在结构良好的潜变量上学习分布
+
+这一设计直接遵循了 Rombach 等人 (2021) 的洞见：潜空间中的扩散同时实现了感知保真度和计算效率，这一原理自然地迁移到结构生物学领域，其中“感知质量”的类比是物理上有效的蛋白质几何结构。
+
+来源: [diffusion.py](starling/models/diffusion.py#L55-L63), [ddpm_sampler.py](starling/samplers/ddpm_sampler.py#L272-L286)
+
+## 与其他组件的关系
+
+扩散模型位于 Starling 生成流水线的中心。理解其与相邻组件的联系有助于阐明完整的生成流程：
+
+- **[序列编码器](5-sequence-encoder)**：生成 ViT 去噪器交叉关注的条件向量 `c`。序列表示的质量直接影响条件生成的保真度。
+- **[VAE 潜空间](6-vae-latent-space)**：定义扩散模型运行的潜空间几何。VAE 的编码器/解码器对在距离图空间和潜空间之间进行调解。
+- **[采样策略](8-sampling-strategies)**：DDPM、DDIM 和 PLMS 采样器实现了反向扩散过程——模型提供噪声预测 ε_θ，采样器决定如何遍历去噪轨迹。
+- **[视觉 Transformer 去噪器](14-vision-transformer-denoiser)**：实现 ε_θ 预测网络的 ViT 架构，使用 DiT 块和自适应层归一化处理分块潜变量。
+- **[约束引导采样](13-constraint-guided-sampling)**：在每个采样器的去噪循环*期间*应用约束，在中间时间步修改潜变量以强制执行物理属性。
+
+---
+
+- [深入解析/生成流水线/采样策略](https://zread.ai/idptools/starling/8-sampling-strategies)
+
+---
+slug:8-sampling-strategies
+blog_type:normal
+---
+
+
+Star!ing81313@Fusion0-Implement0--8-1-C8*2+4+2+7*7+8+7+2*7+9*4*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--7!8!0+7*7+8!3+0--
+
+---
+
+## 集成与结构
+
+- [深入解析/集成与结构/集成对象 API](https://zread.ai/idptools/starling/9-ensemble-object-api)
+
+---
+slug:9-ensemble-object-api
+blog_type:normal
+---
+
+
+**`Ensemble`** 类是 STARLING 的核心数据结构 —— 一个轻量级的、由距离图支持的内在无序蛋白质构象系综容器。`Ensemble` 并不急切地存储完整的 3D 坐标，而是保存由扩散采样器生成的残基对距离图，并且仅在需要时**惰性重建 3D 轨迹**。这种设计在生成过程中将内存开销降至最低，同时仍通过一个单一且一致的对象，提供对坐标、生物物理观测量、BME 重加权以及序列化的无缝访问。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L1-L75)
+
+## 构造与初始化
+
+`Ensemble` 通常通过顶层 [`generate()`](starling/frontend/ensemble_generation.py#L160-L400) 函数获取，但也可以直接从距离图的 NumPy 数组构造：
+
+```python
+from starling.structure.ensemble import Ensemble
+import numpy as np
+
+# distance_maps: 形状 (n_conformations, n_residues, n_residues)
+ensemble = Ensemble(distance_maps, sequence="GSWGSWGSWGSW")
+```
+
+| 参数 | 类型 | 描述 |
+|-----------|------|-------------|
+| `distance_maps` | `np.ndarray` | 形状 `(C, N, N)` — 包含 `C` 个构象、`N` 个残基的对称化残基对距离图 |
+| `sequence` | `str` | 氨基酸序列；必须仅包含标准残基 |
+| `ssprot_ensemble` | `SSProtein`, 可选 | 要附加的已存在 SOURSOP 轨迹（跳过后续重建） |
+
+构造函数会对每个输入执行**验证**：数组必须是 3 维的，每个距离图必须是维度与序列长度匹配的方阵，且每个残基字符必须属于标准氨基酸字母表。无效输入会立即引发 `ValueError`，而不会在后续流程中静默失败。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L77-L129), [ensemble.py](starling/structure/ensemble.py#L131-L179)
+
+### 使用 `generate()` 生成系综
+
+主要的高层入口是 `starling.generate()`，它处理输入归一化、扩散采样、可选的 MDS 优化，并返回一个或多个 `Ensemble` 对象：
+
+```python
+from starling import generate
+
+# 单条序列 → 单个 Ensemble
+ensemble = generate("GSWGSWGSW" * 10, conformations=200, return_single_ensemble=True)
+
+# 多条序列 → Ensemble 字典
+ensembles = generate(["GSWGSWGSW" * 10, "AEAEAEAE" * 10], conformations=100)
+```
+
+| 关键参数 | 默认值 | 用途 |
+|---------------|---------|---------|
+| `conformations` | `configs.DEFAULT_NUMBER_CONFS` | 每条序列要采样的构象数量 |
+| `steps` | `configs.DEFAULT_STEPS` | 去噪扩散步数 |
+| `return_structures` | `False` | 若为 `True`，在生成期间重建 3D 坐标 |
+| `return_single_ensemble` | `False` | 当提供单条序列时，返回单个 `Ensemble` 而非字典 |
+| `output_directory` | `None` | 磁盘输出目录；`None` 表示不保存任何内容 |
+| `constraint` | `None` | 用于引导采样的 `Constraint` 对象 |
+
+来源: [ensemble_generation.py](starling/frontend/ensemble_generation.py#L160-L260), [ensemble_generation.py](starling/frontend/ensemble_generation.py#L261-L400)
+
+## 核心架构
+
+`Ensemble` 对象位于四个功能域的交汇处。下图展示了单个对象如何桥接距离图、生物物理观测量、3D 重建和 BME 重加权：
+
+```mermaid
+graph TD
+    DM["<b>Distance Maps</b><br/>(C × N × N) ndarray"] --> ENS["<b>Ensemble</b><br/>Central Container"]
+    ENS --> OBS["<b>Observables</b><br/>Rg, Rh, rij, contacts"]
+    ENS --> TRAJ["<b>3D Trajectory</b><br/>SSProtein (lazy)"]
+    ENS --> BME["<b>BME Reweighting</b><br/>Optimized weights"]
+    BME -->|"use_bme_weights=True"| OBS
+    TRAJ -->|"MDS embedding"| DM
+    
+    style ENS fill:#4a90d9,color:#fff,stroke:#2c5f8a
+    style DM fill:#f5f5f5,stroke:#999
+    style OBS fill:#f5f5f5,stroke:#999
+    style TRAJ fill:#f5f5f5,stroke:#999
+    style BME fill:#f5f5f5,stroke:#999
+```
+
+**惰性求值**是其核心模式。昂贵的计算 —— 通过多维缩放进行轨迹重建、回转半径循环、流体力学半径求和 —— 仅执行一次，缓存为私有属性，并在后续调用中复用。在任何方法上设置 `force_recompute=True` 会使缓存失效并从头重新计算。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L42-L75), [ensemble.py](starling/structure/ensemble.py#L100-L129)
+
+## 观测量方法
+
+### 残基间距离：`rij(i, j)`
+
+返回所有构象中残基 `i` 和 `j` 之间的距离。设置 `return_mean=True` 时，计算系综平均值（可选择 BME 加权）：
+
+```python
+# 每个构象的距离
+d_05 = ensemble.rij(0, 5)                # 形状: (n_conformations,)
+
+# 系综平均值
+d_05_mean = ensemble.rij(0, 5, return_mean=True)
+
+# BME 重加权平均值
+d_05_bme = ensemble.rij(0, 5, return_mean=True, use_bme_weights=True)
+```
+
+来源: [ensemble.py](starling/structure/ensemble.py#L344-L383)
+
+### 端到端距离
+
+围绕 `rij(0, N-1)` 的便捷封装，返回每帧的 N 端至 C 端距离或其平均值：
+
+```python
+ete = ensemble.end_to_end_distance()                  # 数组
+ete_mean = ensemble.end_to_end_distance(return_mean=True)
+```
+
+来源: [ensemble.py](starling/structure/ensemble.py#L385-L416)
+
+### 回转半径：`radius_of_gyration()`
+
+使用标准公式 $R_g = \sqrt{\frac{\sum_{i<j} d_{ij}^2}{2N^2}}$ 根据距离图计算 Rg。支持 BME 加权平均值和强制重新计算：
+
+```python
+rg_all = ensemble.radius_of_gyration()                                   # 每帧
+rg_mean = ensemble.radius_of_gyration(return_mean=True)                   # 标量
+rg_bme  = ensemble.radius_of_gyration(return_mean=True, use_bme_weights=True)
+```
+
+**局部变体**可计算链上子区域的 Rg：
+
+```python
+rg_local = ensemble.local_radius_of_gyration(start=10, end=30, return_mean=True)
+```
+
+来源: [ensemble.py](starling/structure/ensemble.py#L496-L540), [ensemble.py](starling/structure/ensemble.py#L542-L586)
+
+### 流体力学半径：`hydrodynamic_radius()`
+
+提供由已发表方法支持的两种计算模式：
+
+| 模式 | 方法 | 参考文献 |
+|------|--------|-----------|
+| `"nygaard"` (默认) | 基于缩放的 Rg，带有三个可调 α 参数 | Nygaard et al., *Biophys J* 2017 |
+| `"kr"` | Kirkwood-Riseman 反距离求和 | Kirkwood & Riseman, *J Chem Phys* 1948 |
+
+```python
+rh_nygaard = ensemble.hydrodynamic_radius(mode="nygaard", return_mean=True)
+rh_kr      = ensemble.hydrodynamic_radius(mode="kr", return_mean=True)
+```
+
+Nygaard 模式接受 `alpha1`、`alpha2`、`alpha3` 参数（默认值：0.216, 4.06, 0.821）。切换模式会自动使内部缓存失效，以防止返回来自不同公式的过期值。
+
+<CgxTip>对于与 NMR 导出的 Rh 值进行比较，Kirkwood-Riseman 模式更为准确 (Pesce et al., 2023)，而 Nygaard 模式则更符合动态光散射测量结果。</CgxTip>
+
+来源: [ensemble.py](starling/structure/ensemble.py#L589-L727)
+
+### 距离图与接触图
+
+```python
+# 原始或平均距离图
+all_maps  = ensemble.distance_maps()                                      # (C, N, N)
+mean_map  = ensemble.distance_maps(return_mean=True)                      # (N, N)
+bme_map   = ensemble.distance_maps(return_mean=True, use_bme_weights=True)
+
+# 具有可配置阈值的接触图
+contacts  = ensemble.contact_map(contact_thresh=11)                       # 每帧二值化
+avg_cm    = ensemble.contact_map(contact_thresh=11, return_mean=True)     # 分数占有率
+sum_cm    = ensemble.contact_map(contact_thresh=11, return_summed=True)   # 整数计数
+```
+
+默认的接触阈值是 **11 Å**。`return_mean` 和 `return_summed` 标志互斥。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L418-L494)
+
+## 3D 轨迹重建
+
+距离图是 STARLING 扩散模型的主要输出，但许多下游分析需要实际的 3D 坐标。`Ensemble` 类通过由 `soursop` 库支持的**按需多维缩放 (MDS)** 弥合了这一差距：
+
+```python
+# 访问轨迹（若尚未构建则自动重建）
+traj = ensemble.trajectory          # 返回 soursop.ssprotein.SSProtein
+
+# 显式构造，可控制 MDS 参数
+ensemble.build_ensemble_trajectory(
+    num_cpus_mds=4,          # 用于 MDS 的 CPU 工作数
+    num_mds_init=4,          # 独立的 MDS 初始化次数
+    device="cpu",            # 坐标生成设备
+    force_recompute=True,    # 即使已缓存也强制重建
+    progress_bar=True,
+)
+```
+
+| 方法 / 属性 | 返回值 | 是否惰性? |
+|-------------------|---------|-------|
+| `trajectory` | `soursop.ssprotein.SSProtein` | 是 — 首次访问时自动重建 |
+| `build_ensemble_trajectory(...)` | `soursop.ssprotein.SSProtein` | 是 — 若已缓存则跳过，除非 `force_recompute=True` |
+| `has_structures` | `bool` | 否 — 简单的空值检查 |
+
+增加 `num_mds_init` 可通过运行多次独立的优化来提高 MDS 嵌入的质量，代价是额外的计算时间。重建管线将距离图送入 `generate_3d_coordinates_from_distances()`，并将结果包装在具有仅 CA 拓扑的 `soursop.SSTrajectory` → `SSProtein` 对象中。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L729-L807), [ensemble.py](starling/structure/ensemble.py#L809-L837)
+
+## 错误检测
+
+STARLING 的生成管线偶尔会产生具有物理上不可能的残基间距离的帧。`Ensemble` 类提供了两个互补的错误扫描器：
+
+### `check_for_errors()` — 距离图级别
+
+扫描原始 STARLING 距离图，查找任何残基对超过物理允许最大距离（受键长几何约束）的帧：
+
+```python
+bad_indices = ensemble.check_for_errors(remove_errors=True, verbose=True)
+```
+
+当 `remove_errors=True` 时，被标记的帧将从距离图数组中删除，并且缓存的派生值 (Rg, Rh) 将失效。如果附加了轨迹，设置 `rebuild_trajectory=True` 将从清理后的距离图中重建轨迹；否则将删除该轨迹对象。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L181-L243)
+
+### `check_for_errors_trajectory()` — 重建坐标级别
+
+检查从 3D 轨迹派生的每帧 CA-CA 距离图，而非原始扩散输出。这可以捕获**重建伪影** —— 即源距离图表现良好，但 MDS 嵌入引入了非物理几何的情况：
+
+```python
+bad_indices = ensemble.check_for_errors_trajectory(remove_errors=True, verbose=True)
+```
+
+当移除帧时，轨迹和距离图将同步修剪，以使两种表示保持一致。如果尚未构建轨迹，则引发 `RuntimeError`。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L245-L342)
+
+## BME 重加权集成
+
+`Ensemble` 类通过 `reweight_bme()` 方法为贝叶斯最大熵重加权提供了一等接口，该方法创建优化的逐帧权重，在拟合实验观测量与保持系综多样性之间取得平衡。结果被缓存，并通过 `use_bme_weights=True` 传播到所有观测量方法。
+
+```python
+from starling.structure.bme import ExperimentalObservable
+import numpy as np
+
+# 定义实验目标
+obs_rg  = ExperimentalObservable(25.0, 2.0, name="Rg")
+obs_ete = ExperimentalObservable(70.0, 5.0, constraint="upper", name="ETE")
+
+# 计算逐帧的计算值
+rg_vals  = ensemble.radius_of_gyration()
+ete_vals = ensemble.end_to_end_distance()
+calculated = np.column_stack([rg_vals, ete_vals])
+
+# 自动 theta 选择（推荐）
+result = ensemble.reweight_bme([obs_rg, obs_ete], calculated)
+
+# 现在在任何观测量中使用 BME 权重
+reweighted_rg = ensemble.radius_of_gyration(return_mean=True, use_bme_weights=True)
+```
+
+### Theta 选择模式
+
+| 模式 | 调用方式 | 行为 |
+|------|-----------|----------|
+| **自动** | `theta=None` (默认) | 在 `theta_range` 范围内进行 L 曲线扫描，通过拐点检测选择最优 θ |
+| **手动** | `theta=<float>` | 直接使用指定的 θ；速度更快，无扫描 |
+
+自动模式在范围内测试 `theta_n_points` 个值（默认值：15，范围：0.01–10.0），并使用以下两种方法之一识别拐点：
+
+- `"perpendicular"` (默认) — 到连接曲线端点弦的最大垂直距离
+- `"curvature"` — L 曲线的 Menger 曲率
+
+```python
+# 具有自定义扫描参数的自动模式
+result = ensemble.reweight_bme(
+    [obs_rg, obs_ete], calculated,
+    theta=None,
+    theta_range=(0.1, 5.0),
+    theta_n_points=20,
+    theta_method="curvature",
+    save_theta_scan_plot="theta_scan.png",
+)
+
+# 已知 theta 的手动模式
+result = ensemble.reweight_bme([obs_rg, obs_ete], calculated, theta=0.5)
+```
+
+### BME 相关属性
+
+| 属性 | 类型 | 描述 |
+|----------|------|-------------|
+| `has_bme_weights` | `bool` | 若已调用 `reweight_bme()` 且收敛，则为 `True` |
+| `bme_result` | `BMEResult` 或 `None` | 包含权重、χ²、φ 的缓存优化结果 |
+| `theta_scan_result` | `ThetaScanResult` 或 `None` | 来自最近一次自动 theta 扫描的诊断信息 |
+
+`view_theta_scan()` 方法渲染最近一次自动扫描的 L 曲线诊断图。
+
+<CgxTip>所有观测量方法（`rij`、`radius_of_gyration`、`distance_maps`、`end_to_end_distance`、`local_radius_of_gyration`）均接受 `use_bme_weights=True`，无需手动乘以权重即可无缝计算 BME 加权平均值。</CgxTip>
+
+来源: [ensemble.py](starling/structure/ensemble.py#L939-L1221), [ensemble.py](starling/structure/ensemble.py#L1264-L1326)
+
+## 序列化
+
+### 保存
+
+```python
+# 保存完整的 STARLING 对象（距离图 + 元数据）
+ensemble.save("my_ensemble", compress=True, reduce_precision=True, compression_algorithm="lzma")
+
+# 仅保存 3D 轨迹
+ensemble.save_trajectory("my_traj")                # PDB 拓扑 + XTC 轨迹
+ensemble.save_trajectory("my_traj", pdb_trajectory=True)  # 仅 PDB
+```
+
+`.starling` 格式存储距离图、序列、元数据（模型版本、创建日期、权重路径）以及可选的重建轨迹。压缩选项：
+
+| 算法 | 压缩率 | 速度 | 最佳场景 |
+|-----------|-------------------|-------|-----------|
+| `"lzma"` | 较高 | 较慢 | `reduce_precision=True` |
+| `"gzip"` | 适中 | 较快 | `reduce_precision=False` |
+
+### 加载
+
+```python
+from starling.structure.ensemble import load_ensemble
+
+ensemble = load_ensemble("my_ensemble.starling")
+ensemble_no_structures = load_ensemble("my_ensemble.starling", ignore_structures=True)
+```
+
+设置 `ignore_structures=True` 可跳过轨迹反序列化，当不需要 3D 坐标时，这可以显著加快加载速度。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L839-L915), [ensemble.py](starling/structure/ensemble.py#L1332-L1383)
+
+## 完整 API 摘要
+
+| 方法 / 属性 | 返回值 | 关键标志 |
+|---|---|---|
+| `sequence` | `str` | — |
+| `sequence_length` | `int` | — |
+| `number_of_conformations` | `int` | — |
+| `__len__()` | `int` | — |
+| `__str__()` / `__repr__()` | `str` | — |
+| `rij(i, j)` | `np.ndarray` 或 `float` | `return_mean`, `use_bme_weights` |
+| `end_to_end_distance()` | `np.ndarray` 或 `float` | `return_mean`, `use_bme_weights` |
+| `distance_maps()` | `np.ndarray` | `return_mean`, `use_bme_weights` |
+| `contact_map()` | `np.ndarray` | `contact_thresh`, `return_mean`, `return_summed` |
+| `radius_of_gyration()` | `np.ndarray` 或 `float` | `return_mean`, `force_recompute`, `use_bme_weights` |
+| `local_radius_of_gyration(start, end)` | `np.ndarray` 或 `float` | `return_mean`, `use_bme_weights` |
+| `hydrodynamic_radius()` | `np.ndarray` 或 `float` | `return_mean`, `force_recompute`, `mode` |
+| `build_ensemble_trajectory()` | `SSProtein` | `num_cpus_mds`, `num_mds_init`, `device`, `force_recompute` |
+| `trajectory` | `SSProtein` | 访问时自动重建 |
+| `has_structures` | `bool` | — |
+| `check_for_errors()` | `list[int]` | `remove_errors`, `verbose`, `rebuild_trajectory` |
+| `check_for_errors_trajectory()` | `list[int]` | `remove_errors`, `verbose` |
+| `reweight_bme()` | `BMEResult` | `theta`, `theta_range`, `theta_method`, `force_recompute` |
+| `has_bme_weights` | `bool` | — |
+| `bme_result` | `BMEResult` 或 `None` | — |
+| `theta_scan_result` | `ThetaScanResult` 或 `None` | — |
+| `view_theta_scan()` | `Figure` | `save_path`, `show` |
+| `save()` | `None` | `compress`, `reduce_precision`, `compression_algorithm` |
+| `save_trajectory()` | `None` | `pdb_trajectory` |
+| `load_ensemble(filename)` | `Ensemble` | `ignore_structures` |
+
+来源: [ensemble.py](starling/structure/ensemble.py#L42-L1384)
+
+## 接下来阅读什么
+
+- **[距离图到 3D 坐标](10-distance-map-to-3d-coordinates)** — 深入探讨 `build_ensemble_trajectory()` 在内部调用的 MDS 重建管线
+- **[BME 重加权](11-bme-reweighting)** — 全面介绍贝叶斯最大熵框架、`ExperimentalObservable` 类型以及 θ 扫描诊断
+- **[约束引导采样](13-constraint-guided-sampling)** — 如何将 `constraint` 对象传递给 `generate()`，在系综到达 `Ensemble` 容器之前对其进行塑形
+
+---
+
+- [深入解析/集成与结构/距离图至 3D 坐标](https://zread.ai/idptools/starling/10-distance-map-to-3d-coordinates)
+
+---
+slug:10-distance-map-to-3d-coordinates
+blog_type:normal
+---
+
+
+STARLING 的生成流水线生成**成对距离图**——残基间 Cα–Cα 距离的对称 N×N 矩阵——而非显式的 3D 结构。将这些距离图转换回笛卡尔坐标是关键的**嵌入步骤**，它 bridging了模型的潜在输出与物理上可实现的蛋白质构象。本页解释了数学基础、STARLING 提供的三种重建算法，以及 `Ensemble` 对象如何编排完整的距离到结构工作流。
+
+## 嵌入问题
+
+距离图 **D** ∈ ℝ^(N×N) 编码了 N 个残基之间的所有成对距离。恢复坐标 **X** ∈ ℝ^(N×3) 使得 ‖xᵢ − xⱼ‖ ≈ Dᵢⱼ 是**多维缩放 (MDS)** 的一个实例——距离矩阵操作的逆运算。该问题是欠定的（**X** 的任何旋转、反射或平移都会产生相同的 **D**），但出于结构生物学目的，任何有效的嵌入都足够了，因为像 Rg 和 Rh 这样的可观测量是旋转不变的。
+
+关键挑战在于，从扩散模型采样的距离图可能不是完美的**欧几里得**的——可能存在对三角不等式的微小违反——因此嵌入算法必须对近似距离矩阵具有鲁棒性。STARLING 通过三种互补的方法解决这个问题，每种方法在速度、准确性和硬件要求上都有不同的权衡。
+
+```mermaid
+flowchart TD
+    DM["Distance Maps<br/>(N × N × M)"] --> Router{"Device?"}
+    Router -->|"CPU"| SkMDS["sklearn MDS<br/>(SMACOF, per-map)"]
+    Router -->|"GPU / MPS"| TorchMDS["PyTorch SMACOF<br/>(batched, GPU)"]
+    Router -->|"Optional"| GD["Gradient Descent<br/>(Adam optimizer)"]
+    SkMDS --> Coords["3D Coordinates<br/>(Å → nm)"]
+    TorchMDS --> Coords
+    GD --> Coords
+    Coords --> Topo["CA Topology<br/>(mdtraj.Trajectory)"]
+    Topo --> SSP["SOURSOP SSProtein<br/>(trajectory object)"]
+```
+
+来源: [coordinates.py](starling/structure/coordinates.py#L502-L581), [ensemble.py](starling/structure/ensemble.py#L729-L807)
+
+## 重建算法
+
+### 通过 scikit-learn 的 SMACOF (CPU 路径)
+
+默认的 CPU 方法委托给 `sklearn.manifold.MDS`，并设置 `dissimilarity="precomputed"`，它实现了 **SMACOF**（通过复杂函数主缩放 Scaling by MAjorizing a COmplicated Function）算法。SMACOF 迭代地最小化**应力**函数：
+
+**Stress(X) = Σᵢ<ⱼ (‖xᵢ − xⱼ‖ − Dᵢⱼ)²**
+
+每个距离图在顺序循环中独立嵌入。独立重启次数 (`n_init`) 和并行 CPU 核心数 (`n_jobs`) 是可配置的，默认值取自 `configs.DEFAULT_MDS_NUM_INIT` (4) 和 `configs.DEFAULT_CPU_COUNT_MDS` (`n_init` 和 `os.cpu_count()` 中的较小值)。
+
+| 参数 | 默认值 | 效果 |
+|-----------|---------|--------|
+| `n_components` | 3 | 固定为 3D 嵌入 |
+| `dissimilarity` | `"precomputed"` | 输入是距离矩阵，而非原始特征 |
+| `n_init` | 4 | 更多重启 → 找到全局最小值的机会更大，但速度更慢 |
+| `n_jobs` | `min(n_init, cpu_count)` | 跨重启的并行度 |
+| `normalized_stress` | `"auto"` | 在不同 scikit-learn 版本间保持行为一致 |
+
+来源: [coordinates.py](starling/structure/coordinates.py#L255-L307), [configs.py](starling/configs.py#L19-L20)
+
+### 通过 PyTorch 的 SMACOF (GPU / MPS 路径)
+
+当 GPU 设备可用时，STARLING 使用完全在 PyTorch 中构建的自定义**批量 SMACOF 实现**。这通过批量张量操作并行处理所有构象，避免了 scikit-learn 路径的 Python 循环开销。
+
+核心迭代遵循标准的 SMACOF Guttman 变换：在每一步中，构造一个权重矩阵 **B**，其中非对角线元素 Bᵢⱼ = −Dᵢⱼ / ‖xᵢ − xⱼ‖，对角线设置为保证行和为零。更新规则为 **X_new = (1/N) · B · X**，随后进行居中处理。通过应力跟踪收敛，并在 `|stress_old − stress_new| < tol` 时提前停止。批量公式使用 `torch.bmm` 进行矩阵乘法，并使用 `torch.where` 掩码避免更新批次内已收敛的样本。
+
+| 参数 | 默认值 | 效果 |
+|-----------|---------|--------|
+| `batch_size` | 100 | 每次 GPU 批次的图数量 |
+| `n_iter` | 300 | 每批次的最大 SMACOF 迭代次数 |
+| `tol` | 1e-4 | 应力变化的收敛容差 |
+| `device` | `"cuda"` | 计算设备 |
+| `progress_bar` | `True` | 显示批次的 tqdm 进度条 |
+
+<CgxTip>在 Apple MPS 上，由于不支持的操作（特别是 macOS ≤ 14 上的 `nonzero` 操作）的回退，PyTorch SMACOF 路径可能比 CPU **慢 1.5–2 倍**。当指定 `device="cpu"` 时，`generate_3d_coordinates_from_distances` 中的调度器会自动路由到 CPU sklearn 路径。如果你在 Apple Silicon 上遇到减速，请显式传递 `device="cpu"` 给 `build_ensemble_trajectory`。</CgxTip>
+
+来源: [coordinates.py](starling/structure/coordinates.py#L123-L252), [coordinates.py](starling/structure/coordinates.py#L550-L579)
+
+### 梯度下降 (替代方法)
+
+第三种方法使用 **Adam 优化的梯度下降**来最小化目标距离矩阵与从当前坐标估计计算出的成对距离之间的 MSE。损失仅在矩阵上三角部分计算（以避免重复计算）：
+
+**L(X) = MSE(D_upper, ‖X‖_upper)**
+
+坐标使用**增量链**初始化——每个残基沿随机方向放置在距前一个残基 3.8 Å（标准 Cα–Cα 键长）处——而不是纯随机位置。这种基于物理信息的初始化为优化器提供了更好的起点，减少了收敛所需的迭代次数。
+
+| 参数 | 默认值 | 效果 |
+|-----------|---------|--------|
+| `num_iterations` | 5000 | 梯度下降步数 |
+| `learning_rate` | 1e-3 | Adam 优化器步长 |
+| `device` | `"cuda:0"` | 计算设备 |
+| `verbose` | `True` | 每 100 次迭代打印一次损失 |
+
+<CgxTip>MPS 不支持 `float64` 张量。辅助函数 `get_tensor_dtype` 在 MPS 设备上自动向下转型为 `float32`。在实践中，MPS 上的梯度下降目前比 CPU 慢——提供此支持是为了在未来 Apple 提升 MPS 性能时保持兼容性。</CgxTip>
+
+来源: [coordinates.py](starling/structure/coordinates.py#L310-L380), [coordinates.py](starling/structure/coordinates.py#L100-L120), [coordinates.py](starling/structure/coordinates.py#L15-L42)
+
+## 方法调度逻辑
+
+父函数 `generate_3d_coordinates_from_distances` 作为所有重建的**单一入口点**。它根据解析的设备字符串选择算法：
+
+| 设备 | 算法 | 理由 |
+|--------|-----------|-----------|
+| `"cpu"` | sklearn MDS (顺序) | 无 GPU 开销；sklearn 的 SMACOF 对单个图优化良好 |
+| `"cuda"` / `"mps"` | PyTorch SMACOF (批量) | 利用整个集成体的 GPU 并行性 |
+
+两条路径在返回前都将输出从埃 (Å) 转换为纳米 (nm)（除以 `configs.CONVERT_ANGSTROM_TO_NM = 10`），确保与 mdtraj 基于纳米的坐标约定兼容。
+
+来源: [coordinates.py](starling/structure/coordinates.py#L502-L581), [configs.py](starling/configs.py#L21)
+
+## 拓扑构建
+
+一旦获得 3D 坐标，STARLING 通过 `create_ca_topology_from_coords` 构建一个**仅含 Cα 的骨架拓扑**。此函数构造一个 `mdtraj.Topology`，包含一条链、每个氨基酸一个残基（使用来自 `configs.AA_ONE_TO_THREE` 的一对三字母代码映射），以及每个残基一个 Cα 碳原子。相邻的 Cα 原子形成化学键，产生用于下游分析的最小但有效的拓扑。
+
+然后，生成的 `mdtraj.Trajectory` 通过 `SSTrajectory(TRJ=traj).proteinTrajectoryList[0]` 被封装进 **SOURSOP `SSProtein`** 对象，它提供了贯穿 STARLING 使用的丰富分析接口（距离图、回转半径、PDB/XTC I/O）。
+
+```mermaid
+flowchart LR
+    Seq["Sequence<br/>(e.g. 'GS repeat')"] --> Topo["mdtraj.Topology<br/>(CA chain + bonds)"]
+    Coords3D["3D Coordinates<br/>(nm)"] --> Traj["mdtraj.Trajectory<br/>(topology + xyz)"]
+    Topo --> Traj
+    Traj --> SSP["soursop.SSProtein<br/>(analysis interface)"]
+```
+
+来源: [coordinates.py](starling/structure/coordinates.py#L426-L481), [ensemble.py](starling/structure/ensemble.py#L802-L806)
+
+## 系综集成
+
+`Ensemble` 对象通过两个访问点提供了到距离-坐标重建的最高层接口：
+
+### `build_ensemble_trajectory()`
+
+此方法显式触发重建，并完全控制算法参数：
+
+```python
+ensemble.build_ensemble_trajectory(
+    batch_size=100,          # GPU 批次大小
+    num_cpus_mds=4,          # sklearn MDS 的 CPU 核心数
+    num_mds_init=4,          # 独立的 MDS 重启次数
+    device=None,             # None → 自动检测 (如果可用则使用 GPU)
+    force_recompute=False,   # 重新使用缓存的轨迹？
+    progress_bar=True,       # 显示 tqdm 进度条
+)
+```
+
+轨迹是**惰性计算并缓存**的——除非设置 `force_recompute=True`，否则后续调用将返回缓存的 `SSProtein` 对象。设备通过 `utilities.check_device()` 解析，它按 CUDA → MPS → CPU 的优先级顺序自动检测。
+
+### `trajectory` 属性
+
+如果尚未构建轨迹，访问 `ensemble.trajectory` 将使用默认值自动调用 `build_ensemble_trajectory()`。这使得常见情况——简单地检查或保存结构——无需任何配置：
+
+```python
+ensemble = generate("GSrepeat30", conformations=200, return_single_ensemble=True)
+# 首次使用时访问 .trajectory 会触发重建
+traj = ensemble.trajectory
+```
+
+来源: [ensemble.py](starling/structure/ensemble.py#L729-L837), [utilities.py](starling/utilities.py#L148-L245)
+
+## 质量验证
+
+重建质量可以在两个层面进行评估：
+
+### 距离图验证 (`check_for_errors`)
+
+在重建之前扫描原始距离图以查找**物理上不可能的**残基间距离。相隔 |i − j| 个位置的一对残基之间的距离不能超过 |i − j| × 键长——违反此规则表明图已损坏或采样不佳。
+
+### 轨迹验证 (`check_for_errors_trajectory`)
+
+重建后，此方法从 3D 坐标重新提取 Cα–Cα 距离图，并检查相同的物理违反情况。这可以捕获**重建伪影**——即尽管源距离图有效，但 MDS 嵌入引入了非物理几何的情况。两种方法都支持 `remove_errors=True` 以修剪坏帧，保持距离图和轨迹同步。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L181-L342)
+
+## 重建质量比较
+
+| 算法 | 速度 (200 构象, 60 残基) | 需要 GPU | 批量处理 | 对非欧几里得 D 的鲁棒性 |
+|-----------|---------------------------|--------------|------------------|-------------------------------|
+| sklearn MDS | 中等 (顺序) | 否 | 否 (按图循环) | 高 (经过充分测试的 SMACOF) |
+| PyTorch SMACOF | 快 (并行) | 是 | 是 (批量) | 高 (相同算法) |
+| 梯度下降 | 慢 (多次迭代) | 可选 | 否 | 中等 (存在局部极小值风险) |
+
+对于生产使用，推荐默认使用 **CUDA 上的 PyTorch SMACOF**。梯度下降方法主要用于调试或作为参考实现，因为它提供了 SMACOF 无法以相同方式暴露的显式逐迭代损失跟踪。
+
+来源: [coordinates.py](starling/structure/coordinates.py#L123-L380)
+
+## 保存重建的结构
+
+一旦坐标嵌入完成，`Ensemble` 提供两条导出路径：
+
+- **`save_trajectory(filename_prefix, pdb_trajectory=False)`** ——将 3D 系综写入 PDB 拓扑文件 + XTC 轨迹（默认），或者在 `pdb_trajectory=True` 时作为单个多模型 PDB。这仅保存结构数据，不保存源距离图。
+- **`save(filename_prefix)`** ——以 `.starling` 格式持久化完整的 STARLING 对象（距离图 + 轨迹 + 元数据），可选压缩 (gzip/lzma) 和精度降低 (float16)。
+
+来源: [ensemble.py](starling/structure/ensemble.py#L839-L916)
+
+## 下一步
+
+- 了解 `Ensemble` 对象如何将距离图和坐标封装在一起：[Ensemble Object API](9-ensemble-object-api)
+- 理解贝叶斯最大熵重加权如何改善系综-实验一致性：[BME Reweighting](11-bme-reweighting)
+- 探索约束如何引导采样以生成更易于嵌入的距离图：[Constraint-Guided Sampling](13-constraint-guided-sampling)
+
+---
+
+- [深入解析/集成与结构/BME 重加权](https://zread.ai/idptools/starling/11-bme-reweighting)
+
+---
+slug:11-bme-reweighting
+blog_type:normal
+---
+
+
+贝叶斯最大熵（BME）重新加权是一个基于原则的框架，用于根据实验可观测量来细化生成系综。BME 并非丢弃或重新生成构象，而是分配**逐帧优化权重**，使计算出的系综平均值与实验数据保持一致，同时最小化对先验分布的扰动——这一约束通过相对熵（KL 散度）来衡量。这使其成为 STARLING 无监督生成流水线与生物物理验证定量需求之间的天然桥梁。
+
+来源: [bme.py](starling/structure/bme.py#L1-L85), [bme_utils.py](starling/structure/bme_utils.py#L1-L18)
+
+## 数学基础
+
+BME 目标函数旨在寻找权重分布 **w**，使其在匹配实验可观测量条件下，最小化相对于先验权重 $w_0$ 的相对熵 $D_{KL}(w \| w_0)$。通过拉格朗日对偶性，这转化为关于乘子 $\boldsymbol{\lambda}$ 的无约束优化问题：
+
+$$\gamma(\boldsymbol{\lambda}) = \log Z(\boldsymbol{\lambda}) + \boldsymbol{\lambda}^T \mathbf{F}^{exp} + \frac{\theta}{2} \sum_i \lambda_i^2 \sigma_i^2$$
+
+其中 $Z(\boldsymbol{\lambda})$ 是配分函数，$\mathbf{F}^{exp}$ 是实验值，$\sigma_i^2$ 是实验方差，$\theta$ 是控制偏差-方差权衡的正则化强度。重新加权后的概率为：
+
+$$w_i = \frac{w_{0,i} \exp\!\bigl(-\boldsymbol{\lambda}^T \mathbf{O}_i^{calc}\bigr)}{Z(\boldsymbol{\lambda})}$$
+
+梯度 $\nabla_\lambda \gamma = \mathbf{F}^{exp} + \theta \boldsymbol{\Sigma}^2 \boldsymbol{\lambda} - \langle\mathbf{O}^{calc}\rangle_w$ 驱动 L-BFGS-B 优化，并通过解析计算的雅可比矩阵（`jac=True`）实现高效收敛。目标和梯度均按 $1/\theta$ 缩放以保证数值稳定性。
+
+来源: [bme.py](starling/structure/bme.py#L233-L305)
+
+## 架构概述
+
+BME 系统由两个模块组织而成，职责划分明确——优化逻辑位于 `bme.py`，数据容器及工具函数位于 `bme_utils.py`：
+
+```mermaid
+graph TB
+    subgraph "用户入口"
+        E["Ensemble.reweight_bme()"]
+        S["BME (独立使用)"]
+    end
+
+    subgraph "核心优化"
+        BME["BME 类"]
+        FIT["BME.fit()"]
+        OBJ["_objective_and_gradient()"]
+        CHI["_compute_chi_squared()"]
+        OPT["scipy.optimize.minimize<br/>(L-BFGS-B)"]
+    end
+
+    subgraph "Theta 选择"
+        SCAN["BME.scan_theta()"]
+        TS["theta_scan()"]
+        KNEE["find_optimal_theta()"]
+        PERP["_find_knee_perpendicular()"]
+        CURV["_find_knee_curvature()"]
+    end
+
+    subgraph "数据容器<br/>(bme_utils.py)"
+        EO["ExperimentalObservable"]
+        BR["BMEResult"]
+        TSR["ThetaScanResult"]
+    end
+
+    E --> BME
+    S --> BME
+    BME --> FIT
+    FIT --> OBJ
+    FIT --> SCAN
+    OBJ --> CHI
+    OBJ --> OPT
+    SCAN --> TS
+    TS --> KNEE
+    KNEE --> PERP
+    KNEE --> CURV
+    FIT --> BR
+    SCAN --> TSR
+    E --> EO
+    S --> EO
+    BR -->|诊断| DIAG["BMEResult.diagnostics()"]
+```
+
+来源: [bme.py](starling/structure/bme.py#L108-L122), [bme_utils.py](starling/structure/bme_utils.py#L24-L86), [ensemble.py](starling/structure/ensemble.py#L35-L39)
+
+## 约束类型
+
+每个实验可观测量都带有一个**约束类型**，决定了如何对偏离实验值的偏差进行惩罚。这对于编码不对称的物理知识至关重要——例如，SAXS 导出的回转半径是等式约束，而仅设定距离上限的 FRET 效率则应使用不等式约束。
+
+| 约束 | 拉格朗日界限 | 惩罚逻辑 | 用例 |
+|---|---|---|---|
+| `"equality"` | $\lambda \in (-\infty, +\infty)$ | 始终惩罚 $\|F_{calc} - F_{exp}\|$ | 源自 SAXS 的 Rg，源自 NMR 的 Rh |
+| `"upper"` | $\lambda \geq 0$ | 仅在 $F_{calc} > F_{exp}$ 时惩罚 | 最大端到端距离 |
+| `"lower"` | $\lambda \leq 0$ | 仅在 $F_{calc} < F_{exp}$ 时惩罚 | 最小紧致度 |
+
+$\lambda$ 的边界由 L-BFGS-B 优化器强制执行：`"upper"` 约束的正 $\lambda$ 会将计算值向下推，而 `"lower"` 约束的负 $\lambda$ 会将其向上推。等式约束允许 $\lambda$ 值不受限制。
+
+来源: [bme_utils.py](starling/structure/bme_utils.py#L24-L85), [bme.py](starling/structure/bme.py#L187-L231)
+
+## Theta 参数
+
+正则化参数 $\theta$ 控制着 BME 重新加权中的基本权衡。**较小的 $\theta$** 允许优化器激进地重新加权帧以拟合实验，产生较低的 $\chi^2$，但可能会将权重集中在少数构象上（有效样本量低）。**较大的 $\theta$** 强烈正则化至先验分布，保持了系综的多样性，但可能导致 $\chi^2$ 居高不下。
+
+系综帧的有效比例由下式量化：
+
+$$\Phi = \exp(-D_{KL}) = \exp\!\Bigl(-\sum_i w_i \log \frac{w_i}{w_{0,i}}\Bigr)$$
+
+其中 $\Phi = 1$ 表示未进行重新加权（保留所有先验权重），$\Phi \to 0$ 表示极端集中。默认值 $\theta = 0.5$ 提供了一个适中的起点，但推荐的工作流是通过 L 曲线分析进行**自动 theta 选择**。
+
+来源: [bme_utils.py](starling/structure/bme_utils.py#L11-L12), [bme.py](starling/structure/bme.py#L466-L476)
+
+## 自动 Theta 选择
+
+当 `auto_theta=True`（默认值）时，`BME.fit()` 会执行一次 **theta 扫描**——在对数间隔的 $\theta$ 值网格上拟合 BME 模型——并通过 L 曲线拐点检测选择最优点。L 曲线绘制了 $\chi^2$（拟合质量）与 KL 散度（系综畸变）的关系，拐点代表最大曲率的位置，在此处进一步提升拟合质量将以不成比例的系综多样性损失为代价。
+
+有两种拐点查找方法可供选择：
+
+| 方法 | 算法 | 特征 |
+|---|---|---|
+| `"perpendicular"` | 距连接 L 曲线端点直线的最大垂直距离 | 稳健、直观；经典的拐点检测 |
+| `"curvature"` | 通过三点公式计算最大 Menger 曲率 | 对局部曲率更敏感；能检测细微拐点 |
+
+扫描会生成包含每个 $\theta$ 完整诊断信息的 `ThetaScanResult`，可通过 `ThetaScanResult.plot()` 目视检查 L 曲线，并通过 `ThetaScanResult.print_summary()` 生成摘要报告。
+
+来源: [bme_utils.py](starling/structure/bme_utils.py#L470-L601), [bme_utils.py](starling/structure/bme_utils.py#L604-L683), [bme.py](starling/structure/bme.py#L307-L398)
+
+## 系综集成（推荐路径）
+
+BME 重新加权的主要接口是 `Ensemble` 类，它会缓存 BME 结果并将优化后的权重透明地传播到所有可观测量计算方法。一旦调用 `reweight_bme()`，后续任何带有 `use_bme_weights=True` 的调用都会自动应用缓存的权重：
+
+```python
+from starling import generate
+import numpy as np
+from starling.structure.bme import ExperimentalObservable
+
+# 生成或加载系综
+ensemble = generate("GS"*30, conformations=200)
+
+# 计算每一帧的计算可观测量
+rg_values = ensemble.radius_of_gyration()
+ete_values = ensemble.end_to_end_distance()
+calculated = np.column_stack([rg_values, ete_values])
+
+# 定义实验约束
+obs_rg = ExperimentalObservable(23.0, 2.0, name="Rg", constraint="equality")
+obs_ete = ExperimentalObservable(55.0, 5.0, name="End-to-end", constraint="upper")
+
+# 执行 BME 重新加权（默认自动 theta）
+result = ensemble.reweight_bme([obs_rg, obs_ete], calculated)
+
+# 所有的可观测量方法均接受 use_bme_weights=True
+reweighted_rg = ensemble.radius_of_gyration(return_mean=True, use_bme_weights=True)
+reweighted_ete = ensemble.end_to_end_distance(return_mean=True, use_bme_weights=True)
+reweighted_rij = ensemble.rij(5, 15, return_mean=True, use_bme_weights=True)
+```
+
+`Ensemble` 类将 BME 实例和结果作为私有缓存（`__bme`、`__bme_result`）存储，确保一致地应用权重而无需在每次调用时重新拟合。诸如 `radius_of_gyration()`、`end_to_end_distance()`、`local_radius_of_gyration()` 和 `rij()` 等方法均支持 `use_bme_weights` 标志。
+
+来源: [bme.py](starling/structure/bme.py#L26-L47), [ensemble.py](starling/structure/ensemble.py#L110-L112), [ensemble.py](starling/structure/ensemble.py#L344-L383)
+
+## 独立使用 BME
+
+对于 `Ensemble` 类之外的工作流——或者将 BME 应用于 STARLING 未直接支持的自定义可观测量时——`BME` 类可以独立使用：
+
+```python
+from starling.structure.bme import BME, ExperimentalObservable
+import numpy as np
+
+# 定义可观测量
+obs_rg = ExperimentalObservable(value=25.0, uncertainty=2.0, name="Rg")
+obs_ete = ExperimentalObservable(value=70.0, uncertainty=5.0,
+                                  constraint="upper", name="End-to-end")
+
+# 计算值：形状为 (n_frames, n_observables)
+calculated = np.random.randn(1000, 2) * 2 + np.array([24, 65])
+
+# 创建并以手动 theta 拟合
+bme = BME([obs_rg, obs_ete], calculated, theta=0.5)
+result = bme.fit(verbose=True)
+
+# 将权重应用于来自相同帧的任何可观测量
+reweighted_means = bme.predict(calculated)
+
+# 或运行 theta 扫描以获取最优正则化
+scan = bme.scan_theta(theta_range=(0.01, 10.0), n_points=15, method="curvature")
+scan.print_summary()
+fig = scan.plot(show=True)
+```
+
+`predict()` 方法使用拟合后的权重计算加权平均值，适用于将 BME 权重投影到未参与拟合过程的可观测量上（例如，交叉验证可观测量）。
+
+来源: [bme.py](starling/structure/bme.py#L49-L84), [bme.py](starling/structure/bme.py#L620-L679)
+
+## BMEResult 诊断
+
+`BMEResult` 数据类提供了丰富的诊断接口，用于评估重新加权的质量。`diagnostics()` 方法计算两种互补的有效样本量度量：
+
+| 指标 | 公式 | 敏感性 |
+|---|---|---|
+| $N_{eff}^{(S)}$（基于熵） | $N \cdot \Phi = N \cdot e^{-D_{KL}}$ | 标准 BME 度量；捕获整体信息损失 |
+| $N_{eff}^{(2)}$（Rényi-2） | $1 / \sum_i w_i^2$ | 对少数主导权重更敏感；始终 $\leq N_{eff}^{(S)}$ |
+
+诊断系统会在以下情况生成**结构化警告**：(1) $\Phi < 0.5$ 表示系综多样性显著损失，(2) $N_{eff}^{(2)} < 0.1N$ 表明权重极度集中，(3) 权重范围超过 3 个数量级，或 (4) 最终 $\chi^2 > 2 \times n_{observables}$ 表明实验拟合不佳。可通过 `print_diagnostics()` 获取格式化报告：
+
+```python
+result = ensemble.reweight_bme(observables, calculated)
+result.print_diagnostics(warn_threshold=0.5)
+```
+
+来源: [bme_utils.py](starling/structure/bme_utils.py#L92-L300)
+
+## API 参考
+
+### 核心类
+
+| 类 | 模块 | 用途 |
+|---|---|---|
+| `ExperimentalObservable` | `bme_utils` | 数据类：`(value, uncertainty, constraint, name)` |
+| `BME` | `bme` | 优化器：通过 scipy 拟合拉格朗日乘子 |
+| `BMEResult` | `bme_utils` | 结果容器：权重、$\chi^2$、$\Phi$、诊断 |
+| `ThetaScanResult` | `bme_utils` | 扫描容器：逐 $\theta$ 指标、最优选择 |
+
+### 关键方法
+
+| 方法 | 所属对象 | 描述 |
+|---|---|---|
+| `BME.fit(theta, auto_theta, ...)` | `BME` | 执行重新加权；若 `auto_theta=True` 则自动选择 $\theta$ |
+| `BME.scan_theta(theta_range, ...)` | `BME` | 扫描 $\theta$ 网格并返回 `ThetaScanResult` |
+| `BME.predict(calculated_values)` | `BME` | 应用拟合权重计算加权平均值 |
+| `BMEResult.diagnostics(warn_threshold)` | `BMEResult` | 计算 N_eff、权重统计、警告 |
+| `BMEResult.print_diagnostics()` | `BMEResult` | 格式化的诊断报告 |
+| `ThetaScanResult.plot()` | `ThetaScanResult` | L 曲线 + 权重分布可视化 |
+| `ThetaScanResult.print_summary()` | `ThetaScanResult` | 格式化的扫描摘要 |
+
+### 常量
+
+| 常量 | 值 | 用途 |
+|---|---|---|
+| `DEFAULT_THETA` | 0.5 | 未指定正则化参数时的回退值 |
+| `DEFAULT_MAX_ITERATIONS` | 50000 | scipy 优化器迭代上限 |
+| `DEFAULT_OPTIMIZER` | `"L-BFGS-B"` | 支持 `jac=True` 的有界优化器 |
+| `LAMBDA_INIT_SCALE` | 1e-3 | 随机拉格朗日初始化的标准差 |
+| `MIN_WEIGHT_THRESHOLD` | 1e-50 | 权重的数值下限 |
+
+<CgxTip>拟合后务必检查 `BMEResult.diagnostics()`——较低的 $\Phi$（有效比例）意味着重新加权的系综实际上由一小部分帧主导，这可能表明实验约束不兼容或 $\theta$ 过小。使用 `scan_theta()` 可视化 L 曲线，并验证所选 $\theta$ 位于合理的拐点处。</CgxTip>
+
+<CgxTip>混合使用等式和不等式约束时，请注意不等式约束（`"upper"` / `"lower"`）仅在计算出的系综平均值违反边界时才会激活。如果未加权的系综已满足某一不等式约束，其拉格朗日乘子将保持为零，该约束将有效退出优化过程。</CgxTip>
+
+来源: [bme.py](starling/structure/bme.py#L108-L685), [bme_utils.py](starling/structure/bme_utils.py#L1-L684)
+
+## 后续步骤
+
+- 关于托管 `reweight_bme()` 的 Ensemble API，请参阅 [Ensemble 对象 API](9-ensemble-object-api)
+- 关于约束类型的理论与使用模式，请参阅 [约束类型](12-constraint-types)
+- 关于在重新加权前生成系综的完整生成流水线，请参阅 [采样策略](8-sampling-strategies)
+
+---
+
+## 引导与约束
+
+- [深入解析/引导与约束/约束类型](https://zread.ai/idptools/starling/12-constraint-types)
+
+---
+slug:12-constraint-types
+blog_type:normal
+---
+
+
+STARLING 提供了一个基于梯度的约束系统，用于在潜在空间中引导扩散采样过程，从而实现满足生物物理先验的系综生成。每个约束都在解码后的距离图上定义损失，通过 VAE 解码器进行反向传播，并在每个去噪步骤中对潜在表示应用缩放后的梯度更新。本页编目了所有内置约束、其物理意义以及控制其行为的参数。
+
+## 平底谐势
+
+STARLING 中的每个约束都共享相同的数学核心：一个**平底谐势**。该势并非对偏离目标值的任何偏差都进行惩罚，而是定义了一个*容差带*，在此容差带内损失精确为零。只有超过容差的偏差才会产生二次惩罚：
+
+$$L = \frac{1}{2} k \cdot \text{ReLU}(|x - x_{\text{target}}| - \epsilon)^2$$
+
+其中 *k* 为 `force_constant`，*x* 为当前值，*x*_target 为约束目标，*ε* 为 `tolerance`。此设计对于蛋白质结构至关重要：微小的涨落是物理上预期的，对它们进行惩罚会使系综受到过度约束。`tolerance` 参数定义了平区（势阱的“底”）的宽度，而 `force_constant` 控制了超出该区域后势壁的陡度。
+
+来源: [constraints.py](starling/inference/constraints.py#L284-L326), [constraints.py](starling/inference/constraints.py#L439-L468)
+
+## 约束类层次结构
+
+所有约束均继承自抽象 `Constraint` 基类，该基类提供了调度、梯度计算、自适应裁剪和逐样本损失缩放的共享机制。具体子类仅需实现 `compute_loss`。
+
+```mermaid
+classDiagram
+    class Constraint {
+        <<abstract>>
+        +constraint_weight: float
+        +schedule: str
+        +guidance_start: float
+        +guidance_end: float
+        +"initialize(encoder_model, ...)"
+        +"should_apply_guidance(timestep, total_steps)"
+        +"get_time_scale(timestep)"
+        +"compute_loss(distance_maps)*"
+        +"apply(latents, timestep, logger)"
+    }
+    class BondConstraint {
+        +bond_length: float
+        +tolerance: float
+        +force_constant: float
+        +"compute_loss(distance_maps)"
+    }
+    class StericClashConstraint {
+        +steric_clash_definition: float
+        +force_constant: float
+        +"compute_loss(distance_maps)"
+    }
+    class HelicityConstraint {
+        +resid_start: int
+        +resid_end: int
+        +tolerance: float
+        +force_constant: float
+        +"compute_loss(distance_maps)"
+    }
+    class DistanceConstraint {
+        +resid1: int
+        +resid2: int
+        +target: float
+        +tolerance: float
+        +force_constant: float
+        +"compute_loss(distance_maps)"
+    }
+    class RgConstraint {
+        +target: float
+        +tolerance: float
+        +force_constant: float
+        +"compute_loss(distance_maps)"
+    }
+    class ReConstraint {
+        +target: float
+        +tolerance: float
+        +force_constant: float
+        +"compute_loss(distance_maps)"
+    }
+    class MultiConstraint {
+        +constraints: list
+        +constraint_weights: list
+        +"compute_loss(distance_maps)"
+    }
+    Constraint <|-- BondConstraint
+    Constraint <|-- StericClashConstraint
+    Constraint <|-- HelicityConstraint
+    Constraint <|-- DistanceConstraint
+    Constraint <|-- RgConstraint
+    Constraint <|-- ReConstraint
+    Constraint <|-- MultiConstraint
+```
+
+`Constraint` 基类携带的参数控制着引导应用*何时*以及*多强*，而每个子类则添加领域特定参数（目标距离、残基索引等），并实现在解码后的距离图上操作的 `compute_loss` 方法。
+
+来源: [constraints.py](starling/inference/constraints.py#L41-L282)
+
+## 约束参考
+
+下表总结了每种约束类型及其独特参数和所控制的物理量。
+
+| 约束 | 关键参数 | 物理目标 | 损失计算范围 |
+|---|---|---|---|
+| **BondConstraint** | `bond_length=3.81`, `tolerance=0.0`, `force_constant=2.0` | Cα–Cα 键长 (Å) | 距离图的第一超对角线 |
+| **StericClashConstraint** | `steric_clash_definition=5.0`, `force_constant=2.0` | 最小非键合距离 (Å) | 上三角 (偏移 ≥ 2) |
+| **HelicityConstraint** | `resid_start`, `resid_end`, `tolerance=0.0`, `force_constant=2.0` | 理想 α-螺旋距离模式 | 子矩阵 `[resid_start:resid_end, resid_start:resid_end]` |
+| **DistanceConstraint** | `resid1`, `resid2`, `target`, `tolerance=0.0`, `force_constant=2.0` | 两残基间的成对距离 (Å) | 单个元素 `dm[resid1, resid2]` |
+| **RgConstraint** | `target`, `tolerance=0.0`, `force_constant=2.0` | 回转半径 (Å) | 完整距离图 (全局属性) |
+| **ReConstraint** | `target`, `tolerance=0.0`, `force_constant=2.0` | 端到端距离 (Å) | 单个元素 `dm[0, N-1]` |
+| **MultiConstraint** | `constraints` (列表) | 任意约束的加权组合 | 按子约束聚合 |
+
+来源: [constraints.py](starling/inference/constraints.py#L284-L646)
+
+### BondConstraint
+
+惩罚 Cα–Cα 虚拟键长偏离 **3.81 Å** 的理想值（标准肽主链距离）。损失在距离图的第一超对角线上计算（即所有 *d(i, i+1)* 对）。`bond_length` 的默认值 3.81 Å 反映了多肽链中连续 Cα 原子间的物理距离；`tolerance` 参数允许键长在平底势阱内涨落，随后才激活谐惩罚。
+
+```python
+from starling.inference.constraints import BondConstraint
+
+# 要求键长在 3.81 ± 0.5 Å 范围内
+bond = BondConstraint(bond_length=3.81, tolerance=0.5, force_constant=2.0)
+```
+
+来源: [constraints.py](starling/inference/constraints.py#L284-L326)
+
+### StericClashConstraint
+
+通过惩罚距离低于 `steric_clash_definition`（默认 **5.0 Å**）的非键合残基对，防止物理上不可能的空间位阻冲突。仅考虑偏移 ≥ 2 的上三角部分（即 *d(i, j)*，其中 *j ≥ i + 2*），排除了键合邻居和对角线。该损失采用单侧谐波：仅对*低于*阈值的距离进行惩罚，对更大的分离无惩罚。
+
+```python
+from starling.inference.constraints import StericClashConstraint
+
+# 惩罚任何距离小于 5.0 Å 的非键合对
+steric = StericClashConstraint(steric_clash_definition=5.0, force_constant=2.0)
+```
+
+来源: [constraints.py](starling/inference/constraints.py#L329-L378)
+
+### HelicityConstraint
+
+通过将距离图与理想螺旋参考进行比较，在指定的残基范围内强制执行 α-螺旋几何结构。该参考由 `helix_dm()` 以固定的 384 个位置生成，然后掩码至 `[resid_start, resid_end]` 子区域。只有子区域的上三角（偏移 ≥ 1）对损失有贡献。此约束对于在无序区域中对已知螺旋片段的蛋白质进行建模特别有用。
+
+```python
+from starling.inference.constraints import HelicityConstraint
+
+# 对残基 150–160（0 索引）强制螺旋性
+helix = HelicityConstraint(resid_start=150, resid_end=160, tolerance=0.0, force_constant=2.0)
+```
+
+来源: [constraints.py](starling/inference/constraints.py#L381-L436), [utilities.py](starling/utilities.py#L1-L20)
+
+### DistanceConstraint
+
+最灵活的约束：将任意两个残基之间的成对距离固定为目标值。这直接编码了实验观测结果，如 FRET 距离、交联数据或 NMR 距离约束。损失由单个元素 `distance_maps[:, :, resid1, resid2]` 计算得出。
+
+```python
+from starling.inference.constraints import DistanceConstraint
+
+# 约束残基 10 和 100 相距 30 Å
+dist = DistanceConstraint(resid1=10, resid2=100, target=30.0, tolerance=1.0, force_constant=2.0)
+```
+
+来源: [constraints.py](starling/inference/constraints.py#L439-L468)
+
+### RgConstraint
+
+约束整个结构的**回转半径**，这是一种全局紧致度度量。Rg 直接由距离图计算，无需转换为 3D 坐标，使用恒等式：*Rg = √(Σd_ij² / 2N²)*。此方法计算效率高，且在距离图上可微。典型用例包括匹配源自 SAXS 的 Rg 值，或探索 IDP 的紧致度景观。
+
+```python
+from starling.inference.constraints import RgConstraint
+
+# 目标 Rg 为 40 Å，使用较弱的力常数
+rg = RgConstraint(target=40.0, tolerance=2.0, force_constant=0.1)
+```
+
+<CgxTip>与 `DistanceConstraint` 等局部约束相比，请为 `RgConstraint` 和 `ReConstraint` 使用较低的 `force_constant`（如 0.1–0.5）。全局属性会同时响应许多距离图条目，因此有效梯度幅度要大得多。在全局约束上使用高力常数会使采样轨迹失稳。</CgxTip>
+
+来源: [constraints.py](starling/inference/constraints.py#L471-L543)
+
+### ReConstraint
+
+约束**端到端距离**——即第一个和最后一个 Cα 原子之间的距离。这是在 `distance_maps[:, :, 0, sequence_length-1]` 处的单元素查找，使其成为计算代价最低的约束。与 Rg 一样，它是链的全局属性，因此建议使用较弱的力常数。
+
+```python
+from starling.inference.constraints import ReConstraint
+
+# 目标端到端距离为 100 Å
+re = ReConstraint(target=100.0, tolerance=5.0, force_constant=1.0)
+```
+
+来源: [constraints.py](starling/inference/constraints.py#L546-L570)
+
+### MultiConstraint
+
+将多个约束组合到一个优化步骤中，将每个约束自身的 `constraint_weight` 作为相对缩放因子应用。`MultiConstraint` 将 `initialize()` 委托给每个子约束，并对加权的逐批次损失求和。这是同时强制执行多个约束的机制，例如同时执行目标 Rg *和*特定残基间距离。
+
+```python
+from starling.inference.constraints import (
+    DistanceConstraint, RgConstraint, MultiConstraint
+)
+
+combined = MultiConstraint(constraints=[
+    DistanceConstraint(resid1=10, resid2=100, target=30, constraint_weight=1.0),
+    RgConstraint(target=40, force_constant=0.1, constraint_weight=0.5),
+])
+```
+
+来源: [constraints.py](starling/inference/constraints.py#L573-L646)
+
+## 共享调度和引导参数
+
+除了约束特定参数外，每个 `Constraint` 都继承了调度控制，用于确定在扩散轨迹*何时*激活引导及其强度*如何*随时间变化。
+
+```mermaid
+flowchart TD
+    A["采样器调用 constraint.apply"] --> B{should_apply_guidance?}
+    B -- 否 --> C["原样返回潜在表示"]
+    B -- 是 --> D["解码潜在表示 → 距离图"]
+    D --> E["在距离图上计算 compute_loss"]
+    E --> F["反向传播: ∂L/∂latents"]
+    F --> G["从调度中获取 time_scale"]
+    G --> H["逐样本损失缩放"]
+    H --> I["自适应梯度裁剪"]
+    I --> J["返回 latents + 更新"]
+```
+
+`apply` 方法编排了完整的引导流程：将当前潜在表示解码为距离图，计算约束损失，反向传播至潜在表示，按时间调度和逐样本损失进行缩放，裁剪梯度，并返回更新后的潜在表示。
+
+| 参数 | 默认值 | 用途 |
+|---|---|---|
+| `constraint_weight` | `1.0` | 梯度更新的总乘性权重 |
+| `schedule` | `"cosine"` | 随时间变化的强度：`"cosine"`、`"bell_shaped"` 或 `"linear"` |
+| `guidance_start` | `0.0` | 引导窗口的归一化起点（0 = 噪声，1 = 干净） |
+| `guidance_end` | `1.0` | 引导窗口的归一化终点 |
+| `verbose` | `True` | 启用 `ConstraintLogger` 输出 |
+
+来源: [constraints.py](starling/inference/constraints.py#L41-L114), [constraints.py](starling/inference/constraints.py#L203-L282)
+
+### 调度函数
+
+`schedule` 参数选择引导强度在去噪轨迹上的变化方式。扩散过程从高时间步（噪声）运行到低时间步（干净）。`guidance_start` 和 `guidance_end` 参数在此轨迹内定义了一个激活引导的窗口，使用*逆向*分数（因此 `guidance_start=0.0` 意味着“从去噪开始就进行引导”）。
+
+| 调度 | 公式 | 行为 |
+|---|---|---|
+| `"cosine"` | cos²(t/total · π/2) | 早期强引导，平滑递减至末尾为零 |
+| `"bell_shaped"` | sin(t̃π) · exp(-(t̃-0.6)²/0.1) | 逐渐增强，在去噪约 60% 处达到峰值，然后衰减 |
+| `"linear"` (回退) | 1 - t/total | 从全强度线性衰减至零 |
+
+**余弦调度**是默认设置，适用于大多数场景——它在潜在表示仍粗糙的早期应用强校正，然后让模型自行细化结构。当你希望避免干扰初始粗略布局或最终的精细化处理时，**钟形调度**可能更受青睐，它将引导集中在轨迹的中段。
+
+来源: [constraints.py](starling/inference/constraints.py#L116-L157), [constraints.py](starling/inference/constraints.py#L274-L282)
+
+### 自适应梯度裁剪
+
+`apply` 方法包含两种稳定机制。**逐样本损失缩放**根据每个样本的相对损失幅度（箝位至最大系数 2.0）对其梯度进行加权，从而使已满足约束的样本获得较小的更新。**自适应梯度裁剪**将每个样本的梯度范数上限设定为 1.0，防止任何单个样本受到破坏性的巨大更新。这些机制自动运行，无需用户配置。
+
+来源: [constraints.py](starling/inference/constraints.py#L226-L254)
+
+## 约束如何与采样集成
+
+约束被注入到 DDIM 采样循环中。在每个去噪步骤之后，采样器会检查是否提供了约束，如果提供了，则在当前潜在表示上调用 `constraint.apply(x, step, logger)`。约束将潜在表示解码为距离图，计算损失，并返回梯度扰动的潜在表示。这在引导窗口内的每个时间步（步骤 0 除外）都会发生，在整个去噪过程中产生朝向约束目标的持续压力。
+
+<CgxTip>约束引导的采样比无约束生成慢得多，因为每次 `apply` 调用都需要完整的 VAE 解码和反向传播。对于具有激活约束的 10 步 DDIM 运行，预计大约额外增加 10 次通过解码器的前向+反向传播。使用更少的 `steps` 或更窄的 `guidance_start`/`guidance_end` 窗口可缓解此开销。</CgxTip>
+
+来源: [ddim_sampler.py](starling/samplers/ddim_sampler.py#L194-L229), [ddim_sampler.py](starling/samplers/ddim_sampler.py#L127-L137)
+
+## ConstraintLogger
+
+`ConstraintLogger` 提供对采样期间约束应用情况的实时监控。它显示一个带有每个激活约束当前损失和梯度范数的 `tqdm` 进度条，并在每个扩散步骤进行更新。当将约束传递给 `sample()` 时，采样器会自动创建并管理它，但也可在自定义采样循环中手动使用。
+
+| 日志方法 | 用途 |
+|---|---|
+| `setup()` | 初始化进度条 |
+| `update(timestep, constraint_name, metrics)` | 记录某步的指标 |
+| `close()` | 清理进度条 |
+
+来源: [constraints.py](starling/inference/constraints.py#L649-L720)
+
+## 下一步
+
+现在你已了解每种约束类型及其参数，接下来请通过[约束引导采样](13-constraint-guided-sampling)中的完整采样流水线学习如何在实践中应用它们。若要将约束与实验数据结合，请参阅 [BME 重加权](11-bme-reweighting)。
+
+---
+
+- [深入解析/引导与约束/约束引导采样](https://zread.ai/idptools/starling/13-constraint-guided-sampling)
+
+---
+slug:13-constraint-guided-sampling
+blog_type:normal
+---
+
+
+STARLING 中的约束引导采样通过在每个时间步注入基于梯度的校正，将扩散去噪过程导向生物物理上合理的结构。约束并非事后过滤或拒绝采样，而是在**生成循环内部**运作，修改潜在表示，使得解码后的距离图在采样完成前即满足用户指定的结构属性。
+
+## 引导机制
+
+在每个去噪步骤中，采样器生成一个中间潜在变量 **z**。当约束处于激活状态时，STARLING 临时开启 **z** 的自动求导，通过 VAE 对其进行解码以获得距离图 **D**，计算约束损失 ℒ(**D**)，并求梯度 ∇_z ℒ。随后，潜在变量按如下方式更新：
+
+> **z′** = **z** − w · s(t) · ℓ(**D**) · clip(∇_z ℒ)
+
+其中 **w** 为 `constraint_weight`，**s(t)** 是随时间变化的调度函数，**ℓ(D)** 是逐样本的损失缩放因子，用于防止对已满足约束的样本进行过度校正。梯度范数按样本独立裁剪至最大值 1.0，以确保在异构批次中的稳定性。
+
+关键的设计洞察在于，引导是在**潜在空间**中施加的，而非距离图空间。这意味着梯度必须通过 VAE 解码器进行反向传播，从而将约束信号与生成模型的内部表示相耦合。DDPM 模型上存储的 `latent_space_scaling_factor` 会在解码前对潜在变量进行归一化，以保持梯度的数值条件良好。
+
+来源: [constraints.py](starling/inference/constraints.py#L203-L272)
+
+## 调度与时间门控
+
+约束影响在整个去噪轨迹上并非均匀分布。三种机制控制着引导施加的*时机*和*强度*：
+
+| 机制 | 参数 | 描述 |
+|---|---|---|
+| **引导窗口** | `guidance_start`, `guidance_end` | 逆向过程中约束处于激活状态的归一化比例。默认值 `[0.0, 1.0]` 表示在所有步骤中均施加约束。 |
+| **时间调度** | `schedule` | `"cosine"`（默认）按 cos²(πt/2T) 衰减；`"bell_shaped"` 在采样进程 60% 处达到峰值；`"linear"` 线性衰减。 |
+| **自适应裁剪阈值** | (内部) | 初始值为 2.0，通过余弦调度衰减至 1.0，允许在早期潜在变量噪声较大时进行更大幅度的校正。 |
+
+引导窗口使用*逆向*比例 (1 − t/T)，因此 `guidance_start=0.0` 对应去噪的起始阶段（噪声最大的状态），`guidance_end=1.0` 对应最后一步。例如，你可以通过设置 `guidance_start=0.7`，将约束的应用推迟到采样的最后 30% 阶段。
+
+来源: [constraints.py](starling/inference/constraints.py#L96-L183)
+
+## 约束类型及其损失函数
+
+所有约束子类均使用**平底谐波势**实现 `compute_loss(distance_maps) → (per_batch_loss, mean_loss)`：excess = ReLU(|deviation| − tolerance)，loss = ½ · k · excess²。容差创建了一个死区，在该区内已满足的约束不产生梯度。
+
+### BondConstraint
+
+惩罚相邻 Cα–Cα 距离偏离理想键长（默认 3.81 Å）的程度。作用于距离图的第一副对角线。
+
+```python
+from starling.inference.constraints import BondConstraint
+bond = BondConstraint(bond_length=3.81, tolerance=1.0, force_constant=2.0)
+```
+
+### StericClashConstraint
+
+惩罚距离低于 `steric_clash_definition`（默认 5.0 Å）的非相邻残基对（|i − j| ≥ 2）。使用上三角掩码以避免重复计算和自接触。
+
+```python
+from starling.inference.constraints import StericClashConstraint
+steric = StericClashConstraint(steric_clash_definition=5.0, force_constant=2.0)
+```
+
+### HelicityConstraint
+
+通过将解码距离与理想螺旋参考距离图进行比较，在残基范围内强制执行 α 螺旋几何结构。参考图由 `helix_dm(L=384)` 生成，并且距离依赖的权重矩阵 (1/(d_ref + ε)) 对短程接触赋予更高权重。掩码将损失限制在指定残基窗口的上三角部分。
+
+```python
+from starling.inference.constraints import HelicityConstraint
+helix = HelicityConstraint(resid_start=10, resid_end=25, tolerance=0.5, force_constant=2.0)
+```
+
+### DistanceConstraint
+
+将两个特定残基之间的成对距离约束为目标值。非常适合用于编码实验 FRET 测量或交联质谱数据。
+
+```python
+from starling.inference.constraints import DistanceConstraint
+fret = DistanceConstraint(resid1=5, resid2=50, target=25.0, tolerance=2.0, force_constant=2.0)
+```
+
+### RgConstraint
+
+约束直接从距离图计算的回转半径：Rg = √(Σd²_ij / 2N²)。无需 3D 坐标——计算仅在成对距离上进行。
+
+```python
+from starling.inference.constraints import RgConstraint
+rg = RgConstraint(target=18.0, tolerance=1.0, force_constant=2.0)
+```
+
+### ReConstraint
+
+将端到端距离（残基 0 到残基 N）约束为目标值，控制整体链的伸展或压缩。
+
+```python
+from starling.inference.constraints import ReConstraint
+re = ReConstraint(target=40.0, tolerance=3.0, force_constant=2.0)
+```
+
+来源: [constraints.py](starling/inference/constraints.py#L284-L570)
+
+## 组合多个约束
+
+`MultiConstraint` 将任意约束列表聚合到单个优化步骤中。每个子约束保留其自身的 `constraint_weight`、`guidance_start` 和 `guidance_end`，允许对相对强度和激活窗口进行细粒度控制。组合损失是所有逐约束损失的加权和。
+
+```python
+from starling.inference.constraints import MultiConstraint, RgConstraint, HelicityConstraint
+
+combined = MultiConstraint(
+    constraints=[
+        RgConstraint(target=18.0, tolerance=1.0, force_constant=2.0, constraint_weight=1.5),
+        HelicityConstraint(resid_start=5, resid_end=20, tolerance=0.5, force_constant=2.0, constraint_weight=1.0),
+    ],
+    schedule="cosine",
+)
+```
+
+<CgxTip>当组合具有不同物理单位（距离为 Å，Rg 为 Å²）的约束时，请调整 `constraint_weight` 以使每个约束的损失贡献具有相近的数量级。监控 `ConstraintLogger` 的输出（每步的 loss、grad_norm）以诊断失衡。</CgxTip>
+
+来源: [constraints.py](starling/inference/constraints.py#L573-L646)
+
+## 与采样循环的集成
+
+约束通过高层 `generate()` 函数和低层采样器 `sample()` / `p_sample_loop()` 方法上的 `constraint` 参数注入到去噪循环中。初始化链按如下顺序进行：
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant generate
+    participant Sampler
+    participant Constraint
+
+    User->>generate: generate(..., constraint=c)
+    generate->>Sampler: generate_backend(..., constraint=c)
+    Sampler->>Constraint: initialize(encoder, scale_factor, n_steps, seq_len)
+    loop Each denoising timestep t
+        Sampler->>Sampler: x = denoising_step(x, t)
+        Sampler->>Constraint: should_apply_guidance(t, total_steps)
+        alt Guidance active
+            Constraint->>Constraint: decode latents → distance_maps
+            Constraint->>Constraint: compute_loss(distance_maps)
+            Constraint->>Constraint: grad = ∇_z loss
+            Constraint->>Constraint: apply scheduling + clipping
+            Constraint-->>Sampler: x' = x + update
+        else Guidance inactive
+            Constraint-->>Sampler: x' = x (unchanged)
+        end
+    end
+    Sampler-->>generate: decoded distance maps
+```
+
+在前端层面，约束被直接传递至后端：
+
+```python
+from starling.frontend.ensemble_generation import generate
+from starling.inference.constraints import RgConstraint
+
+ensemble = generate(
+    "MIEQKLKAEEKSEKRQKIAEKQAQKQKEQAQKI",
+    conformations=500,
+    constraint=RgConstraint(target=15.0, tolerance=1.0),
+    return_single_ensemble=True,
+)
+```
+
+采样器在循环开始前自动初始化约束，为其提供编码器模型、潜在缩放因子、总步数和序列长度。`ConstraintLogger` 在采样期间以辅助进度条的形式显示实时诊断信息（损失和梯度范数）。
+
+来源: [ensemble_generation.py](starling/frontend/ensemble_generation.py#L160-L393), [ddpm_sampler.py](starling/samplers/ddpm_sampler.py#L150-L200), [ddim_sampler.py](starling/samplers/ddim_sampler.py#L127-L199)
+
+## 逐样本自适应缩放
+
+在同一批次中，不同样本满足约束的程度可能各不相同。`apply()` 方法将**逐样本损失缩放**计算为 ℓ_i = loss_i / mean(loss)，并裁剪至最大值 2.0。这确保了已接近目标的样本接受较小的校正，而异常值则接受成比例的较大推动，从而防止批次均值掩盖个体违规现象。
+
+结合逐样本梯度范数裁剪（每个样本的更新独立缩放至最大 L2 范数 1.0），这种双层自适应机制使得约束引导在异构批次中具备鲁棒性，无需手动进行逐样本调优。
+
+来源: [constraints.py](starling/inference/constraints.py#L226-L254)
+
+## 参数参考
+
+| 参数 | 默认值 | 作用域 | 描述 |
+|---|---|---|---|
+| `constraint_weight` | 1.0 | 所有约束 | 梯度更新的全局乘数 |
+| `schedule` | `"cosine"` | 所有约束 | 时间调度：`"cosine"`、`"bell_shaped"` 或 `"linear"` |
+| `guidance_start` | 0.0 | 所有约束 | 引导窗口的归一化起点（0 = 噪声最大） |
+| `guidance_end` | 1.0 | 所有约束 | 引导窗口的归一化终点（1 = 最干净） |
+| `tolerance` | 0.0 | 逐类型 | 激活惩罚前的平底宽度 (Å) |
+| `force_constant` | 2.0 | 逐类型 | 谐波势强度 k |
+| `bond_length` | 3.81 | BondConstraint | 目标 Cα–Cα 键长 (Å) |
+| `steric_clash_definition` | 5.0 | StericClashConstraint | 允许的最小非键合距离 (Å) |
+| `resid_start`, `resid_end` | — | HelicityConstraint | 强制螺旋的残基范围 |
+| `resid1`, `resid2`, `target` | — | DistanceConstraint | 残基对及目标距离 (Å) |
+| `target` | — | RgConstraint, ReConstraint | 目标值 (Å) |
+
+来源: [constraints.py](starling/inference/constraints.py#L41-L78)
+
+## 后续步骤
+
+- 在 [约束类型](12-constraint-types) 中查看约束类型的完整目录及其生物物理动机。
+- 在 [BME 重加权](11-bme-reweighting) 中了解约束引导的系综如何与 BME 重加权交互。
+- 在 [VAE 潜在空间](6-vae-latent-space) 中理解约束运作所在的潜在空间。
+
+---
+
+## 模型内部机制
+
+- [深入解析/模型内部机制/Vision Transformer 去噪器](https://zread.ai/idptools/starling/14-vision-transformer-denoiser)
+
+---
+slug:14-vision-transformer-denoiser
+blog_type:normal
+---
+
+
+**Vision Transformer Denoiser**（ViT Denoiser）是 Starling 潜扩散管道中的核心神经网络，负责预测每个扩散时间步的噪声。与图像扩散模型中普遍采用的传统 U-Net 去噪器不同，Starling 采用了基于分块的 Vision Transformer 架构，该架构通过自注意力机制对潜距离图的空间分块进行推理，同时通过交叉注意力机制关注蛋白质序列嵌入。此设计使去噪器能够在单次注意力操作中捕获整个距离图上的**长距离空间相关性**——这是蛋白质结构生成中的一项关键能力，因为在序列中相距较远的残基在 3D 空间中可能彼此邻近。
+
+来源: [vit.py](starling/models/vit.py#L1-L123), [transformer.py](starling/models/transformer.py#L1-L385), [attention.py](starling/models/attention.py#L1-L361)
+
+## 架构概述
+
+ViT Denoiser 将含噪潜表示（形状为 `B×1×24×24`）转换为具有相同形状的噪声预测，其条件依赖于扩散时间步和蛋白质序列嵌入。数据流经五个不同阶段：**输入投影**、**分块化**、**自适应时间调制**、**DiT 块堆叠**和**输出重建**。
+
+```mermaid
+flowchart TB
+    subgraph Input
+        X["Noisy Latent x<br/>(B, 1, 24, 24)"]
+        T["Timestep t"]
+        S["Sequence Embedding<br/>(B, L, context_dim)"]
+        M["Attention Mask<br/>(B, L)"]
+    end
+
+    subgraph "1. Input Projection"
+        CI["conv_in<br/>Conv2d(1→64, k=3, p=1)"]
+    end
+
+    subgraph "2. Patch Embedding"
+        PE["PatchEmbed<br/>Conv2d(64→512, k=3, s=3)<br/>+ LayerNorm + PosEmb"]
+    end
+
+    subgraph "3. Adaptive Time Modulation"
+        TMB["SinusoidalPosEmb(64)"]
+        TML["MLP: 64→512→1024"]
+        ADM["x·(1+scale) + shift"]
+    end
+
+    subgraph "4. DiT Blocks ×12"
+        DB1["DiTBlock 1"]
+        DB2["DiTBlock 2"]
+        DBN["DiTBlock 12"]
+        subgraph "Each DiTBlock"
+            SA["Self-Attention<br/>(8 heads)"]
+            CA["Cross-Attention<br/>(8 heads, seq context)"]
+            FF["FeedForward<br/>(GeGLU expansion ×4)"]
+        end
+    end
+
+    subgraph "5. Output Reconstruction"
+        OP["Linear→ReLU→Linear<br/>+ Rearrange to spatial"]
+        CO["conv_out<br/>Conv2d(64→1, k=3, p=1)"]
+    end
+
+    OUT["Predicted Noise ε<br/>(B, 1, 24, 24)"]
+
+    X --> CI --> PE --> ADM
+    T --> TMB --> TML --> ADM
+    ADM --> DB1 --> DB2 --> DBN
+    S --> CA
+    M --> CA
+    DBN --> OP --> CO --> OUT
+```
+
+来源: [vit.py](starling/models/vit.py#L31-L122), [transformer.py](starling/models/transformer.py#L296-L339)
+
+## 分块嵌入
+
+`PatchEmbed` 模块将中间特征图转换为适合 Transformer 处理的分块 token 序列。**步幅卷积**同时作为分块提取和投影机制——每个 `patch_size × patch_size` 的空间区域在单次操作中被线性投影到 `embed_dim` 维，避免了简单展平带来的信息损失。投影之后，`LayerNorm` 稳定了 token 表示，而**可学习的位置嵌入**（形状为 `1 × num_tokens × embed_dim`）注入了空间感知能力。在默认 `patch_size=3` 和 24×24 空间分辨率下，token 序列长度为 `(24/3)² = 64` 个 token。
+
+| 参数 | 值 | 推导 |
+|-----------|-------|------------|
+| 输入通道数 | 64 (BASE) | `conv_in` 的输出 |
+| 分块大小 | 3 | 分块化 Conv2d 的核大小与步幅 |
+| 嵌入维度 | 512 | 与序列编码器输出匹配 |
+| token 数量 | 64 | `(24 × 24) / 3²` |
+| 位置嵌入 | 可学习 | `nn.Parameter`，形状 `(1, 64, 512)` |
+
+来源: [vit.py](starling/models/vit.py#L9-L28)
+
+## 通过自适应调制进行时间步条件化
+
+时间步信息通过受 DiT（基于 Transformer 的可扩展扩散模型）启发的**自适应缩放与平移**机制注入。连续的时间步首先被编码为正弦位置嵌入，随后通过一个带有 SiLU 激活函数的两层 MLP 扩展，以生成 `2 × embed_dim` 的条件向量。该向量被拆分为 **scale** 和 **shift** 参数，用于调制每个分块 token：
+
+```
+scale, shift = time_mlp(t).chunk(2, dim=-1)
+x = x * (1 + scale) + shift
+```
+
+这种仿射调制仅在 Transformer 堆叠之前应用一次，作为一种高效的全局条件化机制。它向所有后续注意力层传达当前潜变量“有多嘈杂”，而无需逐层条件化的开销。正弦编码使用基础频率 `θ = 10000`，这与标准 Transformer 位置编码约定一致。
+
+来源: [vit.py](starling/models/vit.py#L62-L110), [transformer.py](starling/models/transformer.py#L15-L58)
+
+## DiTBlock：自注意力、交叉注意力、前馈网络
+
+12 个 `DiTBlock` 层均遵循**预归一化残差架构**，包含三个子层：自注意力、交叉注意力和前馈网络。自注意力层使每个空间分块 token 能够关注所有其他分块 token，从而捕获整个距离图上的全局空间相关性。交叉注意力层随后以蛋白质序列嵌入为条件对这些空间表示进行调制——每个分块 token 查询序列上下文（以序列编码器输出的键和值作为来源），使去噪器能够学习哪些序列区域会影响哪些空间区域。前馈网络使用 **GeGLU** 激活函数（门控 GELU），该函数先投影到 `4 × embed_dim` 再降维还原，从而提供非线性变换能力。
+
+```mermaid
+flowchart LR
+    XIN["x (B, N, D)"] --> N1["LayerNorm"]
+    N1 --> SA["Self-Attention<br/>(8 heads)"]
+    SA --> R1["+ residual"]
+    XIN --> R1
+    R1 --> N2["LayerNorm"]
+    N2 --> CA["Cross-Attention<br/>(8 heads, seq context)"]
+    SEQ["sequence (B, L, C)"] --> CA
+    MASK["mask (B, L)"] --> CA
+    CA --> R2["+ residual"]
+    R1 --> R2
+    R2 --> N3["LayerNorm"]
+    N3 --> FF["FeedForward<br/>(GeGLU ×4)"]
+    FF --> R3["+ residual"]
+    R2 --> R3
+    R3 --> XOUT["x' (B, N, D)"]
+```
+
+来源: [transformer.py](starling/models/transformer.py#L296-L339), [attention.py](starling/models/attention.py#L11-L79)
+
+## 多头注意力实现
+
+`MultiHeadAttention` 模块通过 `context_dim` 参数为自注意力和交叉注意力实现了统一接口——当 `context_dim` 与 `embed_dim` 不同时，键和值投影从 `context_dim` 映射到 `embed_dim`（交叉注意力）；否则，它们在 `embed_dim` 内部映射（自注意力）。该实现利用了 PyTorch 的 **`F.scaled_dot_product_attention`** (≥2.0)，该函数在可用时会自动分派至 FlashAttention 或显存高效注意力内核。注意力掩码同时支持查询和上下文掩码，两者通过外积逻辑组合生成 `(B, num_heads, N, S)` 的布尔掩码，以防止注意力关注变长蛋白质序列中的填充 token。
+
+| 属性 | 自注意力 | 交叉注意力 |
+|----------|---------------|-----------------|
+| 查询来源 | 分块 token | 分块 token |
+| 键/值来源 | 分块 token | 序列 token |
+| 查询维度 | 512 | 512 |
+| 上下文维度 | 512 | 512 |
+| 头数 | 8 | 8 |
+| 头维度 | 64 | 64 |
+| 掩码 | 无（固定 64 个 token） | 序列掩码（变长） |
+
+来源: [attention.py](starling/models/attention.py#L11-L79), [attention.py](starling/models/attention.py#L82-L159)
+
+## 输出重建
+
+输出路径与输入路径的顺序相反：`out_projection` 模块首先通过一个带 ReLU 的两层 MLP 将每个 token 从 `embed_dim` 映射回 `BASE × patch_size²`，然后使用 einops 的 `Rearrange` 操作并显式指定 `(h, w, p1, p2, c)` 维度解包，将 token 序列**重排**为空间特征图。这重建出 `(B, 64, 24, 24)` 的中间特征图。最后的 `conv_out`（具有 64 个输入通道 → 1 个输出通道、核大小为 3、填充为 1 的 Conv2d）在原始 24×24 分辨率下生成单通道噪声预测。
+
+来源: [vit.py](starling/models/vit.py#L80-L94), [vit.py](starling/models/vit.py#L117-L121)
+
+## 默认配置
+
+ViT Denoiser 在扩散训练期间以固定配置实例化。下表列举了训练管道中使用的每个架构参数及其默认值。
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `num_layers` | 12 | 堆叠的 DiTBlock 层数 |
+| `embed_dim` | 512 | Transformer 中的 token 嵌入维度 |
+| `num_heads` | 8 | 每个自/交叉注意力层的注意力头数 |
+| `context_dim` | 512 | 序列编码器输出维度（交叉注意力的键/值） |
+| `patch_size` | 3 | 分块化时的空间分块大小 |
+| `BASE` | 64 | conv_in / conv_out 的内部通道维度 |
+| 空间分辨率 | 24×24 | 固定的潜空间大小（单通道） |
+| token 数量 | 64 | 每个样本 `(24 / 3)²` 个分块 |
+| FFN 扩展 | 4× | GeGLU 前馈网络隐藏维度乘数 |
+
+训练管道中的实例化使用 `ViT(12, 512, 8, 512)`，其中 `context_dim` 等于 `embed_dim`，因为序列编码器（配置为 12 层、512 嵌入维度、8 个头）在相同维度空间中产生输出。
+
+来源: [diffusion_train.py](starling/training/diffusion_train.py#L81-L112), [sequence_encoder.yaml](starling/configs/sequence_encoder/sequence_encoder.yaml#L1-L3)
+
+## 前向传播签名
+
+ViT 去噪器的前向方法接受四个输入并返回一个输出：
+
+```python
+def forward(self, x, timestep, sequence, mask) -> torch.Tensor:
+```
+
+| 参数 | 形状 | 类型 | 描述 |
+|----------|-------|------|-------------|
+| `x` | `(B, 1, 24, 24)` | `torch.Tensor` | 含噪潜距离图 |
+| `timestep` | `(B, 1)` | `torch.Tensor` | 扩散时间步（连续） |
+| `sequence` | `(B, L, 512)` | `torch.Tensor` | 序列编码器输出（上下文） |
+| `mask` | `(B, L)` | `torch.Tensor` | 用于填充的布尔注意力掩码 |
+| **返回值** | `(B, 1, 24, 24)` | `torch.Tensor` | 预测的噪声 ε(x_t, t, seq) |
+
+在 `DiffusionModel` 训练循环中，ViT 的调用方式为 `self.model(x_noised, t, labels, mask)`，其中 `labels` 是预计算的序列编码器输出，`x_noised` 是时间步 `t` 处前向扩散后的潜编码。
+
+来源: [vit.py](starling/models/vit.py#L96-L122), [diffusion.py](starling/models/diffusion.py#L296-L302)
+
+## 与扩散管道的关系
+
+ViT Denoiser 在**潜扩散**框架内运行。外部 `DiffusionModel` 模块处理前向扩散过程（通过 `q_sample` 向 VAE 编码的距离图添加噪声）、损失计算（预测噪声与真实噪声之间的 MSE，可选带有 min-SNR 加权）以及反向采样轨迹。去噪器本身纯粹是一个**噪声预测网络**——它接收一个含噪潜变量并估计其中的噪声分量，采样器随后使用该估计进行迭代去噪。序列条件化首先流经 `SequenceEncoder`，生成 ViT 交叉注意力层所消费的 `(B, L, 512)` 上下文张量。
+
+<CgxTip>ViT 去噪器取代了扩散模型中通常使用的传统 U-Net 架构。关键的架构优势在于，自注意力机制能够同时对所有 64 个分块 token 进行操作——每个分块都可以直接关注其他任何分块，而无论空间距离如何。这对于蛋白质距离图尤为重要，因为在去噪过程中必须联合解析长距离残基接触（在序列中相距较远但在 3D 空间中相近）。</CgxTip>
+
+<CgxTip>自适应时间调制（`x * (1 + scale) + shift`）仅在 Transformer 堆叠之前应用一次，而非像完整的 AdaLN-Zero DiT 那样逐层应用。这是一种设计权衡：它减少了参数量和计算量，同时仍提供强时间步条件化，但可能会限制去噪器在不同 Transformer 深度上表现出高度依赖时间步的行为的能力。</CgxTip>
+
+来源: [diffusion.py](starling/models/diffusion.py#L55-L187), [diffusion.py](starling/models/diffusion.py#L253-L326)
+
+## 后续步骤
+
+- 了解去噪器如何被加载、编译和部署用于推理：[模型加载与编译](15-model-loading-and-compilation)
+- 探索使用此去噪器驱动反向扩散的采样算法：[采样策略](8-sampling-strategies)
+- 查看生成交叉注意力上下文的序列编码器：[序列编码器](5-sequence-encoder)
+- 回顾封装此去噪器的完整扩散模型设计：[扩散模型设计](7-diffusion-model-design)
+
+---
+
+- [深入解析/模型内部机制/模型加载与编译](https://zread.ai/idptools/starling/15-model-loading-and-compilation)
+
+---
+slug:15-model-loading-and-compilation
+blog_type:normal
+---
+
+
+Starling的模型加载基础设施控制着两个核心预训练模型——**VAE距离图编码器**和**ViT条件扩散模型**——如何被解析、获取、反序列化，以及可选地编译以加速推理。该系统实现了带有多种来源权重解析（本地文件系统、环境变量和GitHub Releases URLs）的懒加载单例模式、PyTorch Hub集成，以及对推理关键子图选择性使用基于`torch.compile`的即时编译。
+
+## 权重解析与来源优先级
+
+Starling附带两个必须在运行时可用的检查点文件：
+
+| 检查点 | 默认文件名 | 作用 |
+|---|---|---|
+| **VAE Encoder** | `STARLING_v2.0.0_ViT_VAE_2025_10_14.ckpt` | 将距离图压缩到潜空间；将潜空间采样解码回距离图 |
+| **DDPM** | `STARLING_v2.0.0_ViT_DDPM_2025_10_14.ckpt` | 带有ViT主干网络和序列编码器的去噪扩散模型 |
+
+每个检查点的解析顺序遵循严格的优先级链。环境变量覆盖一切，回退到托管在`idptools/starling`仓库下的GitHub Releases URLs：
+
+```
+STARLING_ENCODER_PATH env var  →  https://github.com/idptools/starling/releases/download/v2.0.0/<filename>
+STARLING_DDPM_PATH env var    →  https://github.com/idptools/starling/releases/download/v2.0.0/<filename>
+```
+
+当检测到URL（默认情况）时，`ModelManager.load_from_path_or_url`内部函数使用`torch.hub.download_url_to_file`将检查点下载到PyTorch Hub的缓存目录（`torch.hub.get_dir() + "/checkpoints/"`）中，如果文件已在本地存在则跳过下载。此设计确保首次使用的用户仅产生一次下载开销，而后续运行则直接从缓存中瞬间解析。需要离线部署或自定义模型变体的用户，可以将环境变量指向本地`.ckpt`路径，从而完全绕过网络访问。
+
+来源: [configs.py](starling/configs.py#L8-L91), [model_loading.py](starling/inference/model_loading.py#L21-L46)
+
+## 用户配置覆盖
+
+除了环境变量，Starling还支持位于`~/.starling_weights/configs.py`的基于Python的用户配置文件。当此文件存在时，`load_user_config()`函数会在导入时执行它，并覆盖`starling.configs`中任何匹配的全局变量——包括`DEFAULT_ENCODE_WEIGHTS`、`DEFAULT_DDPM_WEIGHTS`、`DEFAULT_MODEL_DIR`以及所有编译设置。此机制允许进行持久的逐用户自定义，而无需修改已安装的包：
+
+```python
+# ~/.starling_weights/configs.py
+DEFAULT_ENCODE_WEIGHTS = "my_custom_vae.ckpt"
+DEFAULT_DDPM_WEIGHTS = "my_custom_ddpm.ckpt"
+TORCH_COMPILATION = {"enabled": True, "options": {"mode": "reduce-overhead"}}
+```
+
+来源: [configs.py](starling/configs.py#L42-L69)
+
+## ModelManager与懒加载架构
+
+`ModelManager`类是模型生命周期管理的中央协调器。它维护两个实例属性——`encoder_model`和`diffusion_model`——两者均初始化为`None`，并在首次通过`get_models()`方法访问时被填充。这种懒加载模式确保将反序列化两个深度模型的庞大内存和计算开销延迟到实际需要时：
+
+```mermaid
+sequenceDiagram
+    participant Caller as generate() / sequence_encoder()
+    participant MM as ModelManager
+    participant FS as Filesystem / GitHub
+    participant PL as PyTorch Lightning
+
+    Caller->>MM: get_models(device, encoder_path, ddpm_path)
+    alt models already loaded
+        MM-->>Caller: return cached (encoder, diffusion)
+    else first call
+        MM->>FS: resolve encoder_path (URL → cache → local)
+        MM->>FS: resolve ddpm_path (URL → cache → local)
+        MM->>PL: SequenceEncoder(12, 512, 8)
+        MM->>PL: ViT(12, 512, 8, 512)
+        MM->>PL: DiffusionModel.load_from_checkpoint(ddpm_path, ...)
+        MM->>PL: VAE.load_from_checkpoint(encoder_path, ...)
+        alt TORCH_COMPILATION["enabled"]
+            MM->>MM: compile() → torch.compile subgraphs
+        end
+        MM-->>Caller: return (encoder, diffusion)
+    end
+```
+
+检查点加载过程重建了两个复合模型。**扩散模型**检查点通过`DiffusionModel.load_from_checkpoint`加载，它接收三个构造函数参数：一个新实例化的`ViT(12, 512, 8, 512)`去噪器、一个新实例化的`SequenceEncoder(12, 512, 8)`，以及`encoder_path`字符串。在`DiffusionModel.__init__`内部，`distance_map_encoder`路径触发了一个*嵌套的*检查点加载——`VAE.load_from_checkpoint(distance_map_encoder)`——该操作会冻结VAE的参数，以便在扩散训练验证期间将其用作固定的潜空间编码器。另外，顶级`encoder_model`作为另一个`VAE.load_from_checkpoint`实例加载，用于在推理时将采样的潜变量解码回距离图。
+
+模型架构参数`(12, 512, 8)`对应于`num_layers=12`、`embed_dim=512`、`num_heads=8`，与序列编码器配置中的值相匹配。ViT的`context_dim=512`与序列编码器的输出嵌入维度对齐，确保DiT块中的交叉注意力层能够使用序列条件向量而不会出现维度不匹配。
+
+<CgxTip>`ModelManager`单例在`generation.py`中作为`model_manager = ModelManager()`于模块级别实例化。因为`ensemble_generation.py`从`generation`导入，所以在单个Python会话中对`generate()`或`sequence_encoder()`的所有调用都共享相同的已加载模型——从而避免了在重复调用时进行冗余的反序列化。</CgxTip>
+
+来源: [model_loading.py](starling/inference/model_loading.py#L16-L101), [diffusion.py](starling/models/diffusion.py#L55-L143), [generation.py](starling/inference/generation.py#L23-L26), [sequence_encoder.yaml](starling/configs/sequence_encoder/sequence_encoder.yaml#L1-L3)
+
+## PyTorch编译流水线
+
+Starling集成了`torch.compile`，用于对推理关键模型子图进行即时图编译。编译**默认禁用**（`TORCH_COMPILATION["enabled"] = False`），必须通过`set_compilation_options()` API、用户配置文件或在模型加载前设置`TORCH_COMPILATION`全局变量来显式激活。
+
+### 编译的子图
+
+启用编译时，`ModelManager.compile()`方法选择性地编译两个子图，而非整个模型层级：
+
+| 子图 | 访问路径 | 原理 |
+|---|---|---|
+| **ViT Denoiser** | `diffusion_model.model` | ViT前向传播是迭代去噪期间的瓶颈（每个时间步每个样本调用一次） |
+| **VAE Decoder** | `encoder_model.decoder` | ResNet解码器在每个构象中调用一次，将潜空间采样映射回距离图 |
+
+`SequenceEncoder`被故意**不编译**（源码中相关行已被注释掉），因为它的前向传播每个序列仅调用一次，无法从编译开销摊销中获得实质性收益。
+
+### 编译选项
+
+默认编译配置提供了合理的默认值，同时暴露了完整的`torch.compile`参数面：
+
+```python
+TORCH_COMPILATION = {
+    "enabled": False,
+    "options": {
+        "mode": "default",        # "default" | "reduce-overhead" | "max-autotune"
+        "fullgraph": True,       # 编译整个前向图
+        "backend": "inductor",   # 基于Triton的后端
+        "dynamic": None,         # 动态形状处理
+    },
+}
+```
+
+三种`mode`值代表了一种权衡范围：
+
+| 模式 | 编译时间 | 推理速度 | 最适用场景 |
+|---|---|---|---|
+| `"default"` | 中等 | 良好 | 通用场景，首次编译 |
+| `"reduce-overhead"` | 快 | 中等 | 减少Python开销而无需激进优化 |
+| `"max-autotune"` | 慢（内核搜索） | 最佳 | 在固定硬件上重复推理；最高吞吐量 |
+
+### 编程式配置
+
+顶级`starling.set_compilation_options()`函数为运行时编译控制提供了标准API。它接受任何有效的`torch.compile`关键字参数，并在设置更改时自动使缓存的模型失效——重置`ModelManager`单例，以便后续的`get_models()`调用使用更新的选项重新加载和重新编译：
+
+```python
+import starling
+
+# 启用减少开销的编译
+starling.set_compilation_options(enabled=True, mode="reduce-overhead")
+
+# 高级：使用Triton CUDA图进行完整自动调优
+starling.set_compilation_options(
+    enabled=True,
+    mode="max-autotune",
+    backend="inductor",
+    fullgraph=False,
+    dynamic=True,
+    options={"triton.cudagraphs": True}
+)
+
+# 使用编译后的模型生成集成系综
+results = starling.generate("MDEKRMKGLGL")
+```
+
+`set_compilation_options()`中的失效逻辑会检查`model_manager.encoder_model`是否已被填充；如果是，它将用一个全新的`ModelManager()`实例替换该单例。这确保了过时的编译图不会在配置更改后持续存在。
+
+<CgxTip>编译是一项**一次性的前期开销**，根据模式和硬件不同，可能需要30–120秒。编译完成后，所有后续的推理调用将完全绕过Python解释，产生1.5–4倍的加速。对于多次调用`generate()`的交互式笔记本或脚本，摊销后的收益是显著的。对于单次调用的脚本，编译开销可能超过节省的时间——请使用`"reduce-overhead"`模式或保持编译禁用。</CgxTip>
+
+来源: [configs.py](starling/configs.py#L27-L35), [model_loading.py](starling/inference/model_loading.py#L95-L130), [__init__.py](starling/__init__.py#L16-L76)
+
+## 训练时编译
+
+与推理编译分开，`VAE`类通过其`setup()`钩子支持在训练期间使用`torch.compile`。当`stage == "fit"`且`compile_mode`不为`None`时，`encode`、`decode`和`forward`方法将使用指定的模式单独编译：
+
+```python
+# 在 VAE.setup() 中 — 仅在 PyTorch Lightning 训练期间触发
+if stage == "fit" and self.compile_mode is not None:
+    self.encode = torch.compile(self.encode, mode=self.compile_mode)
+    self.decode = torch.compile(self.decode, mode=self.compile_mode)
+    self.forward = torch.compile(self.forward, mode=self.compile_mode)
+```
+
+训练的`compile_mode`在VAE模型YAML中配置为`"max-autotune-no-cudagraphs"`。此训练编译路径完全独立于推理时的`ModelManager.compile()`流程，仅当模型通过PyTorch Lightning的`Trainer.fit()`进行训练时才激活。
+
+来源: [vae.py](starling/models/vae.py#L251-L257), [model.yaml](starling/configs/vae_model/model.yaml#L15-L16)
+
+## PyTorch Hub集成
+
+Starling注册了一个`hubconf.py`入口点，通过PyTorch Hub的标准接口暴露模型加载：
+
+```python
+import torch
+encoder, diffusion = torch.hub.load("idptools/starling", "starling_model", pretrained=True, device="cuda")
+```
+
+`starling_model()`函数实例化一个新的`ModelManager`并调用`get_models()`，返回`(encoder_model, diffusion_model)`元组。请注意，这会创建一个**全新的**`ModelManager`实例，与`generation.py`中的单例不同，因此通过Hub加载的模型不与通过`starling.generate()`加载的模型共享状态。
+
+来源: [hubconf.py](hubconf.py#L1-L18)
+
+## 设备放置与检查点映射
+
+两次检查点加载均使用了PyTorch Lightning带有`map_location=device`参数的`load_from_checkpoint`，确保模型权重在反序列化期间直接放置在目标设备（CPU、CUDA或MPS）上——从而避免了中间的CPU→GPU传输。`device`参数在`get_models()`中默认为`"cpu"`以实现跨平台兼容性，但通常在生成前端检测到GPU硬件时，被`check_device()`工具覆盖为`"cuda"`或`"mps"`。
+
+来源: [model_loading.py](starling/inference/model_loading.py#L48-L61), [utilities.py](starling/utilities.py#L148-L200)
+
+## 加载流程总结
+
+```mermaid
+flowchart TD
+    A[get_models called] --> B{Models cached?}
+    B -->|Yes| C[Return cached models]
+    B -->|No| D[Resolve weight paths]
+    D --> E{Path is URL?}
+    E -->|Yes| F[Download to Hub cache if missing]
+    E -->|No| G[Use local path directly]
+    F --> H[Validate file exists]
+    G --> H
+    H --> I["Instantiate SequenceEncoder + ViT"]
+    I --> J[Load DiffusionModel checkpoint]
+    J --> K["DiffusionModel internally loads VAE encoder"]
+    K --> L[Load standalone VAE encoder checkpoint]
+    L --> M{Compilation enabled?}
+    M -->|No| N[Cache & return models]
+    M -->|Yes| O[torch.compile ViT denoiser]
+    O --> P[torch.compile VAE decoder]
+    P --> N
+```
+
+若要深入了解编译模型架构本身，请参阅[视觉Transformer去噪器](14-vision-transformer-denoiser)了解ViT内部原理，以及[VAE潜空间](6-vae-latent-space)了解编码器/解码器结构。有关所有加载和编译参数的配置，请参阅[配置参考](17-configuration-reference)。
+
+---
