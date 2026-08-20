@@ -1,0 +1,3050 @@
+# Junjie-Zhu/Phanto-IDP
+
+Source: https://zread.ai/Junjie-Zhu/Phanto-IDP
+
+# 入门
+
+- [入门/概述](https://zread.ai/Junjie-Zhu/Phanto-IDP/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**Phanto-IDP** 是一个基于 VAE 的生成式深度学习模型，旨在**精确重建**内在无序蛋白（IDP）的构象系综，并**快速生成**未见过的骨架结构。它结合了用于空间编码的图卷积网络和用于序列解码的 Transformer 解码器模块，在直接监督 3D 结构保真度的 **Frame-Aligned Point Error (FAPE)** 损失函数下进行训练。该模型学习了骨架原子 (N, Cα, C) 坐标的潜空间，从而既能进行确定性重建，也能对多样化且物理上合理的 IDP 构象进行随机采样。
+
+![Phanto-IDP](https://github.com/Junjie-Zhu/Phanto-IDP/blob/main/ImgSrc/Phanto-IDP.png?raw=true)
+
+来源: [README.md](/README.md#L1-L5), [model.py](/model.py#L12-L16)
+
+## Phanto-IDP 解决了什么问题？
+
+内在无序蛋白（IDP）不会折叠成单一稳定结构——相反，它们在溶液中呈现出**广泛的构象系综**。传统的分子动力学（MD）模拟可以对这些系综进行采样，但计算成本高昂，通常需要微秒级的模拟时间。Phanto-IDP 通过从 MD 轨迹中学习 IDP 骨架几何结构的分布来解决这一问题，其生成新构象的速度比运行额外模拟**快数个数量级**，同时保持了由 RMSD 和 Ramachandran 分布与参考数据的一致性所衡量的结构准确性。
+
+来源: [README.md](/README.md#L1-L5)
+
+## 架构概览
+
+该模型遵循 **GCN 编码器 → VAE 瓶颈层 → Transformer 解码器** 流程。蛋白质结构首先被表示为原子级图，其邻域特征由 C++ 预处理工具 (mylddt) 提取。GCN 编码器将这些图转换为逐残基嵌入，随后投影到变分潜空间中。Transformer 解码器接着将采样得到的潜向量细化为逐残基的 3×3 旋转帧预测，对应于 (N, Cα, C) 骨架原子坐标。
+
+```mermaid
+flowchart TB
+    subgraph Input["输入: 蛋白质图"]
+        A1["原子嵌入<br/>(独热 → 学习)"]
+        A2["邻域特征<br/>(距离, 方向, 键)"]
+        A3["邻接表<br/>(K-近邻)"]
+    end
+
+    subgraph Encoder["GCN 编码器"]
+        B1["ConvLayer × N<br/>(门控消息传递)"]
+    end
+
+    subgraph VAE["VAE 瓶颈层"]
+        C1["μ = Linear(h_a×3 → h_g)"]
+        C2["log σ² = Linear(h_a×3 → h_g)"]
+        C3["z = μ + ε·σ<br/>(重参数化)"]
+    end
+
+    subgraph Decoder["Transformer 解码器"]
+        D1["IdpGANBlock × N<br/>(自注意力 + FFN)"]
+        D2["Linear → 9 维<br/>(3 原子 × 3 坐标)"]
+    end
+
+    subgraph Output["输出"]
+        E1["骨架帧<br/>(逐残基 N, Cα, C)"]
+    end
+
+    Input --> Encoder --> VAE --> Decoder --> Output
+```
+
+来源: [model.py](/model.py#L31-L99), [layers.py](/layers.py#L8-L46), [layers.py](/layers.py#L49-L130)
+
+## 核心组件
+
+下表总结了各主要子系统及其在 Phanto-IDP 中的作用：
+
+| 组件 | 核心文件 | 作用 | 关键参数 |
+|---|---|---|---|
+| **GCN ConvLayer** | `layers.py` | 原子-邻域图上的门控消息传递 | `h_a=64`, `h_b` (键维度), `n_conv` 层 |
+| **IdpGANBlock** | `layers.py` | 带有自注意力与前馈网络的 Transformer 解码器块 | `d_model=128`, `nhead=8`, `embed_dim=32` |
+| **IdpGANLayer** | `layers.py` | 带有缩放点积亲和度的多头注意力 | `head_dim=16`, `dp_attn_norm=d_model` |
+| **PhantoIDP 模型** | `model.py` | 完整 VAE：编码器、瓶颈层、解码器、损失计算 | `h_a`, `h_g`, `n_conv` |
+| **FAPE 损失** | `utils.py` | 旋转变换距离上的帧对齐点误差 | `Z=10`, `clamp=10` |
+| **KL 散度** | `utils.py` | 针对 μ 和 log σ² 的标准 VAE 正则化项 | 调度权重 |
+| **ProteinDataset** | `traj_dataset.py` | 加载图 pkl 与 PDB 目标的 PyTorch Dataset | `pkl_dir`, `protein_dir` |
+| **C++ 预处理器** | `preprocess/src/` | 从 PDB 提取原子、键、触点及 LDDT | `dmax`, `topn` 邻居 |
+
+来源: [layers.py](/layers.py#L8-L247), [model.py](/model.py#L12-L99), [utils.py](/utils.py#L80-L120), [traj_dataset.py](/traj_dataset.py#L76-L174)
+
+## 项目结构
+
+```
+Phanto-IDP/
+├── main.py                  # 训练入口
+├── generate.py              # 构象生成入口
+├── model.py                 # PhantoIDP VAE 模型定义
+├── layers.py                # ConvLayer, IdpGANBlock, IdpGANLayer
+├── utils.py                 # FAPE 损失, KL 损失, RMSD, 辅助函数
+├── arguments.py             # CLI 参数定义
+├── config.py                # 设备与张量类型配置
+├── pdb_parse.py             # PDB→图 pkl 转换 (Python)
+├── traj_dataset.py          # PyTorch Dataset 与 DataLoader
+├── get_list.py              # 轨迹文件列表工具
+├── traj_process.sh          # Shell: 从 PDB 中剥离非骨架原子
+├── ckpt/                    # 预训练模型检查点 (14 种蛋白)
+├── preprocess/              # 用于图提取的 C++ mylddt 工具集
+│   ├── src/                 #   Atom, Chain, MyLDDT, kdtree 源码
+│   ├── Makefile             #   构建指令
+│   └── preprocessor.sh      #   自动化脚本
+├── Analysis/                # 生成后分析工具
+│   ├── rmsd_calculation.py  #   基于 Biotite 叠加的 RMSD 计算
+│   ├── rmsd_plot.py         #   KDE 分布绘图
+│   ├── ramachandran.py      #   φ/ψ 二面角密度图
+│   ├── pca.py               #   距离矩阵 PCA
+│   ├── rg.py                #   回转半径统计
+│   └── refine_openmm.py     #   OpenMM 能量最小化
+├── Scripts/                 # 共享分析工具
+│   └── biotite_utils.py     #   序列、二面角、RMSD、pLDDT 提取器
+└── StrucRef/                # 用于评估的参考结构
+```
+
+来源: [main.py](/main.py#L1-L20), [generate.py](/generate.py#L1-L20), [arguments.py](/arguments.py#L1-L50), [preprocess/src/main.cpp](/preprocess/src/main.cpp#L1-L30)
+
+## 预训练检查点
+
+Phanto-IDP 提供了 **14 个预训练检查点**，涵盖了一系列经过充分研究的 IDP 和无序区域。这些检查点允许无需训练即可直接生成：
+
+| 检查点 | 蛋白质 / 区域 | 类型 |
+|---|---|---|
+| `RS1_best.pth.tar` | RS1 | 无序区域 |
+| `PaaA2_best.pth.tar` | PaaA2 | 无序区域 |
+| `synuclein_best.pth.tar` | α-突触核蛋白 | 完整 IDP |
+| `Abeta40_best.pth.tar` | Aβ40 | 淀粉样肽 |
+| `abeta42_best.pth.tar` | Aβ42 | 淀粉样肽 |
+| `ACTR_best.pth.tar` | ACTR | 无序区域 |
+| `CspTm_best.pth.tar` | CspTm | 冷激蛋白 |
+| `drkN_best.pth.tar` | drkN SH3 | 无序区域 |
+| `Histain5_best.pth.tar` | Histatin-5 | 抗菌肽 |
+| `p15PAF_best.pth.tar` | p15PAF | 无序区域 |
+| `R17_best.pth.tar` | R17 | 无序区域 |
+| `SPR17_best.pth.tar` | SPR17 | 无序区域 |
+| `ubiquitin_best.pth.tar` | 泛素 | 折叠蛋白 (基准) |
+| `AAQAA3.pth.tar` | (AAQAA)₃ | 重复肽 |
+
+来源: [ckpt/](/ckpt/), [README.md](/README.md#L38-L43)
+
+## 端到端工作流
+
+从原始 MD 轨迹到验证结构的完整流程包含以下阶段：
+
+```mermaid
+flowchart LR
+    A["MD 轨迹<br/>(多帧 PDB)"] --> B["traj_process.sh<br/>剥离至骨架"]
+    B --> C["mylddt (C++)<br/>提取图特征"]
+    C --> D["pdb_parse.py<br/>构建 pkl 数据集"]
+    D --> E["main.py<br/>训练 PhantoIDP"]
+    E --> F["generate.py<br/>采样构象"]
+    F --> G["Analysis/<br/>RMSD, Ramachandran, Rg"]
+    G --> H["refine_openmm.py<br/>能量最小化"]
+
+    style A fill:#f9f,stroke:#333
+    style E fill:#bbf,stroke:#333
+    style F fill:#bfb,stroke:#333
+    style H fill:#fbb,stroke:#333
+```
+
+来源: [traj_process.sh](/traj_process.sh#L1-L9), [pdb_parse.py](/pdb_parse.py#L1-L30), [main.py](/main.py#L22-L80), [generate.py](/generate.py#L100-L130)
+
+<CgxTip>训练损失结合了 FAPE（权重由初始 10.0 衰减至 1.0 的调度控制）与 KL 散度（权重由 1e-4 逐步增加至 1.5e-2 的调度控制）。这种课程式的权重策略至关重要：训练早期侧重于结构准确性（高 FAPE 权重），随后逐步提高 KL 权重以正则化潜空间。权重调度在 `trainModel()` 中按epoch进行索引。</CgxTip>
+
+<CgxTip>生成过程使用了**低温度**重参数化（默认 `temp=0.05`）在所学均值附近采样，以生成接近训练分布的结构。提高温度会产生更多样但准确性较低的构象——在高温下的无条件生成仍然是一个开放挑战。</CgxTip>
+
+## 核心技术亮点
+
+- **基于图的输入表示**：每个构象被编码为原子级图，其 K-近邻边包含距离和方向特征，由高性能 C++ 预处理器提取
+- **门控 GCN 卷积**：消息传递对邻居消息使用 Sigmoid 门控滤波，使模型能够学习哪些空间触点对每个原子具有信息量
+- **旋转帧输出**：模型预测逐残基的 3×3 旋转矩阵（通过 N/Cα/C 坐标的 Gram-Schmidt 正交化），FAPE 损失在该帧下运算——使损失**对全局刚体变换保持不变性**
+- **多 GPU 训练**：内置 `DataParallel` 支持，可跨可用 GPU 自动分配批次
+
+来源: [layers.py](/layers.py#L8-L46), [model.py](/model.py#L136-L165), [utils.py](/utils.py#L80-L110), [main.py](/main.py#L86-L95)
+
+## 接下来读什么
+
+如需新手友好的入门指导，请遵循以下文档阅读路径：
+
+1. **[快速开始](2-quick-start)** — 在 10 分钟内使用预训练模型运行 Phanto-IDP
+2. **[架构概览](3-architecture-overview)** — 完整模型架构与数据流的深度解析
+3. **[VAE 编码器-解码器设计](4-vae-encoder-decoder-design)** — 变分瓶颈层如何连接编码器与解码器
+4. **[构象生成](12-conformation-generation)** — 生成并评估新的 IDP 结构
+5. **[RMSD 与 Ramachandran 分析](13-rmsd-and-ramachandran-analysis)** — 参照参考数据验证生成的系综
+
+---
+
+- [入门/快速开始](https://zread.ai/Junjie-Zhu/Phanto-IDP/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+几分钟内让 Phanto-IDP 运行起来 —— 从环境配置到生成你的首个本征无序蛋白质（IDP）构象。本指南将引导你完成两大核心工作流：使用预训练检查点进行**即时生成**，以及基于你的轨迹数据进行**自定义训练**。
+
+![Phanto-IDP](https://github.com/Junjie-Zhu/Phanto-IDP/blob/main/ImgSrc/Phanto-IDP.png?raw=true)
+
+## 前置条件
+
+Phanto-IDP 需要支持 CUDA 的 GPU 以及以下核心依赖。该模型使用 `torch.nn.DataParallel` 进行多 GPU 训练，无法在仅 CPU 的配置下运行训练或生成任务。
+
+| 包 | 版本 | 用途 |
+|---------|---------|---------|
+| `numpy` | 1.19.5 | 数值运算与数据 I/O |
+| `ConfigArgParse` | 1.2 | 配置与命令行参数解析 |
+| `joblib` | 0.14.1 | 并行预处理任务 |
+| `torch` | 1.8.0 | 深度学习框架（需 CUDA） |
+| `einops` | 0.4.1 | 损失与层模块中的张量重塑 |
+
+以下**可选**包仅用于事后分析与绘图：
+
+| 包 | 版本 | 用途 |
+|---------|---------|---------|
+| `matplotlib` | 3.3.4 | Ramachandran 与 RMSD 图表 |
+| `biotite` | 0.37.0 | 结构 I/O、骨架二面角、RMSD |
+
+来源：[README.md](/README.md#L13-L22), [config.py](/config.py#L1-L6)
+
+## 工作流概述
+
+完整的 Phanto-IDP 流程遵循从原始 PDB 轨迹到生成构象的线性递进。下方的流程图展示了**预训练生成快捷路径**（左分支）和**完整自定义训练路径**（右分支）。
+
+```mermaid
+flowchart TD
+    A[📦 安装依赖] --> B[⚙️ 编译 C++ 预处理器]
+    B --> C{选择你的路径}
+    
+    C -->|预训练模型| D[🖥️ 运行 generate.py]
+    D --> E[📊 分析生成构象]
+    
+    C -->|自定义训练| F[🧪 处理原始轨迹]
+    F --> G[📐 解析 PDB → 图 Pickles]
+    G --> H[🏋️ 使用 main.py 训练]
+    H --> I[🔄 使用已训练检查点生成]
+    I --> E
+    
+    style D fill:#4CAF50,color:#fff
+    style H fill:#2196F3,color:#fff
+    style E fill:#FF9800,color:#fff
+```
+
+<CgxTip>选择**预训练生成**路径可快速获得结果 —— 本仓库内置了 14 个即用型检查点，涵盖 α-synuclein、Aβ42 和 RS1 等蛋白质。仅当处理所提供检查点集之外的蛋白质时，才需要使用自定义训练路径。</CgxTip>
+
+来源：[generate.py](/generate.py#L1-L30), [main.py](/main.py#L1-L50), [pdb_parse.py](/pdb_parse.py#L1-L30)
+
+## 步骤 1 — 环境配置
+
+在专用的虚拟环境中安装核心包：
+
+```bash
+# 创建并激活 conda 环境
+conda create -n phanto-idp python=3.8
+conda activate phanto-idp
+
+# 安装核心依赖
+pip install numpy==1.19.5 ConfigArgParse==1.2 joblib==0.14.1 torch==1.8.0 einops==0.4.1
+
+# 安装分析依赖（可选）
+pip install matplotlib==3.3.4 biotite==0.37.0
+```
+
+设备配置会在导入时自动检测 —— `config.py` 在可用时选择 `cuda`，否则回退至 `cpu`。请验证你的配置：
+
+```python
+import torch
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA version:   {torch.version.cuda}")
+```
+
+来源：[config.py](/config.py#L1-L6), [README.md](/README.md#L13-L22)
+
+## 步骤 2 — 编译 C++ 预处理器
+
+预处理流程依赖于一个已编译的 C++ 可执行文件（`get_features`），该文件从 PDB 文件中提取原子图特征。此步骤在**两种**工作流中都是必需的 —— 即便是生成流程，也至少需要构建一次预处理器，因为 `pdb_parse.py` 会引用该可执行文件的路径。
+
+```bash
+cd preprocess
+make all
+```
+
+如果因编译器兼容性问题导致 `make` 失败，请手动编译：
+
+```bash
+cd preprocess/src
+g++ -Wall -Wno-unused-result -pedantic -O3 -mtune=native -std=c++11 *.cpp -o ../get_features
+cd ../..
+```
+
+验证构建是否成功 —— 你应能看到 `preprocess/get_features` 可执行文件。在 Linux 上，编译器要求 **GCC ≥ 6.1.0**。
+
+来源：[preprocess/Makefile](/preprocess/Makefile#L1-L29), [preprocess/README.md](/preprocess/README.md#L1-L15)
+
+## 步骤 3 — 使用预训练模型生成构象
+
+这是获取结果的最快路径。本仓库提供了涵盖多种 IDP 系统的 **14 个预训练检查点**：
+
+| 检查点文件 | 目标蛋白质 |
+|-----------------|---------------|
+| `RS1_best.pth.tar` | RS1 |
+| `PaaA2_best.pth.tar` | PaaA2 |
+| `synuclein_best.pth.tar` | α-synuclein |
+| `abeta42_best.pth.tar` | Aβ42 |
+| `Abeta40_best.pth.tar` | Aβ40 |
+| `drkN_best.pth.tar` | drkN |
+| `ACTR_best.pth.tar` | ACTR |
+| `CspTm_best.pth.tar` | CspTm |
+| `Histain5_best.pth.tar` | Histatin-5 |
+| `R17_best.pth.tar` | R17 |
+| `SPR17_best.pth.tar` | SPR17 |
+| `p15PAF_best.pth.tar` | p15PAF |
+| `ubiquitin_best.pth.tar` | ubiquitin |
+| `AAQAA3.pth.tar` | AAQAA3 |
+
+### 运行生成
+
+运行前，请确保 `arguments.py` 中的 `--pretrained` 标志或 `settings.conf` 文件指向所需的检查点，并且 `--protein_dir` 和 `--pkl_dir` 指向相应的预处理数据。然后执行：
+
+```bash
+python generate.py <task_name> --temp 0.1
+```
+
+`<task_name>` 是一个必需的位置参数，用于命名输出目录。生成脚本会加载检查点，根据保存的超参数重建 `PhantoIDP` 模型架构，并通过 VAE 重参数化技巧采样新构象：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `--pretrained` | `None` | `.pth.tar` 检查点文件的路径 |
+| `-n` | 5 | 每批采样的结构数量 |
+| `-var` | 0.1 | 采样方差（越高 → 多样性越强，但质量可能越低） |
+| `-outdir` | `conf_gens/` | 生成构象的输出目录 |
+| `-device` | `cuda` | 计算设备选择 |
+
+生成的构象会以 `.dat` 文件的形式保存在 `generates/` 目录下，命名规则为 `predicted.<batch>.<sample>.<conformation>.dat`。
+
+<CgxTip>目前，该模型在使用**真实构象作为种子**进行生成（条件采样）时表现最佳。从纯噪声进行无条件生成仍是活跃的开发方向 —— 无条件样本的结构保真度预计会较低。</CgxTip>
+
+来源：[generate.py](/generate.py#L1-L60), [arguments.py](/arguments.py#L30-L40), [README.md](/README.md#L47-L55)
+
+## 步骤 4 — 基于自定义轨迹数据训练
+
+当处理的蛋白质不在预训练检查点范围内时，你必须处理自己的 MD 轨迹数据并训练新模型。这包含三个子步骤。
+
+### 4a. 处理原始轨迹
+
+Shell 脚本 `traj_process.sh` 负责编排初始的轨迹清理工作 —— 从原始 PDB 文件中提取骨架原子（C、N、CA）并标准化残基名称：
+
+```bash
+# 编辑 traj_process.sh 中的 'path' 变量，使其与你的轨迹目录匹配
+./traj_process.sh
+```
+
+该脚本在内部会调用 `get_list.py` 枚举 PDB 文件，然后使用 `awk` 过滤骨架原子，并使用 `sed` 将 `HIE → HIS` 残基命名标准化。运行前，你必须核实脚本内的 `path` 变量。
+
+### 4b. 将 PDB 转换为图表示
+
+在每个已处理的 PDB 上运行 C++ 特征提取器，然后将 JSON 输出转换为 PyTorch 数据集所使用的 pickle 文件：
+
+```bash
+# 步骤 1：从已处理的 PDB 中提取图特征 (JSON)
+./preprocess/preprocessor.sh ./processed/ ./json/
+
+# 步骤 2：转换 JSON → pickle 并构建原子初始化
+python pdb_parse.py
+```
+
+`pdb_parse.py` 脚本会读取 JSON 特征文件，构建排序后的邻居映射（每个原子最多 50 个邻居），并将图数据序列化为 `.pkl` 文件。它还会生成 `protein_atom_init.json`（氨基酸独热嵌入）和 `protein_id_prop.csv`（蛋白质索引映射）。关键参数：
+
+| 标志 | 默认值 | 描述 |
+|------|---------|-------------|
+| `-datapath` | `../Traj/processed/` | 存放已处理 PDB 文件的目录 |
+| `-savepath` | `./data/pkl/` | pickle 文件的输出目录 |
+| `-cpp_executable` | `./preprocess/get_features` | 编译后的特征提取器路径 |
+| `-parallel_jobs` | 5 | 并行预处理线程数 |
+
+### 4c. 训练模型
+
+使用 `main.py` 启动训练。位置参数为你的实验名称（用于保存目录）：
+
+```bash
+python main.py my_experiment --epochs 400 --batch_size 32
+```
+
+你可能需要调整的关键训练参数：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `--epochs` | 20 | 训练轮数（建议 400 以实现收敛） |
+| `--batch_size` | 64 | 训练批次大小 |
+| `--lr` | 1e-3 | Adam 优化器学习率 |
+| `--train` | 0.5 | 训练集数据比例 |
+| `--val` | 0.25 | 验证集数据比例 |
+| `--test` | 0.25 | 测试集数据比例 |
+| `--h_a` | 64 | 原子隐藏嵌入维度 |
+| `--h_g` | 9 | 图隐藏嵌入维度 |
+| `--n_conv` | 3 | GCN + Transformer 层数 |
+| `--save_checkpoints` | True | 是否保存模型检查点 |
+
+在单 GPU 上，对约 38,000 个构象训练一个 epoch 约需 130 秒。该模型使用 `DataParallel` 实现自动多 GPU 分发。检查点将保存至 `./data/pkl/results/<task_name>/`，其中 `model_best.pth.tar` 会追踪最低的验证损失。
+
+<CgxTip>训练收敛通常在 **400 个 epoch** 内达到。损失权重调度策略会在 360 个 epoch 内自动将 KL 散度权重从 1e-4 退火至 1.5e-2，并在 800 个 epoch 内将 FAPE 权重从 10.0 退火至 1.0，从而防止训练早期的后验坍塌。</CgxTip>
+
+来源：[main.py](/main.py#L1-L80), [traj_process.sh](/traj_process.sh#L1-L9), [pdb_parse.py](/pdb_parse.py#L1-L25), [arguments.py](/arguments.py#L1-L50), [README.md](/README.md#L28-L46)
+
+## 步骤 5 — 分析结果
+
+生成构象后，使用 `Analysis/` 目录下的分析脚本评估结构质量：
+
+| 脚本 | 计算内容 | 输入 |
+|--------|-----------------|-------|
+| `rmsd_calculation.py` | 预测 PDB 与目标 PDB 间的 RMSD | 两个 `.pdb` 文件 |
+| `rmsd_plot.py` | RMSD 分布图 | 生成的 `.dat` 文件 |
+| `ramachandran.py` | φ/ψ 二面角密度图 | 预测的 `.pdb` 文件目录 |
+| `rg.py` | 回转半径分布 | 生成的结构 |
+| `pca.py` | 构象系综的主成分分析 | 生成的构象 |
+| `refine_openmm.py` | 使用 OpenMM 进行结构能量最小化 | 生成的 `.pdb` 文件 |
+
+例如，计算生成结构与参考结构之间的 RMSD：
+
+```bash
+cd Analysis
+python rmsd_calculation.py
+```
+
+从预测结构系综生成 Ramachandran 图：
+
+```bash
+cd Analysis
+python ramachandran.py
+```
+
+`Scripts/biotite_utils.py` 模块提供了基于 `biotite` 库的可复用工具，用于序列提取、骨架二面角计算、pLDDT 提取和 RMSD 计算。
+
+来源：[Analysis/rmsd_calculation.py](/Analysis/rmsd_calculation.py#L1-L12), [Analysis/ramachandran.py](/Analysis/ramachandran.py#L1-L54), [Scripts/biotite_utils.py](/Scripts/biotite_utils.py#L1-L30)
+
+## 接下来去哪儿
+
+现在你已经能够生成并分析 IDP 构象，接下来可以进一步加深对该系统的理解：
+
+- **理解模型架构** → [架构概览](3-architecture-overview)
+- **了解 VAE 编码器-解码器的工作原理** → [VAE 编码器-解码器设计](4-vae-encoder-decoder-design)
+- **探索 GCN 与 Transformer 模块** → [GCN 卷积层](5-gcn-convolution-layers) · [Transformer 解码器块](6-transformer-decoder-blocks)
+- **掌握训练流程与损失设计** → [训练流水线](7-training-pipeline) · [FAPE 损失函数](8-fape-loss-function)
+- **深度自定义数据预处理** → [PDB 预处理流水线](10-pdb-preprocessing-pipeline) · [图数据集构建](11-graph-dataset-construction)
+- **完整参数参考** → [配置与参数参考](15-configuration-and-arguments-reference)
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/Junjie-Zhu/Phanto-IDP/3-architecture-overview)
+
+---
+slug:3-architecture-overview
+blog_type:normal
+---
+
+
+Phanto-IDP 是一个**基于 VAE 的生成式深度学习模型**，专为精确重建本质无序蛋白 (IDP) 构象系综及高速生成未观测的主链结构而设计。该系统将 C++ 特征提取流水线、带有 Transformer 解码的 PyTorch 图神经网络以及事后结构分析工具，整合为一个紧密的端到端工作流。本页映射了完整的架构——从数据摄入到构象生成——以便你能在清晰地了解各组件如何连接的心智模型下，轻松导航整个代码库。
+
+![Phanto-IDP](https://github.com/Junjie-Zhu/Phanto-IDP/blob/main/ImgSrc/Phanto-IDP.png?raw=true)
+
+来源: [README.md](/README.md#L1-L6), [model.py](/model.py#L13-L18)
+
+## 系统架构图
+
+下面的 Mermaid 图展示了四阶段流水线及各阶段内的主要模块。实线箭头表示数据流；虚线箭头表示可选或条件路径（如 OpenMM 优化、预训练检查点加载）。
+
+```mermaid
+flowchart TB
+    subgraph Stage1["① 预处理 (C++ / Python)"]
+        PDB["PDB 轨迹文件"] --> TP["traj_process.sh<br/>主链提取"]
+        TP --> CPP["get_features (C++)<br/>原子/接触/键 JSON"]
+        CPP --> PP["pdb_parse.py<br/>图 → Pickle"]
+        PP --> PKL[("Pickle 数据集<br/>(atom_fea, nbr_fea,<br/>nbr_idx, res_idx)")]
+        PP --> ATOM["protein_atom_init.json<br/>(独热编码嵌入)"]
+    end
+
+    subgraph Stage2["② 数据加载 (Python)"]
+        PKL --> DS["ProteinDataset<br/>(traj_dataset.py)"]
+        ATOM --> DS
+        PDB --> DS
+        DS --> COL["collate_pool<br/>批量填充"]
+        COL --> DL["DataLoader<br/>(训练/验证/测试划分)"]
+    end
+
+    subgraph Stage3["③ 模型 (VAE + Transformer)"]
+        DL --> ENC["GCN 编码器<br/>(ConvLayer × N)"]
+        ENC --> VAE["VAE 瓶颈<br/>μ, log(σ²) → z"]
+        VAE --> DEC["Transformer 解码器<br/>(IdpGANBlock × N)"]
+        DEC --> OUT["主链输出<br/>(N, CA, C × 3 坐标)"]
+    end
+
+    subgraph Stage4["④ 训练 / 生成 / 分析"]
+        OUT --> FAPE["FAPE 损失"]
+        VAE --> KL["KL 散度损失"]
+        FAPE --> FIT["model.fit()<br/>反向传播"]
+        KL --> FIT
+        OUT -.-> GEN["generate.py<br/>从 z 采样"]
+        GEN -.-> REF["OpenMM 优化<br/>(refine_openmm.py)"]
+        OUT -.-> ANA["分析套件<br/>RMSD / Ramachandran / PCA / Rg"]
+    end
+
+    CKPT[("预训练检查点<br/>ckpt/*.pth.tar")] -.-> ENC
+    CKPT -.-> VAE
+    CKPT -.-> DEC
+```
+
+来源: [main.py](/main.py#L17-L110), [model.py](/model.py#L29-L102), [traj_dataset.py](/traj_dataset.py#L105-L173), [pdb_parse.py](/pdb_parse.py#L54-L137), [preprocess/src/main.cpp](/preprocess/src/main.cpp#L8-L61)
+
+## 核心组件概览
+
+下表总结了每个顶层模块、其职责及暴露的关键类或函数。在深入各个子系统文档之前，此表可作为快速参考导航。
+
+| 模块 | 文件 | 职责 | 关键抽象 |
+|---|---|---|---|
+| **参数解析器** | `arguments.py` | CLI + 配置文件参数定义 | `buildParser()` |
+| **设备配置** | `config.py` | 全局 CUDA/CPU 张量类型选择 | `device`, `FloatTensor` |
+| **模型核心** | `model.py` | VAE 编码器-解码器、损失计算、帧构建 | `PhantoIDP` (nn.Module) |
+| **GCN 层** | `layers.py` → `ConvLayer` | 原子图上的消息传递与门控聚合 | `ConvLayer` |
+| **Transformer 块** | `layers.py` → `IdpGANBlock` | 残基序列的残差自注意力 + 前馈更新 | `IdpGANBlock` |
+| **注意力层** | `layers.py` → `IdpGANLayer` | 带可选 2D 偏置的多头点积注意力 | `IdpGANLayer` |
+| **损失函数** | `utils.py` | FAPE 损失、KL 散度损失、RMSD 辅助函数 | `FAPEloss`, `KL_loss` |
+| **训练循环** | `main.py` | 轮次迭代、损失调度、检查点管理 | `trainModel()` |
+| **生成循环** | `generate.py` | 带温度控制的从已学习潜在空间采样 | `generate()` |
+| **数据集** | `traj_dataset.py` | PDB 解析、Pickle 加载、带填充的批处理 | `ProteinDataset`, `collate_pool` |
+| **PDB→图解析器** | `pdb_parse.py` | JSON→Pickle 转换、邻居排序、独热编码 | `createSortedNeighbors()` |
+| **C++ 预处理器** | `preprocess/src/` | 原子特征提取、接触/键计算、LDDT 评分 | `get_features` 二进制文件 |
+| **分析** | `Analysis/` | RMSD、Ramachandran、PCA、Rg、OpenMM 优化 | 各类脚本 |
+
+来源: [arguments.py](/arguments.py#L1-L50), [config.py](/config.py#L1-L6), [model.py](/model.py#L13-L27), [layers.py](/layers.py#L7-L37), [layers.py](/layers.py#L40-L99), [layers.py](/layers.py#L146-L183), [utils.py](/utils.py#L88-L134), [main.py](/main.py#L164-L266), [generate.py](/generate.py#L134-L153), [traj_dataset.py](/traj_dataset.py#L42-L64), [pdb_parse.py](/pdb_parse.py#L79-L104)
+
+## 数据流：从 PDB 到模型输入
+
+理解数据转换链至关重要——每个阶段都将表示粒度从原始 3D 坐标改变为已学习的潜在向量。
+
+**阶段 ① — 原始 PDB → JSON 特征。** `traj_process.sh` Shell 脚本首先过滤 PDB 文件，仅保留主链原子 (N, CA, C)，并规范化非标准残基名称（如 HIE → HIS）。随后，编译好的 C++ 二进制文件 `get_features` 解析每个过滤后的 PDB，生成包含以下内容的 JSON 文件：`atoms`（残基_原子类型标签）、`res_idx`（原子到残基的映射）、`bonds`（共价键对）和 `contacts`（前 N 个最近邻对，包含原子间距离和局部帧投影）。此步骤计算量大，通过 `pdb_parse.py` 使用 joblib 进行并行化处理。
+
+**阶段 ② — JSON → Pickle 图。** `pdb_parse.py` 脚本读取所有 JSON 文件，按距离对每个原子的邻居进行排序（上限为 `max_neighbors=50`），并将每个构象的四个数组序列化为一个 Pickle 文件：原子特征、邻居特征（距离 + 局部帧坐标 + 键标志）、邻居索引邻接矩阵以及残基到原子的映射。同时，它生成 `protein_atom_init.json` —— 一个从 `groups20.txt` 读取的 20 种标准氨基酸组的独热编码映射。
+
+**阶段 ③ — Pickle → 批量张量。** 在训练时，`ProteinDataset.__getitem__` 加载 Pickle 数据，并将其与直接从原始 PDB 文件解析的真实 N/CA/C 主链坐标配对。`collate_pool` 函数对一个批次内长度可变的蛋白质进行零填充，使其达到统一维度（最大原子数 × 最大邻居数），生成模型期望的三个输入张量：`atom_emb_idx` [B, N]、`nbr_emb` [B, N, M, h_b] 和 `nbr_adj_list` [B, N, M]。
+
+来源: [traj_process.sh](/traj_process.sh#L1-L9), [pdb_parse.py](/pdb_parse.py#L54-L137), [preprocess/src/main.cpp](/preprocess/src/main.cpp#L86-L141), [traj_dataset.py](/traj_dataset.py#L105-L173), [traj_dataset.py](/traj_dataset.py#L42-L64)
+
+## 模型架构：VAE + Transformer 解码器
+
+`PhantoIDP` 模型实现了一个**三阶段前向传播**，通过变分瓶颈将原子级图表示逐步转换为残基级主链坐标。
+
+```mermaid
+flowchart LR
+    subgraph Encoder["GCN 编码器"]
+        A1["原子嵌入<br/>nn.Embedding → nn.Linear"] --> C1["ConvLayer 1"]
+        C1 --> C2["ConvLayer 2"]
+        C2 --> C3["ConvLayer ...N"]
+    end
+
+    subgraph Bottleneck["VAE 瓶颈"]
+        C3 --> RES["残基池化<br/>view(B, -1, h_a×3)"]
+        RES --> MU["amino_to_mu<br/>Linear(h_a×3 → h_g)"]
+        RES --> LV["amino_to_var<br/>Linear(h_a×3 → h_g)"]
+        MU --> REPARAM["重参数化<br/>μ + ε·σ·t"]
+        LV --> REPARAM
+    end
+
+    subgraph Decoder["Transformer 解码器"]
+        REPARAM --> FC["amino_to_fc<br/>Linear(h_g → 32)"]
+        FC --> T1["IdpGANBlock 1<br/>(自注意力 + FFN)"]
+        T1 --> T2["IdpGANBlock 2"]
+        T2 --> T3["IdpGANBlock ...N"]
+        T3 --> OUT["fc_amino_out<br/>Linear(32 → 9)"]
+    end
+
+    OUT --> RESULT["输出 (B, A, 3, 3)<br/>N, CA, C 主链"]
+```
+
+**阶段 1 — GCN 编码器。** 原子索引通过一个冻结的 `nn.Embedding`（由 `protein_atom_init.json` 初始化）进行查找，并通过 `nn.Linear(h_init → h_a)` 进行投影。生成的嵌入通过 `n_conv` 个堆叠的 `ConvLayer` 模块进行精炼，每个模块执行**门控消息传递**：邻居嵌入与中心原子和键特征拼接后，通过一个线性层，然后分割成一个 sigmoid 门控滤波器和一个 ReLU 激活的核心。邻居的滤波求和残差地加到中心原子嵌入上。
+
+**阶段 2 — VAE 瓶颈。** 原子嵌入通过将每三个原子 (N, CA, C) 分组为一个维度为 `h_a × 3` 的向量，从而重塑为残基级。两个并行的线性头将其映射到潜在分布的均值（`amino_to_mu`）和对数方差（`amino_to_var`）。**重参数化技巧**采样 z = μ + ε·exp(½·log σ²)·t，其中 t 是控制采样多样性的温度参数。
+
+**阶段 3 — Transformer 解码器。** 采样的潜在向量通过 `amino_to_fc` 投影到维度 32，然后通过 `n_conv` 个堆叠的 `IdpGANBlock` 模块进行精炼。每个块应用带残差连接的多头自注意力（8 个头，d_model=128），随后是带另一个残差连接和后范数 LayerNorm 的前馈更新器（Linear → ReLU → Dropout → Linear）。最终的 `fc_amino_out` 线性层将每个残基嵌入映射到 9 个值，重塑为每个残基的 (3 个主链原子 × 3 个坐标)。
+
+来源: [model.py](/model.py#L29-L102), [model.py](/model.py#L72-L102), [layers.py](/layers.py#L7-L37), [layers.py](/layers.py#L40-L143), [model.py](/model.py#L119-L123)
+
+## 损失计算与训练信号
+
+模型的 `fit` 方法根据两个互补信号计算复合损失：
+
+| 损失组件 | 公式 | 作用 | 权重调度 |
+|---|---|---|---|
+| **FAPE** | 跨 N, CA, C 的帧对齐点误差 | SE(3) 不变性下的结构准确性 | `weight_fape_list`: [10.0, 2.0, 1.0]，在第 400、800 轮步进 |
+| **KL 散度** | −0.5 · (1 + 2·log σ² − μ² − σ⁴) | 将潜在空间向 N(0,1) 正则化 | `weight_list`: [1e-4 → 1.5e-2]，每 60 轮步进 |
+| **总计** | FAPE × w_fape / 3 − KL × w_kl | 在保持潜在空间覆盖的同时最大化结构拟合 | 依赖轮次的调度 |
+
+FAPE 损失作用于使用 Gram-Schmidt 算法（`from_3_points`）从预测和目标主链三元组 (N, CA, C) 构建的**刚体帧**。对于三个主链原子中的每一个，FAPE 测量在对齐到各自局部帧后，目标点与预测点之间的平均距离，钳位在 10Å 并以 Z=10 归一化。KL 损失在总损失中以**负号**应用（最大化 ELBO），其权重从接近零积极退火，以允许 VAE 先学习重建，然后再正则化潜在空间。
+
+<CgxTip>损失权重调度是训练稳定性的最关键超参数。FAPE 权重起始较高 (10.0) 并逐渐降低，迫使早期轮次关注结构准确性。KL 权重起始接近零 (1e-4) 并逐渐增加，通过逐步鼓励潜在空间正则化来防止后验坍塌。</CgxTip>
+
+来源: [model.py](/model.py#L202-L224), [utils.py](/utils.py#L88-L129), [utils.py](/utils.py#L132-L134), [main.py](/main.py#L173-L178), [model.py](/model.py#L131-L171)
+
+## 生成流水线
+
+`generate.py` 脚本加载预训练检查点，将测试集输入通过编码器以获得 μ 和 log σ²，然后在低温度（默认 0.05）下**反复从潜在空间采样**以生成多样化的构象。`model.sample()` 方法完全绕过编码器——它接收一个预采样的潜在向量，仅运行 Transformer 解码器 + 输出投影，从而实现快速的迭代采样。
+
+| 参数 | 默认值 | 效果 |
+|---|---|---|
+| `avg_sample` | 2 | 每个输入构象的采样数量 |
+| `temp` (在重参数化中) | 0.05 | 采样温度；越低越接近 μ，越高多样性越大 |
+
+生成的坐标保存为 `.dat` 文件，并可通过 **OpenMM 能量最小化**（`Analysis/refine_openmm.py`）进行可选优化，该过程通过 PDBFixer 修复缺失的原子/氢，然后使用 AMBER99SB 力场对非氢原子施加谐形势束缚（刚度 = 10.0 kcal/mol/Å²）进行受限能量最小化。
+
+来源: [generate.py](/generate.py#L134-L153), [model.py](/model.py#L104-L117), [model.py](/model.py#L119-L123), [Analysis/refine_openmm.py](/Analysis/refine_openmm.py#L80-L116)
+
+## 项目结构
+
+```
+Phanto-IDP/
+├── main.py                  # 训练入口点
+├── generate.py              # 构象生成入口点
+├── model.py                 # PhantoIDP 模型 (VAE + GCN + Transformer)
+├── layers.py                # ConvLayer, IdpGANBlock, IdpGANLayer
+├── utils.py                 # FAPE 损失, KL 损失, RMSD, 实用工具
+├── arguments.py             # CLI 参数定义
+├── config.py                # 全局设备/张量配置
+├── pdb_parse.py             # JSON → Pickle 图转换
+├── traj_dataset.py          # ProteinDataset + 批处理
+├── get_list.py              # PDB 文件列表工具
+├── traj_process.sh          # 轨迹过滤脚本
+├── ckpt/                    # 预训练模型检查点 (13 种蛋白质)
+├── preprocess/              # C++ 特征提取 (mylddt 分支)
+│   ├── src/                 #   Atom, Chain, Residue, MyLDDT 类
+│   ├── Makefile             #   构建系统
+│   └── preprocessor.sh      #   批量 JSON 提取脚本
+├── Analysis/                # 生成后分析工具
+│   ├── ramachandran.py      #   φ/ψ 二面角密度图
+│   ├── rmsd_calculation.py  #   成对 RMSD 计算
+│   ├── refine_openmm.py     #   基于物理的结构优化
+│   ├── pca.py               #   距离矩阵 PCA 可视化
+│   └── rg.py                #   回转半径统计
+├── Scripts/
+│   └── biotite_utils.py     #   基于 Biotite 的结构工具
+└── StrucRef/                #   用于评估的参考结构
+```
+
+来源: [main.py](/main.py#L1-L15), [generate.py](/generate.py#L1-L14), [model.py](/model.py#L1-L12), [layers.py](/layers.py#L1-L6), [utils.py](/utils.py#L1-L8), [traj_dataset.py](/traj_dataset.py#L1-L13), [pdb_parse.py](/pdb_parse.py#L1-L31), [Analysis/ramachandran.py](/Analysis/ramachandran.py#L1-L10), [Analysis/refine_openmm.py](/Analysis/refine_openmm.py#L1-L18), [Scripts/biotite_utils.py](/Scripts/biotite_utils.py#L1-L12)
+
+## 关键设计决策
+
+| 决策 | 理由 | 实现 |
+|---|---|---|
+| **图表示而非序列** | IDP 缺乏稳定的三级结构；原子级图能捕获局部几何而无需假设折叠拓扑 | 带有邻居排序邻接的 GCN 编码器 [layers.py](/layers.py#L7-L37) |
+| **VAE 而非 GAN** | VAE 的潜在空间支持可控采样和插值；KL 正则化防止模式坍塌 | 带温度的重参数化技巧 [model.py](/model.py#L119-L123) |
+| **FAPE 而非 RMSD** | FAPE 是 SE(3) 不变且帧感知的，提供比全局 RMSD 更丰富的梯度信号 | 通过 Gram-Schmidt 构建帧 [model.py](/model.py#L131-L171)，损失在 [utils.py](/utils.py#L88-L129) |
+| **C++ 预处理** | 大轨迹系综上的接触/键计算对性能要求极高；带 O3 优化的 C++ 相比 Python 提供 10-100 倍加速 | `get_features` 二进制文件 [preprocess/src/main.cpp](/preprocess/src/main.cpp#L8-L27) |
+| **损失权重退火** | 防止后验坍塌（早期 KL 过强）和过度正则化（晚期 FAPE 过强） | 轮次步进权重列表 [main.py](/main.py#L173-L178) |
+| **解码用 Transformer 而非 RNN** | 自注意力能捕获长程残基依赖，这对扩展的无序构象至关重要 | 带多头注意力的 `IdpGANBlock` [layers.py](/layers.py#L40-L143) |
+
+<CgxTip>该架构将每个 PDB 构象视为独立的图——跨轨迹帧没有时间建模。此设计选择将 IDP 系综视为平衡分布，这适用于无序蛋白，但意味着动力学信息不会被保留。</CgxTip>
+
+来源: [model.py](/model.py#L29-L70), [main.py](/main.py#L173-L178), [layers.py](/layers.py#L40-L99), [preprocess/src/main.cpp](/preprocess/src/main.cpp#L58-L61)
+
+## 建议阅读路径
+
+现在你已经掌握了架构蓝图，请按照以下顺序加深对每个子系统的理解：
+
+1. **[VAE 编码器-解码器设计](4-vae-encoder-decoder-design)** — 变分瓶颈、重参数化技巧，以及编码器输出如何连接到解码器输入
+2. **[GCN 卷积层](5-gcn-convolution-layers)** — 门控消息传递机制、邻居聚合及批量归一化策略
+3. **[Transformer 解码器块](6-transformer-decoder-blocks)** — 自注意力公式、残差更新及前馈更新器模块
+4. **[训练流水线](7-training-pipeline)** — 完整训练循环、检查点管理及评估协议
+5. **[FAPE 损失函数](8-fape-loss-function)** — 帧对齐点误差推导、Gram-Schmidt 帧构建及 SE(3) 不变性
+6. **[PDB 预处理流水线](10-pdb-preprocessing-pipeline)** — C++ 特征提取、JSON 模式及 Pickle 序列化格式
+7. **[构象生成](12-conformation-generation)** — 从潜在空间采样、温度控制及 OpenMM 优化
+
+---
+
+- [深入解析/配置与参数参考](https://zread.ai/Junjie-Zhu/Phanto-IDP/15-configuration-and-arguments-reference)
+
+---
+slug:15-configuration-and-arguments-reference
+blog_type:normal
+---
+
+
+Phanto-IDP 的配置系统建立在双层架构之上：一个控制训练和生成的**主参数解析器**（`configargparse`），以及一个处理运行时张量分发的**辅助设备配置模块**。该参数解析器同时支持 CLI 标志和 `settings.conf` 配置文件以实现持久化配置，从而无需冗长的命令行即可复现实验。本参考文档详细梳理了训练流程、生成流程、模型内部机制、损失调度以及事后分析工具中的所有可配置参数。
+
+来源：[arguments.py](/arguments.py#L1-L50), [config.py](/config.py#L1-L6)
+
+## 配置加载架构
+
+系统采用 `configargparse.ArgParser`，并默认读取 `settings.conf` 配置文件。这意味着参数可以通过以下三种方式指定，其优先级从高到低依次为：**CLI 标志** → **配置文件** → **默认值**。当加载预训练模型时，其保存的 `args` 字典会**覆盖**通过 CLI 指定的模型架构参数（`h_a`、`h_g`、`n_conv`、`lr`），从而确保训练与推理间的架构一致性。
+
+```mermaid
+flowchart TD
+    A[settings.conf] -->|lowest priority| P[ArgParser]
+    B[CLI Flags] -->|highest priority| P
+    P -->|parse_args| ARGS[args Namespace]
+    ARGS -->|if --pretrained| C[Checkpoint Load]
+    C -->|override| ARGS2["args (overridden)"]
+    ARGS2 --> K[Model kwargs dict]
+    K --> M[PhantoIDP constructor]
+    ARGS2 --> D[DataLoader config]
+    ARGS2 --> T[Training loop config]
+```
+
+来源：[arguments.py](/arguments.py#L1-L6), [main.py](/main.py#L62-L71)
+
+## 全局设备配置
+
+`config.py` 模块会自动检测 CUDA 的可用性，并导出整个代码库中使用的三个张量类型别名。这些别名**并非**用户可配置项——它们是在导入时根据硬件情况确定的。
+
+| 导出项 | CUDA 路径 | CPU 路径 | 使用位置 |
+|--------|-----------|----------|---------|
+| `device` | `torch.device('cuda')` | `torch.device('cpu')` | `AverageMeter`、模型放置 |
+| `FloatTensor` | `torch.cuda.FloatTensor` | `torch.FloatTensor` | `Normalizer`、`makeW`、`makeQ` |
+| `LongTensor` | `torch.cuda.LongTensor` | `torch.LongTensor` | （预留） |
+
+来源：[config.py](/config.py#L1-L6)
+
+## 主参数 — 数据来源
+
+这些参数控制输入数据的读取路径与结果写入路径。位置参数 `name` 为**必填项**，它决定了输出的子目录。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `name` | str | *（必填）* | 实验名称；结果保存至 `save_dir + name + /` |
+| `--pkl_dir` | str | `../IDPnet-main/data/pkl/PaaA2-simp/` | 包含预处理后的 `.pkl` 图文件和 `atom_init` JSON 的目录 |
+| `--protein_dir` | str | `../Traj/PaaA2-simp/` | 用于训练/验证/测试划分及目标坐标提取的 PDB 文件目录 |
+| `--save_dir` | str | `./data/pkl/results/` | 检查点和日志的根目标目录 |
+| `--id_prop` | str | `protein_id_prop.csv` | ID-属性映射 CSV 的文件名 |
+| `--atom_init` | str | `protein_atom_init.json` | 原子嵌入初始化 JSON 的文件名（相对于 `pkl_dir`） |
+| `--pretrained` | str | *None* | `.pth.tar` 检查点路径；加载 `state_dict`、`optimizer`，并覆盖 `h_a`、`h_g`、`n_conv`、`lr` |
+| `--no_train` | flag | `False` | 跳过训练；仅在测试集上进行评估 |
+| `--avg_sample` | int | `2` | 生成阶段每批次重参数化采样数 |
+
+<CgxTip>当指定 `--pretrained` 时，模型架构参数（`h_a`、`h_g`、`n_conv`）和学习率会被检查点 `args` 字典中存储的值**静默覆盖**。这能防止形状不匹配，但也意味着在恢复训练时，你为这些标志指定的 CLI 值将被忽略。</CgxTip>
+
+来源：[arguments.py](/arguments.py#L7-L18), [main.py](/main.py#L62-L71)
+
+## 主参数 — 训练配置
+
+这些参数控制训练循环行为、数据集划分及可复现性。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `--seed` | int | `1234` | `torch.manual_seed` 和 `torch.cuda.manual_seed_all` 的随机种子；同时传入 `ProteinDataset` |
+| `--epochs` | int | `20` | 训练轮数 |
+| `--batch_size` | int | `64` | `DataLoader` 的小批量大小（训练、验证和测试） |
+| `--train` | float | `0.5` | 分配给训练的蛋白质目录比例 |
+| `--val` | float | `0.25` | 分配给验证的比例 |
+| `--test` | float | `0.25` | 分配给测试的比例 |
+| `--testing` | flag | `False` | 若设置，则仅运行评估（不进行训练） |
+
+训练/验证/测试的划分在**蛋白质目录层级**执行（而非结构层级），即给定蛋白质的所有构象均保留在同一划分中。划分比例通过 `math.floor` 应用于目录数量计算，因此实际比例可能与指定值略有偏差。
+
+来源：[arguments.py](/arguments.py#L20-L27), [main.py](/main.py#L41-L54)
+
+## 主参数 — 生成配置
+
+这些参数主要由 `generate.py` 消耗，用于从学习到的潜空间中采样新构象。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `-n` | int | `5` | 每个输入的采样结构数量 |
+| `-var` | float | `0.1` | 采样方差；值越大构象多样性越高，但可能导致质量下降 |
+| `-outdir` | str | `conf_gens/` | 生成结构的输出目录 |
+| `-device` | str | `cuda` | 设备选择：`'cuda'` 或 `'cpu'` |
+
+在生成过程中，模型的 `reparameterize` 方法会以固定的 `temp=0.05` 和单位方差（全 1 张量）被调用，从而覆盖学习到的对数方差。`-var` 标志虽作为 CLI 参数可用，但 `generate.py` 中实际的生成循环使用的是硬编码的温度值。
+
+来源：[arguments.py](/arguments.py#L29-L34), [generate.py](/generate.py#L145-L151)
+
+## 主参数 — 优化器
+
+| 标志 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `--lr` | float | `1e-3` | Adam 优化器的学习率 |
+
+优化器在 `PhantoIDP.__init__` 中构建为 `optim.Adam(self.parameters(), lr, weight_decay=0)`。请注意，**权重衰减被硬编码为零**，且未作为 CLI 参数暴露。
+
+来源：[arguments.py](/arguments.py#L37), [model.py](/model.py#L26-L27)
+
+## 主参数 — 模型架构
+
+这三个参数定义了图神经网络主干，对模型容量至关重要。
+
+| 标志 | 类型 | 默认值 | 模型参数 | 描述 |
+|------|------|---------|-----------------|-------------|
+| `--h_a` | int | `64` | `self.h_a` | 原子隐藏嵌入维度；决定 `ConvLayer` 宽度及 `amino_to_mu`/`amino_to_var` 的输入大小（`h_a × 3`） |
+| `--h_g` | int | `9` | `self.h_g` | VAE 瓶颈后的图隐藏嵌入维度；`amino_to_mu` 和 `amino_to_var` 的输出维度 |
+| `--n_conv` | int | `3` | `self.n_conv` | GCN `ConvLayer` 模块数量 **及** `IdpGANBlock` Transformer 模块数量（共享计数） |
+
+维度 `h_b`（键嵌入）**并非** CLI 参数——它在运行时从数据集的边特征形状推断得出：`h_b = structures[1].shape[-1]`。类似地，`h_init`（原子嵌入初始化维度）由加载的 `atom_init` JSON 文件决定。
+
+来源：[arguments.py](/arguments.py#L39-L43), [main.py](/main.py#L78-L91), [model.py](/model.py#L38-L46)
+
+## 主参数 — 运行时与日志
+
+| 标志 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `--save_checkpoints` | flag | `True` | 在每轮训练后保存 `checkpoint.pth.tar` 和 `model_best.pth.tar` |
+| `--print_freq` | int | `50` | 每隔 N 个批次打印一次训练/验证状态；同时触发 `torch.cuda.empty_cache()` |
+| `--workers` | int | `8` | `DataLoader` 的工作进程数 |
+
+来源：[arguments.py](/arguments.py#L44-L47)
+
+## 模型内部配置（硬编码）
+
+若干关键模型参数**未**通过 CLI 暴露，而是硬编码在 `PhantoIDP.build()` 中。高级用户若要修改这些参数，必须直接修改源码。
+
+| 参数 | 值 | 位置 | 描述 |
+|-----------|-------|----------|-------------|
+| `amino_to_fc` 输出维度 | `32` | `model.py` | VAE 瓶颈后的中间全连接维度，亦即 `IdpGANBlock` 的 `embed_dim` |
+| `fc_amino_out` 输出维度 | `9` | `model.py` | 最终输出：3 个原子 (N, CA, C) × 3 个坐标 |
+| `IdpGANBlock.d_model` | `128` | `model.py` | Transformer 注意力维度 |
+| `IdpGANBlock.nhead` | `8` | `model.py` | 注意力头数 (head_dim = 128/8 = 16) |
+| `IdpGANBlock.dim_feedforward` | `128` | `model.py` | Transformer 中的前馈隐藏维度 |
+| `IdpGANBlock.dropout` | `0.1` | `model.py` | Dropout 率 |
+| `IdpGANBlock.norm_pos` | `"post"` | `model.py` | 层归一化位置（后归一化） |
+| `IdpGANBlock.activation` | `"relu"` | `model.py` | 激活函数 |
+| `IdpGANBlock.dp_attn_norm` | `"d_model"` | `model.py` | 注意力缩放分母 (`1/√d_model`) |
+| 原子嵌入冻结 | `True` | `model.py` | 预训练原子嵌入被冻结（不可训练） |
+| Adam 权重衰减 | `0` | `model.py` | 无 L2 正则化 |
+| 生成温度 | `0.05` | `generate.py` | 采样期间固定的重参数化温度 |
+
+来源：[model.py](/model.py#L50-L70), [generate.py](/generate.py#L146-L148)
+
+## 损失权重调度（硬编码）
+
+FAPE 和 KL 损失权重遵循在 `trainModel()` 内部定义的**随轮次变化的调度策略**。它们不可通过 CLI 配置。
+
+| 调度策略 | 值 | 轮次阈值 | 公式 |
+|----------|--------|-----------------|---------|
+| **FAPE 权重**（`weight[0]`） | `[10.0, 2.0, 1.0]` | `epoch < 400`，`400 ≤ epoch < 800`，`epoch ≥ 800` | `weight_fape_list[min(epoch // 400, 2)]` |
+| **KL 权重**（`weight[1]`） | `[1e-4, 5e-4, 1e-3, 2.5e-3, 7.5e-3, 1e-2, 1.5e-2]` | 每 60 轮为一阶段 | `weight_list[min(epoch // 60, 6)]` |
+
+总损失计算公式为：`loss = FAPE × weight[0] / 3 − KL_loss`，其中 FAPE 是 N、CA 和 C 骨架原子的损失之和，`/3` 用于计算其平均值。有关调度的详细原理，请参阅[损失权重调度](9-loss-weight-scheduling)。
+
+来源：[main.py](/main.py#L173-L178), [model.py](/model.py#L215-L219)
+
+## FAPE 损失内部参数
+
+`utils.py` 中的 `FAPEloss` 类包含三个硬编码超参数：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `Z` | `10.0` | 距离归一化常数；距离除以 `1/Z` |
+| `clamp` | `10.0` | 归一化前的最大截断距离值 |
+| `epsion` | `-1e8` | 数值稳定性的 epsilon（预留项，当前前向传播中未使用） |
+
+来源：[utils.py](/utils.py#L88-L129)
+
+## 预处理器 C++ 选项
+
+C++ 预处理流水线（`preprocess/src/`）通过 `Options.h` 定义了其专属的选项结构：
+
+| 字段 | 类型 | 描述 |
+|-------|------|-------------|
+| `model` | `std::string` | 输入模型/结构路径 |
+| `ref` | `std::string` | 参考结构路径（用于 LDDT 计算） |
+| `json` | `std::string` | 输出 JSON 路径（原子级图数据） |
+| `pdb` | `std::string` | 输入 PDB 路径 |
+| `dmax` | `double` | 枚举邻居的最大距离 |
+| `topn` | `int` | 每个原子保留的最近邻居数量 |
+| `verb` | `int` | 详细输出级别 |
+
+来源：[Options.h](/preprocess/src/Options.h#L7-L15)
+
+## OpenMM 优化参数
+
+`Analysis/refine_openmm.py` 脚本具有独立的基于 `argparse` 的配置，与主流水线互不依赖：
+
+| 标志 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `--inpath` / `-i` | str | `./pdbs/` | 包含待优化 PDB 文件的输入目录 |
+| `--outpath` / `-o` | str | `./refined/` | 能量最小化后 PDB 文件的输出目录 |
+
+此外，以下**硬编码**参数控制着最小化过程：
+
+| 参数 | 值 | 描述 |
+|-----------|-------|-------------|
+| `max_iterations` | `0` | OpenMM 最小化器迭代限制（0 = 无限制） |
+| `tolerance` | `2.39 kcal/mol` | 能量收敛容差 |
+| `stiffness` | `10.0 kcal/mol/Å²` | 相对于参考结构的谐约束刚度 |
+| `exclude_residues` | `[]` | 排除约束的残基索引 |
+| `max_attempts` | `1000` | 最小化失败时的重试次数 |
+| `use_gpu` | `False` | 是否使用 CUDA 平台 |
+| `restraint_set` | `"non_hydrogen"` | 最小化期间受约束的原子 |
+| `force_field` | `"amber99sb.xml"` | OpenMM 力场 |
+| `constraints` | `HBonds` | 键约束类型 |
+
+来源：[refine_openmm.py](/Analysis/refine_openmm.py#L13-L27)
+
+## 分析脚本参数
+
+分析脚本采用极简的、脚本专属的配置方式：
+
+| 脚本 | 输入方式 | 关键参数 |
+|--------|-------------|----------------|
+| `pca.py` | `sys.argv[1]` | `dat_path` — 存放 `.dat` 坐标文件的目录；最多加载 60 个文件 |
+| `ramachandran.py` | 硬编码 | `inpath = './optimed/'`；阈值为 20,000 个 φ-ψ 对；200×200 直方图分箱 |
+| `rmsd_calculation.py` | 硬编码 | `subject` 和 `reference` 的 PDB 路径 |
+| `rmsd_plot.py` | 硬编码 | 三个 `.dat` RMSD 文件；参考虚线位于 0.511, 0.885, 2.714 Å |
+| `rg.py` | 硬编码 | 扫描 `./` 中以 `Rg_` 为前缀的文件；蛋白质：RS1, PaaA2, synuclein |
+
+来源：[pca.py](/Analysis/pca.py#L10-L11), [ramachandran.py](/Analysis/ramachandran.py#L8-L9), [rmsd_calculation.py](/Analysis/rmsd_calculation.py#L4-L5), [rmsd_plot.py](/Analysis/rmsd_plot.py#L5-L7), [rg.py](/Analysis/rg.py#L4-L5)
+
+## 完整 CLI 速查
+
+```bash
+# 从头开始训练
+python main.py <name> \
+  --pkl_dir ./data/pkl/<protein>/ \
+  --protein_dir ./Traj/<protein>/ \
+  --save_dir ./results/ \
+  --seed 1234 --epochs 20 --batch_size 64 \
+  --train 0.5 --val 0.25 --test 0.25 \
+  --lr 1e-3 --h_a 64 --h_g 9 --n_conv 3 \
+  --workers 8 --print_freq 50
+
+# 从检查点恢复 / 微调
+python main.py <name> \
+  --pretrained ./ckpt/<protein>_best.pth.tar \
+  --pkl_dir ./data/pkl/<protein>/ \
+  --protein_dir ./Traj/<protein>/ \
+  --epochs 20
+
+# 仅评估（不训练）
+python main.py <name> \
+  --pretrained ./ckpt/<protein>_best.pth.tar \
+  --no_train --testing
+
+# 生成构象
+python generate.py <name> \
+  --pretrained ./ckpt/<protein>_best.pth.tar \
+  -n 5 -var 0.1 -outdir conf_gens/ -device cuda
+
+# OpenMM 优化
+python Analysis/refine_openmm.py \
+  --inpath ./pdbs/ --outpath ./refined/
+```
+
+<CgxTip>推荐使用 `settings.conf` 文件来持久化实验配置。在项目根目录创建该文件，每行指定一个 `--flag value`。`configargparse` 会在应用 CLI 覆盖之前自动读取此文件，这使其非常适合纳入版本控制的实验规范。</CgxTip>
+
+来源：[arguments.py](/arguments.py#L1-L6), [main.py](/main.py#L17-L21), [generate.py](/generate.py#L17-L21)
+
+## 配置文件格式
+
+`settings.conf` 文件遵循标准的 `configargparse` INI 类格式——每行使用长标志形式指定一个参数：
+
+```ini
+# settings.conf — 示例实验配置
+name : PaaA2_experiment
+pkl_dir : ../IDPnet-main/data/pkl/PaaA2-simp/
+protein_dir : ../Traj/PaaA2-simp/
+save_dir : ./data/pkl/results/
+seed : 42
+epochs : 50
+batch_size : 32
+lr : 0.001
+h_a : 64
+h_g : 9
+n_conv : 3
+workers : 4
+print_freq : 100
+```
+
+以 `#` 开头的行视为注释。解析器会在处理 CLI 标志之前读取该文件，因此在命令行上提供的任何标志都将覆盖 `settings.conf` 中的相应值。
+
+来源：[arguments.py](/arguments.py#L5)
+
+## 预训练检查点参数覆盖流程
+
+当 `--pretrained` 指向有效检查点时，将发生以下覆盖序列。理解这一点至关重要：**你通过 CLI 指定的模型架构标志会被舍弃**，转而采用检查点中存储的值。
+
+```mermaid
+sequenceDiagram
+    participant CLI as CLI / settings.conf
+    participant CP as Checkpoint args
+    participant M as PhantoIDP Model
+    
+    CLI->>CLI: Parse all arguments
+    CLI->>CP: Load checkpoint['args']
+    CP-->>CLI: Override h_a, h_g, n_conv, lr, seed
+    CLI->>M: Construct with overridden kwargs
+    CP->>M: Load state_dict + optimizer
+```
+
+覆盖映射为：`args.h_a ← model_args.h_a`，`args.h_g ← model_args.h_g`，`args.n_conv ← model_args.n_conv`，`args.lr ← model_args.lr`，`args.random_seed ← model_args.seed`。数据源参数（`pkl_dir`、`protein_dir` 等）和训练循环参数（`epochs`、`batch_size` 等）**不会**被覆盖，将保留其 CLI/配置文件中的值。
+
+---
+
+## 模型核心
+
+- [深入解析/模型核心/VAE 编码器-解码器设计](https://zread.ai/Junjie-Zhu/Phanto-IDP/4-vae-encoder-decoder-design)
+
+---
+slug:4-vae-encoder-decoder-design
+blog_type:normal
+---
+
+
+PhantoIDP 实现了一个**变分自编码器 (VAE)**，其编码器将本质无序蛋白的结构分布捕获为潜在的图表示，解码器则通过一叠 Transformer 模块重建每个残基的 3D 骨架坐标 (N, Cα, C)。该架构刻意采用了非对称设计——**基于 GCN 的编码器**处理原子级别的图拓扑，而**基于 Transformer 的解码器**则在潜在空间的残基级别上运行——这反映了一个深刻洞见：局部化学键编码了物理规律，而长程残基相互作用支配着无序蛋白的全局构象。
+
+来源: [model.py](model.py#L13-L123), [layers.py](layers.py#L1-L247)
+
+## 架构概述
+
+完整的前向传播由 `PhantoIDP.forward()` 统一调度，它依次链式执行四个阶段：**(1)** 原子嵌入 + GCN 编码，**(2)** 残基池化 + VAE 参数化，**(3)** 重参数化，以及 **(4)** Transformer 解码 + 坐标投影。下图追溯了对于一个包含 `B` 个蛋白、`N` 个原子、`A` 个残基、每个原子有 `M` 个邻居，且隐藏维度为 `h_a=64`、`h_g`（可配置）的批次，在各阶段张量形状的变化过程。
+
+```mermaid
+flowchart TB
+    subgraph Encoder["GCN 编码器 (原子级)"]
+        E1["原子索引<br/>(B, N)"] --> E2["嵌入查找<br/>(冻结)"]
+        E2 --> E3["线性投影<br/>h_init → h_a=64"]
+        E3 --> E4["ConvLayer × n_conv<br/>门控 GCN"]
+        E4 --> E5["重塑为残基<br/>(B, A, h_a×3)"]
+    end
+
+    subgraph VAE_Bottleneck["VAE 瓶颈层 (残基级)"]
+        E5 --> V1["amino_to_mu<br/>Linear(h_a×3, h_g)"]
+        E5 --> V2["amino_to_var<br/>Linear(h_a×3, h_g)"]
+        V1 --> V3["重参数化<br/>z = μ + ε·σ·temp"]
+        V2 --> V3
+    end
+
+    subgraph Decoder["Transformer 解码器 (残基级)"]
+        V3 --> D1["amino_to_fc<br/>Linear(h_g, 32)"]
+        D1 --> D2["IdpGANBlock × n_conv<br/>多头注意力 + FFN"]
+        D2 --> D3["fc_amino_out<br/>Linear(32, 9)"]
+        D3 --> D4["重塑<br/>(B, A, 3, 3)"]
+    end
+
+    D4 --> OUT["骨架坐标<br/>(每个残基的 N, Cα, C)"]
+
+    style Encoder fill:#e8f4e8,stroke:#4caf50
+    style VAE_Bottleneck fill:#fff3e0,stroke:#ff9800
+    style Decoder fill:#e3f2fd,stroke:#2196f3
+```
+
+**编码器**在分子图上运行，其中原子是节点，化学键是边。经过 `n_conv` 轮门控消息传递后，每个残基的三个骨架原子 (N, Cα, C) 的逐原子嵌入沿特征维度拼接——生成维度为 `h_a × 3 = 192` 的残基级描述符。随后，两个并行的线性头将该描述符映射到 VAE 参数 **μ** 和 **log σ²**，重参数化技巧则为每个残基采样一个潜在向量 **z** ∈ ℝ^{h_g}。**解码器**将 **z** 投影到 32 维嵌入中，通过 `n_conv` 个 Transformer 模块进行精炼（这些模块利用多头自注意力对残基间的依赖关系进行建模），最后将每个残基投影为 9 个标量值（3 个原子 × 3 个坐标）。
+
+来源: [model.py](model.py#L72-L102)
+
+## 编码器：带门控消息传递的 GCN
+
+### 原子嵌入初始化
+
+编码器以一个**冻结的嵌入查找**开始——原子类型被映射到从 JSON 文件 (`protein_atom_init.json`) 加载的预计算特征向量。这些向量源自 C++ 预处理流水线，编码了化学身份信息。`nn.Embedding.from_pretrained` 层被冻结 (`freeze=True`)，因此这些表征作为固定的先验而非可学习的参数。随后，一个可训练的 `nn.Linear` 将原始嵌入维度 `h_init` 投影到隐藏原子维度 `h_a`。
+
+来源: [model.py](model.py#L30-L52)
+
+### ConvLayer — 门控图卷积
+
+每个 `ConvLayer` 实现了一种受 Gilmer 等人 (2017) 启发的**门控消息传递**机制。对于每个原子，从其 `M` 个最近邻收集消息，通过 sigmoid 门控机制进行过滤，并经求和聚合后再与残差连接相结合。
+
+```mermaid
+flowchart LR
+    A["atom_emb<br/>&#40;B, N, h_a&#41;"] --> CAT
+    B["neighbor_emb<br/>&#40;B, N, M, h_a&#41;"] --> CAT
+    C["bond_emb<br/>&#40;B, N, M, h_b&#41;"] --> CAT
+    CAT["拼接<br/>&#40;B, N, M, 2h_a+h_b&#41;"] --> FC["fc_full<br/>Linear → &#40;B,N,M,2h_a&#41;"]
+    FC --> BN1["BatchNorm1d"]
+    BN1 --> SPLIT["切分为 2"]
+    SPLIT --> GATE["sigmoid &#40;过滤&#41;"]
+    SPLIT --> CORE["ReLU &#40;核心&#41;"]
+    GATE --> MUL["⊙ &#40;逐元素相乘&#41;"]
+    CORE --> MUL
+    MUL --> SUM["对 M 个邻居求和<br/>&#40;B, N, h_a&#41;"]
+    SUM --> BN2["BatchNorm1d"]
+    BN2 --> RES["+ atom_emb &#40;残差&#41;"]
+    RES --> OUT["ReLU → 输出<br/>&#40;B, N, h_a&#41;"]
+```
+
+门控机制将线性输出切分为两个维度为 `h_a` 的部分：一个通过 **sigmoid**（门控/过滤分支），另一个通过 **ReLU**（核心/消息分支）。逐元素乘积 `σ(gate) ⊙ ReLU(core)` 充当了针对邻居特征的学习型软注意力——过滤分支学习传递*哪些*信息，而核心分支决定传递*什么*信息。该结果在所有 `M` 个邻居上求和，进行批次归一化，并通过残差连接与原始原子嵌入相结合。
+
+| 组件 | 输入维度 | 输出维度 | 激活函数 | 用途 |
+|-----------|-----------|------------|------------|---------|
+| `fc_full` | 2·h_a + h_b | 2·h_a | 无 | 自身 + 邻居 + 化学键的联合变换 |
+| 过滤分支 | h_a | h_a | Sigmoid | 门控：学习传播*哪些*特征 |
+| 核心分支 | h_a | h_a | ReLU | 消息：学习传播*什么*特征 |
+| `bn_hidden` | 2·h_a | 2·h_a | — | 在切分前稳定门控输出 |
+| `bn_output` | h_a | h_a | — | 归一化聚合后的消息 |
+| 残差 + ReLU | h_a | h_a | ReLU | 与自嵌入结合 |
+
+来源: [layers.py](layers.py#L7-L37)
+
+### 残基级池化
+
+在最后的 GCN 层之后，原子级嵌入从 `(B, N, h_a)` 重塑为 `(B, A, h_a × 3)`，其中 `A` 是残基数量。这种重塑是一种**基于拼接的硬编码池化**——属于每个残基的三个骨架原子 (N, Cα, C) 沿特征轴拼接，而非取平均。这保留了残基表示中每种原子类型的独特化学身份。因子 3 受到结构上的强制约束：数据集的目标明确是 N, Cα 和 C 坐标，且邻接表确保了这些原子在每个残基内是连续分组的。
+
+来源: [model.py](model.py#L84-L86), [traj_dataset.py](traj_dataset.py#L53-L61)
+
+## VAE 瓶颈层：参数化与重参数化
+
+### 映射到潜在空间
+
+维度为 `h_a × 3` 的残基级描述符经过共享的 `ReLU` 激活函数后，被**两个并行的线性头**投影：
+
+- **`amino_to_mu`**: `Linear(h_a × 3, h_g)` → 近似后验 q(z|x) 的均值 **μ**
+- **`amino_to_var`**: `Linear(h_a × 3, h_g)` → 近似后验 q(z|x) 的对数方差 **log σ²**
+
+两个头共享相同的输入（经 ReLU 激活的残基描述符），但拥有**独立的权重矩阵**，使其能够各司其职——均值头捕获确定性的结构倾向，而方差头量化构象的不确定性，这正是 IDP 的核心关注量。
+
+### 重参数化技巧
+
+```python
+@staticmethod
+def reparameterize(means, logvars, temp=1.0):
+    std = torch.exp(0.5 * logvars)
+    eps = torch.randn_like(std)
+    return means + eps * std * temp
+```
+
+这实现了标准的 VAE 重参数化：**z = μ + ε · σ · temp**，其中 ε ~ N(0, I)。`temp` 参数控制采样的多样性——在训练期间 `temp=1.0`（默认值），而在生成期间它被设定为一个较小的值（例如 0.05），以产生靠近均值且方差可控的结构。`0.5 * logvars` 的公式计算了 σ = exp(0.5 · log σ²) = exp(log σ)，在保证数值稳定性的同时确保了结果为正数。
+
+<CgxTip>`reparameterize()` 中的 `temp` 参数具有双重用途：在训练期间 `temp=1.0` 保持了穿过随机节点的梯度流；在生成期间（参见 `generate.py`）`temp=0.05` 充当多样性旋钮——较低的值产生更靠近众数的结构，较高的值则探索学习分布的尾部。</CgxTip>
+
+来源: [model.py](model.py#L55-L56), [model.py](model.py#L119-L123), [generate.py](generate.py#L146-L148)
+
+## 解码器：用于残基级精炼的 Transformer 模块
+
+### 投影与 Transformer 堆叠
+
+采样得到的潜在向量 **z** ∈ ℝ^{h_g} 首先通过 `amino_to_fc` 投影：`Linear(h_g, 32)`，在进入 Transformer 堆叠前降低维度。张量被转置为 `(A, B, 32)`——这是 PyTorch 风格的 Transformer 实现所期望的 `(序列长度, 批次大小, 嵌入维度)` 格式——然后通过 `n_conv` 个 `IdpGANBlock` 实例进行处理。
+
+### IdpGANBlock — Transformer 解码器块
+
+每个 `IdpGANBlock` 遵循标准的**后归一化 Transformer** 架构：一个多头自注意力子层后接一个逐位置前馈子层，每层都包裹了残差连接与层归一化。
+
+```mermaid
+flowchart TB
+    S_IN["s (A, B, 32)"] --> ATTN["IdpGANLayer<br/>多头自注意力"]
+    ATTN --> DROP1["Dropout + 残差相加"]
+    DROP1 --> LN1["LayerNorm"]
+    LN1 --> FF_IN["um_in = s"]
+    FF_IN --> L1["linear1: Linear(32, 128)"]
+    L1 --> ACT["ReLU"]
+    ACT --> DROP2["Dropout"]
+    DROP2 --> L2["linear2: Linear(128, 32)"]
+    L2 --> RES2["残差相加"]
+    RES2 --> LN2["LayerNorm"]
+    LN2 --> S_OUT["s (A, B, 32)"]
+
+    style ATTN fill:#e3f2fd,stroke:#2196f3
+```
+
+| 参数 | 值 | 描述 |
+|-----------|-------|-------------|
+| `embed_dim` | 32 | 残基嵌入维度 |
+| `d_model` | 128 | 内部注意力维度 (Q, K, V 投影空间) |
+| `nhead` | 8 | 注意力头数量 |
+| `dim_feedforward` | 128 | FFN 隐藏维度 |
+| `dropout` | 0.1 | 注意力权重与 FFN 的 Dropout 率 |
+| `norm_pos` | "post" | 在残差之后应用 LayerNorm (后归一化) |
+| `activation` | "relu" | FFN 中间层激活函数 |
+
+### IdpGANLayer — 多头自注意力
+
+该注意力层实现了具有 `nhead=8` 个头的缩放点积注意力。每个头在 `head_dim = d_model / nhead = 16` 维的子空间上运行。查询、键和值通过无偏置线性层从输入维度 (`embed_dim=32`) 投影到 `d_model=128`，然后重塑为 `(batch × nhead, seq_len, head_dim)` 以进行并行的多头计算。
+
+注意力亲和度计算公式为：**Attention(Q, K, V) = softmax(Q·K^T / √d_model) · V**，缩放因子为 `1/√128`。架构中存在一个 2D 成对分支 (`mlp_2d`)，但在当前配置中已被禁用 (`embed_dim_2d=None`))，使得纯点积注意力成为唯一的亲和度机制。
+
+<CgxTip>16 的头维度 (128 / 8) 与标准 Transformer（通常为 64）相比显著较小。这是有意为之——IDP 属于短序列（通常 < 50 个残基），因此紧凑的头能防止过拟合，同时仍能捕获骨架间的局部结构相关性。</CgxTip>
+
+来源: [model.py](model.py#L60-L70), [model.py](model.py#L92-L102), [layers.py](layers.py#L40-L143), [layers.py](layers.py#L146-L247)
+
+## 坐标输出与坐标系构建
+
+### 输出投影
+
+在最后的 Transformer 块之后，张量被转置回 `(B, A, 32)` 并通过 `fc_amino_out` 投影：`Linear(32, 9)`。每个残基的 9 个输出值被重塑为 `(3, 3)`，代表三个骨架原子 N、Cα 和 C 的 **x, y, z 坐标**。模型的 `forward()` 返回一个元组：`(predicted_coords, amino_mu, amino_logvar)`，其中 `predicted_coords` 的形状为 `(B, A, 3, 3)`。
+
+### 基于 Gram-Schmidt 的局部坐标系构建
+
+在损失计算期间，预测和目标坐标通过 `from_3_points()` 被转换为**局部参考系**，该函数实现了 AlphaFold2 补充材料中的算法 21。给定三个点 (p_neg_x_axis, origin, p_xy_plane)，它通过 Gram-Schmidt 过程构建正交基：
+
+1. **e₀** = normalize(origin − p_neg_x_axis) — 局部 x 轴
+2. **e₁** = normalize(p_xy_plane − origin − (e₀ · (p_xy_plane − origin)) · e₀) — 局部 y 轴 (Gram-Schmidt 正交化)
+3. **e₂** = e₀ × e₁ — 局部 z 轴 (叉积)
+
+由此产生的 3×3 旋转矩阵与平移向量定义了每个残基的**刚体坐标系**，这是 FAPE 损失所需的几何基元。这种坐标系构建在数学上与 AlphaFold2 定义其骨架坐标系的方式完全一致，实现了预测结构与目标结构之间的旋转不变比较。
+
+来源: [model.py](model.py#L99-L102), [model.py](model.py#L132-L171), [model.py](model.py#L210-L218)
+
+## 采样与生成路径
+
+该模型提供了两种不同的前向路径：
+
+| 路径 | 方法 | 编码器 | 解码器 | 用例 |
+|------|--------|---------|---------|----------|
+| **训练** | `forward()` | ✅ GCN → μ, log σ² → z | ✅ Transformer → 坐标 | 学习 VAE 参数 |
+| **生成** | `sample()` | ❌ 绕过 | ✅ Transformer → 坐标 | 采样新构象 |
+
+在生成阶段（在 `generate.py` 中），编码器运行一次以获取每个残基的 **μ**，随后调用 `reparameterize()` 并传入 **μ** 与 `log σ² = 0`（单位方差）以及 `temp=0.05`——这实际上是在均值附近以极小扰动进行采样。针对每个输入会抽取多个样本（`avg_sample` 次迭代），以产生多样的构象系综，同时保持结构质量。这种受控方差采样策略对 IDP 至关重要：它在探索构象景观与避免生成物理上不合理结构之间取得了平衡。
+
+来源: [model.py](model.py#L104-L117), [generate.py](generate.py#L141-L151)
+
+## 维度流总结
+
+下表追溯了在默认超参数 (`h_a=64`, `h_g=9`, `n_conv=3`) 下，完整的张量形状变换经过编码器和解码器的全过程：
+
+| 阶段 | 操作 | 形状 |
+|-------|-----------|-------|
+| 输入 | 原子索引 | `(B, N)` |
+| 嵌入 | 查找 + 线性 | `(B, N, 64)` |
+| GCN × 3 | ConvLayer (门控) | `(B, N, 64)` |
+| 池化 | 重塑为残基 | `(B, A, 192)` |
+| VAE μ | Linear(192, 9) | `(B, A, 9)` |
+| VAE log σ² | Linear(192, 9) | `(B, A, 9)` |
+| 重参数化 | z = μ + ε·σ·temp | `(B, A, 9)` |
+| 投影 | Linear(9, 32) | `(A, B, 32)` |
+| Transformer × 3 | IdpGANBlock | `(A, B, 32)` |
+| 输出投影 | Linear(32, 9) | `(B, A, 9)` |
+| 重塑 | → 3 原子 × 3 坐标 | `(B, A, 3, 3)` |
+
+来源: [model.py](model.py#L72-L102), [arguments.py](arguments.py#L40-L42)
+
+## 设计原理与关键模式
+
+该架构体现了多项刻意的设计选择，使其有别于通用的 VAE 或蛋白质结构预测模型：
+
+**非对称编码器-解码器**：GCN 编码器处理细粒度的原子级信息（化学键类型、邻居几何结构），这些信息在残基级别是无法获取的；而 Transformer 解码器则在较粗的残基级别上运行，在此级别上，链中远端部分之间的长程依赖对于捕获 IDP 的构象异质性至关重要。
+
+**残基级潜在空间**：VAE 瓶颈层为每个残基生成一个 **z**，而非为每个原子生成潜在向量。这不仅在计算上高效，且有物理依据——IDP 的构象柔性主要由残基级相互作用（疏水性、电荷、脯氨酸约束）决定，而非单个原子位置。
+
+**门控 GCN 优于标准 GCN**：`ConvLayer` 中的 sigmoid 门控消息传递比简单的求和/平均聚合提供了更丰富的表达能力。过滤分支可以学习抑制来自化学上无关邻居的信息（例如，在更新埋藏原子的表示时忽略远处的溶剂暴露原子），这对于无序蛋白中异质性的局部环境尤为重要。
+
+**紧凑的 Transformer 头**：在 `head_dim=16` 的设置下，每个注意力头捕获狭窄的结构相关性。8 个头共同跨越 128 维的注意力空间，但每个头的较小容量充当了隐式正则化——防止解码器过拟合于特定的训练构象，当训练集仅代表真实构象系综的极小一部分时，这一点至关重要。
+
+来源: [model.py](model.py#L29-L70), [layers.py](layers.py#L7-L37), [layers.py](layers.py#L146-L181)
+
+## 导航
+
+- **下一步**: 深入了解 GCN 内部机制 → [GCN 卷积层](5-gcn-convolution-layers)
+- **下一步**: 探索 Transformer 解码器内部机制 → [Transformer 解码器块](6-transformer-decoder-blocks)
+- **下一步**: 理解 VAE 损失如何驱动训练 → [训练流水线](7-training-pipeline)
+- **向上**: 返回架构概述 → [架构概述](3-architecture-overview)
+
+---
+
+- [深入解析/模型核心/GCN 卷积层](https://zread.ai/Junjie-Zhu/Phanto-IDP/5-gcn-convolution-layers)
+
+---
+slug:5-gcn-convolution-layers
+blog_type:normal
+---
+
+
+`ConvLayer` 是 Phanto-IDP 中的基础消息传递原语——一种**门控图卷积**，它通过聚合分子图中每个原子局部邻域的信息来转换原子级嵌入。这些卷积层顺序堆叠（默认 3–4 层），构成了 VAE 的**编码器**，在到达潜在瓶颈层之前，将每个原子的特征向量从初始化学嵌入逐步精炼为具备结构感知能力的隐藏表示。该设计遵循了 Xie 和 Grossman（CGCNN，2018）提出的 filter-core 门控范式，此处针对本质上无序的蛋白质构象进行了适配，其中图拓扑编码了单一结构快照内的原子间邻近度。
+
+来源: [layers.py](/layers.py#L7-L37), [model.py](/model.py#L53-L53)
+
+## 编码器流水线中的架构角色
+
+GCN 卷积层位于 `PhantoIDP` 前向传播的最前端，紧接在原子嵌入查找和线性投影之后。它们是唯一在**原子级图**上操作的组件——每个下游模块（VAE 瓶颈层、Transformer 解码器）均在残基级别上工作。这使得卷积堆栈承担了将局部几何与化学信息转换为适用于残基级池化的稠密原子嵌入的关键任务。
+
+```mermaid
+flowchart LR
+    subgraph Encoder["GCN Encoder Stack"]
+        direction TB
+        E0["Embedding Lookup<br/>+ Linear Projection"] --> C1["ConvLayer #1"]
+        C1 --> C2["ConvLayer #2"]
+        C2 --> C3["ConvLayer #n_conv"]
+    end
+    C3 --> R["Residue Pooling<br/>atom_emb → (B, A, h_a×3)"]
+    R --> VAE["VAE Bottleneck<br/>μ, logσ → z"]
+    VAE --> TF["Transformer Decoder"]
+
+    style Encoder fill:#e8f4f8,stroke:#2c7fb8,stroke-width:2px
+    style C1 fill:#b3dce9,stroke:#2c7fb8
+    style C2 fill:#b3dce9,stroke:#2c7fb8
+    style C3 fill:#b3dce9,stroke:#2c7fb8
+```
+
+在整个堆栈中，每个 `ConvLayer` 都接收相同的三个输入：当前的原子嵌入（`atom_emb`）、**固定的**键/边嵌入（`nbr_emb`）以及**固定的**邻居邻接索引（`nbr_adj_list`）。只有 `atom_emb` 会在层间更新；图结构和边特征保持不变——这是图神经网络中标准的设计选择，可避免重复计算拓扑结构。
+
+来源: [model.py](/model.py#L72-L82), [model.py](/model.py#L44-L53)
+
+## ConvLayer：门控消息传递机制
+
+`ConvLayer` 实现了三阶段计算：**(1) 邻居收集**、**(2) 门控聚合** 和 **(3) 残差更新**。下图追踪了各阶段的张量变换过程：
+
+```mermaid
+flowchart TD
+    A["atom_emb\n(B, N, h_a)"] --> CAT["Concatenate"]
+    N["atom_nbr_emb\n(B, N, M, h_a)"] --> CAT
+    E["nbr_emb\n(B, N, M, h_b)"] --> CAT
+    CAT -->|"2·h_a + h_b"| LIN["fc_full: Linear\n(2h_a+h_b) → 2h_a"]
+    LIN --> BN1["BatchNorm1d"]
+    BN1 --> SPLIT["Chunk → (filter, core)"]
+    SPLIT -->|"h_a"| SIG["σ Sigmoid\n(gate)"]
+    SPLIT -->|"h_a"| RELU1["ReLU\n(message)"]
+    SIG --> MUL["⊙ Element-wise\nProduct"]
+    RELU1 --> MUL
+    MUL --> SUM["∑ Sum over M\nneighbors"]
+    SUM --> BN2["BatchNorm1d"]
+    BN2 --> ADD["+ Residual\n(atom_emb)"]
+    A --> ADD
+    ADD --> RELU2["ReLU"]
+    RELU2 --> OUT["out\n(B, N, h_a)"]
+
+    style CAT fill:#fef9e7,stroke:#f39c12
+    style SPLIT fill:#fef9e7,stroke:#f39c12
+    style MUL fill:#eaf2f8,stroke:#2c7fb8
+    style ADD fill:#eaf2f8,stroke:#2c7fb8
+```
+
+### 阶段 1：邻居收集
+
+给定形状为 `(B, N, M)` 的邻接表 `nbr_adj_list`——其中 **M** 是每个原子固定的最大邻居数——该层通过高级索引收集每个原子的 M 个邻居的嵌入：`atom_emb[torch.arange(B).unsqueeze(-1), nbr_adj_list.view(B, -1)]`。这将产生形状为 `(B, N, M, h_a)` 的 `atom_nbr_emb`，随后将其与中心原子的嵌入（在 M 维度上广播）以及每条边的键特征向量进行拼接，生成形状为 `(B, N, M, 2·h_a + h_b)` 的联合张量。
+
+来源: [layers.py](/layers.py#L21-L27)
+
+### 阶段 2：门控聚合
+
+拼接后的张量经过 `fc_full`（一个将 `2·h_a + h_b → 2·h_a` 进行投影的线性层），随后在展平的 `(B·N·M)` 维度上进行批归一化。然后，结果被**拆分为两个相等的半区**：
+
+| 分支 | 激活函数 | 作用 |
+|--------|-----------|------|
+| **Filter** (`nbr_filter`) | Sigmoid σ | 生成 [0, 1] 范围内的值，充当软门控，控制每个邻居的消息有多少能够通过 |
+| **Core** (`nbr_core`) | ReLU | 生成实际的消息内容——将被传递的非负特征 |
+
+随后，逐元素乘积 `nbr_filter ⊙ nbr_core` 在 M 个邻居上进行**求和**（维度 dim=2），折叠邻域维度，并为每个原子生成一个形状为 `(B, N, h_a)` 的单一聚合向量。对该聚合输出应用第二次批归一化。
+
+Sigmoid 门控是区分标准 GCN 或 GAT 卷积的关键差异：它并非学习固定的注意力权重，而是让每个特征维度独立学习是传播还是抑制来自每个邻居的信息，从而在通道轴上实现**细粒度的特征选择**。
+
+来源: [layers.py](/layers.py#L28-L34)
+
+### 阶段 3：残差更新
+
+将聚合后的邻域向量与**原始原子嵌入**相加作为残差连接：`atom_emb + nbr_sumed`。此跳跃连接确保每一层是精炼而非替代原子表示，为堆叠的卷积层提供稳定的梯度流。在返回前，对该和应用最终的 ReLU 激活。
+
+鉴于默认堆叠深度为 3–4 层，残差设计尤为重要——若无跳跃连接，重复的消息传递可能导致过平滑，即所有原子嵌入坍缩为统一的表示。残差路径在层间保留了每个原子的身份信息。
+
+来源: [layers.py](/layers.py#L35-L36)
+
+## 张量形状契约
+
+下表追踪了单次 `ConvLayer.forward` 调用中完整的张量形状演进过程，使用默认配置（`h_a = 64`，`h_b` 由数据决定）：
+
+| 步骤 | 操作 | 输出形状 |
+|------|-----------|-------------|
+| 输入 `atom_emb` | — | `(B, N, 64)` |
+| 输入 `nbr_emb` | — | `(B, N, M, h_b)` |
+| 输入 `nbr_adj_list` | — | `(B, N, M)` |
+| 邻居收集 | 索引 `atom_emb` | `(B, N, M, 64)` |
+| 拼接 | `[center, neighbor, bond]` | `(B, N, M, 128+h_b)` |
+| `fc_full` | 线性投影 | `(B, N, M, 128)` |
+| `bn_hidden` | 批归一化 | `(B, N, M, 128)` |
+| 拆分 | 切分维度 dim=3 | 2 × `(B, N, M, 64)` |
+| Filter ⊙ Core | 逐元素乘积 | `(B, N, M, 64)` |
+| 邻居求和 | 归约维度 dim=2 | `(B, N, 64)` |
+| `bn_output` | 批归一化 | `(B, N, 64)` |
+| 残差 + ReLU | 相加 + 激活 | `(B, N, 64)` |
+
+<CgxTip>`fc_full` 线性层是每个 ConvLayer 实例所**独有的唯一可学习参数**（两个批归一化模块除外）。这意味着每层的参数量主要由 `(2·h_a + h_b) × 2·h_a + 2·h_a` 的权重/偏置决定——在为更大的蛋白质缩放 `h_a` 时请牢记这一点，因为其二次增长会迅速增加内存占用。</CgxTip>
+
+来源: [layers.py](/layers.py#L7-L37)
+
+## 配置与堆叠
+
+卷积堆栈通过三个模型级超参数进行配置，它们共同控制编码器的容量和感受野：
+
+| 参数 | 默认值 | CLI 标志 | 作用 |
+|-----------|---------|----------|--------|
+| `h_a` | 64 | `--h_a` | 原子隐藏嵌入维度——决定 `fc_full` 及所有中间张量的宽度 |
+| `h_b` | 数据推导 | — | 键/边特征维度——在运行时从预处理后的 pickle 文件中推断 |
+| `n_conv` | 3 | `--n_conv` | 堆叠的 `ConvLayer` 实例数量——每层将图中的有效感受野扩展一个跃距 |
+
+`n_conv` 层在 `PhantoIDP.build()` 中作为 `nn.ModuleList` 实例化，并在前向传播中通过简单循环顺序执行。每一层都是独立的 `ConvLayer`，拥有各自的 `fc_full`、`bn_hidden` 和 `bn_output` 参数——层间**无参数共享**。在最终卷积之后，原子嵌入从 `(B, N, h_a)` 重塑为 `(B, A, h_a × 3)`，其中 **A** 是氨基酸残基的数量，假设每个残基包含 3 个骨架原子（N, Cα, C），并将其分组用于随后的 VAE 瓶颈层。
+
+<CgxTip>`n_conv` 层后的有效感受野为分子图中的 `n_conv` 个跃距。对于具有扩展构象的 IDP，增加 `n_conv`（例如从 3 增至 5–6）有助于捕获更长程的结构依赖关系，但需注意过平滑问题——残差连接只能缓解而不能消除此风险。在训练期间监控各层的原子嵌入方差以检测坍缩现象。</CgxTip>
+
+来源: [model.py](/model.py#L43-L53), [model.py](/model.py#L81-L85), [arguments.py](/arguments.py#L40-L43)
+
+## 从图构建到 ConvLayer 的数据流
+
+`ConvLayer` 的输入源自预处理和数据集流水线。理解它们的来源有助于阐明卷积在整个系统中的角色：
+
+```mermaid
+flowchart LR
+    subgraph Preprocess["C++ Preprocessor"]
+        PDB["PDB Files"] --> PKL["Pickle Files\n(atom_fea, nbr_info,\nnbr_fea_idx, atom_amino_idx)"]
+    end
+    subgraph Dataset["ProteinDataset + collate_pool"]
+        PKL --> AFEA["atom_emb_idx\n(B, N) — integer indices"]
+        PKL --> NFEA["nbr_emb\n(B, N, M, h_b) — edge features"]
+        PKL --> NIDX["nbr_adj_list\n(B, N, M) — neighbor indices"]
+    end
+    subgraph Model["PhantoIDP.forward"]
+        AFEA --> EMB["Embedding lookup\n+ Linear(h_init → h_a)"]
+        EMB --> CONV["ConvLayer stack"]
+        NFEA --> CONV
+        NIDX --> CONV
+    end
+
+    style Preprocess fill:#f5f5f5,stroke:#999
+    style Dataset fill:#fef9e7,stroke:#f39c12
+    style Model fill:#eaf2f8,stroke:#2c7fb8
+```
+
+- **`atom_emb_idx`** `(B, N)`：原子嵌入表的整数索引，源自 `AtomCustomJSONInitializer` 生成的独热原子类型编码。通过 `nn.Embedding.from_pretrained` 查找并随后经过 `nn.Linear(h_init → h_a)` 投影，生成初始的 `atom_emb` 张量。
+- **`nbr_emb`** `(B, N, M, h_b)`：键/边特征向量，编码每个原子与其 M 个最近邻之间的几何关系（距离、角度）。由 C++ 预处理器计算并存储在 pickle 文件中。
+- **`nbr_adj_list`** `(B, N, M)`：标识每个原子的 M 个最近邻的整数索引。用于阶段 1 的收集操作。
+
+`collate_pool` 函数将批次中的所有结构填充至最大原子数 **N** 和最大残基数 **A**，确保变长蛋白质具有统一的张量形状。
+
+来源: [traj_dataset.py](/traj_dataset.py#L42-L64), [traj_dataset.py](/traj_dataset.py#L154-L173), [model.py](/model.py#L72-L82)
+
+## 设计对比：门控卷积 vs. 替代方案
+
+`ConvLayer` 中的 filter-core 门控机制在图卷积变体空间中占据着独特的设计位置。下表将其与两种常见替代方案进行了对比：
+
+| 方面 | 门控卷积（本工作） | 标准 GCN | 图注意力（GAT） |
+|--------|----------------------|-------------|----------------------|
+| **聚合权重** | 按特征学习的门控 σ(f₁) ∈ [0,1] | 固定的 1/√(d_i·d_j) 归一化 | 通过 softmax 学习的逐边标量 |
+| **粒度** | 逐通道门控 | 每边单一标量 | 每头每边单一标量 |
+| **非线性位置** | 线性层之后，聚合之前 | 聚合之后 | 注意力分数计算中 |
+| **残差连接** | 显式 `atom_emb + agg` | 通常无 | 可选跳跃 |
+| **批归一化** | 两个 BN 层（聚合前/后） | 单个 BN 或 LayerNorm | 不定 |
+| **表达力** | 高——每个特征维度独立门控 | 低——基于拓扑的固定权重 | 中——学习到的边重要性 |
+
+逐通道门控为**特征选择性消息传递**提供了一种自然机制：网络能够学习在每个邻居的基础上传播某些几何特征（如键角），同时抑制其他特征（如冗余的距离信息）。这对于 IDP 构象生成尤为有利，因为在构象系综的不同区域中，相关的结构特征会有所差异。
+
+来源: [layers.py](/layers.py#L28-L33)
+
+## 集成点与后续步骤
+
+GCN 卷积层在 `PhantoIDP.forward` 的残基池化重塑处终止，此后架构过渡到 VAE 瓶颈层（`amino_to_mu` / `amino_to_var` 线性映射及重参数化技巧）。因此，原子级图结构被卷积堆栈**完全消耗**——Transformer 解码器在残基级序列上操作，不再包含显式的图拓扑。
+
+关于 ConvLayer 输出如何馈入 VAE 瓶颈层及后续 Transformer 解码器的完整图景，请参见 [VAE Encoder-Decoder Design](4-vae-encoder-decoder-design) 和 [Transformer Decoder Blocks](6-transformer-decoder-blocks)。有关如何从原始 PDB 文件构建输入图数据的详细信息，请参见 [Graph Dataset Construction](11-graph-dataset-construction)。
+
+---
+
+- [深入解析/模型核心/Transformer 解码器块](https://zread.ai/Junjie-Zhu/Phanto-IDP/6-transformer-decoder-blocks)
+
+---
+slug:6-transformer-decoder-blocks
+blog_type:normal
+---
+
+
+Transformer 解码器模块构成了 Phanto-IDP 双路径架构的**精炼阶段**——接收 VAE 重参数化的残基级嵌入，并通过多头自注意力与逐位置前馈层对其进行迭代精炼，最终为每个残基生成 3×3 的主链帧预测。与在原子级图上运行的 GCN 编码器不同，这些模块在序列残基表示上运行，能够捕获局部图卷积无法触及的长程残基间依赖关系。其实现包含两个紧密耦合的类：**`IdpGANBlock`**（包含残差连接、归一化和前馈网络的完整解码器模块）与 **`IdpGANLayer`**（多头自注意力机制），两者均定义在 [layers.py](/layers.py) 中。
+
+来源：[layers.py](/layers.py#L40-L99)，[model.py](/model.py#L60-L70)
+
+## 架构概述
+
+Transformer 解码器堆栈位于 Phanto-IDP 前向传播的末端，接收来自 VAE 瓶颈层的压缩残基嵌入，并在 `n_conv` 个堆叠模块中逐步对其进行精炼。每个模块遵循经典的 Transformer 解码器模式——自注意力 → 残差相加 → 层归一化 → 前馈 → 残差相加 → 层归一化——并可配置前归一化或后归一化顺序。其与标准 `nn.TransformerDecoderLayer` 的关键架构区别在于：**可选的成对 2D 表示分支**（可通过结构先验偏置注意力对数），以及 **1D 氨基酸条件化**（将序列特征拼接到前馈更新器中）。
+
+```mermaid
+flowchart TB
+    subgraph "IdpGANBlock Forward Pass"
+        direction TB
+        S_IN["s (L, N, embed_dim)"] --> NORM_PRE{"pre-norm?"}
+        NORM_PRE -->|Yes| LN1["LayerNorm(s)"]
+        NORM_PRE -->|No| ATTN_IN["s"]
+        LN1 --> ATTN_IN
+        
+        ATTN_IN --> SA["IdpGANLayer<br/>Multi-Head Self-Attention<br/>+ Optional 2D Bias"]
+        SA --> RES1["s + Dropout(s₂)"]
+        RES1 --> NORM_POST1{"post-norm?"}
+        NORM_POST1 -->|Yes| LN2["LayerNorm(s)"]
+        NORM_POST1 -->|No| FF_IN["s"]
+        LN2 --> FF_IN
+        
+        FF_IN --> CAT{"1D embed<br/>enabled?"}
+        CAT -->|Yes| CONCAT["cat(s, x)"]
+        CAT -->|No| PASS["s"]
+        CONCAT --> UPD["Updater Module<br/>Linear→Activation→Dropout→Linear"]
+        PASS --> UPD
+        
+        UPD --> RES2["s + Dropout(s₂)"]
+        RES2 --> NORM_POST2{"post-norm?"}
+        NORM_POST2 -->|Yes| LN3["LayerNorm(s)"]
+        NORM_POST2 -->|No| S_OUT["s (output)"]
+        LN3 --> S_OUT
+    end
+```
+
+来源：[layers.py](/layers.py#L111-L143)
+
+## IdpGANBlock——完整解码器模块
+
+`IdpGANBlock` 实现了一个单一的 Transformer 解码器层，包含以下结构组件：
+
+| 组件 | 实现方式 | 默认配置 |
+|---|---|---|
+| **自注意力** | `IdpGANLayer`（自定义 MHA） | d_model=128, nhead=8 |
+| **前馈（更新器）** | `Linear→Activation→Dropout→Linear` | dim_ff=128, ReLU |
+| **残差连接** | 每个子层的加性跳跃连接 | 始终"启用" |
+| **层归一化** | 可配置位置的 `nn.LayerNorm` | 后归一化，ε=1e-5 |
+(9-Loss-Weight-Scheduling)|
+| **Dropout**. | 应$应用于每个子层输出之后GPT | p=0.1$ |
+| **1D 条件化** | 拼接到前馈输入 | 禁用 (embed_dim_1d=None) |
+| **2D 成对偏. | 通过 MLP 的注意力对数偏置 | 禁8DGPT 禁用 (embed_dimC*2d=None) |
+
+**更新器模块**在构造时被组装为 `nn.Sequential` 链：`Linear(updater_in;_dim, dim_feedforward) → Activation →2D → [Dropout] → Linear(dim_feedforward, embed_dim)`。仅(仅当 `dropout is not None` 时，Dropout 层才会被条件性地包含。这与原始 Transformer 的逐位置前馈网络相$呼应，5;但不同0D1区别在于&6在于：当启用 1D 氨基酸嵌入时，`updater_in_dim`6会扩展为 `embed;5G,3_dim + embed_dim_1d`，从而将序列级0A级的条件.9D条件信6E信息直接注入到精炼路径中。
+
+&0D
+来源：7D：[layers.py](/layers.py#L40-L99)0A，[model.py](/model.py#L60-L70)0D0A0D0A### 归一化策略0D0A7D
+
+?：Pre-LN2; 与 Post-LN0D0A0D0B2;该?模块B3模块支$支持两种由 `norm_pos` 推;控制的归一化放置策略0D0A0D0A- **后.9D后归一化**（`"post"`）：原始 Transformer 公式——`LayerNorm(x + Sublayer(x))-)`。会';会为 `norm1` 和& 和 `norm2` 创建0D创建两个?2相同的 `LayerNorm(embed#(embed_dim)` 实例。这是?3这是默认.9D默认设置5;设置，也是3，也是 Phanto-IDP(生产?3生产模型0D模型中使用的配置D使用的配置。0D0A0D0A-#(A- **前归一-3前归一化**（`"pre"`）：;`2;：重构变+3@重构变体——`x + Sublayer(LayerNorm(x))`。8,LayerNorm(x))`。此处 `norm1` 在?3在注意力?2注意力之前?2之前;5;运行，2运行，而 `norm2` 则?3则应用;5应用于拼接?3拼接输入 `cat(s, x)`，在?2在更新器?3更新器模块;5模块**之前***?3之前**，这;2这需要?3需要一个额外?2额外的 `pre_linear` 投影（`Linear(updater_in_dim, updater_in_dim)`）将;2将归一化?3归一化后的?3混合;2混合维度?3维度输入?2输入转换?3转换回?2回更新器?3更新器期望?2期望的维度。0D0A0D0A前归一化?3归一化变体?2变体在[第 87 行](/layers.py#L87)的额外 `pre_linear` 层?2层是?3是必要的?2必要的，因为?3因为当?2当启用?3启用 1D 条件?3条件化时，归一化?3归一化输入?2输入维度?3维度不同于?2不同于纯 `embed_dim`——LayerNorm?3LayerNorm 必须?2必须归一化?3归一化拼接?3拼接的 `[s; x]` 张量?2张量，而?2而线性?3线性投影?2投影会?3会在?2在更新器?3更新器处理?2处理它?3它之前?2之前恢复?3恢复其?2其维度。0D0A0D0A来源7D来源：[layers.py](/layers.py#L82-L90)0A，[layers.py](/layers.py#L117-L142)0D0A0D0A### 前向?3前向传播?2传播数据?3数据流0D0A0D0A前向?3前向签名 `forward(self, s, x=None, p=None)` 接受?2接受0D0A0D0A- **`s`**：形状?3形状为 `(L, N, embed_dim)` 的主?3主要序列?2序列表示?3表示张量——**注意?3注意序列?2序列优先?3优先的布局?2布局**（L = 序列?3序列长度?2长度，N = 批量?3批量大小?2大小），这?2这与?3与 PyTorch 的?3的旧版?2旧版 transformer 约定?3约定相匹配?2匹配，而?2而不是?3不是批量?3批量优先?2优先的?3标准。0D0A0D0A- **`x`**：形状?3形状为 `(L, N, embed_dim_1d)` 的可选?3可选 1D 氨基?3氨基酸?2酸嵌入?3嵌入，启用?3启用时?2时将?3将拼接?3拼接到?2到更新器?3更新器输入?2输入中。0D0A0D0A- **`p`**：用于?3用于注意力?3注意力偏置?2偏置的?3的可选?3可选 2D 成对?3成对表示?2表示，直接?3直接传递?2传递给 `IdpGANLayer`。0D0A0D0A残差?3残差连接?2连接使用?3使用带有?3带有 dropout 正则?3正则化?2化的**加性?3加性跳跃?2跳跃连接**：`s = s + dropout(sublayer_output)`。当?3当禁用?3禁用 dropout（`dropout is None`）时?2时，该?3该连接?2连接简化?3简化为 `s = s + sublayer_output`，不?2不应用?3应用随机?3随机正则?3正则化。0D0A0D0A来源7D来源：[layers.py](/layers.py#L111-L143)0D0A0D0A## IdpGANLayer——多头?3多头自注意力0D0A0D0A`IdpGANLayer` 实?3实现?2现了一个?3一个带有?3带有可选?3可选成对?3成对 2D 表示?3表示分支?2分支的?3的自定义?3自定义多头?3多头缩放?3缩放点积?3点积自注意力?3注意力机制?2机制。与?3与 PyTorch 内置?3内置的 `nn.MultiheadAttention` 不同?2不同，此?3此实现?2实现暴露?3暴露了?2了内部?3内部注意力?3注意力计算?2计算结构?3结构，并?2并支持?3支持通过?3通过成对?3成对嵌入?2嵌入注入?3注入结构?3结构偏置?2偏置。0D0A0D0A```mermaid0Dflowchart LR0D    subgraph "IdpGANLayer: Scaled Dot-Product Attention"0D        S["s (L, N, I)"] --> Q["q_linear(s)"]0D        S --> K["k_linear(s)"]0D        S --> V["v_linear(s)"]0D        0D        Q --> RESHAPE_Q["Reshape → (N·H, L, D)"]0D        K --> RESHAPE_K["Reshape → (N·H, L, D)"]0D        V --> RESHAPE_V["Reshape → (N·H, L, D)"]0D        0D        RESHAPE_Q --> SCALE["q × 1/√(norm_dim)"]0D        SCALE --> BMM_QK["bmm(q, kᵀ) → (N·H, L, L)"]0D        RESHAPE_K --> BMM_QK0D        0D        BMM_QK --> TOT_AFF["tot_aff = dp_aff<br>[+ 2D bias if p given]"]0D        0D        P["p (pairwise 2D)"] --> MLP2D["mlp_2d → (N, H, L, L)"]0D        MLP2D --> TOT_AFF0D        0D        TOT_AFF --> SOFTMAX["Softmax(dim=-1)"]0D        SOFTMAX --> BMM_AV["bmm(attn, v) → (N·H, L, D)"]0D        RESHAPE_V --> BMM_AV0D        0D        BMM_AV --> RESHAPE_OUT["Reshape → (L, N, D·H)"]0D        RESHAPE_OUT --> OUT_PROJ["out_linear → (L, N, I)"]0D    end0D```0D0A来源7D来源：[layers.py](/layers.py#L146-L247)0D0A0D0A### Q/K/V 投影?3投影和?3和头?3头分割0D0A0D0A查询?3查询、键?3键和?3和值?3值投影?3投影使用?3使用**无偏置?3无偏置**线性?3线性层?2层：`nn.Linear(in_dim, d_model, bias=False)`。投影?3投影后?2后的?3张量?2张量从 `(L, N, d_model)` 重塑?3重塑为 `(N·H, L, head_dim)`，方法?3方法是?2是先?2先视为?3视为 `(L, N·H, head_dim)` 再?2再转置?3转置，其中?2其中 `H` 是?3是注意力?3注意力头?2头的数量?3数量，`D = d_model / H` 是?3是每个?3每个头?2头的维度?3维度。这种?3这种交错?3交错将?2将所有?3所有头?2头分布?3分布在?2在批量?3批量维度?2维度上，从而?3从而允许?2允许通过?3通过单次?3单次 `torch.bmm` 调用?3调用即可?2即可同时?3同时计算?3计算所有?2所有批量?3批量-头?2头组合?3组合。0D0A0D0A来源7D来源：[layers.py](/layers.py#L167-L220)0D0A0D0A### 注意力?3注意力缩放?3缩放：两种?3两种归一化?3归一化模式0D0A0D0A注意力?3注意力缩放?3缩放因子?2因子由 `dp_attn_norm` 控制0D0A0D0A| 模式7D模式 | 缩放?3缩放因子?2因子 | 语义7D语义 |0D|---|---|---|0D| `"d_model"` | 1/√(d_model) = 1/√128 ≈ 0.088 | 按?3按总?3总嵌入?3嵌入维度?2维度缩放?3缩放 |0D| `"head_dim"` | 1/√(head_dim) = 1/√16 = 0.25 | 按?3按每个?3每个头?2头的维度?2维度缩放?3缩放 |0D0APhanto-IDP 在?3在生产?3生产中?2中使用?3使用 `"d_model"` 模式?2模式，该?3该模式?2模式应用?3应用了?2了标准?3标准 Transformer 的?3的按?3按完整?3完整模型?3模型维度?2维度缩放?3缩放。`"head_dim"` 模式?2模式遵循?3遵循一些?3一些现代?3现代架构?2架构中?2中使用的?3的按头?3按头缩放?3缩放约定?2约定。在?3在构造?3构造时?2时强制?3强制执行?2执行约束 `d_model % nhead == 0`，以?2以保证?3保证 `head_dim` 为?3为整数?3整数。0D0A0D0A来源7D来源：[layers.py](/layers.py#L156-L201)0D0A0D0A### 成对?3成对 2D 表示?3表示分支0D0A0D0A`mlp_2d` 分支?2分支提供?3提供了?2了一种?3一种将?3将成对?3成对结构?3结构信息?2信息注入?3注入注意力?3注意力对数?2对数中?2中的?3的机制?2机制。它?3它被?2被定义?3定义为?2为一个?3一个单?3单层 `nn.Linear(in_dim, nhead)`（更?2更深的?3的 2 层?2层 MLP 已?2已在[第 177-179 行](/layers.py#L177-L179)被?2被注释?3注释掉）。当?3当提供?3提供成对?3成对张量?2张量 `p` 时?2时，它会?3会产生?3产生逐头?3逐头注意力?3注意力偏置?2偏置图?2图，并?2并在?2在 softmax 之前?2之前将?2将其?3其加?2加到?3到点积?3点积亲和力?2亲和力中。**在?3在当前?3当前生产?3生产配置?2配置中，此?3此分支?2分支已?2已禁用**（`embed_dim_2d=None`），这?2这意味着?3意味着在[第 230 行](/layers.py#L230)处?2处 `tot_aff = dp_aff`——注意力?3注意力纯粹?3纯粹基于?3基于学习?3学习到的?2的点积?3点积亲和力?2亲和力运行?2运行，而?2而没有?3没有结构?3结构先验?2先验。0D0A0D0A<CgxTip>2D 成对?3成对分支?2分支虽然?3虽然当前?3当前已?2已禁用?2禁用，但?2但在?2在架构?3架构上?2上具有?3具有重大?3重大意义?2意义：它?3它遵循?3遵循了?2了 AlphaFold2 的?3的 Evoformer 中?2中成对?3成对表示?3表示偏置?3偏置注意力?3注意力机制?2机制的?3的模式?2模式。启用?3启用它?2它（通过?3通过提供?3提供 `embed_dim_2d` 并?2并传递?3传递 `p` 张量?2张量）将?2将允许?3允许模型?2模型将?3将基于?3基于距离?2距离/接触?2接触的?3的先验?3先验纳入?3纳入自注意力?3注意力计算?2计算中，从而?3从而可能?3可能改善?3改善对?2对具有?3具有瞬态?3瞬态接触?2接触的?3的 IDP 的?3的远距?3远距结构?3结构预测?2预测。</CgxTip>0D0A0D0A来源7D来源：[layers.py](/layers.py#L176-L181)0A，[layers.py](/layers.py#L230-L231)0D0A0D0A## 在?3在 Phanto-IDP 中?2中的?3的集成0D0A0D0ATransformer 解码器?3解码器模块?2模块在 `PhantoIDP.build()` 中?2中被?3被实例化?2实例化，并?2并对?3对 VAE 重?3重参数化?2参数化的?3的残基?3残基级?2级嵌入?3嵌入进行?2进行操作?2操作。完整?3完整的?3的集成?3集成链?2链如下?2如下0D0A0D0A```mermaid0Dflowchart TB0D    ATOM_EMB["Atom Embeddings<br/>(B, N_atoms, h_a=64)"] --> GCN["GCN ConvLayers × n_conv"]0D    GCN --> RESHAPE["Reshape to residue-level<br/>(B, N_res, h_a×3=192)"]0D    VAE["VAE: μ, logvar → Reparameterize<br/>(B, N_res, h_g=32)"]0D    RESHAPE --> VAE0D    VAE --> FC_PROJ["amino_to_fc: h_g→32<br/>Transpose to (L, N, 32)"]0D    FC_PROJ --> TF_STACK["IdpGANBlock × n_conv<br/>embed_dim=32, d_model=128, nhead=8"]0D    TF_STACK --> TRANSPOSE_BACK["Transpose to (B, N_res, 32)"]0D    TRANSPOSE_BACK --> FC_OUT["fc_amino_out: 32→9"]0D    FC_OUT --> RESHAPE_OUT["Reshape to (B, N_res, 3, 3)<br/>N, CA, C backbone frames"]0D```0D0A生产?3生产配置?2配置使用?3使用以下?3以下确切?3确切参数?2参数实例化?3实例化这些?3这些模块?2模块0D0A0D| 参数7D参数 | 值7D值 | 作用7D作用 |0D|---|---|---|0D| `embed_dim` | 32 | 残基?3残基嵌入?3嵌入维度?2维度（模块?3模块的?3的输入?3输入/输出?2输出） |0D| `d_model` | 128 | 内部?3内部注意力?3注意力投影?3投影维度?2维度 |0D| `nhead` | 8 | 注意力?3注意力头?2头的?3的数量?3数量 (head_dim = 16) |0D| `dim_feedforward` | 128 | 前馈?3前馈隐藏?3隐藏维度?2维度 |0D| `dropout` | 0.1 | 子层?3子层 dropout 概率?3概率 |0D| `layer_norm_eps` | 1e-5 | 用于?3用于数值?3数值稳定性?2稳定性的?3的 LayerNorm epsilon |0D| `norm_pos` | `"post"` | 后归一化?3归一化（原始?3原始 Transformer） |0D| `embed_dim_2d` | None | 2D 成对?3成对分支?2分支已?2已禁用?3禁用 |0D| `embed_dim_1d` | None | 1D 氨基?3氨基酸?2酸条件化?3条件化已?2已禁用?3禁用 |0D| `activation` | `"relu"` | 前馈?3前馈网络?2网络中的?3的 ReLU 激活?3激活 |0D| `dp_attn_norm` | `"d_model"` | 按?3按完整?3完整模型?3模型维度?2维度缩放?3缩放 |0D0ATransformer 模块?3模块的?3的数量?2数量等于?3等于 `n_conv`（GCN 层?2层数?3数量?2数量），从而?3从而创建?3创建对称?3对称的?3的编码器?3编码器-解码器?3解码器深度?2深度。在?3在默认?3默认的 `n_conv=4` 设置?2设置下?2下，将?2将堆叠?3堆叠四?3四个 `IdpGANBlock` 实例?2实例，每个?3每个实例?2实例通过?3通过一轮?3一轮自注意力?3注意力和?2和前馈?3前馈变换?3变换来?2来精炼?3精炼残基?3残基表示?2表示。0D0A0D0A来源7D来源：[model.py](/model.py#L60-L70)0A，[model.py](/model.py#L92-L96)0D0A0D0A### 前向?3前向与?2与采样?3采样路径0D0A0D0ATransformer 模块?3模块服务?2服务于?2于两种?3两种不同?3不同的?3的执行?3执行路径?2路径0D0A0D0A**训练?3训练路径**（`PhantoIDP.forward`）：VAE 编码器?3编码器从?2从 GCN 输出?3输出中?2中产生 μ 和 logvar，重?3重参数化?2参数化采样?3采样一个?2一个潜?3潜向量?2向量，结果?3结果在?2在进入?3进入 Transformer 堆栈?2堆栈之前?2之前通过 `amino_to_fc` 投影?3投影。这些?3这些模块?2模块处理?3处理 `(L, N, 32)` 张量?2张量，最终?3最终输出?2输出经过?3经过 `fc_amino_out` 以?2以生成?3生成 `(B, N_res, 3, 3)` 主链?3主链帧?2帧预测?2预测，并?2并与?3与用于?3用于损失?3损失计算?2计算的?3的 VAE 统计?3统计数据?2数据一起?2一起返回?3返回。0D0A0D0A**生成?3生成路径**（`PhantoIDP.sample`）：在?3在推理?3推理期间?2期间，一个?2一个预?3预采样?3采样的?3的潜?3潜嵌入?2嵌入（来自?3来自带有?2带有小?3小温度?2温度的?3的 `reparameterize`，通常?3通常为 0.05）被?2被投影?3投影并?2并直接?3直接馈入?2馈入 Transformer 堆栈?2堆栈。此?3此路径?2路径完全?3完全绕过?2绕过 GCN 编码器?3编码器和?2和 VAE——Transformer 对?2对采样?3采样的?3的潜?3潜向量?2向量进行?2进行精炼?3精炼以?2以生成?3生成结构?3结构预测?2预测，从而?3从而实现?2实现通过?2在?3在重?3重参数化?2参数化中?2中改变?3改变噪声?2噪声来?2来**构象?3构象采样?2采样**，同时?2同时保持?3保持学习?3学习到?2到的?3的注意力?3注意力模式?2模式固定?3固定。0D0A0D0A<CgxTip>`forward` 和?2和 `sample` 的?3的分离?2分离是?2是 Phanto-IDP 生成?3生成能力?2能力的?3的关键?2关键：Transformer 模块?3模块学会?2学会将?2将任何?3任何有效?3有效的?3的潜?3潜向量?2向量解码?3解码为?2为物理?3物理上?2上合理?3合理的?3的主链?3主链帧?2帧序列?2序列。通过?2通过在?2在生成?3生成时?2时控制?3控制重?3重参数化?2参数化温度?2温度（例如?3例如 [generate.py](/generate.py#L148) 中?2中的?3的 `temp=0.05`），你?2你导航?3导航学习?3学习到?2到的?3的潜?3潜空间?2空间，以?2以产生?3产生多样?3多样且?2且真实?3真实的?3的 IDP 构象?3构象。</CgxTip>0D0A0D0A来源7D来源：[model.py](/model.py#L72-L102)0A，[model.py](/model.py#L104-L117)0A，[generate.py](/generate.py#L146-L149)0D0A0D0A## 参数?3参数预算?3预算分析0D0A0D0A在?3在生产?3生产配置?2配置下?2下（embed_dim=32, d_model=128, nhead=8, dim_feedforward=128），每个 `IdpGANBlock` 的?3的参数?3参数数量?2数量细分?3细分如下?2如下0D0A0D| 子模块7D子模块 | 参数7D参数 | 计算7D计算 |0D|---|---|---|0D| `q_linear` | 4,096 | 32 × 128 (bias=False) |0D| `k_linear` | 4,096 | 32 × 128 |0D| `v_linear` | 4,096 | 32 × 128 |0D| `out_linear` | 4,128 | 128 × 32 + 32 (bias=True) |0D| `linear1`（FF 输入?3输入） | 4,256 | 32 × 128 + 128 |0D| `linear2`（FF 输出?3输出） | 4,256 | 128 × 32 + 32 |0D| `norm1` | 64 | 32 × 2（权重?3权重 + 偏置?3偏置） |0D| `norm2` | 64 | 32 × 2 |0D| **每个?3每个模块?3模块总计** | **≈ 25,056** | |0D0A在?3在 4 个?2个堆叠?3堆叠模块?2模块下?2下，Transformer 解码器?3解码器贡献?2贡献了大约?3大约 **100K 个?2个参数**——这?2这是一个?3一个刻意?3刻意的?3的紧凑?3紧凑设计?2设计，反映?3反映了?2了?3了固有?3固有无序?3无序蛋白?3蛋白质域?2域的?3的特征?2特征，在?2在此?3此领域?2领域中?2中，过度?3过度参数化?2参数化将?2将有?3有风险?2风险对?2对特定?3特定构象?3构象过拟合?2拟合，而?2而不是?3不是学习?3学习分布?3分布景观?2景观。0D0A0D0A来源7D来源：[layers.py](/layers.py#L40-L99)0A，[layers.py](/layers.py#L146-L181)0D0A0D0A## 设计?3设计原理?3原理及?2及与?2与其他?3其他组件?2组件的?3的关系0D0A0D0ATransformer 解码器?3解码器模块?2模块在?2在 Phanto-IDP 的?3的架构?2架构中?2中占据?3占据着?2着一个?3一个精心?3精心选择?2选择的?3的位置?2位置。[GCN 卷积?3卷积层](<5-gcn-convolution-layers>) 通过?2通过在?2在原子?2原子级?2级邻域?3邻域特征?2特征上?2上的?3的图卷积?3卷积捕获?3捕获**局部?3局部**结构?3结构模式?2模式，而?2而 Transformer 模块?3模块则?2则通过?2通过全?3全序列?3序列自注意力?3注意力捕获?3捕获**全局?3全局**残基?3残基间?2间依赖?3依赖关系?2关系。[VAE 编码器?3编码器-解码器?3解码器设计](<4-vae-encoder-decoder-design>) 介导?3导了?2了这?2这两个?3两个世界?2世界之间?2之间的?3的联系?2联系——GCN 编码器?3编码器产生?3产生原子?2原子级?2级特征?2特征，VAE 将?2将其?3其压缩?3压缩为?2为残基?3残基级?2级潜?3潜空间?2空间，而?2而 Transformer 解码器?3解码器则?2则将?2A将A精炼?3精炼B2潜表示?3表示B3为A为最终?3最终C0结构?3结构C0预测?3预测。0D0A0D0A刻意?3刻意选择?2选择后?3后归一化?3归一化而?2而非?3非前?3前归一化?3归一化，以及?2以及不?2不使用?3使用因果?3因果掩码?2掩码，反映?3反映了?2了?3了该?2该任务?2任务的?3的结构?3结构预测?2预测性质?2性质：每个?3每个残基?3残基都?2都应该?3能够?2能够关注?3关注到?2到所有?2所有其他?3其他残基?37D（无?3无自回归?3回归约束?2约束）9-并且?2并且后?3后归一化?3归一化提供?2提供了?2了更强?3更强的?3的正则?3正则化?2化，有助?3有助于?2于防止?3防止模型?2模型记忆?3记忆无序?3无序系综?3系综的?3的特定?3特定构象?3构象。0D0A0D0A若?3若要?2要了解?3了解这些?3这些模块?2模块如何?2如何对?2对整体?3整体损失?3损失景观?2景观产生?3产生贡献?2贡献，请?2请参阅?3参阅[FAPE 损失?3损失函数](<8-fape-loss-function>) 和?2和[损失?3损失权重?3权重调度](<9-Loss-Weight-Scheduling>)。关于?3关于完整?3完整的?3的训练?3训练执行?2执行，请?2请参阅?3参阅[训练?3训练流水线](<7-training-pipeline>)。
+
+---
+
+## 训练与损失
+
+- [深入解析/训练与损失/训练流程](https://zread.ai/Junjie-Zhu/Phanto-IDP/7-training-pipeline)
+
+---
+slug:7-training-pipeline
+blog_type:normal
+---
+
+
+训练流水线是 Phanto-IDP 的编排核心——它将数据集构建、模型实例化、损失计算、权重调度和检查点持久化串联成一个单一的可复现循环。理解该流水线对于修改训练行为、诊断收敛问题或将框架扩展到新的蛋白质系统至关重要。
+
+## 流水线概述
+
+整个训练生命周期由 `main.py` 中的单一入口点驱动。在宏观层面上，流水线遵循严格的顺序契约：**解析配置 → 构建数据集 → 划分数据 → 实例化模型 → 迭代轮次 → 保存最佳检查点**。给定相同的随机种子，每个阶段都是确定性的，该种子在任何随机操作发生之前已被固定。
+
+```mermaid
+flowchart TD
+    A[Parse Arguments<br/>buildParser + settings.conf] --> B[Fix Random Seed]
+    B --> C[Discover & Shuffle<br/>Protein Directories]
+    C --> D[Split into<br/>train / val / test]
+    D --> E["Build ProteinDataset<br/>PDB targets + PKL graph features"]
+    E --> F{Pretrained<br/>Checkpoint?}
+    F -- Yes --> G[Override Model Hyperparams<br/>from Checkpoint Args]
+    F -- No --> H[Use CLI Defaults]
+    G --> I[Instantiate PhantoIDP<br/>+ DataParallel]
+    H --> I
+    I --> J[Create DataLoaders<br/>via splitDataset]
+    J --> K[Epoch Loop]
+    K --> L[trainModel<br/>train_loader]
+    L --> M[trainModel<br/>val_loader, evaluation=True]
+    M --> N{val_loss < best?}
+    N -- Yes --> O[Save Best Checkpoint]
+    N -- No --> P[Continue]
+    O --> K
+    P --> K
+    K -- epochs done --> Q[Load Best Checkpoint]
+    Q --> R["trainModel<br/>test_loader, testing=True"]
+    R --> S[Report RMSD + Loss]
+```
+
+来源: [main.py](/main.py#L17-L162), [arguments.py](/arguments.py#L4-L49)
+
+## 配置与参数解析
+
+流水线始于 `buildParser()`，它使用 **configargparse** 将 `settings.conf` 文件置于 CLI 参数之下。这意味着每个 CLI 标志都有一个对应的配置文件键，从而无需 shell 脚本即可实现可复现的实验。关键的训练相关参数如下：
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| `--seed` | 1234 | 固定 `torch.manual_seed` 和 `torch.cuda.manual_seed_all` 以保证可复现性 |
+| `--epochs` | 20 | 总训练轮次 |
+| `--batch_size` | 64 | 每次梯度更新的样本数 |
+| `--train` / `--val` / `--test` | 0.5 / 0.25 / 0.25 | 蛋白质目录的分数划分比例 |
+| `--lr` | 1e-3 | Adam 学习率 |
+| `--pretrained` | None | 用于热启动的 `.pth.tar` 检查点路径 |
+| `--no_train` | False | 跳过训练，直接进行评估 |
+| `--save_checkpoints` | True | 将最佳模型持久化到磁盘 |
+| `--workers` | 8 | DataLoader 并行度 |
+
+解析后，随机种子通过 `randomSeed(args.seed)` 全局应用，该函数在一次调用中同时设置 PyTorch 的 CPU 和 CUDA 种子。这发生在数据集打乱和模型初始化**之前**，从而确保完全的确定性。
+
+来源: [arguments.py](/arguments.py#L4-L49), [main.py](/main.py#L20-L33), [utils.py](/utils.py#L171-L176)
+
+## 数据集构建与划分
+
+流水线**不**划分单个样本——它划分的是**蛋白质目录**。这是一个关键的设计决策：属于同一蛋白质的所有构象快照保留在同一划分中，从而防止数据泄漏，即模型在训练时记忆了某种蛋白质的结构基序，并在验证时再次遇到它。
+
+划分逻辑如下：列出 `--protein_dir` 下的所有子目录，将其打乱，并使用向下取整除法按 `--train`、`--val`、`--test` 比例进行分区。然后使用完整语料库构建一次 `ProteinDataset`，`splitDataset()` 通过根据每个划分中的目录名称过滤数据集的 `id_prop_data` 列表，创建三个独立的 `DataLoader` 实例。每个加载器使用 `SubsetRandomSampler` 进行划分内随机化，并使用自定义的 `collate_pool` 函数将变长蛋白质图填充为统一的批量张量。
+
+```mermaid
+flowchart LR
+    A[Protein Directories] --> B[Shuffle + Floor Split]
+    B --> C[train_dirs]
+    B --> D[val_dirs]
+    B --> E[test_dirs]
+    F["ProteinDataset<br/>full corpus"] --> G[splitDataset]
+    C --> G
+    D --> G
+    E --> G
+    G --> H["train_loader<br/>SubsetRandomSampler"]
+    G --> I[val_loader]
+    G --> J[test_loader]
+```
+
+`collate_pool` 函数执行零填充，将其填充至批次中的最大原子数 `N` 和最大氨基酸数 `A`，生成形状为 `(B, N, ...)` 的原子特征统一张量，以及形状为 `(B, A, 3)` 的坐标目标 (N, CA, C) 统一张量。
+
+来源: [main.py](/main.py#L36-L109), [traj_dataset.py](/traj_dataset.py#L15-L64)
+
+## 模型实例化与预训练加载
+
+模型采用两阶段参数解析策略构建。当 `--pretrained` 指向有效检查点时，保存的 `args` 命名空间会**覆盖**四个关键超参数——`h_a`、`h_g`、`n_conv` 和 `lr`——从而确保与保存的权重保持架构一致性。键嵌入维度 `h_b` **不是**超参数；它是从数据集的边特征形状（`structures[1].shape[-1]`）推断出来的，使其依赖于数据而非由用户配置。
+
+构建后，模型被包装入 `torch.nn.DataParallel` 并移至 CUDA。优化器是一个权重衰减为零的 **Adam** 实例，在 `PhantoIDP.__init__` 内部创建——这意味着优化器是一个模块属性，而非外部对象，这简化了检查点序列化，因为 `state_dict` 和 `optimizer.state_dict` 可以一起保存。
+
+当提供预训练检查点时，加载分两阶段进行：(1) 模型构建前的超参数覆盖，然后 (2) 在 `DataParallel` 包装**之后**对模型权重和优化器状态执行 `load_state_dict`。全程使用 `.module` 访问器，因为 `DataParallel` 嵌套了原始模型。
+
+来源: [main.py](/main.py#L62-L101), [model.py](/model.py#L15-L27)
+
+## 训练循环
+
+`main()` 中的外层轮次循环被刻意保持极简——它将所有每轮逻辑委托给 `trainModel()`，该函数根据其布尔标志承担三重职责，作为**训练**、**验证**和**测试**的驱动器。循环契约如下：
+
+1. **训练阶段**：`trainModel(train_loader, model, epoch=epoch)` —— 启用梯度，`model.train()`
+2. **验证阶段**：`trainModel(val_loader, model, epoch=epoch, evaluation=True)` —— `torch.no_grad()`，`model.eval()`
+3. **最佳模型跟踪**：若 `val_loss < best_val_loss`，则标记为最佳并保存检查点
+4. **训练后测试**：加载最佳检查点，`trainModel(test_loader, model, testing=True)` —— 计算每样本 RMSD
+
+### 逐批次执行流程
+
+在 `trainModel` 内部，每个批次遵循以下序列：
+
+```mermaid
+sequenceDiagram
+    participant DL as DataLoader
+    participant M as Model (DataParallel)
+    participant O as Optimizer
+
+    loop each batch
+        DL->>M: (input_data, target_data)
+        Note over M: getInputs() → move to CUDA
+        alt Training
+            M->>M: model.train()
+            M->>M: out = model(input_var)
+            M->>M: model.module.fit(out, target_var, weight)
+            Note over M: fit() computes loss,<br/>calls backward(),<br/>optimizer.step()
+        else Evaluation / Testing
+            M->>M: model.eval()
+            M->>M: predicted = model(input_var)
+            M->>M: model.module.fit(predicted, target_var, weight, pred=True)
+            Note over M: pred=True skips<br/>backward() and step()
+        end
+    end
+```
+
+`fit()` 中的 `pred=True` 标志是区分纯前向评估与梯度更新训练的机制——当 `pred=True` 时，该方法计算损失但**跳过** `optimizer.zero_grad()`、`loss.backward()` 和 `optimizer.step()`。这使得损失记录器得以填充以便日志记录，而不会改变模型权重。
+
+在测试期间，使用 `calc_rmsd()` 计算每样本 RMSD，该函数通过四元数特征值分解实现 Kabsch 算法。目标和预测的坐标文件也会写入磁盘，以供外部分析。
+
+来源: [main.py](/main.py#L129-L162), [main.py](/main.py#L164-L266)
+
+## 损失计算：`fit()` 方法
+
+`fit()` 方法是训练流水线的数学核心。它接收模型的三元输出 `(predicted_frames, mu, logvar)` 以及真实主干坐标和当前轮次的损失权重。计算分三阶段进行：
+
+### 阶段 1 — 刚性变换构建
+
+预测和目标坐标均为骨干原子三元组：**(N, CA, C)**。`from_3_points()` 静态方法应用 **Gram-Schmidt 算法**（AlphaFold2 的算法 21）从这些三元组构造 3×3 旋转矩阵。对于预测，三个输出帧 `torch.split(outputs[0], 1, dim=-2)` 各自被压缩并视为独立的点三元组。目标的旋转矩阵则从真实的 N、CA、C 位置计算一次。
+
+### 阶段 2 — FAPE 损失
+
+**帧对齐点误差**计算三次——每种骨干原子类型 (N, CA, C) 各一次——并取平均值。每次 FAPE 计算度量的是**对齐到目标的局部帧后**预测与目标原子位置之间的距离。这使得损失在构造上是 **SE(3) 不变的**，意味着模型绝不会因预测了全局旋转或平移的结构而受到惩罚。
+
+### 阶段 3 — KL 散度
+
+VAE 的 KL 散度使用标准的闭式表达式从编码器的 `(mu, logvar)` 输出计算，并按序列长度归一化：
+
+$$\mathcal{L}_{KL} = \frac{0.5}{N} \cdot \text{mean}\left(\sum_i \left(1 + 2\log\sigma_i - \mu_i^2 - \sigma_i^2\right)\right) \cdot w_{KL}$$
+
+### 组合损失
+
+最终训练目标为：
+
+$$\mathcal{L} = \frac{w_{FAPE}}{3} \cdot \mathcal{L}_{FAPE} - \mathcal{L}_{KL}$$
+
+注意 KL 上的**负号**——这是因为计算出的 KL 项已经是负数（标准 VAE 目标最大化包含 −KL 的 ELBO）。减法有效地加上了 KL 正则化，将学习到的后验推向先验。
+
+<CgxTip>组合损失公式 `fape * weight_fape / 3 - kl_loss` 意味着在早期训练期间（高 FAPE 权重，低 KL 权重），模型优先考虑结构准确性。随着 KL 权重在轮次中增加，潜空间被逐步正则化，从而在生成时提高采样质量。</CgxTip>
+
+来源: [model.py](/model.py#L202-L224), [utils.py](/utils.py#L88-L134)
+
+## 损失权重调度
+
+流水线实现了一个**双轴**权重调度，分别为 FAPE 和 KL 独立演化，并以轮次编号为索引。这不是连续调度——它是一个带有离散步长边界的**分段常数**调度：
+
+### KL 权重调度
+
+| 轮次范围 | KL 权重 | 依据 |
+|---|---|---|
+| 0–59 | 1e-4 | 近零正则化；模型专注于重建 |
+| 60–119 | 5e-4 | 开始温和的潜空间塑造 |
+| 120–179 | 1e-3 | 中等 KL 压力 |
+| 180–239 | 2.5e-3 | |
+| 240–299 | 7.5e-3 | |
+| 300–359 | 1e-2 | 强正则化 |
+| 360+ | 1.5e-2 | 最大 KL 权重；潜空间良好正则化 |
+
+### FAPE 权重调度
+
+| 轮次范围 | FAPE 权重 | 依据 |
+|---|---|---|
+| 0–399 | 10.0 | 高权重：早期结构准确性至关重要 |
+| 400–799 | 2.0 | 降低：模型已学习骨干几何 |
+| 800+ | 1.0 | 标称：微调阶段 |
+
+调度通过 `min(epoch // 60, 6)` 和 `min(epoch // 400, 2)` 索引至权重列表来计算，使得边界被硬编码但列表易于修改。当 `epoch` 为 `None`（例如在独立评估期间）时，两个权重均回退至其终值 `(10.0, 1e-2)`。
+
+<CgxTip>两个调度之间的不对称性是有意为之的：KL 以 60 轮步长递增（在约 360 轮内 7 次过渡），而 FAPE 以 400 轮间隔递减（在约 800 轮内仅 3 次过渡）。这意味着 FAPE 在前约 400 轮中占主导地位，此后 KL 正则化变得日益具影响力——这是一种体现“先学结构，后正则化潜空间”原则的课程。</CgxTip>
+
+来源: [main.py](/main.py#L172-L178)
+
+## 检查点持久化
+
+当启用 `--save_checkpoints` 时，模型在每个轮次都会保存，而**最佳**模型（验证损失最低）会额外复制到 `model_best.pth.tar`。检查点字典包含：
+
+| 键 | 内容 |
+|---|---|
+| `epoch` | 当前轮次索引 |
+| `state_dict` | 所有模型参数 |
+| `optimizer` | Adam 状态（动量缓冲区，步数） |
+| `args` | 完整参数命名空间（经由 `vars(args)`） |
+
+保存 `args` 命名空间使得预训练加载逻辑能够重构精确的模型架构，而无需用户重新指定超参数。保存路径遵循 `{save_dir}/{name}/checkpoint.pth.tar` 模式，其中 `model_best.pth.tar` 为最佳轮次检查点的硬链接/副本。
+
+训练后，最佳检查点被重新加载至模型以进行测试集评估，确保报告的测试指标始终对应于具有最低验证损失的模型——而非最终轮次的模型。
+
+来源: [main.py](/main.py#L143-L161), [model.py](/model.py#L125-L129)
+
+## 监控与诊断
+
+流水线在每个阶段跟踪四个 `AverageMeter` 实例：**批次时间**、**数据加载时间**、**总损失**和 **KL 损失**。进度每 `--print_freq`（默认 50）个批次打印一次，带有不同的前缀：`##` 代表训练，`*` 代表验证，`**` 代表测试。CUDA 缓存以相同频率通过 `torch.cuda.empty_cache()` 清除，以防止长时训练运行中的碎片化。
+
+在测试期间，每样本 RMSD 值被写入 `rmsd.dat`，各个坐标张量被导出为 NumPy 文本文件（`outputs/target.*.dat` 和 `outputs/predicted.*.dat`），从而能够使用 [RMSD 与 Ramachandran 分析](13-rmsd-and-ramachandran-analysis) 中记录的工具进行下游分析。
+
+来源: [main.py](/main.py#L164-L266), [utils.py](/utils.py#L55-L85)
+
+## 执行总结
+
+从调用到最终测试指标的完整训练流水线可总结如下：
+
+| 阶段 | 组件 | 关键操作 |
+|---|---|---|
+| 1. 配置 | `buildParser()` | 叠加 `settings.conf` + CLI 参数 |
+| 2. 种子 | `randomSeed()` | 固定 PyTorch CPU + CUDA 种子 |
+| 3. 数据 | `ProteinDataset` | 加载 PDB 目标 + PKL 图特征 |
+| 4. 划分 | `splitDataset()` | 使用 `SubsetRandomSampler` 进行蛋白质级训练/验证/测试划分 |
+| 5. 模型 | `PhantoIDP` + `DataParallel` | 带有 Adam 优化器的 VAE 编码器-解码器 |
+| 6. 训练 | `trainModel()` | 具有 FAPE + KL 损失和权重调度的轮次循环 |
+| 7. 保存 | `model.save()` | 按验证损失持久化最佳检查点 |
+| 8. 测试 | `trainModel(testing=True)` | 加载最佳检查点，计算 RMSD |
+
+有关 FAPE 损失的数学细节，请参见 [FAPE 损失函数](8-fape-loss-function)。有关动态权重课程，请参见 [损失权重调度](9-loss-weight-scheduling)。有关馈入此流水线的数据准备，请参见 [图数据集构建](11-graph-dataset-construction)。
+
+---
+
+- [深入解析/训练与损失/FAPE 损失函数](https://zread.ai/Junjie-Zhu/Phanto-IDP/8-fape-loss-function)
+
+---
+slug:8-fape-loss-function
+blog_type:normal
+---
+
+
+**帧对齐点误差 (FAPE)** 损失是 Phanto-IDP 中的主要几何监督信号。它通过比较局部坐标系下所有成对位移向量，来衡量预测构象与真实构象之间的结构差异——从构造上使其具有 **SE(3) 不变性**。与需要显式最优对齐预处理步骤的 RMSD 不同，FAPE 将帧对齐直接嵌入损失计算中，产生密集的逐残基对梯度信号，这对于本质上无序蛋白质的高度异质性构象景观特别有效。
+
+来源: [utils.py](utils.py#L88-L129), [model.py](model.py#L202-L224)
+
+## 数学基础
+
+FAPE 作用于**刚体变换**——每个残基都与一个旋转矩阵 **R** ∈ SO(3) 和一个平移向量 **t** ∈ ℝ³ 相关联。给定预测帧 (R̂, t̂) 和真实帧 (R, t)，该损失通过在计算距离之前将所有 N² 个成对位移向量旋转到各自的局部帧来进行比较：
+
+```
+Δt̂_ij = t̂_j − t̂_i          (预测成对位移)
+Δt_ij  = t_j  − t_i           (真实成对位移)
+
+X̂_ij = R̂_i · Δt̂_ij          (局部帧 i 中的预测位移)
+X_ij  = R_i  · Δt_ij          (局部帧 i 中的真实位移)
+
+FAPE = (1/Z) · clamp(‖X̂_ij − X_ij‖, max=C)
+```
+
+核心思想在于 **R** 将位移向量旋转至残基 *i* 的局部坐标系中，因此该比较对全局旋转和平移具有不变性。通过评估*所有*有序对 (i, j)，该损失密集地监督整个结构的相对几何，而不仅仅是局部距离。
+
+来源: [utils.py](utils.py#L88-L129)
+
+## 实现架构
+
+下图说明了从骨干原子坐标经过帧构建到最终 FAPE 计算的完整数据流：
+
+```mermaid
+flowchart TD
+    subgraph Input["Backbone Atom Coordinates"]
+        N["N atom coords<br/>[B, A, 3]"]
+        CA["Cα atom coords<br/>[B, A, 3]"]
+        C["C atom coords<br/>[B, A, 3]"]
+    end
+
+    subgraph Frame["from_3_points (Gram-Schmidt)"]
+        R_tgt["R_target<br/>[B, A, 3, 3]"]
+        R_pred["R_predicted<br/>[B, A, 3, 3]"]
+    end
+
+    N --> Frame
+    CA --> Frame
+    C --> Frame
+    Frame --> R_tgt
+    Frame --> R_pred
+
+    subgraph FAPE_N["FAPE for N atoms"]
+        FN["FAPE((R_tgt, t_N), (R_pred, t̂_N))"]
+    end
+    subgraph FAPE_CA["FAPE for Cα atoms"]
+        FCA["FAPE((R_tgt, t_Cα), (R_pred, t̂_Cα))"]
+    end
+    subgraph FAPE_C["FAPE for C atoms"]
+        FC["FAPE((R_tgt, t_C), (R_pred, t̂_C))"]
+    end
+
+    R_tgt --> FAPE_N
+    R_tgt --> FAPE_CA
+    R_tgt --> FAPE_C
+    R_pred --> FAPE_N
+    R_pred --> FAPE_CA
+    R_pred --> FAPE_C
+
+    FN --> SUM["Σ FAPE / 3"]
+    FCA --> SUM
+    FC --> SUM
+
+    SUM --> TOTAL["Loss = FAPE_avg × w_fape − KL × w_kl"]
+```
+
+来源: [model.py](model.py#L202-L224), [utils.py](utils.py#L102-L129)
+
+## FAPEloss 类
+
+`FAPEloss` 模块将核心计算封装为一个 `nn.Module`，包含三个可配置的超参数：
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `Z` | 10.0 | 归一化除数——将截断距离缩放至数值稳定的范围 |
+| `clamp` | 10.0 | 归一化前每对距离的上界；防止长程误差产生异常梯度 |
+| `epsion` | −1e8 | 保留参数（在当前前向传播中未使用） |
+
+`forward` 方法接受两个变换元组和可选的掩码：
+
+| 参数 | 形状 | 描述 |
+|----------|-------|-------------|
+| `predict_T` | `([B, N, 3, 3], [B, N, 3])` | 预测的（旋转，平移）对 |
+| `transformation` | `([B, N, 3, 3], [B, N, 3])` | 真实的（旋转，平移）对 |
+| `pdb_mask` | `[B, N, N]` | 有效残基对的可选掩码（例如链内） |
+| `padding_mask` | `[B, N, N]` | 用于排除变长序列中填充位置的可选掩码 |
+
+来源: [utils.py](utils.py#L88-L129)
+
+## 计算步骤
+
+前向传播执行以下序列：
+
+**步骤 1 — 成对位移向量。** 使用 `einops.rearrange`，平移向量被广播为成对差张量。对于预测和真实值，跨所有残基对 (i, j) 计算操作 `t_j − t_i`，产生形状为 `[B, N, N, 3]` 的张量。
+
+**步骤 2 — 局部帧旋转。** 爱因斯坦求和 (`torch.einsum`) 将残基 *i* 的旋转矩阵应用于对 (i, j) 的位移向量：`X̂_ij = R̂_i · Δt̂_ij` 和 `X_ij = R_i · Δt_ij`。收缩模式 `'bikq, bjik -> bijq'` 正确索引了每个对的*源*帧的旋转。
+
+**步骤 3 — 距离、截断与归一化。** 沿坐标维度计算残差 `X̂ − X` 的欧几里得范数，然后截断至 `[0, clamp]` 并除以 `Z`。这在默认设置下产生一个在 `[0, clamp/Z]` = `[0, 1.0]` 范围内的逐对标量。
+
+**步骤 4 — 掩码与归约。** 可选的 `pdb_mask` 和 `padding_mask` 按元素应用，以将无效对置零。最终标量损失通过 `torch.mean` 对所有有效条目求均值获得。
+
+<CgxTip>截断阈值 10.0 Å 结合 Z=10.0，有效地使位移 ≥ 10 Å 的逐对损失饱和至 1.0。这是有意为之：它限制了严重错位残基产生的梯度幅度，同时在 0–10 Å 范围内提供强信号，该范围是骨干几何在结构上最具影响力的区间。</CgxTip>
+
+来源: [utils.py](utils.py#L102-L129)
+
+## 通过 Gram-Schmidt 构建帧
+
+在计算 FAPE 之前，每个残基必须关联一个局部坐标系。Phanto-IDP 使用 `from_3_points` 静态方法从三个骨干原子 (N, Cα, C) 构建这些帧，该方法实现了 **算法 21**（来自 AlphaFold2 的 Gram-Schmidt 正交化过程）：
+
+1. **e₀** = normalize(origin − p_neg_x_axis) → 从 Cα 指向 N，定义局部 x 轴
+2. **e₁** = normalize(p_xy_plane − origin − (e₀ · v)e₀) → 从 C 指向 Cα，定义 y 轴分量，针对 e₀ 正交化
+3. **e₂** = e₀ × e₁ → 通过叉积完成右手坐标系
+
+旋转矩阵组装为 **R** = [e₀ | e₁ | e₂]（列向量），平移为 Cα 位置 (origin)。这确保了**相同的骨干几何产生相同的帧**，而与全局方向无关——这是 FAPE 的 SE(3) 不变性的前提。
+
+来源: [model.py](model.py#L132-L171)
+
+## 三原子 FAPE 组合
+
+在 Phanto-IDP 的 `fit` 方法中，FAPE 不是计算一次，而是**三次**——每种骨干原子类型各一次。相同的旋转矩阵（通过 Gram-Schmidt 从所有三个原子导出）用作帧对齐，但平移向量不同：
+
+```python
+fape_n  = FAPEloss()((R_tgt, t_N),  (R_pred, t̂_N))
+fape_ca = FAPEloss()((R_tgt, t_Cα), (R_pred, t̂_Cα))
+fape_c  = FAPEloss()((R_tgt, t_C),  (R_pred, t̂_C))
+fape_avg = (fape_n + fape_ca + fape_c) / 3
+```
+
+对三种原子类型取平均确保了损失对**所有**骨干自由度中的误差敏感——N–Cα 键方向、Cα–C 键方向和肽平面方向——而不是被任何单一原子的位置误差所主导。
+
+来源: [model.py](model.py#L202-L224)
+
+## 总训练损失
+
+最终训练目标将平均 FAPE 与 VAE 的 KL 散度结合，由调度对 `(w_fape, w_kl)` 加权：
+
+```
+L = fape_avg × w_fape − KL × w_kl
+```
+
+KL 项上的**负号**反映了标准 VAE 目标：KL 散度作为正则化项，鼓励潜空间趋向标准正态先验，而 FAPE 提供重建信号。权重调度策略（详见[损失权重调度](9-loss-weight-scheduling)）在训练周期中逐步退火这两个权重。
+
+来源: [model.py](model.py#L215-L219), [main.py](main.py#L172-L178)
+
+## 与 RMSD 的比较
+
+| 属性 | FAPE | RMSD |
+|----------|------|------|
+| **SE(3) 不变性** | 内置（帧对齐比较） | 需要显式最优叠合 |
+| **梯度密度** | O(N²) 逐残基对信号 | 单一全局标量 |
+| **局部敏感性** | 每对独立监督 | 全局平均可能掩盖局部误差 |
+| **截断** | 内置异常值抵抗力 | 无原生截断 |
+| **计算成本** | O(N²) 成对操作 | SVD 对齐后 O(N) |
+| **在 Phanto-IDP 中的用途** | 训练损失 | 仅评估指标 |
+
+FAPE 的 O(N²) 梯度密度对 IDP 特别有价值：因为无序蛋白质占据广阔的构象系综，密集的成对监督有助于模型学习残基间几何的完整分布，而不是收敛到单一误导性的平均结构。
+
+<CgxTip>虽然 FAPE 的 O(N²) 成对计算比 RMSD 的 O(N) 成本更高，但它可以通过 einsum 和广播在 GPU 上完全并行化。对于典型的 IDP 序列长度（40–140 个残基），N² ≈ 1.6K–19.6K 的成对操作与 Transformer 前向传播相比可以忽略不计。</CgxTip>
+
+来源: [utils.py](utils.py#L88-L129), [model.py](model.py#L173-L200)
+
+## 后续步骤
+
+- 在[损失权重调度](9-loss-weight-scheduling)中了解 `(w_fape, w_kl)` 如何在各周期中演变
+- 在[训练流水线](7-training-pipeline)中追踪调用 `fit()` 的完整训练循环
+- 在[图数据集构建](11-graph-dataset-construction)中考察骨干坐标如何从 PDB 文件流向损失
+
+---
+
+- [深入解析/训练与损失/损失权重调度](https://zread.ai/Junjie-Zhu/Phanto-IDP/9-loss-weight-scheduling)
+
+---
+slug:9-loss-weight-scheduling
+blog_type:normal
+---
+
+
+Phanto-IDP 采用了一种**分段常数损失权重调度**策略，该策略在训练周期中联合退火 FAPE 重建权重和 VAE KL 散度权重。这种双轴调度对于稳定的 VAE 训练至关重要：它通过抑制 KL 惩罚在初期防止**后验坍塌**，随后逐渐将优化重点从精确的结构重建转移到良好正则化的潜空间。该调度被实现为两个由周期索引的独立查找表，生成一个权重元组 `(w_fape, w_kl)`，在每次前向传播中由,由模型的 `fit` 方法B-方法E方法消耗/消耗。
+
+## 总损失组成
+
+复合训练目标在 `PhantoIDP.fit` 方法中定义如下：
+
+```
+L = (FAPE_N + FAPE_Cα + FAPE_C) × w_fape / 3  +  KL(q‖p) × w_kl
+```
+
+FAPE 项对三个主链原子损失 (N, Cα, C) 取平均值，每个均通过 [FAPE 损失函数](8-fape-loss-function) 计算。KL 项是标准的 VAE 散度 `KL(q(z|x) ‖ p(z))`，由编码器的 μ 和 log-σ² 输出解析计算得出。关键是，`KL_loss` 工具函数返回 `−ELBO_kl × w_kl`，而: `fit` 方法减去该值，从而为>对总损失产生**正的 KL 贡献** —— 这两项均被最小化，与标准 VAE 目标相匹配。
+
+来源: [model.py](/model.py#L215-L219), [utils.py](/utils.py#L132-L134)
+
+## 调度定义
+
+调度逻辑位于 `trainModel` 中，其中两个查找表根据当前周期生成权重对：
+
+| 调度 | 查找表 | 索引公式 | 步长 (周期) | 最大索引 |
+|----------|-------------|---------------|---------------------|-----------|
+| **KL 权重** `w_kl` | `[1e-4, 5e-4, 1e-3, 2.5e-3, 7.5e-3, 1e-2, 1.5e-2]` | `min(epoch // 60, 6)` | 60 | 6 |
+| **FAPE 权重** `w_fape` | `[10.0, 2.0, 1.0]` | `min(epoch // 400, 2)` | ! 400 | 2 |
+
+在评估或推理期间 (当 `epoch` 为 `None` 时)，两个权重都会回退到其初始值：`weight = (10.0, 1e-2)`。
+
+来源: [main.py](/main.py#L172-L178)
+
+## KL 权重预热调度
+
+KL 权重遵循一个**7 阶预热坡道**，在前 360 个周期中，将 β-VAE 的 β 参数增加了约一个数量级。4。这是避免后验坍塌的核心机制 —— 后验坍塌是一种失效模式，即 VAE 编码器学会完全忽略潜空间，产生一个匹配先验但不捕获有用结构信息的退化后验。
+
+| 周期范围 | 索引 | `w_kl` | 目的 |
+|-------------|-------|--------|---------|
+| [0, 60) | 0 | 1×10⁻⁴ | 近零 KL：编码器纯粹专注于重建 |
+| [60, 120) | 1 | 5×10⁻⁴ | 温和引入 KL |
+| [120, 180) | 2 | 1×10⁻³ | β 开始显著塑造潜空间 |
+| [180, 240) | 3 | 2.5×10⁻³ | 过渡区 |
+| [240, 300) | 4 | 7.5×10⁻³ | KL 正则化增强 |
+| [300, 360) | 5 | 1×10⁻² | 接近最终的 KL 压力 |
+| [360, ∞) | 6 | 1.5×10⁻² | 完全 KL 正则化 —— 潜空间完全成型 |
+
+```mermaid
+graph LR
+    A["Epoch 0<br/>w_kl = 1e-4"] -->|"+60"| B["Epoch 60<br/>w_kl = 5e-4"]
+    B["Epoch 60<br/>w_kl = 5e-4"] -->|"+60"| C["Epoch 120<br/>w_kl = 1e-3"]
+    C["Epoch 120<br/>w_kl = 1e-3"] -->|"+60"| D["Epoch 180<br/>w_kl = 2.5e-3"]
+    D["Epoch 180<br/>w_kl = 2.5e-3"] -->|"+60"| E["Epoch 240<br/>w_kl = 7.5e-3"]
+    E["Epoch 240<br/>w_kl = 7.5e-3"] -->|"+60"| F["Epoch 300<br/>w_kl = 1e-2"]
+    F["Epoch 300<br/>w_kl = 1e-2"] -->|"+60"| G["Epoch 360+<br/>w_kl = 1.5e-2"]
+
+    style A fill:#1a1a2e,color:#fff
+    style G fill:#e94560,color:#fff
+```
+
+60 个周期的步长提供了一个**渐进、非振荡**的调度。与反复升降 β 的周期性退火策略不同，Phanto-IDP 的单调坡道确保潜空间正则化只会增强 —— 编码器永远不会得到“缓刑”以放弃其已学习到的后验结构。
+
+<CgxTip>1e-4 的初始 KL 权重比 1.5e-2 的终值低两个数量级。这 150 倍的动态范围至关重要 —— 过于激进的初始 β (例如，从 1e-2 开始) 会导致编码器立即遵从各向同性高斯先验，在解码器学会利用潜表示之前就使其坍塌。</CgxTip>
+
+来源: [main.py](/main.py#L174-L176)
+
+## FAPE 权重衰减调度
+
+FAPE 权重遵循一个**3 阶衰减**，在前 800 个周期中将重建压力降低了 10 倍。这与 KL 预热相平衡：随着 β-VAE 正则化增强并开始约束潜空间，FAPE 权重同时降低，允许模型为了获得更好的潜空间几何结构而容忍稍微不精确的重建。
+
+| 周期范围 | 索引 | `w_fape` | 实际效果 |
+|-------------|-------|----------|-----------------|
+| [0, 400) | 0 | 10.0 | 强重建：结构必须紧密匹配目标 |
+| [400, 800) | 1 | 2.0 | 中等重建：潜空间可以表达更多多样性 |
+| [800, ∞) | 2 | 1.0 | 宽松重建：完全的 VAE 生成能力 |
+
+```mermaid
+graph LR
+    A["Epoch 0<br>w_fape = 10.0"] -->|"+400"| B["Epoch 400<br>w_fape = 2.0"]
+    B -->|"+400"| C["Epoch 800+<br>w_fape = 1.0"]
+
+    style A fill:#e94560,color:#fff
+    style C fill:#1a1a2e,color:#fff
+```
+
+400 个周期的步长是刻意设定的粗粒度 —— 在典型的训练运行中，FAPE 权重仅改变两次，确保了过渡之间较长的优化稳定期。10× → 2× → 1× 的衰减曲线将重建重点前置到了训练的前半段。
+
+来源: [main.py](/main.py#L175-L176)
+
+## 联合调度动态
+
+这两个调度以不同的时间尺度且沿相反方向运作，在整个周期时间线上创建了一个**训练阶段分解**：
+
+```mermaid
+graph TD
+    subgraph Phase1["阶段 1: 重建主导<br/>周期 0–120"]
+        direction LR
+        P1A["w_fape = 10.0<br/>w_kl ≈ 0"]
+    end
+    subgraph Phase2["阶段 2: 过渡<br/>周期 120–400"]
+        direction LR
+        P2A["w_fape = 10.0<br/>w_kl 上升中"]
+    end
+    subgraph Phase3["阶段 3: 平衡优化<br/>周期 400–800"]
+        direction LR
+        P3A["w_fape = 2.0<br/>w_kl 接近最大值"]
+    end
+    subgraph Phase4["阶段 4: 生成微调<br/>周期 800+"]
+        direction LR
+        P4A["w_fape = 1.0<br/>w_kl = 1.5e-2"]
+    end
+
+    Phase1 --> Phase2 --> Phase3 --> Phase4
+
+    style Phase1 fill:#16213e,color:#fff
+    style Phase2 fill:#0f3460,color:#fff
+    style Phase3 fill:#533483,color:#fff
+    style Phase4 fill:#e94560,color:#fff
+```
+
+| 阶段 | 周期 | `w_fape` | `w_kl` | 特征 |
+|-------|--------|----------|--------|-----------|
+| **重建主导** | 0–120 | 10.0 | 1e-4 → 1e-3 | 编码器学习忠实的坐标映射；KL 可忽略不计 |
+| **过渡** | 120–400 | 10.0 | 1e-3 → 1e-2 | KL 开始塑造潜空间，同时 FAPE 维持结构 |
+| **平衡优化** | 400–800 | 2.0 | 1e-2 → 1.5e-2 | 降低的 FAPE 允许潜空间多样性；KL 接近终值 |
+| **生成微调** | 800+ | 1.0 | 1.5e-2 | 同等侧重；模型达到稳态 VAE 行为 |
+
+<CgxTip>第 400 个周期的阶段边界是最关键的过渡点 —— FAPE 权重从 10.0 降至 2.0，同时 KL 权重已升至 1e-2。如果训练在此周期附近表现出不稳定性 (突发损失峰值、KL 坍塌)，请考虑减小 FAPE 步长 (例如，`epoch // 600`) 以实现更平滑的交接。</CgxTip>
+
+来源: [main.py](/main.py#L172-L178)
+
+## 优化步骤中的权重应用
+
+调度的权重元组从 `trainModel` 流经训练循环进入 `PhantoIDP.fit`，在此被解构并应用：
+
+1. **`weight[1]` → `KL_loss`**：KL 权重在 `KL_loss` 函数内部与原始散度相乘后返回，因此 `self.kl_loss` 已包含了调度的 β
+2. **`weight[0]` → FAPE 缩放**：FAPE 权重直接与求和后的三原子 FAPE 损失相乘，并除以 3 以实现单原子归一化
+3. **梯度步**：`self.loss.backward()` 基于完全加权的损失计算梯度；未应用单独的梯度缩放
+
+默认评估权重 `(10.0, 1e-2)` 匹配 KL 终值但保留初始 FAPE 权重，确保验证损失在完全重建侧重下计算，以实现有意义的模型选择。
+
+来源: [model.py](/model.py#L215-L224), [main.py](/main.py#L177-L178)
+
+## 设计原理与比较
+
+分段常数方法与几种替代调度策略的对比：
+
+| 策略 | Phanto-IDP (分段常数) | 线性退火 | 周期性退火 | 连续 β-VAE |
+|----------|--------------------------------|------------------|--------------------|-------------------|
+| **KL 轨迹** | 7 阶阶梯，60 周期步长 | 从 0 到 β_max 的线性坡道 | 重复的三角波 | 平滑的 S 型/逻辑斯蒂曲线 |
+| **稳定性** | 高 —— 长期稳定的平台期 | 中 —— 持续漂移 | 低 —— 周期性扰动 | 高 —— 平滑单调 |
+| **超参数** | 查找表 + 步长 (2 个参数) | 起始、终止、持续时间 (3 个) | 周期、比率 (3 个) | 中心、斜率 (2 个) |
+| **调参难度** | 中等 —— 查找表直观明确 | 低 | 高 —— 周期比率敏感 | 低 |
+
+Phanto-IDP 的选择优先考虑**显式控制**和**训练稳定性**：每个平台期都给予优化器在下次权重偏移前收敛的时间，且查找表使得确切的调度立即可查，无需计算函数。权衡之处在于过渡是突变的 —— 在第 60、120、180 等周期，KL 权重发生不连续跳变，这可能导致暂时的损失峰值。在实践中，60 个周期的间隔足够宽，优化器可在几个批次内恢复。
+
+来源: [main.py](/main.py#L174-L176)
+
+## 扩展调度
+
+调度表在 `trainModel` 中被硬编码。若要针对不同的训练体制修改调度 (例如，使用更精细步长进行更长时间的训练)：
+
+- **添加 KL 步数**：扩展 `weight_list` 并增加 `min(epoch // 60, N)` 中的最大索引
+- **更改步长**：将 `epoch // 60` 替换为 `epoch // step_size` 以实现更精细或更粗粒度的过渡
+- **调整 FAPE 衰减**：修改 `weight_fape_list` 条目或将 `epoch // 400` 更改为不同的除数
+- **评估默认值**：更新回退元组 `(10.0, 1e-2)` 以匹配你的终态调度值，从而保持验证的一致性
+
+有关这些权重调节的底层损失函数的详细信息，请参阅 [FAPE 损失函数](8-fape-loss-function) 和 [训练流水线](7-training-pipeline)。
+
+---
+
+## 数据流程
+
+- [深入解析/数据流程/PDB 预处理流程](https://zread.ai/Junjie-Zhu/Phanto-IDP/10-pdb-preprocessing-pipeline)
+
+---
+slug:10-pdb-preprocessing-pipeline
+blog_type:normal
+---
+
+
+PDB 预处理流水线是一个**两阶段特征提取系统**，它将原始 PDB 结构文件转换为 Phanto-IDP 神经网络所需的图兼容 JSON 和 pickle 表示形式。第一阶段是一个高性能 C++ 可执行程序（`get_features`），用于解析 PDB 文件、计算分子拓扑、提取局部坐标系表示并识别空间接触。第二阶段是一个 Python 编排器（`pdb_parse.py`），它在整个轨迹目录中并行化 C++ 特征提取，并将生成的 JSON 特征转换为基于 pickle 的邻居图以供训练。
+
+## 架构概述
+
+该流水线遵循清晰的关注点分离原则：**C++ 负责处理几何密集型计算**（PDB 解析、坐标变换、k-d 树空间查询、LDDT 评分），而 **Python 负责处理编排和图构建**（并行任务分发、邻居排序、独热编码、pickle 序列化）。这种设计确保了计算密集型的逐原子操作（局部坐标系旋转、接触投影、距离计算）能够受益于原生编译，而 I/O 密集型的批处理则利用 Python 的 `joblib` 并行机制。
+
+```mermaid
+flowchart TD
+    subgraph Stage1["阶段 1: C++ 特征提取"]
+        PDB["PDB 文件<br/>(原始坐标)"] --> AR["AtomRecord<br/>PDB 行解析器"]
+        AR --> R["Residue<br/>标准化 + 替代构象解析"]
+        R --> C["Chain<br/>构建 k-d 树 + 拓扑"]
+        C --> LFR["SetAtomsLFR<br/>局部坐标系计算"]
+        LFR --> BONDS["GetBonds<br/>残基内 + 残基间"]
+        LFR --> CONTACTS["GetContacts<br/>k-d 树范围查询"]
+        CONTACTS --> PROJ["Atom.Project<br/>LFR 坐标变换"]
+        BONDS --> JSON["JSON 输出<br/>atoms, res_idx, bonds, contacts"]
+        PROJ --> JSON
+    end
+
+    subgraph Stage2["阶段 2: Python 图构建"]
+        JSON --> SN["createSortedNeighbors<br/>合并键 + 接触"]
+        SN --> OHE["独热编码<br/>groups20.txt (168 种原子类型)"]
+        OHE --> PKL["Pickle 输出<br/>atom_fea, nbr_fea, nbr_fea_idx"]
+    end
+
+    PDB -->|"preprocessor.sh<br/>或 pdb_parse.py"| JSON
+```
+
+来源：[main.cpp](/preprocess/src/main.cpp#L1-L228), [pdb_parse.py](/pdb_parse.py#L1-L138)
+
+## C++ 类层级结构
+
+`preprocess/src/` 下的预处理源代码实现了一个四层对象层级结构，该结构映射了 PDB 格式的自然结构：**AtomRecord → Atom → Residue → Chain**。每一层级都增加了相应的行为能力——分别对应解析、坐标变换、标准化和空间查询。
+
+| 类 | 职责 | 关键数据 | 关键方法 |
+|-------|---------------|----------|-------------|
+| **AtomRecord** | PDB ATOM 行解析 | 所有 80 列 PDB 字段 | `ReadAtomRecord()` |
+| **Atom** | 坐标几何 + 局部坐标系 | `(x,y,z)`, `lfr[3][3]`, `chem_type` | `Dist()`, `SetLFR()`, `Project()` |
+| **Residue** | 标准化 + 替代构象 | `atoms[]`, `atom{}` 映射, `type`, `name` | `Standardize()`, `Flip()`, `SetAtomMap()` |
+| **Chain** | 拓扑 + 空间查询 | `residues[]`, `atoms[]`, k-d 树 | `GetBonds()`, `GetContacts()`, `SetAtomsLFR()` |
+| **MyLDDT** | 相对参考结构的质量评分 | 模型/参考子结构 | `GetScore()` (HA/TS 模式) |
+
+来源：[Atom.h](/preprocess/src/Atom.h#L1-L51), [Residue.h](/preprocess/src/Residue.h#L1-L49), [Chain.h](/preprocess/src/Chain.h#L1-L66), [MyLDDT.h](/preprocess/src/MyLDDT.h#L1-L59)
+
+## 阶段 1：C++ 特征提取
+
+### PDB 解析与残基标准化
+
+`Chain` 构造函数逐行读取 PDB 文件，仅筛选 `ATOM` 记录。每一行由 `AtomRecord::ReadAtomRecord()` 进行解析，该方法对固定宽度的 PDB 格式执行**逆向字段提取**——从第 80 列向前读取，以正确处理右对齐的元素符号和电荷字段。原子通过比较 `(resNum, insCode)` 对被动态分组到残基中。
+
+一旦所有原子记录加载完毕，流水线将通过 `Residue::Standardize()` 应用**残基标准化**。这个关键步骤执行三项操作：(1) 通过包含 80 多种修饰残基映射的 `CANONICAL20_MAP` 查找表，映射非标准残基名称（例如，`MSE` → `MET`，`HSE` → `HIS`）；(2) 将原子过滤为仅保留该残基类型的 `CANONICAL20_ATOMS` 拓扑集中的原子，丢弃氢原子和非标准原子；(3) 构建 `atom{}` 名称到指针的映射，并标记任何缺失的重原子。标准化失败的残基（非标准类型或缺失骨架 N/CA/C 原子）将从链中**静默丢弃**。
+
+对于具有**替代构象**的残基（altLoc 指示符），构造函数通过为每个原子名称选择**最高占有率**的构象来解决歧义，从而确保生成单一且一致的结构。
+
+来源：[Chain.cpp](/preprocess/src/Chain.cpp#L30-L80), [AtomRecord.cpp](/preprocess/src/AtomRecord.cpp#L1-L88), [Residue.cpp](/preprocess/src/Residue.cpp#L48-L130)
+
+### 键拓扑提取
+
+`Chain::GetBonds()` 通过两种机制计算分子键图。**残基内键**纯粹由拓扑决定——每个残基的标准键集定义在 `CANONICAL20_BONDS` 中（例如，ALA 具有键 N–CA, CA–C, C–O, CA–CB）。**残基间键**将残基 *i* 的羰基 C 连接到残基 *i+1* 的骨架 N，但前提是它们的欧几里得距离低于 4.5 Å，这巧妙地处理了结构中的链断裂。
+
+来源：[Chain.cpp](/preprocess/src/Chain.cpp#L213-L240), [Topology.h](/preprocess/src/Topology.h#L215-L235)
+
+### 局部坐标系表示 (LFR)
+
+局部坐标系表示是该流水线最具特色的几何贡献。每个原子存储一个 **3×3 规范正交坐标系**（`lfr[3][3]`），它定义了以该原子为原点的局部坐标系。此坐标系用于将原子间的位移向量投影到**旋转不变的局部表示**中，这对于 FAPE 损失函数的坐标系感知结构比较至关重要。
+
+坐标系构建遵循两步策略：
+
+1. **默认 LFR**（`Atom::SetDefaultLFR()`）：每个原子从 `CANONICAL20_LFR` 查找其定义三元组 (A, B, C)。例如，ALA-CB 使用三元组 (CA, N, CB)，这意味着坐标系由 CA→N 和 N→CB 向量构建。三个坐标轴计算如下：**z** = (B−A) − (C−B)（类似角平分线），**x** = (B−A) × (C−B)（叉积），**y** = z × x（构成右手系），随后进行归一化。
+
+2. **骨架校正**（`Chain::SetAtomsLFR()`）：设置默认坐标系后，骨架原子 N、C 和 O 接收包含**残基间上下文**的校正坐标系——N 使用前一个残基的 C 原子，而 C 和 O 使用下一个残基的 N 原子。这确保了肽键处的局部坐标系能够捕获跨越相邻残基的二面角几何结构。
+
+随后，`Atom::Project()` 方法将任何其他原子的位置投影到此局部坐标系中：`out[i] = Σ_j lfr[i][j] * (self[j] − other[j])`，生成存储在 JSON 接触数组中的 3D 局部坐标。
+
+来源：[Atom.cpp](/preprocess/src/Atom.cpp#L139-L198), [Chain.cpp](/preprocess/src/Chain.cpp#L355-L393), [Topology.h](/preprocess/src/Topology.h#L26-L200)
+
+### 基于 k-d 树的接触检测
+
+空间接触使用在 `Chain::SetKD()` 方法中基于所有原子位置构建的 **k-d 树**（通过 `kdtree` 库）进行识别。`Chain::GetContacts(dmax, topn)` 对每个原子执行范围查询 `kd_nearest_range3(kd, x, y, z, dmax)`，收集距离截断值内的所有原子对。每个原子的接触按距离排序，并**截断至最近的 Top-N**，以防止密集结构导致内存激增。典型配置使用 `dmax=10.0 Å` 且每个原子 `topn=100` 个接触。
+
+对于每个接触对，JSON 输出存储：`[a, b, distance, xyz_ab[0:3], xyz_ba[0:3]]`，其中 `xyz_ab` 是原子 b 投影到原子 a 的局部坐标系中的坐标，而 `xyz_ba` 是反向投影。这种双向 LFR 投影为神经网络提供了每个接触的**完整相对几何描述**。
+
+来源：[Chain.cpp](/preprocess/src/Chain.cpp#L270-L340), [main.cpp](/preprocess/src/main.cpp#L40-L43)
+
+### LDDT 质量评分（可选）
+
+当通过 `-r` 标志提供参考 PDB 时，`MyLDDT` 类将计算**局部距离差异测试**分数——这是一种既有的结构质量度量，用于比较模型与参考之间的原子间距离分布。支持两种模式：**HA**（高精度，分箱：0.5, 1.0, 2.0, 4.0 Å）和 **TS**（模板搜索，分箱：1.0, 2.0, 4.0, 8.0 Å）。在评分前，MyLDDT 执行**非对称残基翻转**——它探测交换模糊原子对（ASP: OD1↔OD2, GLU: OE1↔OE2, PHE/TYR: CD1↔CD2 / CE1↔CE2, ARG: NH1↔NH2）是否会提高分数，如果改善超过 1e-3 则执行翻转。最终逐原子、逐残基和全局的 LDDT 分数将被写入 JSON 输出。
+
+来源：[MyLDDT.cpp](/preprocess/src/MyLDDT.cpp#L1-L293), [MyLDDT.h](/preprocess/src/MyLDDT.h#L1-L59)
+
+### JSON 输出模式
+
+C++ 可执行程序生成一个包含以下字段的 JSON 文件：
+
+| 字段 | 类型 | 描述 |
+|-------|------|-------------|
+| `atoms` | `string[]` | `"RES_ATOM"` 格式的原子类型标签（例如 `"GLY_CA"`） |
+| `res_idx` | `int[]` | 每个原子的残基索引（从 0 开始，连续） |
+| `bonds` | `int[2][]` | 表示共价键的原子索引对 |
+| `contacts` | `float[9][]` | `[a, b, dist, lfr_ab_x, lfr_ab_y, lfr_ab_z, lfr_ba_x, lfr_ba_y, lfr_ba_z]` |
+| `ref_dist` | `float[]` | *（可选）* 每个接触的参考距离 |
+| `rscores` | `float[2][]` | *（可选）* 逐残基 [HA, TS] LDDT 分数 |
+| `ascores` | `float[2][]` | *（可选）* 逐原子 [HA, TS] LDDT 分数 |
+| `lddt` | `float[2]` | *（可选）* 全局 [HA, TS] LDDT 分数 |
+
+来源：[main.cpp](/preprocess/src/main.cpp#L73-L190), [示例 JSON](/preprocess/example/tag0001.al.json#L1-L7)
+
+## 阶段 2：Python 图构建
+
+### 并行 C++ 执行
+
+`pdb_parse.py` 使用具有可配置线程数（`-parallel_jobs`，默认为 5）的 `joblib.Parallel` 编排批量特征提取。对于数据目录中的每个 PDB 文件，它使用适当的 `-i` 和 `-j` 标志调用 C++ 可执行程序，为每个结构生成一个 JSON 文件。
+
+### 邻居图组装
+
+`createSortedNeighbors()` 函数将 JSON 的 `bonds` 和 `contacts` 数组合并为一个**逐原子邻居列表**。对于每个接触，它确定该原子对是否也是共价键，并相应地设置一个布尔标志。邻居按距离排序，并**填充或截断至每个原子确切 `max_neighbors=50` 个条目**，填充使用零值哨兵元组。这种固定大小的表示能够在训练期间实现高效的批量张量操作。
+
+### 独热原子类型编码
+
+`groups20.txt` 文件在 20 种标准氨基酸中定义了 **168 种独立原子类型**，将每个 `RES_ATOM` 标签映射到一个化学组（例如，`ALA_CB → CH3`，`ARG_NE → Narg`，`PHE_CG → aroC`）。Python 流水线从此映射构建 **168 维独热编码**，保存为 `protein_atom_init.json`。此编码同时捕获残基身份和原子化学环境，为 GCN 提供节点特征输入。
+
+### Pickle 序列化
+
+每个处理后的结构被序列化为一个 pickle 文件，包含按顺序写入的五个对象：(1) `atom_fea` — 原子类型标签，(2) `nbr_fea` — 邻居特征（距离、局部坐标、键标志），(3) `nbr_fea_idx` — 邻居原子索引，(4) `amino_atom_idx` — 残基到原子的映射，(5) `save_filename` — 结构标识符。
+
+来源：[pdb_parse.py](/pdb_parse.py#L62-L138), [groups20.txt](/preprocess/data/groups20.txt#L1-L168)
+
+## 命令行界面与构建
+
+### 构建 C++ 可执行程序
+
+```bash
+cd preprocess
+make    # 生成 ./get_features
+```
+
+Makefile 使用 `g++` 编译所有 `src/*.cpp` 文件，采用 C++11 标准、`-O3` 优化以及针对平台特定调优的 `-mtune=native`。目标文件放置在 `obj/` 子目录中。
+
+### 运行单文件提取
+
+```bash
+./get_features -i input.pdb -j output.json -d 10.0
+```
+
+| 标志 | 必需 | 默认值 | 描述 |
+|------|----------|---------|-------------|
+| `-i` | **是** | — | 输入 PDB 文件路径 |
+| `-r` | 否 | — | 用于 LDDT 评分的参考 PDB |
+| `-j` | 否 | — | 输出 JSON 路径（原子特征） |
+| `-p` | 否 | — | 输出 PDB 路径（清理后的模型） |
+| `-d` | 否 | `999.99` | 接触距离截断值 (Å) |
+| `-t` | 否 | `100` | 每个原子保留的 Top-N 接触数 |
+| `-v` | 否 | `1` | 详细级别 |
+
+### 批处理
+
+```bash
+# Shell 脚本（简单循环）
+./preprocessor.sh ./pdb_dir ./json_dir
+
+# Python（并行图构建）
+python pdb_parse.py -datapath ./Traj/processed/ -savepath ./data/pkl/ -parallel_jobs 8
+```
+
+来源：[Makefile](/preprocess/Makefile#L1-L29), [README.md](/preprocess/README.md#L1-L58), [preprocessor.sh](/preprocess/preprocessor.sh#L1-L20), [Options.cpp](/preprocess/src/Options.cpp#L1-L64)
+
+## 数据流总结
+
+完整流水线通过四种表示形式转换数据：
+
+| 阶段 | 输入 | 输出 | 格式 |
+|-------|-------|--------|--------|
+| PDB 解析 | 原始 `.pdb` | 内存中的 `Chain` 对象 | C++ 类层级结构 |
+| 特征提取 | `Chain` | `.json` | JSON（原子、键、接触、LFR 投影） |
+| 图构建 | `.json` | 内存中的邻居映射 | Python 字典/数组 |
+| 序列化 | 邻居映射 | `.pkl` | Pickle (atom_fea, nbr_fea, nbr_fea_idx, res_idx) |
+
+<CgxTip>`-d 10.0` 距离截断值和 `-t 100` Top-N 参数直接控制生成图的稀疏度和内存占用。对于具有扩展构象的 IDP 系综，可能需要更大的 `dmax`（例如 12–15 Å）以捕获定义全局折叠的长程接触。</CgxTip>
+
+<CgxTip>`CANONICAL20_LFR` 拓扑表是最重要的单一配置产物——它定义了每个原子的局部坐标系如何由其邻居构建。不正确的 LFR 定义将产生垃圾接触，从而静默破坏训练。在添加对非标准残基的支持时，你必须同时扩展 `Topology.h` 中的 `CANONICAL20_ATOMS` 和 `CANONICAL20_LFR`。</CgxTip>
+
+来源：[main.cpp](/preprocess/src/main.cpp#L1-L228), [pdb_parse.py](/pdb_parse.py#L1-L138), [Topology.h](/preprocess/src/Topology.h#L1-L269)
+
+## 后续内容
+
+此流水线生成的 pickle 文件作为图数据集加载器的直接输入。要了解这些特征如何被神经网络使用，请前往 [图数据集构建](11-graph-dataset-construction)。有关预处理如何融入训练和生成的更广泛上下文，请参阅 [训练流水线](7-training-pipeline) 和 [配置与参数参考](15-configuration-and-arguments-reference)。
+
+---
+
+- [深入解析/数据流程/图数据集构建](https://zread.ai/Junjie-Zhu/Phanto-IDP/11-graph-dataset-construction)
+
+---
+slug:11-graph-dataset-construction
+blog_type:normal
+---
+
+
+Phanto-IDP 将本质上无序的蛋白质构象表示为**原子级几何图**，其中节点是原子，边编码了空间邻居关系，并富含局部坐标系投影的距离向量和共价键指示符。本页说明了原始的 PDB 轨迹帧如何转换为图结构张量，以供 GCN 消耗——这搭建了 C++ 特征提取器、Python 序列化管线以及为训练提供数据的 PyTorch `Dataset` 之间的桥梁。
+
+## 从 PDB 到 JSON：C++ 特征提取器
+
+图构建管线以编译好的 C++ 可执行文件（`get_features`）为起点，该文件解析 PDB 文件并提取四个结构化字段写入 JSON：**atoms**、**res_idx**、**bonds** 和 **contacts**。该可执行文件通过 `pdb_parse.py` 的 `runCommands` 函数逐帧调用，该函数会对轨迹目录中的每个 `.pdb` 文件执行 shell 命令。
+
+```mermaid
+flowchart LR
+    PDB["PDB Frame"] --> Chain["Chain Object<br/>(C++ KD-tree)"]
+    Chain --> Atoms["atoms[]<br/>ResName_AtomName"]
+    Chain --> ResIdx["res_idx[]<br/>atom→residue map"]
+    Chain --> Bonds["bonds[]<br/>covalent pairs"]
+    Chain --> Contacts["contacts[]<br/>spatial neighbors"]
+    Atoms & ResIdx & Bonds & Contacts --> JSON["output.json"]
+```
+
+`Chain` 构造函数逐行读取 PDB，将 `ATOM` 记录分组为 `Residue` 对象，过滤出**20 种标准氨基酸**，并要求每个残基具有主链原子 N、CA 和 C。随后在所有原子坐标上构建 **KD-树**，以实现高效的空间查询。接着，原子编号从零开始重新排序——这是所有下游索引所依赖的关键不变量。
+
+**键提取**（`Chain::GetBonds`）分两个阶段进行。首先，残基内键通过硬编码的拓扑表（`topology::CANONICAL20_BONDS`）解析，该表将每个氨基酸名称映射到其共价原子对集合。其次，残基间肽键在相邻残基之间检测：如果原子间距离低于 4.5 Å，则声明 C–N 对成键。这将产生 `bonds` 字段：一个 `[atom_i, atom_j]` 索引对列表。
+
+**接触提取**（`Chain::GetContacts(dmax, topn)`）在每个原子的 `dmax`（默认 999.99 Å）范围内执行 KD-树范围查询，然后对于每个原子，仅保留按距离排序的前 `topn`（默认 100）个最近邻居。每个接触被序列化为一个 9 元素元组：`[atom_a, atom_b, distance, x_ab, y_ab, z_ab, x_ba, y_ba, z_ba]`，其中 `(x_ab, y_ab, z_ab)` 是原子 B 的位置在原子 A 坐标系上的**局部坐标系投影**，反之亦然。这些投影通过 `Atom::Project` 计算，该函数将原子间位移向量转换为每个原子的**局部参考系（LFR）**——这是一个 3×3 正交基，通过 `SetAtomsLFR` 从每个原子的成键邻居分配。对于主链原子，LFR 由相邻的主链原子设置（例如，N 使用 C_prev→N→CA；C 使用 CA→C→N_next），而侧链原子则使用规范的查找表。
+
+`res_idx` 字段将每个原子映射到其父残基索引，从而实现从原子级到残基级表示的下游聚合。`atoms` 字段存储 `"RESNAME_ATOMNAME"` 形式的字符串标签（例如，`"HIS_ND1"`、`"GLY_CA"`），作为原子类型嵌入表的键。
+
+来源: [main.cpp](/preprocess/src/main.cpp#L8-L200), [Chain.cpp](/preprocess/src/Chain.cpp#L20-L81), [Chain.cpp](/preprocess/src/Chain.cpp#L230-L320), [Atom.cpp](/preprocess/src/Atom.cpp#L132-L198), [Chain.h](/preprocess/src/Chain.h#L16-L63)
+
+## 从 JSON 到 Pickle：Python 序列化层
+
+一旦生成了 JSON 文件，`pdb_parse.py` 的 `processDirectory` 函数就会将它们转换为 **pickle 文件**，以存储预计算的图张量。这是关键的一步，原始图拓扑在此被具体化为模型消耗的固定大小填充数组。
+
+### 原子类型嵌入初始化
+
+在处理任何 JSON 之前，会从 `groups20.txt` 构建一个**独热嵌入映射**，该文件列出了 20 种标准氨基酸。每个氨基酸名称被分配一个 20 维的独热向量。此映射被序列化为 `protein_atom_init.json`，随后由 `AtomCustomJSONInitializer` 加载以编码原子类型。
+
+```python
+# One-hot encoding: 20 amino acids → 20-dim vectors
+feature_map = {}
+with open(groups20_filepath, 'r') as f:
+    data = f.readlines()
+    len_amino = sum(1 for row in data)
+    for idx, line in enumerate(data):
+        a = [0] * len_amino
+        a[idx] = 1
+        name, _ = line.split(" ")
+        feature_map[name] = a
+```
+
+请注意，嵌入键是**残基名称**（例如，`"GLY"`、`"HIS"`），而不是完整的原子标签。`AtomCustomJSONInitializer` 进一步将每个键映射到用于 `nn.Embedding` 查找的整数索引。
+
+### 邻居排序与填充
+
+核心图构建逻辑位于 `createSortedNeighbors` 中，它将 JSON 接触和键转换为每个原子的**固定大小邻居列表**，其中 `max_neighbors = 50`：
+
+| 步骤 | 操作 | 详情 |
+|------|------|------|
+| 1 | **边分类** | 每个接触都会与键列表进行核对——成键对获得 `bool_bond = 1`，非成键的空间邻居获得 `bool_bond = 0` |
+| 2 | **按距离排序** | 使用 NumPy 结构化数组上的归并排序，按欧几里得距离升序对每个原子的邻居列表进行排序 |
+| 3 | **截断** | 仅保留前 `max_neighbors` 个最近邻居 |
+| 4 | **零填充** | 具有少于 `max_neighbors` 个接触的原子将用 `(0, 0, 0, 0, 0, 0)` 哨兵元组填充 |
+
+每个邻居条目是一个 6 元组：`(neighbor_index, distance, x_proj, y_proj, z_proj, is_bond)`。`is_bond` 标志是区分共价键和空间接触的唯一显式拓扑信号——GCN 卷积层通过边特征向量隐式地使用了它。
+
+### Pickle 序列化格式
+
+对于每个 JSON 文件，`processDirectory` 写入一个名为 `{directory}_{filename}.pkl` 的 pickle 文件，其中包含**四个连续的 pickle 转储**：
+
+| 转储顺序 | 内容 | 形状语义 | 张量作用 |
+|----------|------|----------|----------|
+| 1 | `atom_fea` | `(N_atoms,)` 字符串列表 | 原子类型标签 → 独热查找 |
+| 2 | `nbr_fea` | `(N_atoms, M, 5)` | 边特征：`[distance, x_proj, y_proj, z_proj, is_bond]` |
+| 3 | `nbr_fea_idx` | `(N_atoms, M)` | 定义图邻接关系的邻居原子索引 |
+| 4 | `amino_atom_idx` | `(N_atoms,)` | 用于池化的原子到残基映射 |
+
+其中 `N_atoms` 是每帧的原子数，`M = max_neighbors = 50`。蛋白质 ID 字符串也作为第五个条目转储，用于标识。
+
+来源: [pdb_parse.py](/pdb_parse.py#L57-L137), [pdb_parse.py](/pdb_parse.py#L79-L104)
+
+## ProteinDataset：将图加载到 PyTorch 中
+
+`ProteinDataset` 类在序列化的 pickle 文件和 PyTorch 训练循环之间搭建了桥梁。其设计遵循两阶段初始化模式：构建时的**急切坐标解析**，以及 `__getitem__` 时的**惰性图加载**。
+
+### 初始化：从 PDB 提取坐标
+
+在 `__init__` 期间，数据集扫描 `protein_dir` 中的所有 `.pdb` 文件，并使用直接的 PDB 行解析（第 30–53 列）从每一帧中提取**主链 N、CA、C 坐标目标**。这三个坐标数组（`self.n_crd`、`self.ca_crd`、`self.c_crd`）作为 VAE 解码器的 **3D 重建目标**——它们定义了 FAPE 损失所依据的真实主链帧。原子初始化器（`AtomCustomJSONInitializer`）也从共享的 `protein_atom_init.json` 加载。
+
+```python
+# PDB coordinate parsing — column-based extraction
+if lines[13] == 'C' and lines[14] == 'A':     # CA atom
+    self.ca_crd[i].append([float(lines[30:38]), float(lines[38:46]), float(lines[46:54])])
+elif lines[13] == 'C' and lines[14] == ' ':   # C atom
+    self.c_crd[i].append(...)
+elif lines[13] == 'N' and lines[14] == ' ':   # N atom
+    self.n_crd[i].append(...)
+```
+
+### 条目访问：图张量组装
+
+`__getitem__` 方法为请求的帧加载预计算的 pickle 文件，并组装最终的张量元组：
+
+```mermaid
+flowchart TD
+    PKL["Pickle File<br/>pkl_dir + '_' + protein_id + '.pkl'"] --> A1["atom_fea → one-hot lookup<br/>via AtomCustomJSONInitializer"]
+    PKL --> A2["nbr_fea → torch.Tensor<br/>(N, M, 5) edge features"]
+    PKL --> A3["nbr_fea_idx → torch.LongTensor<br/>(N, M) adjacency"]
+    PKL --> A4["atom_amino_idx → torch.LongTensor<br/>(N,) atom→residue map"]
+    CRD["Pre-parsed PDB coords"] --> T["target_n, target_ca, target_c<br/>each (A, 3)"]
+    A1 & A2 & A3 & A4 & T --> OUT["((atom_fea, nbr_fea, nbr_fea_idx, atom_amino_idx),<br/> (target_n, target_ca, target_c), protein_id)"]
+```
+
+原子特征通过 `self.ari.get_atom_fea(atom)` 从字符串标签转换为整数索引，然后堆叠成一维张量。该整数张量随后在模型的前向传播中通过 `nn.Embedding.from_pretrained`，以获得独热嵌入向量。
+
+来源: [traj_dataset.py](/traj_dataset.py#L105-L173)
+
+## 批次整理：变尺寸图填充
+
+由于不同的蛋白质帧可能包含不同数量的原子和残基，`collate_pool` 函数将批次中的所有图填充到该批次内的**最大维度**：
+
+| 张量 | 形状 | 填充策略 |
+|------|------|----------|
+| `final_protein_atom_fea` | `(B, N_max)` | 零填充至最大原子数 |
+| `final_nbr_fea` | `(B, N_max, M, h_b)` | 零填充（哨兵邻居已在 pickle 中） |
+| `final_nbr_fea_idx` | `(B, N_max, M)` | 零填充（索引 0 为哨兵） |
+| `final_target_n/ca/c` | `(B, A_max, 3)` | 零填充至最大残基数 |
+
+其中 `B` 是批次大小，`N_max` 是批次中的最大原子数，`M = 50` 是固定的邻居数，`h_b = 5` 是边特征维度，`A_max` 是最大残基数。`atom_amino_idx` 映射在模型的原子到残基池化步骤中被内部消耗（将 `atom_emb` 从 `(B, N, h_a)` 重塑为 `(B, A, h_a * 3)`，其中 3 是池化中使用的每个残基的主链原子数）。
+
+来源: [traj_dataset.py](/traj_dataset.py#L42-L64)
+
+## 训练/验证/测试集划分
+
+`splitDataset` 函数实现了**基于目录的划分**：它不是按随机比例划分，而是按蛋白质身份对数据集进行分区。训练、验证和测试目录列表被显式提供，`SubsetRandomSampler` 仅选择属于每个划分的帧。这确保了来自同一 MD 轨迹的帧不会跨划分泄露——对于 IDP 构象生成而言，这是一个关键的设计选择，因为单一轨迹内的结构多样性正是建模目标。
+
+来源: [traj_dataset.py](/traj_dataset.py#L15-L39)
+
+## 端到端数据流总结
+
+完整的图构建管线，从原始 MD 轨迹到模型就绪的批次，经过五个不同阶段：
+
+| 阶段 | 输入 | 输出 | 执行器 |
+|------|------|------|--------|
+| 1. 特征提取 | PDB 帧 | JSON (atoms, bonds, contacts, res_idx) | C++ `get_features` |
+| 2. 图序列化 | JSON | Pickle (atom_fea, nbr_fea, nbr_fea_idx, amino_atom_idx) | Python `pdb_parse.py` |
+| 3. 数据集初始化 | Pickle 目录 + PDB 目录 | 内存中的坐标目标 + 原子初始化器 | `ProteinDataset.__init__` |
+| 4. 条目加载 | Pickle 文件 + 坐标 | 张量元组 (图 + 目标) | `ProteinDataset.__getitem__` |
+| 5. 批次整理 | 张量元组列表 | 填充的批次张量 | `collate_pool` |
+
+<CgxTip>`max_neighbors = 50` 参数是控制图密度的主要旋钮。对于小型 IDP（< 50 个残基），大多数原子在默认的 `dmax` 内的真实空间邻居将远少于 50 个，这意味着大多数邻居槽位都是零填充的哨兵。GCN 的门控卷积通过 sigmoid 门控机制自然地抑制了这些哨兵，但过大的 `max_neighbors` 会浪费内存。对于较大的蛋白质，可能需要增加此值以捕获长程接触。</CgxTip>
+
+<CgxTip>边特征中的局部坐标系投影向量（`x_proj, y_proj, z_proj`）在构造上是**旋转等变的**——它们在每个原子自身的坐标系中而非全局笛卡尔坐标中表达邻居位置。这使得图表示对输入结构的刚体旋转具有内在的不变性，FAPE 损失在训练期间进一步在残基级别上利用了这一性质。</CgxTip>
+
+来源: [pdb_parse.py](/pdb_parse.py#L1-L30), [traj_dataset.py](/traj_dataset.py#L42-L64), [model.py](/model.py#L72-L102)
+
+## 下一步
+
+理解了图数据集构建之后，下一步合乎逻辑的做法是了解这些图张量如何流经模型的 GCN 编码器和 Transformer 解码器以生成 3D 构象：[构象生成](12-conformation-generation)。至于在提取的主链坐标目标上进行训练的损失函数，请参阅 [FAPE 损失函数](8-fape-loss-function)。
+
+---
+
+## 生成与分析
+
+- [深入解析/生成与分析/构象生成](https://zread.ai/Junjie-Zhu/Phanto-IDP/12-conformation-generation)
+
+---
+slug:12-conformation-generation
+blog_type:normal
+---
+
+
+构象生成是 Phanto-IDP 的最终目标——为内在无序蛋白生成多样且结构合理的骨架系综。本页剖析了将训练好的 VAE 模型转化为生成引擎的**隐空间采样与解码流程**，涵盖了专属的 `generate.py` 入口、重参数化策略、仅解码器的 `sample()` 路径，以及生成结构的输出格式。
+
+## 生成流程概述
+
+Phanto-IDP 通过一个**条件式两阶段过程**生成构象：GCN 编码器将真实构象的图表示压缩为隐分布 (μ, log σ²)，随后 VAE 重参数化技巧从该分布中采样隐向量，最后 Transformer 解码器合成新的 3D 骨架。关键的洞察在于，生成**并非无条件**的——它需要来自测试集的种子结构来锚定隐空间，但低温采样确保了输出偏离种子，从而生成新颖的构象。
+
+```mermaid
+flowchart TD
+    A["Test Set PDB<br/>(seed structure)"] --> B["ProteinDataset<br/>Graph Construction"]
+    B --> C["GCN Encoder<br/>ConvLayer × n_conv"]
+    C --> D["amino_to_mu / amino_to_var<br/>Latent Distribution"]
+    D --> E{"Reparameterize<br/>z = μ + ε·σ·temp"}
+    E -->|temp=0.05| F["Latent Vector z"]
+    F --> G["sample() Path<br/>amino_to_fc → Transformers → fc_amino_out"]
+    G --> H["Backbone Output<br/>(N, CA, C) × 3 coords"]
+    H --> I[".dat File Output<br/>per-conformation"]
+
+    style E fill:#f9e2ae,stroke:#d4910a,stroke-width:2px
+    style F fill:#a8d8ea,stroke:#3a8fd4,stroke-width:2px
+    style G fill:#b5e8b5,stroke:#2d8a2d,stroke-width:2px
+```
+
+来源: [generate.py](/generate.py#L134-L153), [model.py](/model.py#L72-L102)
+
+## `generate.py` 入口
+
+`generate.py` 脚本是专属的生成入口，在架构上与 `main.py` 平行，但用**纯生成循环**取代了训练/评估循环。它与 `main.py` 共享完全相同的模型构建、检查点加载和数据集划分逻辑，随后在测试 DataLoader 上调用 `generate()` 函数。
+
+### 模型与检查点加载
+
+该脚本通过提取存储在检查点文件内部的超参数来重建模型架构——这确保了架构一致性，无需手动重新指定 `h_a`、`h_g` 或 `n_conv`：
+
+```python
+model_checkpoint = torch.load(args.pretrained, map_location=lambda storage, loc: storage)
+model_args = argparse.Namespace(**model_checkpoint['args'])
+args.h_a = model_args.h_a
+args.h_g = model_args.h_g
+args.n_conv = model_args.n_conv
+```
+
+在构建 `PhantoIDP(**kwargs)` 并将其包装入 `DataParallel` 后，保存的 `state_dict` 和优化器状态会被恢复。键嵌入维度 `h_b` 是从数据集的第一个样本推断得出的，而非被存储，因为它由图预处理流程决定。
+
+来源: [generate.py](/generate.py#L61-L98), [arguments.py](/arguments.py#L15-L18)
+
+### `generate()` 函数
+
+核心生成逻辑位于一个遍历批次、采样迭代和单个结构的三重嵌套循环中：
+
+```python
+def generate(data_loader, model):
+    for protein_batch_iter, (input_data, target_data) in enumerate(data_loader):
+        input_var, target_var = getInputs(input_data, target_data)
+        with torch.no_grad():
+            model.eval()
+            predicted = model(input_var)           # forward pass → (output, μ, log σ²)
+            for i in range(args.avg_sample):        # multiple samples per seed
+                conf_seed = model.module.reparameterize(
+                    predicted[1],                   # μ from encoder
+                    torch.ones(predicted[2].shape)  # unit variance override
+                        .to(predicted[2].device),
+                    temp=0.05)                      # low temperature
+                generated = model.module.sample(conf_seed)
+                for j in range(generated.shape[0]):
+                    np.savetxt("generates/predicted.%d.%d.%d.dat"
+                               % (protein_batch_iter, i, j),
+                               generated[j].cpu().numpy())
+```
+
+存在三个嵌套层级的迭代，每层服务于不同的目的：
+
+| 循环变量 | 范围 | 目的 |
+|---|---|---|
+| `protein_batch_iter` | DataLoader 批次 | 遍历测试集中的所有种子结构 |
+| `i` | `args.avg_sample` (默认 2) | 为每个种子提取多个隐空间样本，以保证系综多样性 |
+| `j` | `generated.shape[0]` (批次大小) | 独立保存批次中的每个结构 |
+
+来源: [generate.py](/generate.py#L134-L153), [arguments.py](/arguments.py#L17-L18)
+
+## 生成的重参数化策略
+
+`reparameterize()` 静态方法实现了标准的 VAE 重参数化技巧：**z = μ + ε · σ · temp**，其中 ε ~ N(0, I)。在训练期间，这使得梯度能够流经随机采样操作。在生成期间，它则成为**多样性控制旋钮**。
+
+### 温度缩放
+
+`temp` 参数缩放随机噪声分量。在 `temp=0.05`（生成默认值）时，采样出的隐向量紧密集中在均值 μ 附近，生成的构象为**近众数**——在结构上接近给定种子下最可能的构象，仅有微小变异。这与 `temp=1.0`（训练默认值）形成对比，后者使用完整的所学方差进行标准 VAE 采样。
+
+```python
+@staticmethod
+def reparameterize(means, logvars, temp=1.0):
+    std = torch.exp(0.5 * logvars)
+    eps = torch.randn_like(std)
+    return means + eps * std * temp
+```
+
+### 单位方差覆写
+
+生成代码中的一个关键架构选择：不使用编码器的**所学对数方差**（`predicted[2]`），生成流程将**单位方差**（`torch.ones(...)`）代入 logvar 参数。这意味着 `std = exp(0.5 * 0) = 1.0`，有效地摒弃了编码器的不确定性估计，代之以各向同性高斯噪声。结合 `temp=0.05`，实际采样公式变为 **z = μ + ε · 1.0 · 0.05 = μ + 0.05ε**，在编码器均值附近产生极其紧凑、受控的扰动。
+
+<CgxTip>单位方差覆写将生成多样性与编码器所学方差场解耦，因为对于分布外种子，所学方差场可能校准不佳。这使得温度成为唯一的多样性控制手段，简化了生成质量与多样性之间的权衡。</CgxTip>
+
+来源: [model.py](/model.py#L119-L123), [generate.py](/generate.py#L146-L148)
+
+## 仅解码器的 `sample()` 路径
+
+`sample()` 方法提供了一种**局部前向传播**，完全跳过编码器，从预计算的隐向量开始。这是针对生成的专属路径，对应于完整的 `forward()` 方法：
+
+```mermaid
+flowchart LR
+    subgraph "forward() — Training"
+        A1["GCN Encoder"] --> B1["amino_to_mu / amino_to_var"]
+        B1 --> C1["reparameterize"]
+        C1 --> D1["amino_to_fc"]
+        D1 --> E1["Transformer × n_conv"]
+        E1 --> F1["fc_amino_out"]
+    end
+
+    subgraph "sample() — Generation"
+        A2["Latent z<br/>(pre-computed)"] --> D2["amino_to_fc"]
+        D2 --> E2["Transformer × n_conv"]
+        E2 --> F2["fc_amino_out"]
+    end
+
+    style A2 fill:#a8d8ea,stroke:#3a8fd4,stroke-width:2px
+    style C1 fill:#f9e2ae,stroke:#d4910a,stroke-width:2px
+```
+
+### 实现
+
+```python
+def sample(self, inputs):
+    amino_emb = inputs
+    amino_emb = self.amino_to_fc(amino_emb).transpose(0, 1)
+    batch_size = amino_emb.shape[1]
+    for idx in range(self.n_conv):
+        amino_emb = self.transformers[idx](amino_emb)
+    amino_emb = amino_emb.transpose(0, 1)
+    out = self.fc_amino_out(amino_emb)    # [B, A, 3]
+    return out
+```
+
+数据流映射了 `forward()` 的解码器部分：隐嵌入经过 `amino_to_fc` (Linear: h_g → 32) 投影，转置为序列优先格式 `(A, B, 32)` 以供 Transformer 块处理，再经由 `n_conv` 个连续的 `IdpGANBlock` 实例处理，最后通过 `fc_amino_out` (Linear: 32 → 9) 投影为 9 维。输出形状 `[B, A, 3]` 表示每个残基包含**3 个骨架原子 (N, CA, C) 及其 3D 坐标**。
+
+来源: [model.py](/model.py#L104-L117), [model.py](/model.py#L72-L102)
+
+## 输出格式与文件结构
+
+### 坐标编码
+
+每个生成的构象以 NumPy 文本文件保存，命名规范如下：
+
+```
+generates/predicted.{batch_idx}.{sample_idx}.{structure_idx}.dat
+```
+
+每个 `.dat` 文件的内容是一个形状为 **(A, 9)** 的矩阵，其中 A 是氨基酸残基数，9 编码了三个骨架原子 × 三个空间坐标：每行为 **[N_x, N_y, N_z, CA_x, CA_y, CA_z, C_x, C_y, C_z]**。这种展平表示源自 `fc_amino_out` 为每个残基生成一个 9 维向量，该向量在训练期间被重塑为 `(A, 3, 3)` 用于 FAPE 损失计算，但在 `sample()` 输出中保留为 `(A, 3)`（其中最后一个维度索引三个原子）。
+
+### 对比：训练与生成输出
+
+| 方面 | 训练 (`main.py`) | 生成 (`generate.py`) |
+|---|---|---|
+| 输出目录 | `outputs/` | `generates/` |
+| 文件前缀 | `predicted.{batch}.{struct}.dat` | `predicted.{batch}.{sample}.{struct}.dat` |
+| 方差来源 | 编码器所学对数方差 | 单位方差 (ones) |
+| 温度 | 1.0 (隐式) | 0.05 (显式) |
+| 前向路径 | `model(input_var)` → 完整前向 | `model(input_var)` → 重参数化 → `sample()` |
+| 梯度计算 | 训练时启用 | `torch.no_grad()` 上下文 |
+| 目标文件保存 | 是 (`target.*.dat`) | 否 (仅预测) |
+
+来源: [generate.py](/generate.py#L150-L151), [main.py](/main.py#L217-L220)
+
+## 端到端生成工作流
+
+从训练检查点到构象系综的完整流程遵循以下步骤：
+
+```mermaid
+flowchart TD
+    A["1. Prepare seed PDB files<br/>in --protein_dir"] --> B["2. Run generate.py<br/>python generate.py name --pretrained ckpt/X.pth.tar"]
+    B --> C["3. Dataset loads graph<br/>representations from --pkl_dir"]
+    C --> D["4. Model encodes seed<br/>→ produces μ, log σ²"]
+    D --> E["5. Reparameterize with<br/>unit var & temp=0.05"]
+    E --> F["6. Decode via sample()<br/>→ (A, 3) backbone coords"]
+    F --> G["7. Save .dat files to<br/>generates/ directory"]
+    G --> H["8. (Optional) Convert .dat<br/>to PDB for analysis"]
+    H --> I["9. Run RMSD & Ramachandran<br/>analysis scripts"]
+
+    style B fill:#b5e8b5,stroke:#2d8a2d,stroke-width:2px
+    style E fill:#f9e2ae,stroke:#d4910a,stroke-width:2px
+    style I fill:#d8b5e8,stroke:#7a2d8a,stroke-width:2px
+```
+
+### 命令行调用
+
+```shell
+python generate.py generate_trial \
+    --pretrained ckpt/PaaA2_best.pth.tar \
+    --pkl_dir ./data/pkl/PaaA2-simp/ \
+    --protein_dir ../Traj/PaaA2-simp/ \
+    --avg_sample 5
+```
+
+`--avg_sample` 标志直接控制**每个种子结构**生成的构象数量。增大此值将线性扩展系综规模。若要更广泛地探索构象景观，可以通过 `--test` 划分比例来增加测试集大小。
+
+<CgxTip>生成质量严重依赖于种子结构距离训练分布的远近。从同一蛋白的 MD 轨迹中提取的种子能产生最可靠的输出；跨蛋白种子可能会产生结构上不合理的构象，因为 GCN 编码器尚未学会表征该结构空间区域。</CgxTip>
+
+### 可用的预训练检查点
+
+本仓库在 `ckpt/` 目录下内置了 14 个预训练检查点，覆盖了多种 IDP 系统：
+
+| 检查点 | 蛋白质系统 | 残基 |
+|---|---|---|
+| `AAQAA3.pth.tar` | (AAQAA)₃ 重复 | ~15 |
+| `ACTR_best.pth.tar` | ACTR | ~45 |
+| `Abeta40_best.pth.tar` | Aβ40 | 40 |
+| `abeta42_best.pth.tar` | Aβ42 | 42 |
+| `CspTm_best.pth.tar` | CspTm | ~66 |
+| `drkN_best.pth.tar` | drkN SH3 | ~59 |
+| `RS1_best.pth.tar` | RS1 | ~44 |
+| `synuclein_best.pth.tar` | α-synuclein | 140 |
+| `ubiquitin_best.pth.tar` | Ubiquitin | 76 |
+
+来源: [generate.py](/generate.py#L17-L31), [arguments.py](/arguments.py#L29-L34)
+
+## 生成与训练前向传播：架构分歧
+
+生成流程与训练前向传播在两个基本方面存在分歧，值得深入理解：
+
+**1. 隐向量注入点。** 在训练期间，`forward()` 在单次传播中执行编码 → 重参数化 → 解码，梯度流经所有阶段。在生成期间，流程将此拆分为两个独立步骤：`model(input_var)` 产生 `(output, μ, log σ²)`，然后分别调用 `reparameterize()` 和 `sample()`。这种分离使得能够从**同一**编码器输出中提取多个样本，而无需冗余编码。
+
+**2. 输出形状解释。** 训练的 `forward()` 返回 `out.view(batch_size, -1, 3, 3)`——将 9 维输出重塑为 `(B, A, 3, 3)` 以进行帧对齐点误差 (FAPE) 计算，其中最后两个维度代表 3 个骨架原子 × 3 个空间坐标。生成的 `sample()` 返回未重塑的 `(B, A, 3)` 张量（其中最后一个维度是 9 维展平坐标向量），随后直接保存而无需构建帧。
+
+来源: [model.py](/model.py#L99-L102), [model.py](/model.py#L114-L117), [generate.py](/generate.py#L144-L151)
+
+## 后续步骤
+
+在生成构象系综后，自然的下一步是定量评估和物理精细化：
+
+- **[RMSD 与 Ramachandran 分析](13-rmsd-and-ramachandran-analysis)** — 评估生成系综的结构多样性和骨架二面角分布质量
+- **[OpenMM 结构精细化](14-openmm-structure-refinement)** — 使用分子动力学弛豫生成的构象，以消除空间位阻并提高物理合理性
+- **[配置与参数参考](15-configuration-and-arguments-reference)** — 用于调节生成行为的完整参数参考
+
+---
+
+- [深入解析/生成与分析/RMSD 与 Ramachandran 分析](https://zread.ai/Junjie-Zhu/Phanto-IDP/13-rmsd-and-ramachandran-analysis)
+
+---
+slug:13-rmsd-and-ramachandran-analysis
+blog_type:normal
+---
+
+
+在 Phanto-IDP 生成一组本质无序蛋白构象后，两项互补的结构验证分析会确认采样结构的物理合理性与重构保真度。**RMSD 分析**量化了预测结构与参考结构之间的骨架偏差，提供标量精度指标；而**Ramachandran 分析**则映射了整个构象系的骨架二面角分布，揭示模型是否遵循立体化学约束。这两项分析共同构成了关键的生成后验证层，连接了[构象生成](12-conformation-generation)与[OpenMM 结构精修](14-openmm-structure-refinement)。
+
+## 分析流水线架构
+
+RMSD 和 Ramachandran 分析位于构象生成的下游，也可选位于 OpenMM 精修的下游。下图说明了数据如何从生成的结构流入每项分析，以及每项分析的产出：
+
+```mermaid
+flowchart LR
+    subgraph Generation
+        GEN["Model Sampling<br/>(generate.py)"]
+    end
+    subgraph Optional Refinement
+        OMM["OpenMM Energy<br/>Minimization"]
+    end
+    subgraph Structural Validation
+        RC["rmsd_calculation.py<br/>Superimpose + RMSD"]
+        RP["rmsd_plot.py<br/>KDE Distribution"]
+        RA["ramachandran.py<br/>Backbone Dihedrals"]
+    end
+    subgraph Shared Library
+        BU["biotite_utils.py<br/>rmsd() / extract_dihedral()"]
+    end
+
+    GEN -->|"predicted.*.pdb"| OMM
+    OMM -->|"optimed/predicted.*.pdb"| RA
+    GEN -->|"predicted vs target"| RC
+    RC -->|"rmsd-*.dat"| RP
+    RA -->|"φ, ψ, ω .dat files"| RAMPLT["2D Histogram<br/>(Ramachandran Plot)"]
+    BU -.->|"reusable API"| RC
+    BU -.->|"reusable API"| RA
+```
+
+流水线在生成步骤后发生分支：RMSD 分析将预测结构与已知参考结构进行对比（需要 subject 和 target），而 Ramachandran 分析则纯粹在预测构象系上进行操作，完全不需要参考结构。
+
+来源：[rmsd_calculation.py](Analysis/rmsd_calculation.py#L1-L12), [rmsd_plot.py](Analysis/rmsd_plot.py#L1-L45), [ramachandran.py](Analysis/ramachandran.py#L1-L54), [biotite_utils.py](Scripts/biotite_utils.py#L1-L167)
+
+## RMSD 计算
+
+### 核心算法
+
+RMSD（均方根偏差）计算遵循标准的结构生物学协议：**先叠合，后测量**。如果不进行叠合，RMSD 会将结构差异与刚体位移混为一谈，产生误导性的过大值。`rmsd_calculation.py` 中的实现将这两个步骤均委托给 **biotite** 库：
+
+1. **加载** subject（预测）和 reference（目标）结构，通过 `biotite.structure.io.load_structure` 转换为 `AtomArray` 对象。
+2. **叠合** subject 至 reference 上，使用 `biotite.structure.superimpose`，该函数会寻找最小化最小二乘距离的最优旋转与平移。
+3. **计算 RMSD**，在 reference 与叠合后的 subject 之间通过 `biotite.structure.rmsd` 进行计算。
+
+```python
+subject_array = strucio.load_structure(subject)
+reference_array = strucio.load_structure(reference)
+superimposed, _ = struc.superimpose(reference_array, subject_array)
+print(struc.rmsd(reference_array, superimposed))
+```
+
+<CgxTip>独立的 `rmsd_calculation.py` 会对 PDB 文件中的**所有原子**进行操作。若仅需计算骨架 RMSD（N, CA, C, O），请改用 `biotite_utils.py` 中的 `rmsd()` 函数——它会在叠合前应用原子名掩码，这是蛋白质结构评估中的标准做法。</CgxTip>
+
+### 骨架过滤 RMSD (biotite_utils)
+
+共享工具库中的 `rmsd()` 函数提供了更严格的**骨架限制** RMSD，与 CASP 及类似基准测试中使用的惯例保持一致。在执行叠合前，它会过滤 reference 和 target，仅保留规范氨基酸残基的骨架重原子（N, CA, C, O）：
+
+| 步骤 | 操作 | 原理 |
+|------|-----------|-----------|
+| 加载 | `load_structure(..., model=1)` | 仅使用多模型 PDB 中的第一个模型 |
+| 掩码 | `atom_name ∈ {N, CA, C, O} ∧ filter_amino_acids` | 排除侧链与非标准残基 |
+| 叠合 | `struc.superimpose(ref, target)` | 最优刚体对齐 |
+| 测量 | `struc.rmsd(ref, superimposed)` | 以 Å 为单位的标量偏差 |
+
+来源：[rmsd_calculation.py](Analysis/rmsd_calculation.py#L1-L12), [biotite_utils.py](Scripts/biotite_utils.py#L145-L156)
+
+## RMSD 分布绘图
+
+### 从标量到分布
+
+单一预测结构与其参考结构之间的单个 RMSD 值虽有参考意义，但不足以评估 IDP 构象的**系综**。`rmsd_plot.py` 脚本通过绘制跨多个蛋白质系统的 RMSD 值的**核密度估计 (KDE)** 来解决此问题，生成平滑的概率密度曲线，以揭示重构误差的分布范围与模态。
+
+### 实现细节
+
+该脚本加载三个蛋白质系统的预计算 RMSD 数据文件（纯文本列），并将它们的 KDE 曲线叠加在同一图表中：
+
+| 蛋白质 | 数据文件 | 平均 RMSD (Å) | 线型 |
+|---------|-----------|---------------|------------|
+| RS1 | `rmsd-rs1.dat` | 0.511 | 竖虚线 |
+| PaaA2 | `rmsd-paa.dat` | 0.885 | 竖虚线 |
+| α-synuclein | `rmsd-syn.dat` | 2.714 | 竖虚线 |
+
+竖虚线 (`axvline`) 标记了每个蛋白质的平均 RMSD，为直观比较分布中心与平均值的关系提供参考。色彩映射 (`gnuplot`) 因其在印刷中的感知均匀性而被选用；Y 轴被隐藏，以强调密度的形状而非绝对概率值——这是结构生物学出版物中的常见惯例。
+
+<CgxTip>硬编码的平均 RMSD 值（0.511, 0.885, 2.714）**并非动态计算**——如果底层数据发生变化，必须手动更新它们。对于可复现的工作流，应使用 `np.mean(rmsd_array)` 从加载的数组中计算这些均值，并以编程方式传递给 `axvline`。</CgxTip>
+
+来源：[rmsd_plot.py](Analysis/rmsd_plot.py#L1-L45)
+
+## Ramachandran 分析
+
+### 二面角提取
+
+Ramachandran 图是骨架立体化学的标准诊断方法。它将每个残基的 **φ (phi)** 和 **ψ (psi)** 二面角映射到二维平面上，在允许区域（α-螺旋、β-折叠、左手螺旋）内的聚集表明构象具有物理合理性，而在禁阻区域内的密度则指示存在空间位阻或几何伪影。
+
+`ramachandran.py` 脚本以批处理方式处理整个预测结构系综：
+
+1. **遍历**输入目录 (`./optimed/`) 中所有以 `predicted` 开头的文件。
+2. **加载**每个结构，并通过 `biotite.structure.dihedral_backbone` 计算骨架二面角，该函数以**弧度**返回 φ、ψ 和 ω 数组。
+3. **剔除**首尾残基（由于其前驱/后继原子缺失，φ/ψ 未定义），移除 `NaN` 值。
+4. **累积**所有结构的角度，直至达到 **20,000 角度阈值**——此举措可限制大型系综的内存占用与绘图密度。
+5. **转换**从弧度至角度（× 180/π）。
+6. **持久化**将 φ、ψ 和 ω 保存至 `.dat` 文件，供下游复用。
+
+### 可视化
+
+该脚本使用 `ax.hist2d` 生成 **2D 直方图**（而非散点图），配置 200×200 的分箱与 `RdYlGn_r` 色彩映射（红色 = 高密度，绿色 = 低密度）。此分箱策略至关重要：对于包含数千个构象的 IDP 系综，散点图会产生严重的过度绘制，而直方图则能揭示**群体密度**——即模型的 φ-ψ 空间中哪些区域被优先采样。
+
+| 绘图参数 | 值 | 目的 |
+|----------------|-------|---------|
+| 分箱 | 200 × 200 | 高粒度密度分辨率 |
+| 色彩映射 | `RdYlGn_r` | 红色 = 高密度，绿色 = 稀疏 |
+| `cmin` | 1 | 抑制零计数分箱（白色背景） |
+| 坐标轴范围 | [−180, 175] | 完整二面角范围并略留边距 |
+| 宽高比 | `equal` | 在图中保持角度几何关系 |
+
+来源：[ramachandran.py](Analysis/ramachandran.py#L1-L54)
+
+### biotite_utils 中的二面角提取
+
+共享库提供了可复用的 `extract_dihedral()` 函数，具有相同的核心逻辑，但采用**单文件、单链**的 API 设计。它仅加载模型 1，过滤至链 A，计算骨架二面角，剔除 NaN 边界，并转换为角度——以元组形式返回这三个角度数组。此函数是二面角分析的编程入口点，而 `ramachandran.py` 则是用于全系综可视化的批处理脚本。
+
+来源：[biotite_utils.py](Scripts/biotite_utils.py#L83-L97)
+
+## 对比分析：脚本 vs. 共享库
+
+Analysis 目录包含用于直接执行与临时探索的**独立脚本**，而 `Scripts/biotite_utils.py` 则提供用于编程集成的**可导入 API 函数**。下表总结了它们的关系：
+
+| 功能 | 独立脚本 | biotite_utils 函数 |
+|------------|------------------|-----------------------|
+| RMSD (所有原子) | `rmsd_calculation.py` | — |
+| RMSD (仅骨架) | — | `rmsd(reference, target)` |
+| 二面角批量提取 | `ramachandran.py` | — |
+| 二面角单文件提取 | — | `extract_dihedral(protein)` |
+| 序列提取 | — | `extract_seq(protein)` |
+| pLDDT 提取 | — | `extract_plddt(protein)` |
+| SSE 注释 | — | `secondary_structure(protein)` |
+
+在构建自动化评估流水线时，推荐使用 `biotite_utils` 函数，因为其具备输入验证、链过滤和一致的返回类型。若需进行快速的临时分析，或直接从命令行生成出版级图像，请使用独立脚本。
+
+来源：[biotite_utils.py](Scripts/biotite_utils.py#L1-L167), [rmsd_calculation.py](Analysis/rmsd_calculation.py#L1-L12), [ramachandran.py](Analysis/ramachandran.py#L1-L54)
+
+## 典型工作流
+
+构象生成后的端到端分析工作流如下：
+
+1. 使用[构象生成](12-conformation-generation)**生成构象**，产出 `predicted.*.pdb` 文件。
+2. （可选）使用 [OpenMM 结构精修](14-openmm-structure-refinement)进行**精修**，在 `./optimed/` 中产出能量最小化结构。
+3. 使用 `rmsd_calculation.py` 或 `biotite_utils.rmsd()` 计算每个预测结构与其参考之间的 **RMSD**。将结果收集至 `.dat` 文件中。
+4. 使用 `rmsd_plot.py` **绘制 RMSD 分布**，跨蛋白质系统比较重构质量。
+5. 在精修后的系综上使用 `ramachandran.py` **计算 Ramachandran 角度**，验证立体化学合理性。
+6. **解读结果**：较低的平均 RMSD（< 2 Å）且 Ramachandran 密度集中于允许区域，表明生成模型表现良好。
+
+若要深入了解生成这些构象的模型，请参阅 [VAE 编码器-解码器设计](4-vae-encoder-decoder-design)。关于通常在 Ramachandran 分析之前的精修步骤，请参阅 [OpenMM 结构精修](14-openmm-structure-refinement)。获取完整的参数与配置参考，请参阅[配置与参数参考](15-configuration-and-arguments-reference)。
+
+---
+
+- [深入解析/生成与分析/OpenMM 结构优化](https://zread.ai/Junjie-Zhu/Phanto-IDP/14-openmm-structure-refinement)
+
+---
+slug:14-openmm-structure-refinement
+blog_type:normal
+---
+
+
+Phanto-IDP 的 VAE 解码器将内无序蛋白 (IDP) 的骨架坐标生成为连续的 3D 点，这些点虽然在拓扑上合理，但可能包含局部空间位阻冲突、扭曲的键角几何，或违背物理化学约束的高能构象。**OpenMM 结构精修**模块作为关键的生成后校正层：它通过 PDBFixer 修复结构缺陷，然后在 AMBER99SB 力场下对每种构象执行**受限能量最小化**，生成适合下游分析（如 RMSD 比较、Ramachandran 图绘制或回旋半径计算）的符合物理规律的 PDB 结构。
+
+来源: [refine_openmm.py](/Analysis/refine_openmm.py#L1-L170)
+
+## 精修流水线架构
+
+精修流水线作为一个批处理器在原始 PDB 文件目录上运行，对每种构象独立应用两阶段转换——**结构修复**和随后的**能量最小化**。下图展示了端到端的数据流：
+
+```mermaid
+flowchart TD
+    A["Raw PDB Directory<br/>(--inpath)"] --> B{For each .pdb file}
+    B --> C["fix_structure()<br/>PDBFixer Repair"]
+    C --> C1["findMissingResidues()"]
+    C1 --> C2["findMissingAtoms()"]
+    C2 --> C3["addMissingAtoms(seed=0)"]
+    C3 --> C4["addMissingHydrogens()"]
+    C4 --> D["minimize()<br/>Energy Minimization"]
+    D --> D1["Load PDB + AMBER99SB Force Field"]
+    D1 --> D2["Apply H-Bond Constraints"]
+    D2 --> D3["Add Harmonic Restraints<br/>(stiffness=10.0)"]
+    D3 --> D4["LangevinIntegrator(T=0)"]
+    D4 --> D5["minimizeEnergy()"]
+    D5 --> E{Success?}
+    E -- Yes --> F["Write Refined PDB<br/>(--outpath)"]
+    E -- No --> G{attempts < 1000?}
+    G -- Yes --> D
+    G -- No --> H["Log Failure"]
+    H --> F
+    F --> B
+```
+
+来源: [refine_openmm.py](/Analysis/refine_openmm.py#L136-L169)
+
+## 阶段 1：使用 PDBFixer 进行结构修复
+
+`fix_structure` 函数处理 ML 生成的 PDB 文件中常见的问题类别：VAE 骨架表示遗漏的**缺失原子**（侧链重原子、端帽原子）、不完整链建模导致的**缺失残基**，以及全原子 AMBER 力场所需的**缺失氢原子**。修复序列遵循严格的依赖顺序——必须先识别缺失残基，然后才能解决这些残基内的缺失原子问题，而氢原子最后添加，因为其位置取决于完整的重原子几何结构。
+
+该函数读取 PDB 文件句柄，应用四步 PDBFixer 流水线，然后使用 OpenMM 的 `PDBFile.writeFile`（设置 `keepIds=True` 以保留原始原子和残基编号）将修复后的拓扑和位置序列化回 PDB 格式的字符串。确定性的 `seed=0` 确保了跨运行时氢原子放置的可复现性。
+
+| 修复步骤 | PDBFixer 方法 | 目的 | 依赖 |
+|---|---|---|---|
+| 1 | `findMissingResidues()` | 检测链序列中的空缺 | 无 |
+| 2 | `findMissingAtoms()` | 识别每个残基中缺失的重原子 | 步骤 1 |
+| 3 | `addMissingAtoms(seed=0)` | 在理想几何位置插入原子 | 步骤 2 |
+| 4 | `addMissingHydrogens()` | 放置与化合价一致的氢原子 | 步骤 3 |
+
+来源: [refine_openmm.py](/Analysis/refine_openmm.py#L31-L43)
+
+## 阶段 2：受限能量最小化
+
+`minimize` 函数实现了核心的基于物理的校正。它从修复后的 PDB 构建一个 OpenMM 分子系统，应用力场和可选约束，然后执行基于梯度的能量最小化。该设计故意将**宽松的收敛标准**与**谐约束**结合，以实现受控扰动：约束将原子锚定在其输入坐标附近，同时允许优化器解决局部应变。
+
+### 力场与约束
+
+系统使用 **AMBER99SB** 全原子力场进行实例化，该力场提供了在隐式溶剂中为蛋白质参数化的成键项（键、键角、二面角）和非键项（范德华力、静电相互作用）。应用了**氢键约束**（`openmm_app.HBonds`）以冻结涉及氢原子的键长，从而实现更大的有效积分时间步长，并消除与 Phanto-IDP 所需的骨架级别校正无关的高频振动模式。
+
+### 谐约束
+
+当 `stiffness > 0` 时，`CustomExternalForce` 实现以下势能：
+
+$$V_{\text{restraint}} = \frac{1}{2} k \sum_{i \in S} \left[ (x_i - x_i^0)^2 + (y_i - y_i^0)^2 + (z_i - z_i^0)^2 \right]$$
+
+其中 $k$ 为刚度（默认 **10.0 kcal·mol⁻¹·Å⁻²**），$S$ 为约束集，$(x_i^0, y_i^0, z_i^0)$ 为来自修复结构的参考坐标。通过 `will_restrain` 谓词支持两种约束集：
+
+| 约束集 | 选择标准 | 受约束原子（典型蛋白质） |
+|---|---|---|
+| `"non_hydrogen"` | 所有 `element.name != "hydrogen"` 的原子 | N, Cα, C, O, Cβ, 侧链重原子 |
+| `"c_alpha"` | 仅 `name == "CA"` 的原子 | 仅 Cα |
+
+默认配置使用 `"non_hydrogen"` 约束，这提供了强锚定作用，同时仍允许侧链旋转异构体弛豫和骨架二面角调整。`exclude_residues` 列表（默认为空）中的残基将被跳过，从而实现对柔性区域（如末端尾段或无序环）的选择性弛豫。
+
+### 最小化协议
+
+温度设定为 0 K 且时间步长为 0.01 ps 的 **LangevinIntegrator** 纯粹作为最小化调用的载体——不传播动力学。平台选择（若 `use_gpu=True` 则为 `"CUDA"`，否则为 `"CPU"`）决定了计算后端。能量最小化通过 L-BFGS 算法（OpenMM 的默认算法）进行，收敛参数如下：
+
+| 参数 | 默认值 | 单位 | 解释 |
+|---|---|---|---|
+| `max_iterations` | 0 | 迭代次数 | 无限迭代（仅基于容差收敛） |
+| `tolerance` | 2.39 | kcal·mol⁻¹ | 能量收敛阈值 |
+
+该函数返回一个捕获最小化前后状态的字典：初始/最终势能（`einit`、`efinal`）、初始/最终位置（`posinit`、`pos`）、最小化后的 PDB 字符串（`min_pdb`）以及所需的尝试次数（`min_attempts`）。
+
+来源: [refine_openmm.py](/Analysis/refine_openmm.py#L46-L116)
+
+## 鲁棒性：重试机制与失败处理
+
+ML 生成的结构偶尔会产生触发 OpenMM 异常的拓扑——原子命名不一致、非标准残基修补或 PDBFixer 无法完全解决的立体化学违规。精修循环实现了**无修改重试**策略：如果 `minimize` 抛出任何异常，尝试计数器将递增并重试相同的输入。这解决了瞬态故障（例如，GPU 内存压力、非确定性平台初始化），同时使**结构性故障**在各次尝试中保持不变——使得重试仅对随机运行时错误有效。
+
+经过 `max_attempts`（默认 **1000**）次连续失败后，该结构将被记录在 `fails` 列表中，流水线将继续处理下一个文件，而不是抛出致命异常。在批处理完成时，摘要将报告总挂钟时间和任何无法精修的结构列表。
+
+<CgxTip>无修改重试的设计意味着，确定性结构故障（例如，PDBFixer 无法修补的非规范残基）将始终耗尽全部 1000 次尝试才会被记录为失败。对于大型构象系的批处理，考虑将 `max_attempts` 减小到较小值（例如 5–10），以避免在不可恢复的结构上浪费算力。</CgxTip>
+
+来源: [refine_openmm.py](/Analysis/refine_openmm.py#L141-L169)
+
+## 参数参考
+
+下表汇总了精修流水线的所有可配置参数、其默认值及其对精修行为的影响：
+
+| 参数 | CLI 标志 | 默认值 | 单位 | 作用域 | 效果 |
+|---|---|---|---|---|---|
+| `inpath` | `--inpath`, `-i` | `./pdbs/` | 路径 | 批处理 | 包含待精修原始 PDB 文件的目录 |
+| `outpath` | `--outpath`, `-o` | `./refined/` | 路径 | 批处理 | 精修后 PDB 输出目录 |
+| `max_iterations` | — | 0 | 迭代次数 | 最小化器 | 0 = 无限；仅基于容差收敛 |
+| `tolerance` | — | 2.39 | kcal·mol⁻¹ | 最小化器 | L-BFGS 的能量收敛阈值 |
+| `stiffness` | — | 10.0 | kcal·mol⁻¹·Å⁻² | 约束 | 谐约束力常数；值越高 = 偏离输入越小 |
+| `restraint_set` | — | `"non_hydrogen"` | — | 约束 | 哪些原子接受谐约束 |
+| `exclude_residues` | — | `[]` | 残基索引 | 约束 | 排除约束的残基 |
+| `max_attempts` | — | 1000 | 尝试次数 | 重试 | 每个结构的最大重试次数 |
+| `use_gpu` | — | `False` | — | 平台 | 是否使用 CUDA 平台 |
+
+来源: [refine_openmm.py](/Analysis/refine_openmm.py#L13-L27), [refine_openmm.py](/Analysis/refine_openmm.py#L126-L127)
+
+## 与 Phanto-IDP 工作流的集成
+
+精修模块位于 Phanto-IDP 流水线的**生成后边界**，将 VAE 解码的骨架坐标转换为物理上有效的结构。更广泛的工作流程如下进行：
+
+1. **生成** ([构象生成](12-conformation-generation))：VAE 的 `reparameterize` + `sample` 路径生成逐残基的 3×3 帧矩阵（编码 N, Cα, C 位置的局部坐标系），这些矩阵被序列化为 `.dat` 坐标文件
+2. **PDB 转换**：坐标数组转换为 PDB 格式（骨架原子 + 理想侧链几何）并放入输入目录
+3. **OpenMM 精修**（本页）：`refine_openmm.py` 批处理 PDB 目录，修复并最小化每个结构
+4. **分析** ([RMSD 与 Ramachandran 分析](13-rmsd-and-ramachandran-analysis))：精修后的 PDB 被 `rmsd_calculation.py`、`ramachandran.py`、`rg.py` 和 `pca.py` 消耗，用于定量的系综表征
+
+输出目录中的精修结构成为所有下游生物物理分析的规范表示，这使得精修质量直接影响验证指标。
+
+```mermaid
+flowchart LR
+    A["VAE Decoder<br/>Backbone Frames"] --> B["PDB Conversion"]
+    B --> C["OpenMM Refinement<br/>(this page)"]
+    C --> D["RMSD Analysis"]
+    C --> E["Ramachandran Plot"]
+    C --> F["Radius of Gyration"]
+    C --> G["PCA"]
+```
+
+<CgxTip>`stiffness = 10.0 kcal·mol⁻¹·Å⁻²` 的默认值对应于在 1 kcal·mol⁻¹ 应变能下约 0.32 Å 的特征位移。对于骨架多样性为核心关注量的 IDP 系综，考虑降低刚度（例如 1.0–5.0）以允许更大的校正，或者在 VAE 生成的结构已经接近物理合理且仅需轻微冲突消除时提高刚度（例如 50.0+）。</CgxTip>
+
+来源: [refine_openmm.py](/Analysis/refine_openmm.py#L1-L170), [generate.py](/generate.py#L134-L153), [ramachandran.py](/Analysis/ramachandran.py#L1-L54), [rmsd_calculation.py](/Analysis/rmsd_calculation.py#L1-L12)
+
+## 用法示例
+
+对原始 VAE 生成的 PDB 目录运行精修：
+
+```bash
+# 默认：精修 ./pdbs/ 中的所有 .pdb 文件，写入 ./refined/
+python Analysis/refine_openmm.py --inpath ./pdbs/ --outpath ./refined/
+
+# GPU 加速精修（需要启用 CUDA 的 OpenMM 构建）
+python Analysis/refine_openmm.py -i ./pdbs/ -o ./refined/  # 注意：use_gpu 必须在脚本中设置
+```
+
+脚本在完成时打印计时信息和任何失败：
+
+```
+optimization using 42.37 s
+fail to optimize 2 structures, filename list:
+['predicted.3.17.pdb', 'predicted.7.42.pdb']
+```
+
+请注意，诸如 `tolerance`、`stiffness`、`max_iterations`、`max_attempts` 和 `use_gpu` 等参数目前是模块级别（第 21–26 行）的**硬编码常量**，并未作为 CLI 参数暴露。要修改这些参数，请直接在 `refine_openmm.py` 中编辑相应的变量赋值。
+
+---

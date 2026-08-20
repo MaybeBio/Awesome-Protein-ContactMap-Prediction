@@ -1,0 +1,36 @@
+# Junjie-Zhu/Phanto-IDP
+
+Source: https://zread.ai/Junjie-Zhu/Phanto-IDP
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+
+## 深入解析
+
+- [深入解析/架构概述](3-architecture-overview.md)
+- [深入解析/配置与参数参考](15-configuration-and-arguments-reference.md)
+### 模型核心
+
+- [深入解析/模型核心/VAE 编码器-解码器设计](4-vae-encoder-decoder-design.md)
+- [深入解析/模型核心/GCN 卷积层](5-gcn-convolution-layers.md)
+- [深入解析/模型核心/Transformer 解码器块](6-transformer-decoder-blocks.md)
+
+### 训练与损失
+
+- [深入解析/训练与损失/训练流程](7-training-pipeline.md)
+- [深入解析/训练与损失/FAPE 损失函数](8-fape-loss-function.md)
+- [深入解析/训练与损失/损失权重调度](9-loss-weight-scheduling.md)
+
+### 数据流程
+
+- [深入解析/数据流程/PDB 预处理流程](10-pdb-preprocessing-pipeline.md)
+- [深入解析/数据流程/图数据集构建](11-graph-dataset-construction.md)
+
+### 生成与分析
+
+- [深入解析/生成与分析/构象生成](12-conformation-generation.md)
+- [深入解析/生成与分析/RMSD 与 Ramachandran 分析](13-rmsd-and-ramachandran-analysis.md)
+- [深入解析/生成与分析/OpenMM 结构优化](14-openmm-structure-refinement.md)
+
