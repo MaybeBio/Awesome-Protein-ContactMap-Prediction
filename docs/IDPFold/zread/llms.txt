@@ -1,0 +1,52 @@
+# Junjie-Zhu/IDPFold
+
+Source: https://zread.ai/Junjie-Zhu/IDPFold
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/环境配置](3-environment-setup.md)
+- [入门指南/推理流程](4-inference-pipeline.md)
+
+## 深入解析
+
+- [深入解析/架构概述](5-architecture-overview.md)
+- [深入解析/工具模块概述](25-utility-modules-overview.md)
+### SE(3) 流形上的扩散
+
+- [深入解析/SE(3) 流形上的扩散/刚体表示](6-rigid-body-representation.md)
+- [深入解析/SE(3) 流形上的扩散/R3 平移扩散器](7-r3-translation-diffuser.md)
+- [深入解析/SE(3) 流形上的扩散/SO3 旋转扩散器](8-so3-rotation-diffuser.md)
+- [深入解析/SE(3) 流形上的扩散/帧扩散器集成](9-frame-diffuser-integration.md)
+
+### 神经网络主干
+
+- [深入解析/神经网络主干/嵌入模块设计](10-embedding-module-design.md)
+- [深入解析/神经网络主干/不变点注意力](11-invariant-point-attention.md)
+- [深入解析/神经网络主干/去噪网络流程](12-denoising-network-pipeline.md)
+
+### 训练与损失
+
+- [深入解析/训练与损失/训练循环与模型步数](13-training-loop-and-model-step.md)
+- [深入解析/训练与损失/分数匹配损失](14-score-matching-loss.md)
+- [深入解析/训练与损失/FAPE 与辅助损失](15-fape-and-auxiliary-losses.md)
+
+### 数据流水线
+
+- [深入解析/数据流水线/蛋白质数据集与转换](16-protein-dataset-and-transforms.md)
+- [深入解析/数据流水线/ESM 序列嵌入提取](17-esm-sequence-embedding-extraction.md)
+- [深入解析/数据流水线/数据模块与批处理](18-data-module-and-batching.md)
+
+### 推理与采样
+
+- [深入解析/推理与采样/前向-后向采样策略](19-forward-backward-sampling-strategy.md)
+- [深入解析/推理与采样/检查点加载](20-checkpoint-loading.md)
+- [深入解析/推理与采样/PDB 输出生成](21-pdb-output-generation.md)
+
+### 配置系统
+
+- [深入解析/配置系统/Hydra 配置层级](22-hydra-configuration-hierarchy.md)
+- [深入解析/配置系统/模型配置参考](23-model-configuration-reference.md)
+- [深入解析/配置系统/实验与训练器配置](24-experiment-and-trainer-configs.md)
+
