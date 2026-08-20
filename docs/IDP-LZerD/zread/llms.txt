@@ -1,0 +1,39 @@
+# kiharalab/idp_lzerd
+
+Source: https://zread.ai/kiharalab/idp_lzerd
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/外部依赖配置](3-external-dependencies-setup.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/共享工具参考](17-shared-utilities-reference.md)
+- [深入解析/配置与 PATHS.ini](18-configuration-and-paths-ini.md)
+### 片段生成
+
+- [深入解析/片段生成/Rosetta 片段选择器](5-rosetta-fragment-picker.md)
+- [深入解析/片段生成/Rosetta 到 PDB 的转换](6-rosetta-to-pdb-conversion.md)
+- [深入解析/片段生成/二级结构解析](7-secondary-structure-parsing.md)
+
+### 对接与评分
+
+- [深入解析/对接与评分/数据库创建与模式](8-database-creation-and-schema.md)
+- [深入解析/对接与评分/模型评分加载](9-model-score-loading.md)
+- [深入解析/对接与评分/几何截断过滤器](10-geometric-cutoff-filters.md)
+
+### 路径组装与排序
+
+- [深入解析/路径组装与排序/逐步路径搜索](11-stepwise-path-search.md)
+- [深入解析/路径组装与排序/启发式聚类](12-heuristic-clustering.md)
+- [深入解析/路径组装与排序/占有度评分计算](13-occupancy-score-computation.md)
+- [深入解析/路径组装与排序/路径选择与排序](14-path-selection-and-ranking.md)
+
+### 优化与输出
+
+- [深入解析/优化与输出/CHARMM 弛豫协议](15-charmm-relaxation-protocol.md)
+- [深入解析/优化与输出/受体链组合](16-receptor-chain-combination.md)
+

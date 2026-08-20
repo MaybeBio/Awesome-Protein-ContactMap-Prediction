@@ -1,0 +1,3951 @@
+# kiharalab/idp_lzerd
+
+Source: https://zread.ai/kiharalab/idp_lzerd
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/kiharalab/idp_lzerd/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**IDP-LZerD** 是一个计算流程，用于对蛋白质-蛋白质相互作用 (PPI) 的结合构象进行建模，其中一方是**本质无序蛋白 (IDP)**，另一方是有序（结构化）蛋白。仅给定无序蛋白的序列和有序受体的 3D 结构，IDP-LZerD 就能预测 IDP 在结合时如何折叠和对接——这是传统刚体对接工具无法解决的问题。该方法由普渡大学的 Lenna X. Peterson 和 Daisuke Kihara 开发，发表在 *PLoS Computational Biology* (2017) 上。
+
+来源: [README.md](/README.md#L1-L82), [LICENSE.txt](/LICENSE.txt#L1-L4)
+
+## IDP-LZerD 解决了什么问题？
+
+传统的蛋白质对接算法假设两个蛋白质都是刚性的，或仅发生有限的构象变化。**本质无序蛋白**打破了这一假设——它们在游离状态下缺乏稳定的折叠结构，只有在与伴侣结合时才采取明确的构象（这种现象被称为**耦合折叠与结合**）。IDP-LZerD 通过将 IDP 分解为重叠的结构片段、将每个片段独立对接到受体上，然后通过组合路径搜索算法将得分最高的片段组合组装成全长的结合构象来解决这一问题。
+
+来源: [README.md](/README.md#L1-L10)
+
+## 流程架构一览
+
+IDP-LZerD 的工作流程分为五个概念阶段，每个阶段实现为一个独立的 Python 脚本，通过读取和写入 SQLite 数据库及文件系统来运行：
+
+```mermaid
+flowchart LR
+    subgraph SG1["1. 片段生成"]
+        A["IDP 序列 +<br/>SS 预测"] --> B["Rosetta<br/>片段选择器"]
+        B --> C["Rosetta→PDB<br/>转换"]
+        C --> D["Pulchra +<br/>侧链建模"]
+    end
+    subgraph SG2["2. 对接与评分"]
+        D --> E["LZerD<br/>局部对接"]
+        E --> F["GOAP + ITScorePro<br/>模型评分"]
+    end
+    subgraph SG3["3. 数据库与过滤"]
+        F --> G["create_database.py<br/>模式与索引"]
+        G --> H["load_model_scores.py<br/>分数加载与<br/>几何过滤"]
+    end
+    subgraph SG4["4. 路径组装与排序"]
+        H --> I["find_paths_stepwise.py<br/>组合搜索"]
+        I --> J["cluster_heuristic.py<br/>LRMSD 聚类"]
+        J --> K["compute_occupancy_score.py<br/>受体接触评分"]
+        K --> L["select_paths.py<br/>加权 Z-Score 排序"]
+    end
+    subgraph SG5["5. 优化与输出"]
+        L --> M["combine_receptor.py<br/>链合并"]
+        M --> N["CHARMM<br/>弛豫协议"]
+    end
+    SG1 --> SG2 --> SG3 --> SG4 --> SG5
+```
+
+来源: [test/test_decoys.sh](/test/test_decoys.sh#L1-L27), [scripts/find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L1-L50)
+
+## 核心计算思想：滑动窗口与路径
+
+IDP-LZerD 的核心创新在于对无序蛋白的**滑动窗口分解**。IDP 序列被划分为重叠的 9 残基窗口，每次步进 6 个残基（相邻窗口之间有 3 个残基的重叠）。对于每个窗口，Rosetta 生成一组候选结构片段。然后使用 LZerD 将每个片段对接到受体上，每个片段产生数千个对接诱体。
+
+随后，流程执行**组合路径搜索**：“路径”是由每个窗口的一个对接模型组成的序列，其中相邻窗口必须满足几何兼容性约束（主链原子重叠、残基重叠、片段间距离、角度方向）。`find_paths_stepwise.py` 脚本逐步构建路径——首先将窗口 0 与窗口 1 配对，然后扩展到窗口 2，依此类推——同时计算边缘分数，对连续片段之间的几何冲突进行惩罚。这种逐步推进的方法避免了朴素暴力组合的指数级爆炸。
+
+来源: [scripts/shared.py](/scripts/shared.py#L260-L278), [scripts/find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L60-L120)
+
+## 脚本清单
+
+| 脚本 | 阶段 | 用途 |
+|--------|-------|---------|
+| `run_rosetta.py` | 片段生成 | 运行 PSI-BLAST 和 Rosetta 片段选择器以生成 9 聚体结构片段 |
+| `rosetta_to_pdb.py` | 片段生成 | 将 Rosetta 内部片段格式转换为标准 PDB CA 轨迹文件 |
+| `parse_ss.py` | 片段生成 | 将二级结构预测 (PSIPRED, Porter, Jpred, SSPro) 归一化为统一格式 |
+| `parse.pl` | 片段生成 | Perl 桥接脚本，将 PSI-BLAST 二进制检查点转换为 Rosetta 兼容格式 |
+| `create_database.py` | 数据库与过滤 | 创建 SQLite 数据库模式，对窗口、片段及其关系进行索引 |
+| `load_model_scores.py` | 对接与评分 | 加载 GOAP/ITScorePro 分数，选择每个窗口的顶级模型，应用几何截断过滤，计算成对片段兼容性 |
+| `find_paths_stepwise.py` | 路径组装 | 逐步组合搜索，在所有窗口中构建几何有效的片段路径 |
+| `cluster_heuristic.py` | 路径组装 | 按配体 RMSD 对路径进行聚类，以识别代表性中心点并减少冗余 |
+| `compute_occupancy_score.py` | 路径排序 | 计算每条路径的受体残基接触数，以得出基于占据率的分数 |
+| `select_paths.py` | 路径排序 | 通过加权复合 Z-score（节点 + 边 + 聚类大小 + 占据率）对聚类中心点进行排序，并输出全原子 PDB 文件 |
+| `combine_receptor.py` | 优化与输出 | 将多链受体 PDB 合并为单链，以兼容 CHARMM |
+| `shared.py` | 实用工具 | 公共函数：数据库连接管理器、SQL 辅助函数、PDB I/O、评分解析器、窗口计算、配置加载 |
+
+来源: [scripts/run_rosetta.py](/scripts/run_rosetta.py#L1-L30), [scripts/create_database.py](/scripts/create_database.py#L50-L80), [scripts/load_model_scores.py](/scripts/load_model_scores.py#L40-L80), [scripts/cluster_heuristic.py](/scripts/cluster_heuristic.py#L35-L70), [scripts/compute_occupancy_score.py](/scripts/compute_occupancy_score.py#L30-L60), [scripts/select_paths.py](/scripts/select_paths.py#L30-L50), [scripts/combine_receptor.py](/scripts/combine_receptor.py#L25-L55), [scripts/shared.py](/scripts/shared.py#L1-L50)
+
+## 数据流与持久化
+
+IDP-LZerD 使用 **SQLite 数据库**（通过 `apsw` 库）作为流程各阶段之间的主要持久层。两个关键的数据库文件负责协调数据流转：
+
+| 数据库文件 | 创建者 | 包含内容 |
+|---------------|-----------|----------|
+| `scores_{complexid}.db` | `create_database.py` | 窗口/片段索引、模型分数 (ITScorePro, GOAP/DFIRE)、选定模型坐标、成对模型距离 |
+| `path_{complexid}_all.db` | `find_paths_stepwise.py` | 每个窗口数的有效路径、LRMSD 聚类分配、聚类大小 |
+
+流程还依赖于一个 **CSV 文件** (`{PDBID}_data.csv`)，该文件存储窗口分解元数据（位置、残基起始/结束、窗口索引），以及一个最终捕获所选路径加权排序的 `path_scores.csv` 文件。
+
+来源: [scripts/create_database.py](/scripts/create_database.py#L50-L90), [scripts/find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L60-L90), [scripts/shared.py](/scripts/shared.py#L50-L100)
+
+## 外部依赖
+
+IDP-LZerD 编排了多个外部生物信息学工具。这些工具的路径在 [PATHS.ini](/PATHS.ini#L1-L6) 中配置：
+
+| 依赖项 | 作用 | 所需阶段 |
+|-----------|------|-------------------|
+| **Rosetta** (片段选择器) | 从序列 + SS 预测生成结构片段集合 | 片段生成 |
+| **PSI-BLAST** (`blastpgp`) + **nr 数据库** | 为 Rosetta 片段选择构建序列谱 | 片段生成 |
+| **LZerD** (PDBGEN, LB3Dclust) | 局部蛋白质-蛋白质对接和诱体聚类 | 对接与评分 |
+| **Pulchra** | 从仅 CA 轨迹重建完整主链 | 片段生成 |
+| **侧链建模** (SCComp / Scwrl4 / Oscar-star / RASP) | 为主链模型添加侧链 | 片段生成 |
+| **GOAP** | 为对接模型评分（提供 DFIRE 子分数） | 对接与评分 |
+| **ITScorePro** | 为对接模型评分（基于迭代知识的势能） | 对接与评分 |
+| **CHARMM** | 最终模型的基于物理的弛豫/优化 | 优化与输出 |
+
+来源: [README.md](/README.md#L20-L42), [PATHS.ini](/PATHS.ini#L1-L6)
+
+## 项目结构
+
+```
+idp_lzerd/
+├── PATHS.ini                          # 外部工具路径配置
+├── idp_relax.inp                      # CHARMM 弛豫输入模板
+├── LICENSE.txt                        # GPL v3
+├── README.md                          # 安装与使用说明
+├── scripts/
+│   ├── cluster_heuristic.py           # 基于 LRMSD 的路径聚类
+│   ├── combine_receptor.py            # 多链受体合并
+│   ├── compute_occupancy_score.py     # 受体接触占据率评分
+│   ├── create_database.py             # SQLite 模式与片段索引
+│   ├── find_paths_stepwise.py         # 组合路径搜索
+│   ├── load_model_scores.py           # 分数加载与几何过滤
+│   ├── parse.pl                       # PSI-BLAST 检查点转换器
+│   ├── parse_ss.py                    # 二级结构预测解析器
+│   ├── rosetta_templates/             # Rosetta 片段选择器配置文件
+│   │   ├── quota-protocol.flags.template
+│   │   ├── quota-protocol.wghts
+│   │   └── quota.def
+│   ├── rosetta_to_pdb.py              # Rosetta 输出 → PDB 转换
+│   ├── run_rosetta.py                 # Rosetta 片段选择器运行器
+│   ├── select_paths.py                # 加权 Z-score 排序与输出
+│   └── shared.py                      # 共享实用工具与数据库辅助函数
+└── test/
+    ├── 4ah2/                          # 测试用例: PDB 4ah2
+    │   ├── 4ah21/ ... 4ah213/ 4ah27/ # 片段窗口子目录
+    │   └── goap_score.txt
+    ├── 4ah2_data.csv                  # 窗口分解数据
+    ├── generate_decoys.py             # 测试辅助: 运行 LZerD 对接
+    └── test_decoys.sh                 # 端到端测试脚本
+```
+
+来源: [README.md](/README.md#L1-L82), [scripts/shared.py](/scripts/shared.py#L22-L24)
+
+## 排序方法论
+
+`select_paths.py` 中的最终路径选择采用**四分量加权 Z-score** 对聚类中心点进行排序。每个评分分量被归一化为 Z-score，然后合并：
+
+| 评分分量 | 方向 | 权重 | 含义 |
+|----------------|-----------|--------|---------|
+| `nodescore` | 越低越好 | 0.5 | 路径上各个模型对接分数的总和 |
+| `edgescores` | 越低越好 | 0.1 | 相邻窗口之间几何兼容性惩罚的总和 |
+| `clustersize` | 越大越好 | 0.3 | 同一 LRMSD 聚类中的路径数量（指示一致性） |
+| `occupancyscore` | 越大越好 | 0.1 | 路径上的受体残基接触数量 |
+
+这些分量通过**最佳分数权重** (`b_weight = 0.3`) 进行混合：最终分数的 30% 来自四个分量中单一最佳（最负）的 Z-score，70% 来自加权和。这在利用最强信号和跨所有评分标准的多样化之间取得了平衡。
+
+<CgxTip>四个评分分量解决了根本不同的质量信号——对接准确性（节点）、结构连贯性（边）、构象共识（聚类）和界面的生物学合理性（占据率）。最佳分数权重可防止单个较差的分量主导排序。</CgxTip>
+
+来源: [scripts/select_paths.py](/scripts/select_paths.py#L22-L30), [scripts/select_paths.py](/scripts/select_paths.py#L90-L130)
+
+## 测试用例
+
+本仓库包含一个基于 **PDB 4ah2**（A 链作为受体，C 链作为配体）的测试用例。测试脚本 `test/test_decoys.sh` 演练了从数据库创建到路径选择的完整流程。请注意，完整运行会产生约 **250 GB** 的中间文件，因为 LZerD 每个片段最多产生 50,000 个对接诱体，且组合搜索会探索所有几何有效的路径。
+
+来源: [README.md](/README.md#L48-L55), [test/test_decoys.sh](/test/test_decoys.sh#L1-L27), [test/generate_decoys.py](/test/generate_decoys.py#L1-L30)
+
+## 建议阅读路径
+
+若要获取系统的导览，请按以下顺序阅读页面：
+
+1. **[快速开始](2-quick-start)** — 端到端运行测试用例
+2. **[外部依赖设置](3-external-dependencies-setup)** — 安装并配置所有必需工具
+3. **[架构概述](4-architecture-overview)** — 深入了解流程的数据模型和控制流
+4. **片段生成** → [Rosetta 片段选择器](5-rosetta-fragment-picker), [Rosetta 至 PDB 转换](6-rosetta-to-pdb-conversion), [二级结构解析](7-secondary-structure-parsing)
+5. **对接与评分** → [数据库创建与模式](8-database-creation-and-schema), [模型分数加载](9-model-score-loading), [几何截断过滤](10-geometric-cutoff-filters)
+6. **路径组装与排序** → [逐步路径搜索](11-stepwise-path-search), [启发式聚类](12-heuristic-clustering), [占据率分数计算](13-occupancy-score-computation), [路径选择与排序](14-path-selection-and-ranking)
+7. **优化与输出** → [CHARMM 弛豫协议](15-charmm-relaxation-protocol), [受体链组合](16-receptor-chain-combination)
+8. **参考** → [共享实用工具参考](17-shared-utilities-reference), [配置与 PATHS.ini](18-configuration-and-paths-ini)
+
+---
+
+- [入门指南/快速开始](https://zread.ai/kiharalab/idp_lzerd/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+IDP-LZerD 用于对内在无序蛋白 (IDP) 与有序蛋白相互作用时的结合构象进行建模。本页将使用内置测试用例 (PDB: 4ah2) 作为具体参考，引导你完成**从配置到最终输出的最快运行路径**。
+
+## 前置条件速览
+
+在接触任何代码之前，请确认你的环境同时满足 Python 和二进制文件的依赖要求。下表汇总了所需依赖及其在流程中的用途。
+
+| 类别 | 依赖项 | 流程中的作用 |
+|---|---|---|
+| **Python** | apsw, numpy, scipy, pandas, Biopython | 所有脚本的核心数据库、评分及 PDB I/O |
+| **Python** | seaborn | 占据分数可视化 ([compute_occupancy_score.py](scripts/compute_occupancy_score.py#L30)) |
+| **二进制文件** | Rosetta | 片段生成 ([run_rosetta.py](scripts/run_rosetta.py#L56)) |
+| **二进制文件** | blastpgp + nr 数据库 | 用于片段挑选的 PSI-BLAST 特征谱 |
+| **二进制文件** | LZerD (PDBGEN) | 两两对接诱饵生成 |
+| **二进制文件** | Pulchra | CA → 全原子骨架重建 |
+| **二进制文件** | SCCOMP / Scwrl4 / Oscar-star / RASP | 侧链建模（任选其一） |
+| **二进制文件** | GOAP + ITScorePro | 对接模型评分 |
+| **二进制文件** | CHARMM | 组装路径的最终弛豫 |
+
+通过 conda 一键安装 Python 依赖：
+
+```bash
+conda install numpy scipy pandas biopython seaborn
+conda install -c conda-forge apsw
+```
+
+来源：[README.md](README.md#L18-L31), [shared.py](scripts/shared.py#L17-L28)
+
+## 步骤 0 — 配置 PATHS.ini
+
+每次流程运行都会读取项目根目录下的 [`PATHS.ini`](PATHS.ini)。此 INI 风格的文件告知脚本去何处寻找四个**强制性**外部工具。打开该文件并将每个路径设置为与你的系统相匹配：
+
+```ini
+[paths]
+lzerd_path: $HOME/lzerddistribution
+rosetta_path: /apps/rosetta/w2016.08
+nr_path: /apps/blast+/databases/nr
+blastpgp_exe: /usr/bin/blastpgp
+```
+
+`shared.py` 中的 `load_config()` 函数会解析此文件，并验证 `lzerd_path`、`rosetta_path`、`nr_path` 和 `blastpgp_exe` 这四个键是否全部存在。缺少任何键都会立即引发 `IDPError`。**最常见的安装失败原因是跳过了 blastpgp 或 nr 数据库**；如果 Rosetta 报错并提及 "blast" 或 "nr"，请验证这些路径是否指向了实际安装的位置。
+
+来源：[PATHS.ini](PATHS.ini#L1-L6), [shared.py](scripts/shared.py#L293-L322), [README.md](README.md#L50-L52)
+
+## 流程概览
+
+IDP-LZerD 执行包含六个阶段的流程。下方的流程图展示了完整的序列以及负责各阶段的脚本。
+
+```mermaid
+flowchart TD
+    A["<b>阶段 1</b><br/>片段生成<br/><i>run_rosetta.py</i>"] --> B["<b>阶段 1b</b><br/>Rosetta → PDB<br/><i>rosetta_to_pdb.py</i>"]
+    B --> C["<b>阶段 2</b><br/>诱饵生成<br/><i>LZerD / PDBGEN</i>"]
+    C --> D["<b>阶段 3</b><br/>数据库 + 评分<br/><i>create_database.py<br/>load_model_scores.py</i>"]
+    D --> E["<b>阶段 4</b><br/>路径搜索 + 聚类<br/><i>find_paths_stepwise.py</i>"]
+    E --> F["<b>阶段 5</b><br/>占据分数计算<br/><i>compute_occupancy_score.py</i>"]
+    F --> G["<b>阶段 6</b><br/>路径选择 + 输出<br/><i>select_paths.py</i>"]
+    G --> H["<b>阶段 7</b><br/>CHARMM 弛豫<br/><i>idp_relax.inp</i>"]
+
+    style A fill:#e8f4f8,stroke:#2196F3
+    style B fill:#e8f4f8,stroke:#2196F3
+    style C fill:#fff3e0,stroke:#FF9800
+    style D fill:#e8f5e9,stroke:#4CAF50
+    style E fill:#e8f5e9,stroke:#4CAF50
+    style F fill:#e8f5e9,stroke:#4CAF50
+    style G fill:#e8f5e9,stroke:#4CAF50
+    style H fill:#fce4ec,stroke:#E91E63
+```
+
+来源：[test_decoys.sh](test/test_decoys.sh#L1-L27), [README.md](README.md#L55-L81)
+
+## 步骤 1 — 运行测试用例
+
+内置测试用例的目标是 **PDB 4ah2**，其受体链为 A，配体链为 C。编排脚本 [`test_decoys.sh`](test/test_decoys.sh) 会在诱饵生成之后将流程的所有阶段串联起来。
+
+### 1a. 编辑测试脚本
+
+打开 `test/test_decoys.sh` 并将 `PACKAGE_DIR` 设置为 IDP-LZerD 根目录的绝对路径：
+
+```bash
+PACKAGE_DIR="/path/to/idp_lzerd"
+```
+
+该脚本在顶部定义了关键标识符：
+
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| `PDBID` | `4ah2` | 复合物的 PDB 标识符 |
+| `R_CH` | `A` | 受体链标识符 |
+| `L_CH` | `C` | 配体 (IDP) 链标识符 |
+| `N_WINDOWS` | `3` | 沿 IDP 重叠的 9-mer 窗口数量 |
+
+来源：[test_decoys.sh](test/test_decoys.sh#L3-L8)
+
+### 1b. 运行测试
+
+```bash
+cd test && ./test_decoys.sh
+```
+
+> ⚠️ **磁盘空间警告**：完整测试会生成约 **250 GB** 的中间文件（对接诱饵、数据库、坐标）。在启动前请确保有足够的可用磁盘空间。
+
+该脚本会自动执行以下序列：
+
+```mermaid
+flowchart LR
+    A["generate_decoys.py<br/>(LZerD PDBGEN)"] --> B["create_database.py<br/>(SQLite 模式)"]
+    B --> C["load_model_scores.py<br/>(ITScorePro + GOAP)"]
+    C --> D["find_paths_stepwise.py<br/>(组合搜索)"]
+    D --> E["compute_occupancy_score.py<br/>(受体接触)"]
+    E --> F["select_paths.py<br/>(排序 + 输出 PDB)"]
+```
+
+各命令及其作用：
+
+| 步骤 | 命令 | 作用 |
+|---|---|---|
+| 1 | `python generate_decoys.py` | 对每个片段运行 LZerD 的 PDBGEN 以生成两两对接模型 |
+| 2 | `python create_database.py -p 4ah2 -i 4ah2_data.csv -d .` | 创建具有窗口/片段模式的 SQLite 数据库 |
+| 3 | `python load_model_scores.py -b scores_4ah2AC.db -p 4ah2 -r A -l C -d .` | 加载 ITScorePro 和 GOAP (DFIRE) 分数，为每个窗口选择前 4500 个模型，并计算模型间距离 |
+| 4 | `python find_paths_stepwise.py 4ah2AC -n 3 -d .` | 带有启发式聚类的逐步组合路径搜索 |
+| 5 | `python compute_occupancy_score.py 4ah2 -r A -l C -n 3 -d .` | 统计跨路径的受体残基接触 → 占据分数 |
+| 6 | `python select_paths.py 4ah2 -r A -l C -n 3 -d .` | 按加权 Z 分数对路径排序，输出前 100 个组合 PDB 文件 |
+
+来源：[test_decoys.sh](test/test_decoys.sh#L14-L27), [generate_decoys.py](test/generate_decoys.py#L57-L96)
+
+### 1c. 定位输出
+
+未经精修（CHARMM 处理前）的路径 PDB 文件会被写入 `test/4ah2ac3/`。该目录名遵循 `{pdbid}{receptor_chain}{ligand_chain}{n_windows}` 的小写模式。你可以在其中找到：
+
+- **组合 PDB 文件** — 每条所选路径的完整复合物结构
+- **`path_scores.csv`** — 每条路径的 Z 分数及加权复合分数
+
+来源：[test_decoys.sh](test/test_decoys.sh#L8), [select_paths.py](scripts/select_paths.py#L64-L76)
+
+## 步骤 2 — CHARMM 弛豫（流程后处理）
+
+流程中的 `select_paths.py` 会产生结构上合理但未经精修的模型。若要进行最终的能量最小化和分子动力学弛豫，请使用内置的 [`idp_relax.inp`](idp_relax.inp) CHARMM 输入模板。
+
+1. 为 CHARMM 准备 PDB 文件（添加缺失原子，生成 PSF/坐标文件）
+2. 编辑 `idp_relax.inp` — 设置顶部的占位符变量：
+
+| 变量 | 含义 |
+|---|---|
+| `{charmm_dir}` | CHARMM 源码/数据目录的路径 |
+| `{working_dir}` | 包含 PSF、COR 和 SEQ 文件的目录 |
+| `{filename}` | 输入/输出文件的基本名 |
+| `{receptor_chain}` | 受体片段标识符 |
+| `{ligand_chain}` | 配体片段标识符 |
+
+3. 使用此输入文件运行 CHARMM
+
+该弛豫方案采用**分阶段谐约束策略**：受体被固定，而配体经历逐步解约束的最小化（力常数：50→40→30→20→10→0），随后进行骨架约束最小化（10→5→1→0），最后是在 200 K 下进行 20 ps 的 Langevin 动力学模拟。
+
+<CgxTip>分阶段的力常数计划至关重要——过快解除约束会导致 CHARMM 因不良接触而崩溃。默认计划已针对 IDP-LZerD 的输出进行了验证；只有在了解能量面影响的情况下才可进行修改。</CgxTip>
+
+来源：[idp_relax.inp](idp_relax.inp#L1-L117), [README.md](README.md#L58-L60)
+
+## 步骤 3 — 运行新蛋白
+
+对于不在测试集中的蛋白，流程需要在应用类似 `test_decoys.sh` 的步骤之前进行额外的**上游准备工作**。完整的工作流程如下：
+
+```mermaid
+flowchart TD
+    A["准备输入：<br/>IDP FASTA + 受体 PDB"] --> B["生成 SS 预测<br/>(PSIPRED 格式)"]
+    B --> C["运行 Rosetta 片段挑选器<br/><b>run_rosetta.py</b>"]
+    C --> D["转换为 PDB<br/><b>rosetta_to_pdb.py</b>"]
+    D --> E["重命名 window_data.csv<br/>→ {PDBID}_data.csv"]
+    E --> F["重建骨架<br/><b>Pulchra</b>"]
+    F --> G["构建侧链<br/><b>SCCOMP/Scwrl4/…</b>"]
+    G --> H["整理片段<br/>至子目录"]
+    H --> I["在每个片段上运行 LZerD"]
+    I --> J["使用 GOAP + ITScorePro 评分"]
+    J --> K["运行 test_decoys.sh 风格的<br/>流程步骤 2–6"]
+
+    style C fill:#e8f4f8,stroke:#2196F3
+    style D fill:#e8f4f8,stroke:#2196F3
+    style K fill:#e8f5e9,stroke:#4CAF50
+```
+
+### 3a. 片段生成
+
+```bash
+scripts/run_rosetta.py -l <IDP_chain> -s <IDP.fasta> \
+  --psipred_path <psipred.ss2> \
+  --porter_path <porter.ss2> \
+  --jpred_path <jpred.ss2> \
+  --sspro_path <sspro.ss2> \
+  -d ./ -n 30 <PDB_ID>
+```
+
+关键标志：`-l` 设置配体链 ID，`-s` 设置 FASTA 文件，`-n` 设置每个位置的片段数（默认为 30），每个 `--*_path` 指向 PSIPRED `.ss2` 格式的二级结构预测。该脚本在内部运行 blastpgp，调用 Rosetta 的 `make_fragments.pl`，然后使用配额协议执行 `fragment_picker.linuxgccrelease`。
+
+### 3b. Rosetta 到 PDB 的转换
+
+```bash
+scripts/rosetta_to_pdb.py -p <PDB_ID> -l <IDP_chain> -s <IDP.fasta> \
+  -f output_files/<PDB_ID><IDP_chain>.30.9mers
+```
+
+此步骤读取 Rosetta 9-mer 片段文件，将每个片段位置映射到滑动窗口（通过 `create_windows()` 计算），并写入按位置组织的单个仅含 CA 的 PDB 文件。它还会生成包含窗口索引、残基起始/结束位置以及各窗口位置的 `window_data.csv`——**请将其重命名为 `{PDBID}_data.csv`**（例如 `4ah2_data.csv`）。
+
+### 3c. 骨架和侧链重建
+
+```bash
+# 从 CA 轨迹重建全原子骨架
+find ./ -name "frag_???.pdb" -print0 | xargs -0 -n1 pulchra
+
+# 然后在你选择的侧链建模工具上运行每个文件
+```
+
+### 3d. 对接与评分
+
+将片段整理至目录结构 `<PDBID>/<windowindex>/<fragmentindex>/` 中，镜像参考 `test/4ah2/4ah21/1/`。在每个片段上运行 LZerD 以生成聚类文件（例如 `a-c.cluster4`），然后使用 GOAP 和 ITScorePro 对所有对接模型进行评分。
+
+### 3e. 流程执行
+
+复制并修改 `test/test_decoys.sh` 中的 PDB ID、链标识符和窗口数量，然后如步骤 1 所示运行步骤 2–6。
+
+<CgxTip>窗口数量 (`N_WINDOWS`) 由 IDP 序列长度通过 `shared.py` 中的 `create_windows()` 决定。对于 20 个残基的 IDP，这会产生 3 个窗口（位置 1、7、12）。来自 `rosetta_to_pdb.py` 的 CSV 文件对此进行了编码——请勿在不与 CSV 交叉核对的情况下手动设置 `N_WINDOWS`。</CgxTip>
+
+来源：[README.md](README.md#L64-L81), [run_rosetta.py](scripts/run_rosetta.py#L48-L74), [rosetta_to_pdb.py](scripts/rosetta_to_pdb.py#L63-L71), [shared.py](scripts/shared.py#L245-L258), [4ah2_data.csv](test/4ah2_data.csv#L1-L5)
+
+## 快速参考：脚本清单
+
+| 脚本 | 阶段 | 关键参数 | 一句话总结 |
+|---|---|---|---|
+| `run_rosetta.py` | 1 | `-l`, `-s`, `--psipred_path`, `-n` | 为 IDP 运行 Rosetta 片段挑选器 |
+| `rosetta_to_pdb.py` | 1b | `-p`, `-l`, `-s`, `-f` | 将 Rosetta 片段转换为 PDB + 窗口 CSV |
+| `parse_ss.py` | 1 (准备) | 特定方法参数 | 将 SS 预测解析为 PSIPRED .ss2 格式 |
+| `create_database.py` | 3 | `-p`, `-i`, `-d` | 构建具有窗口/片段模式的 SQLite 数据库 |
+| `load_model_scores.py` | 3 | `-b`, `-p`, `-r`, `-l` | 加载 GOAP/ITScorePro 分数，选择顶部模型，计算距离 |
+| `find_paths_stepwise.py` | 4 | `complexid`, `-n` | 带有聚类的组合路径搜索 |
+| `compute_occupancy_score.py` | 5 | `PDBID`, `-r`, `-l`, `-n` | 计算每条路径的受体占据分数 |
+| `select_paths.py` | 6 | `PDBID`, `-r`, `-l`, `-n` | 按复合 Z 分数对路径排序，输出 PDB |
+| `combine_receptor.py` | 6 (辅助) | `--input`, `--receptor` | 将多链受体合并/还原为单链 |
+| `cluster_heuristic.py` | 4 (内部) | 由 find_paths_stepwise 调用 | 基于 LRMSD 启发式的 PDB 聚类 |
+
+来源：[test_decoys.sh](test/test_decoys.sh#L14-L27), [run_rosetta.py](scripts/run_rosetta.py#L151-L177), [rosetta_to_pdb.py](scripts/rosetta_to_pdb.py#L168-L183), [create_database.py](scripts/create_database.py#L108-L122), [load_model_scores.py](scripts/load_model_scores.py#L63-L71)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| Rosetta 退出并提示 "blast" 或 "nr" 错误 | `PATHS.ini` 指向错误/不存在的 blastpgp 或 nr 路径 | 验证 `PATHS.ini` 中的 `blastpgp_exe` 和 `nr_path` |
+| `IDPError: Could not open PATHS.ini` | 从错误的目录运行脚本，或缺少 `PATHS.ini` | 确保 `PATHS.ini` 存在于项目根目录；从正确的工作目录运行脚本 |
+| `IDPError: 'PATHS.ini' did not contain required key 'lzerd_path'` | INI 文件缺少必需的键 | 添加所有四个键：`lzerd_path`、`rosetta_path`、`nr_path`、`blastpgp_exe` |
+| `RunRosettaError: File not found` (SS 文件) | 二级结构预测文件路径错误或文件缺失 | 检查 `--psipred_path`、`--porter_path`、`--jpred_path`、`--sspro_path` 参数 |
+| `LoadModelScoresError: Score number mismatch` | ITScorePro 和 GOAP 生成的评分模型数量不一致 | 重新运行评分；确保两个评分器都处理了所有诱饵 |
+| `SelectPathsError: No occupancy score` | 跳过了 `compute_occupancy_score.py` 或其运行失败 | 在路径选择之前运行占据分数计算 |
+
+来源：[shared.py](scripts/shared.py#L293-L322), [run_rosetta.py](scripts/run_rosetta.py#L85-L89), [load_model_scores.py](scripts/load_model_scores.py#L123-L126), [select_paths.py](scripts/select_paths.py#L117-L119)
+
+## 后续步骤
+
+既然你已经能够端到端地运行此流程：
+
+- 深入理解每个脚本的具体功能 → [架构概览](4-architecture-overview)
+- 正确设置所有外部二进制文件 → [外部依赖设置](3-external-dependencies-setup)
+- 深入了解片段生成机制 → [Rosetta 片段挑选器](5-rosetta-fragment-picker)
+- 探索数据库模式和评分逻辑 → [数据库创建与模式](8-database-creation-and-schema)
+- 学习路径如何组装和排序 → [逐步路径搜索](11-stepwise-path-search)
+
+---
+
+- [入门指南/外部依赖配置](https://zread.ai/kiharalab/idp_lzerd/3-external-dependencies-setup)
+
+---
+slug:3-external-dependencies-setup
+blog_type:normal
+---
+
+
+IDP-LZerD 编排了一个多步骤的结构生物学流程，该流程将**基于 Python 的脚本**与多个**编译好的科学二进制文件**及**外部数据库**桥接在一起。在运行任何流程阶段之前，必须安装每个外部工具并将其路径注册到项目的核心配置文件中。本页将引导你了解每个依赖类别，解释其在流程中的作用，并准确展示如何进行配置。
+
+来源: [README.md](/README.md#L18-L46), [PATHS.ini](/PATHS.ini#L1-L6), [scripts/shared.py](/scripts/shared.py#L293-L322)
+
+## 依赖全景
+
+下图将每个外部依赖映射到使用它的流程阶段。在进入单独的安装说明之前，请将此作为心智模型参考。
+
+```mermaid
+flowchart TD
+    subgraph Python["Python Packages"]
+        apsw["apsw"]
+        numpy["numpy"]
+        scipy["scipy"]
+        pandas["pandas"]
+        biopython["Biopython"]
+        seaborn["seaborn"]
+    end
+
+    subgraph Binaries["Binary / External Tools"]
+        blastpgp["blastpgp + nr DB"]
+        rosetta["Rosetta"]
+        lzerd["LZerD"]
+        pulchra["Pulchra"]
+        sc["Side-chain tool"]
+        goap["GOAP"]
+        itscore["ITScorePro"]
+        charmm["CHARMM"]
+    end
+
+    subgraph Stages["Pipeline Stages"]
+        frag["Fragment Generation"]
+        backbone["Backbone Reconstruction"]
+        sidechain["Side-chain Modeling"]
+        dock["Local Docking"]
+        score["Model Scoring"]
+        relax["CHARMM Relaxation"]
+        internal["Internal Scripts"]
+    end
+
+    blastpgp --> frag
+    rosetta --> frag
+    frag --> backbone
+    pulchra --> backbone
+    backbone --> sidechain
+    sc --> sidechain
+    sidechain --> dock
+    lzerd --> dock
+    dock --> score
+    goap --> score
+    itscore --> score
+    score --> relax
+    charmm --> relax
+
+    apsw --> internal
+    numpy --> internal
+    scipy --> internal
+    pandas --> internal
+    biopython --> internal
+    seaborn --> internal
+```
+
+来源: [scripts/run_rosetta.py](/scripts/run_rosetta.py#L42-L56), [scripts/load_model_scores.py](/scripts/load_model_scores.py#L28-L32), [scripts/compute_occupancy_score.py](/scripts/compute_occupancy_score.py#L27-L31), [idp_relax.inp](/idp_relax.inp#L1-L10)
+
+## Python 包依赖
+
+项目的内部脚本共需要五个核心 Python 包（外加一个可视化库）。下表列出了每个包、其用途以及导入它的脚本。
+
+| 包 | 用途 | 导入脚本 |
+|---------|---------|-------------------|
+| **apsw** | Another Python SQLite Wrapper — 提供 SQLite 数据库引擎绑定，用于所有 `.db` 评分和模型文件 | `shared.py`, `find_paths_stepwise.py` |
+| **numpy** | 数值数组操作 — 坐标操作、距离计算 | `load_model_scores.py`, `find_paths_stepwise.py`, `cluster_heuristic.py`, `select_paths.py` |
+| **scipy** | 科学计算 — 空间距离计算 (`scipy.spatial`) | `load_model_scores.py` |
+| **pandas** | 表格数据操作 — CSV/SQL 加载、评分合并、基于 DataFrame 的流程逻辑 | 几乎所有脚本 |
+| **Biopython** | 生物信息学 I/O — `Bio.PDB` 用于结构解析，`Bio.SeqIO` 用于 FASTA 读取 | `rosetta_to_pdb.py`, `load_model_scores.py`, `compute_occupancy_score.py`, `select_paths.py`, `combine_receptor.py` |
+| **seaborn** | 统计可视化 — 占据度评分图 | `compute_occupancy_score.py` |
+
+### 安装 Python 包
+
+推荐使用 **conda** 进行安装，它能解决 `pip` 无法处理的 `apsw` 二进制依赖问题：
+
+```bash
+# 核心依赖
+conda install numpy scipy pandas biopython
+
+# apsw 需要 conda-forge 频道
+conda install -c conda-forge apsw
+
+# 可视化（可选，用于生成占据度图）
+conda install seaborn
+```
+
+> <CgxTip>如果你使用 `pip` 而非 conda，请注意 `apsw` 会针对系统的 SQLite 头文件进行编译。在运行 `pip install apsw` 之前，请确保已安装 `sqlite3` 开发包（在 Debian/Ubuntu 上为 `libsqlite3-dev`）。</CgxTip>
+
+来源: [README.md](/README.md#L23-L31), [scripts/shared.py](/scripts/shared.py#L26-L28), [scripts/load_model_scores.py](/scripts/load_model_scores.py#L28-L32)
+
+## 二进制和外部工具依赖
+
+IDP-LZerD 将计算密集型步骤委托给专业的结构生物学工具。这些工具**并未捆绑**在代码仓库中，必须单独安装。
+
+### 必需的外部工具
+
+| 工具 | 在流程中的用途 | 官方来源 |
+|------|---------------------|-----------------|
+| **PSI-BLAST** (`blastpgp` + `nr` 数据库) | 生成 Rosetta 片段选取器使用的序列谱 (PSSM) | [NCBI BLAST](https://blast.ncbi.nlm.nih.gov/Blast.cgi) |
+| **Rosetta** | 片段选取器 (`fragment_picker.linuxgccrelease`) 生成 9-mer 结构片段 | [RosettaCommons](https://www.rosettacommons.org) |
+| **LZerD** | 局部蛋白质-蛋白质对接 — 为每个片段生成诱饵复合物 | [kiharalab.org](http://kiharalab.org/proteindocking/lzerd.php) |
+| **Pulchra** | 从仅含 Cα 的片段结构重建全原子骨架 | [Georgia Tech](http://cssb.biology.gatech.edu/PULCHRA) |
+| **侧链工具**（任选其一） | 在重建的骨架上构建侧链原子 | 见下表 |
+| **GOAP** | 评分函数 — 为对接模型计算 GOAP 和 DFIRE 分数 | [Georgia Tech](http://cssb.biology.gatech.edu/GOAP/index.html) |
+| **ITScorePro** | 评分函数 — 为对接模型计算 ITScore 分数 | [Zou Lab](http://zoulab.dalton.missouri.edu/resources.html) |
+| **CHARMM** | 对最终组装的路径进行分子动力学弛豫 | [CHARMM.org](https://www.charmm.org) |
+
+### 侧链建模选项
+
+你**必须至少安装以下侧链建模工具中的一种**。对于 IDP-LZerD 的用途，所有工具均产生等效的输出；你可以根据授权协议和平台可用性进行选择。
+
+| 工具 | 许可协议 | 来源 |
+|------|---------|--------|
+| **SCCOMP** | 学术版 | [SHEBA Cancer](http://www.sheba-cancer.org.il/cgi-bin/sccomp/sccomp1.cgi) |
+| **Scwrl4** | 学术版 | [Dunbrack Lab](http://dunbrack.fccc.edu/scwrl4/) |
+| **Oscar-star** | 学术版 | [Osaka University](http://sysimm.ifrec.osaka-u.ac.jp/OSCAR) |
+| **RASP** | 学术版 | [Jiang Lab](http://jianglab.ibp.ac.cn/lims/rasp/rasp) |
+
+来源: [README.md](/README.md#L34-L46), [scripts/run_rosetta.py](/scripts/run_rosetta.py#L42-L56), [idp_relax.inp](/idp_relax.inp#L1-L10)
+
+## 配置 PATHS.ini
+
+代码仓库根目录下的 `PATHS.ini` 文件是所有二进制路径的**唯一可信源**。IDP-LZerD 的 Python 脚本在运行时通过 `shared.load_config()` 函数读取此文件，该函数会验证每个必需的键是否都存在。
+
+### 当前模板
+
+```ini
+[paths]
+lzerd_path: $HOME/lzerddistribution
+rosetta_path: /apps/rosetta/w2016.08
+nr_path: /apps/blast+/databases/nr
+blastpgp_exe: /usr/bin/blastpgp
+```
+
+### 键值参考
+
+| 键 | 描述 | 示例值 |
+|-----|-------------|---------------|
+| `lzerd_path` | LZerD 发行版的根目录 | `$HOME/lzerddistribution` |
+| `rosetta_path` | Rosetta 安装的根目录 | `/apps/rosetta/w2016.08` |
+| `nr_path` | BLAST `nr` 序列数据库的路径 | `/apps/blast+/databases/nr` |
+| `blastpgp_exe` | `blastpgp` 可执行文件的路径 | `/usr/bin/blastpgp` |
+
+### PATHS.ini 的解析方式
+
+`shared.py` 中的 `load_config()` 函数逐行读取 `PATHS.ini`，在首个 `:` 处分割以提取键值对。随后，它会验证所有四个必需的键（`lzerd_path`、`rosetta_path`、`nr_path`、`blastpgp_exe`）是否存在，若缺少任何一个则抛出 `IDPError` 异常。
+
+来源: [PATHS.ini](/PATHS.ini#L1-L6), [scripts/shared.py](/scripts/shared.py#L293-L322)
+
+### 逐步安装配置流程
+
+```mermaid
+flowchart LR
+    A["1. Install PSI-BLAST<br/>+ download nr DB"] --> B["2. Install Rosetta<br/>(apply for license)"]
+    B --> C["3. Install LZerD"]
+    C --> D["4. Install Pulchra<br/>+ side-chain tool"]
+    D --> E["5. Install GOAP<br/>+ ITScorePro"]
+    E --> F["6. Install CHARMM"]
+    F --> G["7. Edit PATHS.ini<br/>with all paths"]
+    G --> H["8. Validate with<br/>test run"]
+```
+
+请按照以下顺序安装和配置所有依赖：
+
+**步骤 1 — PSI-BLAST 和 nr 数据库。** 安装 NCBI BLAST+ 工具包并下载 `nr`（非冗余）蛋白质序列数据库。`blastpgp` 可执行文件必须位于你的 `PATH` 中，或者显式指定其路径。`nr` 数据库体积庞大（压缩后约 50 GB）；请确保留有充足的磁盘空间。在 `PATHS.ini` 中设置 `blastpgp_exe` 和 `nr_path`。
+
+**步骤 2 — Rosetta。** 在 [rosettacommons.org](https://www.rosettacommons.org) 申请 Rosetta 许可证并下载源码或二进制发行版。IDP-LZerD 需要 Rosetta 目录树中的两个特定路径：`main/source/bin/fragment_picker.linuxgccrelease`（片段选取器二进制文件）和 `tools/fragment_tools/make_fragments.pl`（检查点解析器）。将 `rosetta_path` 设置为 Rosetta 根目录——脚本将从该路径构造子路径。
+
+**步骤 3 — LZerD。** 从 [kiharalab.org](http://kiharalab.org/proteindocking/lzerd.php) 下载。将 `lzerd_path` 设置为发行版根目录。
+
+**步骤 4 — Pulchra 和侧链工具。** 安装 Pulchra 用于 Cα 到骨架的重建。然后安装一种侧链建模工具（SCCOMP、Scwrl4、Oscar-star 或 RASP）。这些工具在流程步骤之间手动调用（无需在 `PATHS.ini` 中配置）。
+
+**步骤 5 — GOAP 和 ITScorePro。** 安装这两个评分工具。它们需在对接诱饵上手动运行，以生成流程读取的 `goap_score.txt` 和 `scores.itscore` 文件。
+
+**步骤 6 — CHARMM。** 安装 CHARMM 用于最终的弛豫步骤。在运行弛豫之前，编辑 `idp_relax.inp` 将 `{charmm_dir}` 设置为你的 CHARMM 安装路径。
+
+**步骤 7 — 编辑 PATHS.ini。** 更新所有四个键以匹配你的安装位置。
+
+**步骤 8 — 验证。** 运行测试流程（`cd test && ./test_decoys.sh`）以确认所有路径都能正确解析。
+
+> <CgxTip>一个常见错误是跳过安装 `blastpgp` 和/或 `nr` 数据库。如果 Rosetta 在运行时尝试下载软件，或者报告提及 "blast" 或 "nr" 的错误，请验证 `PATHS.ini` 中的值是否与你实际的安装路径相匹配。</CgxTip>
+
+来源: [README.md](/README.md#L49-L52), [scripts/run_rosetta.py](/scripts/run_rosetta.py#L54-L56), [idp_relax.inp](/idp_relax.inp#L4-L4)
+
+## Rosetta 如何使用 PATHS.ini 键
+
+`run_rosetta.py` 脚本演示了 `PATHS.ini` 的值如何流入具体的 Rosetta 命令。在 `load_config()` 返回配置字典后，该脚本构造了两个关键路径：
+
+```
+make_fragments.pl → {rosetta_path}/tools/fragment_tools/make_fragments.pl
+fragment_picker   → {rosetta_path}/main/source/bin/fragment_picker.linuxgccrelease
+```
+
+`blastpgp_exe` 和 `nr_path` 的值被直接代入 PSI-BLAST 命令模板中以生成序列谱：
+
+```
+blastpgp -t 1 -i {id}.fasta -F F -j2 -o {id}.blast
+       -d {nr_path} -v10000 -b10000 -K1000
+       -h0.0009 -e0.0009
+       -C {id}.chk -Q {id}.pssm
+```
+
+Rosetta 片段选取器标志文件模板（`quota-protocol.flags.template`）也引用了 `{rosetta_path}` 以定位 Rosetta 数据库和 vall 片段库：
+
+```
+-in::path::database    {rosetta_path}/main/database
+-in::file::vall        {rosetta_path}/tools/fragment_tools/vall.apr24.2008.extended.gz
+```
+
+来源: [scripts/run_rosetta.py](/scripts/run_rosetta.py#L42-L56), [scripts/run_rosetta.py](/scripts/run_rosetta.py#L102-L113), [scripts/rosetta_templates/quota-protocol.flags.template](/scripts/rosetta_templates/quota-protocol.flags.template#L1-L6)
+
+## 不在 PATHS.ini 中的依赖
+
+部分工具在流程阶段之间**手动**调用，且未在 `PATHS.ini` 中配置。下表列出了每个此类工具、使用它的流程步骤，以及预期的输入/输出约定。
+
+| 工具 | 使用时机 | 输入 → 输出 | 约定 |
+|------|-----------|----------------|------------|
+| **Pulchra** | 片段生成之后 | `frag_???.pdb`（仅含 Cα） → 全原子骨架 PDB | 运行：`find ./ -name "frag_???.pdb" -print0 \| xargs -0 -n1 pulchra` |
+| **侧链工具** | Pulchra 之后 | 骨架 PDB → 带有侧链的全原子 PDB | 工具特定的调用方式 |
+| **GOAP** | LZerD 对接之后 | 对接模型 → `goap_score.txt` | 必须在片段目录中生成名为 `goap_score.txt` 的文件 |
+| **ITScorePro** | LZerD 对接之后 | 对接模型 → `scores.itscore` | 必须在片段目录中生成名为 `scores.itscore` 的文件 |
+| **CHARMM** | 路径组装之后 | 组合 PDB + `idp_relax.inp` → 弛豫结构 | 编辑 `idp_relax.inp` 以设置 `charmm_dir` 和工作目录 |
+
+`shared.py` 模块硬编码了 GOAP 和 ITScorePro 输出的预期文件名（`goap_score.txt` 和 `scores.itscore`），因此你必须确保评分运行在每个片段的 `decoys/` 子目录中生成具有这些确切名称的文件。
+
+来源: [README.md](/README.md#L76-L80), [scripts/shared.py](/scripts/shared.py#L216-L242), [idp_relax.inp](/idp_relax.inp#L1-L10)
+
+## 常见安装问题排查
+
+| 症状 | 根本原因 | 解决方案 |
+|---------|------------|------------|
+| Rosetta 以非零代码退出 | 未找到 `fragment_picker` 二进制文件或架构不匹配 | 验证 `rosetta_path` 指向了包含你平台已编译二进制文件的完整 Rosetta 安装目录 |
+| "Could not open PATHS.ini" | 代码仓库根目录中缺少 `PATHS.ini` | 确保你是从代码仓库目录树内运行脚本，或者 `ROOTDIR` 解析正确 |
+| 缺少配置键时出现 `IDPError` | `PATHS.ini` 缺少四个必需键之一 | 添加缺少的键（`lzerd_path`、`rosetta_path`、`nr_path` 或 `blastpgp_exe`） |
+| Rosetta 报告 "blast" 或 "nr" 错误 | `blastpgp_exe` 或 `nr_path` 不正确 | 确认 `blastpgp` 可执行，并且 `nr` 数据库文件存在于指定路径 |
+| 数据库文件出现 `apsw.CantOpenError` | 数据库文件缺失或不可读 | 首先运行 `create_database.py` 以生成 SQLite 数据库，然后再运行 `load_model_scores.py` |
+| 找不到 `scores.itscore` 或 `goap_score.txt` | 未在对接模型上运行 ITScorePro/GOAP | 在运行 `load_model_scores.py` 之前，对每个片段的诱饵目录运行评分工具 |
+
+来源: [scripts/shared.py](/scripts/shared.py#L296-L322), [scripts/run_rosetta.py](/scripts/run_rosetta.py#L140-L148), [README.md](/README.md#L51-L52)
+
+## 接下来去哪里
+
+一旦所有依赖安装完毕且 `PATHS.ini` 配置完成，你就准备好运行流程了。逻辑上的下一步是**快速入门**指南，它将引导你端到端地运行测试蛋白质：
+
+→ [快速入门](2-quick-start)
+
+若要更深入地了解这些依赖如何在流程架构中连接：
+
+→ [架构概览](4-architecture-overview)
+
+有关 `PATHS.ini` 解析方式及配置如何在代码库中流转的详细信息：
+
+→ [配置与 PATHS.ini](18-configuration-and-paths-ini)
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/kiharalab/idp_lzerd/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+IDP-LZerD 是一个计算流水线，用于对**天然无序蛋白 (IDP) 与有序受体蛋白相互作用时的结合构象**进行建模。该系统将 IDP 序列分解为重叠的 9 残基窗口，通过 Rosetta 为每个窗口生成结构片段，使用 LZerD 将每个片段与受体进行对接，然后对兼容的片段放置位置执行组合路径搜索，以组装全长的结合构象。其架构是一个**分阶段批处理流水线** —— 每个阶段产生被下游阶段消费的持久化产物（SQLite 数据库、PDB 文件、CSV），脚本之间没有内存数据传递。这种设计允许在每个阶段设置检查点并在故障后恢复，鉴于该流水线单个测试用例的输出规模就达到约 250 GB，这一点至关重要。
+
+来源: [README.md](/README.md#L1-L82), [test_decoys.sh](/test/test_decoys.sh#L1-L27)
+
+## 流水线架构
+
+完整的 IDP-LZerD 工作流分为六个逻辑阶段进行，每个阶段都实现为一个从 Shell 调用的独立 Python 脚本。下面的 Mermaid 图展示了端到端的数据流；请从上至下阅读，其中每个节点代表一个脚本或外部工具，边代表文件级的数据依赖关系。
+
+```mermaid
+flowchart TD
+    subgraph Stage1["① 片段生成"]
+        FASTA["IDP FASTA 序列"] --> RR["run_rosetta.py"]
+        SS["SS 预测文件<br/>(PSIPRED 格式)"] --> RR
+        PATHS["PATHS.ini"] --> RR
+        RR -->|"9mer 片段文件"| R2P["rosetta_to_pdb.py"]
+        R2P -->|"窗口目录 +<br/>frag_*.pdb 文件"| PULCHRA["Pulchra<br/>(CA→主链)"]
+        PULCHRA --> SC["侧链<br/>建模"]
+    end
+
+    subgraph Stage2["② 对接与诱饵生成"]
+        SC -->|"全原子片段"| LZERD["LZerD<br/>(局部对接)"]
+        RCP["受体 PDB"] --> LZERD
+        LZERD -->|"model*.pdb<br/>(对接诱饵)"| GOAP["GOAP +<br/>ITScorePro<br/>(评分)"]
+    end
+
+    subgraph Stage3["③ 数据库与分数加载"]
+        GOAP --> CDB["create_database.py"]
+        CDB -->|"scores_*.db"| LMS["load_model_scores.py"]
+        LMS -->|"模型分数 +<br/>modeldist_*.db"| LMS
+    end
+
+    subgraph Stage4["④ 路径组装与聚类"]
+        LMS --> FPS["find_paths_stepwise.py"]
+        FPS -->|"path_*_all.db<br/>(路径 + 聚类)"| FPS
+    end
+
+    subgraph Stage5["⑤ 占据率与排序"]
+        FPS --> OCC["compute_occupancy_score.py"]
+        OCC -->|"*_receptor_occupancy.csv"| SP["select_paths.py"]
+        SP -->|"合并的 PDB +<br/>path_scores.csv"| SP
+    end
+
+    subgraph Stage6["⑥ 精修"]
+        SP --> CHARMM["CHARMM<br/>弛豫<br/>(idp_relax.inp)"]
+        CHARMM --> FINAL["精修后的<br/>结合复合物"]
+    end
+
+    style Stage1 fill:#e8f4e8,stroke:#2d7d2d
+    style Stage2 fill:#e8e8f4,stroke:#2d2d7d
+    style Stage3 fill:#f4f4e8,stroke:#7d7d2d
+    style Stage4 fill:#f4e8e8,stroke:#7d2d2d
+    style Stage5 fill:#e8f4f4,stroke:#2d7d7d
+    style Stage6 fill:#f0e8f4,stroke:#6d2d7d
+```
+
+来源: [test_decoys.sh](/test/test_decoys.sh#L1-L27), [README.md](/README.md#L49-L82)
+
+## 核心子系统
+
+每个子系统封装了不同的计算职责。下表将每个脚本映射到其流水线阶段、主类、输入产物和输出产物 —— 为追踪数据溯源提供快速参考。
+
+| 脚本 | 阶段 | 主类 | 输入 | 输出 |
+|---|---|---|---|---|
+| `run_rosetta.py` | 片段生成 | `RunRosetta` | FASTA, SS 预测 | 9mer 片段文件, `.fsc` 分数文件 |
+| `rosetta_to_pdb.py` | 片段生成 | `MakePdb` | 9mer 片段文件 | 窗口目录, `*_data.csv` |
+| `parse_ss.py` | 片段生成 | `ParseSs` | Porter/Jpred/SSPro 文件 | PSIPRED 格式的 `.ss2` 文件 |
+| `create_database.py` | 数据库创建 | `main()` | 窗口目录, `*_data.csv` | `scores_*.db` (SQLite) |
+| `load_model_scores.py` | 对接与评分 | `LoadModelScores` | `scores_*.db`, 诱饵 PDB | 更新的 `scores_*.db`, `*_modeldist*.db` |
+| `find_paths_stepwise.py` | 路径组装 | `FindPathsStepwise` | `scores_*.db`, `*_modeldist*.db` | `path_*_all.db` (SQLite) |
+| `cluster_heuristic.py` | 路径组装 | `ClusterPdb` / `ClusterLRMSD` | `path_*_all.db`, `scores_*.db` | `path_*_all.db` 中的聚类表 |
+| `compute_occupancy_score.py` | 占据率评分 | `PlotPaths` | `path_*_all.db`, `scores_*.db` | `*_receptor_occupancy.csv` |
+| `select_paths.py` | 路径排序 | `SelectPaths` | 所有数据库, 占据率 CSV | 合并的 PDB, `path_scores.csv` |
+| `combine_receptor.py` | 精修 | `CombineChain` | 多链受体 PDB | 单链受体 PDB |
+| `shared.py` | 跨阶段通用 | — | `PATHS.ini` | 配置字典, 实用工具函数 |
+
+来源: [run_rosetta.py](/scripts/run_rosetta.py#L42-L182), [create_database.py](/scripts/create_database.py#L50-L126), [load_model_scores.py](/scripts/load_model_scores.py#L35-L200), [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L35-L200), [cluster_heuristic.py](/scripts/cluster_heuristic.py#L33-L200), [compute_occupancy_score.py](/scripts/compute_occupancy_score.py#L31-L200), [select_paths.py](/scripts/select_paths.py#L31-L200), [shared.py](/scripts/shared.py#L23-L323)
+
+## 数据持久化模型
+
+IDP-LZerD 使用 **SQLite (通过 APSW)** 作为其唯一的结构化持久化机制。数据库模式在流水线的各个阶段中演化 —— 每个阶段添加表或整个数据库文件，而不是修改现有模式，遵循**仅追加积累**模式。三个不同的数据库文件构成了持久化的骨干：
+
+```mermaid
+erDiagram
+    scores_db["scores_{complexid}.db"] {
+        int windowindex PK "窗口标识符"
+        text window_wd "窗口目录路径"
+        int res_start "首个残基位置"
+        int res_end "末个残基位置"
+        int position "片段起始位置"
+    }
+    scores_db ||--o{ fragment : contains
+    fragment {
+        int windowindex FK "窗口标识符"
+        int fragmentindex PK "窗口内的片段"
+    }
+    scores_db ||--o{ allmodel : references
+    allmodel {
+        int modelid PK "自动生成的 ID"
+        int modelindex "片段内的索引"
+        float dfire "GOAP/DFIRE 分数"
+        float itscore "ITScorePro 分数"
+        int windowindex FK
+        int fragmentindex FK
+    }
+    scores_db ||--o{ model : selects
+    model {
+        int modelid PK "选出的 Top-N 模型"
+        text coordinates "JSON 原子坐标"
+    }
+
+    modeldist_db["*_modeldist{window}.db"] {
+        int modela FK "第一个窗口模型"
+        int modelb FK "第二个窗口模型"
+        float mpdist "中点 CA 距离"
+        float ifourdist "i 到 i+4 CA 距离"
+        float edgescore "重叠区域分数"
+        float cosine "主链角度余弦"
+    }
+
+    path_db["path_{complexid}_all.db"] {
+        int pathsid PK "路径标识符"
+        float edgescores "平均边分数"
+        float nodescore "平均节点分数"
+    }
+    path_db ||--o{ clusters : groups
+    clusters {
+        int pathsid FK "路径标识符"
+        int cid "聚类 ID"
+        int is_medoid "1 表示聚类中心"
+        int clustersize "聚类中的成员数"
+    }
+```
+
+**分数数据库**是核心枢纽：`create_database.py` 初始化 `window` 和 `fragment` 表；`load_model_scores.py` 用原始分数填充 `allmodel`，选择 Top-N 模型进入嵌入坐标 JSON 的 `model`，然后生成成对的**模型距离数据库** (`*_modeldist*.db`)，编码连续窗口之间的几何兼容性。**路径数据库**由 `find_paths_stepwise.py` 增量构建 —— 对于从 2 到 *N* 的每个窗口计数 *n*，通过将上一级路径与当前窗口的 modeldist 表连接来创建 `paths{n}` 表，然后 `cluster_heuristic.py` 添加一个 `clusters{n}` 表，按结构相似性 (LRMSD) 对这些路径进行分区。
+
+来源: [create_database.py](/scripts/create_database.py#L31-L49), [load_model_scores.py](/scripts/load_model_scores.py#L35-L100), [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L48-L100), [shared.py](/scripts/shared.py#L30-L110)
+
+## 窗口分解策略
+
+IDP 序列被分解为**重叠的 9 残基窗口**，偏移量为 6 个残基，由 `shared.py` 中的 `create_windows()` 实现。对于长度为 *L* 的序列，窗口从残基位置 1, 7, 13, 19, ... 开始 —— 每个覆盖 9 个残基，与其相邻窗口在每个边界上有 3 个残基的重叠。最后一个窗口被截断至序列长度，并调整其起始位置以维持重叠不变性。这种滑动窗口设计是整个流水线的核心：每个窗口生成独立的片段结构，3 残基重叠提供了在路径组装期间使用的几何约束表面（边分数、余弦检查、冲突检测），以确保跨越窗口边界的结构连续性。
+
+来源: [shared.py](/scripts/shared.py#L279-L295), [rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L55-L130)
+
+## 几何兼容性过滤器
+
+当 `load_model_scores.py` 计算窗口间的成对模型距离时，它应用**五级几何过滤器级联**来确定两个对接的片段放置位置在结构上是否兼容。这些过滤器对作为 JSON 存储在 `model` 表中的预提取坐标数组进行操作，其阈值在 `LoadModelScores` 中被参数化为类级别默认值：
+
+| 过滤器 | 计算 | 目的 |
+|---|---|---|
+| **中点距离** | 每个窗口重叠中点处 CA 原子间的欧氏距离 | 确保两个片段在 3D 空间中彼此位置相近 |
+| **i 到 i+4 CA 距离** | 窗口 *k* 的最后一个重叠 CA 与窗口 *k+1* 的第一个重叠后 CA 之间的距离 | 验证连接处的主链连续性 |
+| **主链冲突** | 重叠区域中所有主链原子间的成对距离矩阵；统计低于阈值的原子对数量 | 拒绝重叠残基间的空间位阻冲突 |
+| **边分数** | 对应重叠区域原子间距离的均方值 | 量化共享残基区域的结构一致性 |
+| **余弦检查** | 连接处主链方向向量间夹角的余弦值 | 防止窗口边界处出现不切实际的主链弯折 |
+
+对于相邻窗口通过所有过滤器的模型，被记录为 `modeldist` 表中的**允许对**；对于非相邻窗口未通过的模型，被记录为**不允许对**，以在路径搜索期间强制执行长程排除。
+
+来源: [load_model_scores.py](/scripts/load_model_scores.py#L200-L350)
+
+## 路径组装算法
+
+`find_paths_stepwise.py` 实现了一种**自底向上的动态规划**方法来组装全长 IDP 构象。该算法增量构建路径：
+
+1. **基本情况 (n=2)**：直接查询第一个 `modeldist` 表 —— 每个允许对 成为一条 2 窗口路径，其 `edgescores` = 对的边分数，`nodescore` = 单个模型 `di` 分数的平均值。
+2. **归纳步骤 (n→n+1)**：对于每条现有的 *n* 窗口路径（对于 *n* ≥ 3，限制为聚类中心点），查询 `modeldist` 表以在窗口 *n+1* 中找到兼容模型，排除已被早期窗口禁止的模型。扩展路径，将 `edgescores` 更新为运行平均值，将 `nodescore` 更新为所有窗口 `di` 值的平均值。
+3. **聚类**：在每一层之后，`cluster_heuristic.py` 使用 LZerD 的 `LB3Dclust` 二进制文件以 4.0 Å 截断值按 LRMSD 对路径进行分组，存储聚类分配和中心点标志。只有中心点作为下一层的扩展种子，从而实现了搜索空间的指数级缩减。
+
+批量插入策略（默认每事务 10,000 行）以及通过 APSW 备份 API 将 `modeldist` 数据库全量加载到内存中，是关键的性能优化 —— 若无聚类，片段放置位置的组合爆炸将使搜索变得不可行。
+
+来源: [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L100-L361), [cluster_heuristic.py](/scripts/cluster_heuristic.py#L33-L200)
+
+## 路径评分与选择
+
+`select_paths.py` 实现了一个**多标准排序**系统，将四个正交分数组合成一个单一的加权度量。每个分数首先在所有聚类中心点之间转换为 Z 分数，然后进行组合：
+
+| 分数组件 | 来源 | 方向 | 权重 | 依据 |
+|---|---|---|---|---|
+| `nodescore` | 每个窗口的平均 `di` (缩放后的 ITScorePro+GOAP) | 越低越好 | 0.5 | 单个片段放置位置的对接质量 |
+| `edgescores` | 跨窗口边界的平均边分数 | 越低越好 | 0.1 | 重叠处的结构一致性 |
+| `clustersize` | LRMSD 聚类中的路径数 | 越大越好 | 0.3 | 来自结构共识的置信度 |
+| `occupancyscore` | 聚类中所有路径的受体接触计数 | 越大越好 | 0.1 | 结合界面的生物学合理性 |
+
+最终的 `weighted_score` 混合了一个“最佳分数”项（β=0.3，取所有四个度量的最小 Z 分数）与所有四个 Z 分数的加权和（1−β=0.7，使用上述权重）。这种混合公式奖励至少在一个标准上表现优异的路径，同时仍要求在所有维度上具有合理的表现。选择前 *N* 条路径（默认 100），将其片段 PDB 与受体结构合并，并将组合的复合物写出以供 CHARMM 精修。
+
+来源: [select_paths.py](/scripts/select_paths.py#L31-L150), [compute_occupancy_score.py](/scripts/compute_occupancy_score.py#L31-L200)
+
+## 外部依赖拓扑
+
+IDP-LZerD 编排了七个外部工具，每个工具在特定的流水线阶段被调用。依赖拓扑通过 `PATHS.ini` 配置，该文件将四个键（`lzerd_path`、`rosetta_path`、`nr_path`、`blastpgp_exe`）映射到文件系统路径。下图显示了哪些脚本调用了哪些外部工具：
+
+```mermaid
+graph LR
+    subgraph External Tools
+        BLAST["blastpgp +<br/>nr 数据库"]
+        ROSETTA["Rosetta<br/>fragment_picker"]
+        PULCHRA["Pulchra"]
+        SCMOD["侧链<br/>建模"]
+        LZERD["LZerD<br/>(PDBGEN + LB3Dclust)"]
+        GOAP["GOAP +<br/>ITScorePro"]
+        CHARMM["CHARMM"]
+    end
+
+    subgraph Scripts
+        RR["run_rosetta.py"]
+        GEN["generate_decoys.py"]
+        LMS["load_model_scores.py"]
+        CLH["cluster_heuristic.py"]
+        RELAX["idp_relax.inp"]
+    end
+
+    BLAST --> RR
+    ROSETTA --> RR
+    LZERD --> GEN
+    GOAP --> LMS
+    LZERD --> CLH
+    CHARMM --> RELAX
+```
+
+请注意，Pulchra、侧链建模、GOAP 和 ITScorePro 是在 Python 流水线**之外**调用的 —— 用户需按照 README 中的文档说明在阶段间手动运行它们。这反映了该流水线被设计为脚本编排层，而非单体框架。
+
+来源: [PATHS.ini](/PATHS.ini#L1-L6), [shared.py](/scripts/shared.py#L298-L323), [README.md](/README.md#L19-L45)
+
+## 共享工具与配置
+
+`shared.py` 充当被每个流水线脚本导入的**跨阶段通用基础层**。它提供三大类功能：
+
+**数据库访问** —— 基于 APSW 的上下文托管 SQLite 连接工厂（`ro_conn`、`write_conn`、`new_conn`），以及用于将查询转换为 DataFrame 的 `db_to_pandas()` 和 `conn_to_pandas()`，还有用于类型安全参数化 SQL 生成的 `create_insert_statement()` / `create_update_statement()`。
+
+**文件系统实用工具** —— 用于安全目录更改的 `CHDIR` 上下文管理器，用于幂等目录创建的 `mkdir_p()`，用作流水线阶段守卫的文件存在性检查 `missing()`，以及容错清理的 `silent_remove()`。
+
+**领域特定辅助工具** —— 用于 9-mer 窗口分解的 `create_windows()`，用于带必填键验证的 `PATHS.ini` 解析的 `load_config()`，用于从 PDB 文件中去除氢原子的 `strip_h()`，氨基酸映射字典（`three_to_one`、`one_to_three`），以及分数文件解析器（`read_itscore`、`read_dfire_from_goap`）。
+
+来源: [shared.py](/scripts/shared.py#L23-L323)
+
+## 项目结构
+
+```
+idp_lzerd/
+├── PATHS.ini                        # 外部工具路径配置
+├── idp_relax.inp                    # CHARMM 弛豫输入模板
+├── scripts/
+│   ├── run_rosetta.py               # ① Rosetta 片段生成
+│   ├── rosetta_to_pdb.py            # ① 片段格式转换
+│   ├── parse_ss.py                  # ① 二级结构归一化
+│   ├── rosetta_templates/           # ① Rosetta 标志/权重模板
+│   │   ├── quota-protocol.flags.template
+│   │   ├── quota-protocol.wghts
+│   │   └── quota.def
+│   ├── create_database.py           # ③ SQLite 模式初始化
+│   ├── load_model_scores.py         # ③ 分数加载 + 几何过滤
+│   ├── find_paths_stepwise.py       # ④ 组合路径搜索
+│   ├── cluster_heuristic.py         # ④ 基于 LRMSD 的路径聚类
+│   ├── compute_occupancy_score.py   # ⑤ 受体接触占据率
+│   ├── select_paths.py              # ⑤ 多标准路径排序
+│   ├── combine_receptor.py          # ⑥ 多链受体合并
+│   ├── parse.pl                     # ① BLAST 检查点转换
+│   └── shared.py                    # 跨阶段通用工具
+└── test/
+    ├── 4ah2/                        # 测试用例片段目录
+    ├── 4ah2_data.csv                # 测试用例的窗口元数据
+    ├── generate_decoys.py           # ② LZerD 诱饵生成包装器
+    └── test_decoys.sh               # 端到端测试编排
+```
+
+来源: [README.md](/README.md#L1-L82), [test_decoys.sh](/test/test_decoys.sh#L1-L27)
+
+<CgxTip>每个流水线脚本都使用 `shared.missing()` 来守卫其核心计算 —— 如果输出文件已存在，则跳过该阶段。这意味着你可以通过简单地重新执行 Shell 脚本来恢复失败的流水线运行，而无需清理已完成阶段的部分输出。</CgxTip>
+
+<CgxTip>在路径搜索期间，`modeldist` 数据库通过 APSW 的备份 API（带有 `backup.step()` 的 `apsw.Connection(":memory:")`）完全加载到内存中。对于具有许多窗口的蛋白质，这可能会消耗大量 RAM —— 若在受限系统上运行，请监控内存使用情况。</CgxTip>
+
+## 建议阅读顺序
+
+你刚刚阅读的架构概述建立了完整的流水线上下文。为了加深理解，请按照以下顺序阅读目录：
+
+1. **片段生成** —— 从 [Rosetta Fragment Picker](5-rosetta-fragment-picker) 开始，了解结构片段是如何生成的，然后阅读 [Rosetta-to-PDB Conversion](6-rosetta-to-pdb-conversion) 和 [Secondary Structure Parsing](7-secondary-structure-parsing) 以了解格式处理。
+2. **对接与评分** —— [Database Creation and Schema](8-database-creation-and-schema) 解释了持久化模型，[Model Score Loading](9-model-score-loading) 涵盖了分数摄取和几何过滤，[Geometric Cutoff Filters](10-geometric-cutoff-filters) 详述了兼容性级联。
+3. **路径组装** —— [Stepwise Path Search](11-stepwise-path-search) 是算法核心，由 [Heuristic Clustering](12-heuristic-clustering)、[Occupancy Score Computation](13-occupancy-score-computation) 和 [Path Selection and Ranking](14-path-selection-and-ranking) 提供支持。
+4. **精修** —— [CHARMM Relaxation Protocol](15-charmm-relaxation-protocol) 和 [Receptor Chain Combination](16-receptor-chain-combination) 涵盖了最终的输出阶段。
+5. **参考** —— [Shared Utilities Reference](17-shared-utilities-reference) 和 [Configuration and PATHS.ini](18-configuration-and-paths-ini) 提供了查阅材料。
+
+---
+
+- [深入解析/共享工具参考](https://zread.ai/kiharalab/idp_lzerd/17-shared-utilities-reference)
+
+---
+slug:17-shared-utilities-reference
+blog_type:normal
+---
+
+
+`shared.py` 模块是 IDP-LZerD 的**横切工具层** —— 这是一个单一的、可导入的模块，它整合了 SQLite 数据库访问模式、文件系统辅助函数、PDB 操作原语、评分 I/O、领域特定的片段逻辑以及配置加载。每一个流水线脚本 —— 从[数据库创建与模式](8-database-creation-and-schema)到[路径选择与排序](14-path-selection-and-ranking) —— 都直接导入 `shared`，这使其成为整个代码库的架构脊梁。它的设计遵循务实的“库模块”模式：这里没有类来编排控制流；相反，独立的函数和上下文管理器提供了可复用的构建块，供消费端脚本组合成特定于流水线的逻辑。
+
+```mermaid
+graph TB
+    subgraph "shared.py — Utility Domains"
+        direction TB
+        SQL["SQL Functions<br/>ro_conn · write_conn · new_conn<br/>db_to_pandas · conn_to_pandas<br/>create_insert_statement · create_update_statement"]
+        FS["Filesystem Functions<br/>CHDIR · missing · mkdir_p · silent_remove"]
+        PDB["PDB Functions<br/>strip_h · three_to_one · one_to_three"]
+        SCORE["Scoring Functions<br/>read_itscore · read_dfire_from_goap<br/>df_extract_index"]
+        IDP["IDP-LZerD Functions<br/>create_windows · add_model_path<br/>load_config"]
+        CONST["Module Constants<br/>script_dir · ROOTDIR<br/>IDPError"]
+    end
+
+    subgraph "Consumer Scripts"
+        CD[create_database.py]
+        RR[run_rosetta.py]
+        CH[cluster_heuristic.py]
+        FPS[find_paths_stepwise.py]
+        SP[select_paths.py]
+        CO[compute_occupancy_score.py]
+        CR[combine_receptor.py]
+        LMS[load_model_scores.py]
+    end
+
+    CD --> SQL & FS
+    RR --> IDP & FS
+    CH --> IDP & SQL & FS
+    FPS --> SQL
+    SP --> SQL & FS
+    CO --> SQL & FS & PDB
+    CR --> PDB
+    LMS --> IDP
+
+    style SQL fill:#e8f4e8,stroke:#2d7d2d
+    style FS fill:#e8e8f4,stroke:#2d2d7d
+    style PDB fill:#f4e8e8,stroke:#7d2d2d
+    style SCORE fill:#f4f4e8,stroke:#7d7d2d
+    style IDP fill:#e8f4f4,stroke:#2d7d7d
+    style CONST fill:#f0f0f0,stroke:#555
+```
+
+来源：[shared.py](/scripts/shared.py#L1-L323)
+
+## 模块常量与自定义异常
+
+两个路径常量在导入时使用 `inspect` 进行解析，以定位执行文件所在的目录，然后推导出包的根目录：
+
+| 常量 | 值 | 用途 |
+|---|---|---|
+| `script_dir` | `os.path.abspath(os.path.dirname(inspect.getfile(inspect.currentframe())))` | `scripts/` 目录的绝对路径 |
+| `ROOTDIR` | `os.path.normpath(os.path.join(script_dir, os.pardir))` | 仓库根目录的绝对路径（`scripts/` 的上一级） |
+
+**`IDPError`** 继承自 `RuntimeError`，作为整个流水线中抛出的领域特定异常类型 —— 由 `create_windows`（当序列长度过短时）和 `load_config`（当缺少必需的配置键时）抛出。像 `cluster_heuristic.py` 和 `combine_receptor.py` 这样的消费端脚本定义了它们自己的 `RuntimeError` 子类，而不是复用 `IDPError`，从而将其保留给真正共享的故障模式。
+
+来源：[shared.py](/scripts/shared.py#L29-L37)
+
+## SQL 函数
+
+SQL 层提供了三个连接上下文管理器和四个查询构建/查询工具。所有数据库连接均使用 **APSW** (Another Python SQLite Wrapper) 库，而非标准库的 `sqlite3`，从而能够对 SQLite 打开标志进行更细粒度的控制。
+
+### 连接上下文管理器
+
+| 管理器 | SQLite 标志 | 用例 |
+|---|---|---|
+| `ro_conn(dbfile)` | `SQLITE_OPEN_READONLY` | 读取查询 —— 不获取写锁 |
+| `write_conn(dbfile)` | `SQLITE_OPEN_READWRITE` | 更新现有数据库（路径评分、聚类大小） |
+| `new_conn(dbfile)` | `SQLITE_OPEN_CREATE \| SQLITE_OPEN_READWRITE` | 全新数据库创建（初始模式 + 数据插入） |
+
+这三者遵循相同的结构模式：它们在 `@contextmanager` 内部生成一个 `apsw.Connection`，并在打印出错的 `dbfile` 路径后重新抛出 `apsw.CantOpenError`。对于查询密集的阶段，`ro_conn` 管理器是最安全的默认选择；当更新行时（例如，在[逐步路径搜索](11-stepwise-path-search)中写入聚类大小），需要使用 `write_conn`；`new_conn` 仅在数据库文件尚不存在时由[数据库创建与模式](8-database-creation-and-schema)使用。
+
+<CgxTip>对于读操作，请始终优先使用 `ro_conn`。SQLite 的 WAL 日志模式意味着读锁可能会在未解析的写日志上阻塞 —— 使用 `write_conn` 来“解析”日志（通过打开写连接并立即关闭）是一种在 `find_paths_stepwise.py` 的 `count_paths` 方法中可见的模式，即在真正的 `ro_conn` 读取之前，会进行一次短暂的 `write_conn` 打开。</CgxTip>
+
+来源：[shared.py](/scripts/shared.py#L39-L65)
+
+### 查询与语句构建器
+
+**`db_to_pandas(select, dbf, **kwargs)`** 将 `ro_conn` 与 `conn_to_pandas` 组合 —— 它打开一个到 `dbf` 的只读连接，执行 `select` SQL 字符串，并返回一个 `pandas.DataFrame`。这是 `compute_occupancy_score.py` 和 `select_paths.py` 使用的**主要数据加载入口点**。
+
+**`conn_to_pandas(select, conn, **kwargs)`** 封装了 `pd.read_sql_query` 并捕获 `apsw.ExecutionCompleteError`，在该异常发生时返回一个空的 `DataFrame`。这处理了查询完成但未产生结果集的边缘情况。
+
+**`create_insert_statement(tablename, columns)`** 使用 SQLite 命名参数语法（`:column_name`）生成参数化的 `INSERT` 语句。例如，`create_insert_statement("window", ["windowindex", "window_wd"])` 会生成 `INSERT INTO window (windowindex, window_wd) VALUES (:windowindex, :window_wd)`。命名参数格式可直接与 `cursor.executemany()` 和 `DataFrame.to_dict("records")` 集成。
+
+**`create_update_statement(tablename, columns, where)`** 生成参数化的 `UPDATE ... SET ... WHERE ...` 语句，使用 `AND` 连接多个 `WHERE` 列。例如，`create_update_statement("clusters3", ["clustersize"], ["pathsid"])` 会生成 `UPDATE clusters3 SET clustersize=:clustersize WHERE pathsid=:pathsid`。`columns` 和 `where` 均接受单个字符串（自动提升为列表）或列表。
+
+来源：[shared.py](/scripts/shared.py#L67-L136)
+
+## 文件系统函数
+
+四个工具函数处理了在流水线各阶段中反复出现的常见文件系统操作：
+
+### `CHDIR` —— 临时目录切换
+
+一个上下文管理器（使用 `__enter__`/`__exit__` 协议，而非 `@contextmanager`），它在进入时保存当前工作目录，切换到 `dirname`，并在退出时恢复原始目录 —— 即使在异常传播的情况下也是如此。这对于 [Rosetta 片段选择器](5-rosetta-fragment-picker)的调用至关重要，因为 Rosetta 的 `fragment_picker` 二进制文件期望从包含 `input_files/` 和 `output_files/` 子目录的特定目录树中运行。用法：`with shared.CHDIR(input_dir): subprocess.check_call(cmd)`。
+
+### `missing(*files)` —— 文件存在性检查
+
+如果提供的任何文件路径不存在或长度为零，则返回 `True`。这是流水线的**守卫子句主力**：几乎每个阶段在执行昂贵计算之前都会检查 `shared.missing(output_file)`，从而实现安全的中断后恢复行为。长度为零的检查至关重要，因为 Rosetta 和 LZerD 可以在填充输出文件之前先创建它们 —— 空文件意味着运行未完成。
+
+### `mkdir_p(path)` —— 递归创建目录
+
+等效于 `mkdir -p` 的 Pythonic 实现：创建目录及其所有父目录，静默忽略 `EEXIST` 错误。在 Rosetta 工作目录设置和路径输出目录创建期间使用。
+
+### `silent_remove(path)` —— 安全文件删除
+
+删除文件，忽略 `ENOENT`（文件未找到）错误。任何其他 `OSError` 都将被传播。这提供了幂等的清理行为。
+
+| 消费端脚本 | 使用的函数 |
+|---|---|
+| `run_rosetta.py` | `CHDIR`, `mkdir_p`, `missing`, `load_config` |
+| `select_paths.py` | `mkdir_p`, `missing`, `db_to_pandas` |
+| `cluster_heuristic.py` | `missing`, `load_config`, `create_insert_statement` |
+| `create_database.py` | `missing`, `new_conn`, `create_insert_statement` |
+| `find_paths_stepwise.py` | `ro_conn`, `write_conn`, `create_insert_statement`, `create_update_statement` |
+| `compute_occupancy_score.py` | `db_to_pandas`, `missing`, `strip_h` |
+
+来源：[shared.py](/scripts/shared.py#L138-L176)
+
+## PDB 函数
+
+### `strip_h(filename)` —— 移除氢原子
+
+将整个 PDB 文件读入内存，并返回一个仅包含非氢 `ATOM` 记录的 `StringIO.StringIO` 对象。过滤正则表达式 `_h_re = re.compile(r"[123 ]*H.*")` 匹配 PDB 原子名称字段（第 13–16 列）中的氢原子名称，涵盖了常见的命名约定：` H  `，`1H  `，`2H  `，`3H  `，` HA ` 等。返回的 `StringIO` 对象**由 Biopython 的 `PDBParser` 消费** —— `combine_receptor.py` 和 `compute_occupancy_score.py` 都将此结果直接作为文件句柄参数传递给 `parser.get_structure()`。这避免了将临时文件写入磁盘。
+
+<CgxTip>该函数在过滤之前会将整个文件加载到内存中。对于非常大的 PDB 文件（数千个模型），这可能会消耗大量内存。在当前流水线中，它是按片段 PDB（小文件）调用的，因此这是可接受的。如果要适配全蛋白质组规模的输入，请考虑使用流式替代方案。</CgxTip>
+
+### 氨基酸代码映射
+
+两个字典常量提供了双向的三字母 ↔ 一字母氨基酸翻译，涵盖了所有 20 种标准残基：
+
+| 字典 | 键 → 值 | 大小 |
+|---|---|---|
+| `three_to_one` | `{'VAL': 'V', 'ILE': 'I', ...}` | 20 条目 |
+| `one_to_three` | `{'V': 'VAL', 'I': 'ILE', ...}` | 20 条目（逆映射） |
+
+`one_to_three` 在模块加载时通过字典推导式从 `three_to_one` 计算得出。非标准残基（例如，`MSE`，`SEP`）未包含在内，如果访问将抛出 `KeyError`。
+
+来源：[shared.py](/scripts/shared.py#L178-L198)
+
+## 评分函数
+
+评分 I/O 层定义了对 LZerD 对接引擎生成的两种评分文件格式的结构化读取，以及一个通用的索引提取工具。
+
+### 索引提取
+
+**`df_extract_index(df, kind, colname="model")`** 使用正则表达式查找从字符串列中提取数字索引，并将其作为新列添加到 DataFrame 中。`kind` 参数从预定义的映射中进行选择：
+
+| `kind` | 索引列名 | 正则表达式模式 | 匹配项 |
+|---|---|---|---|
+| `"model"` | `modelindex` | `r"model(\d+)\D*"` | `model3.pdb` → `3` |
+| `"fragment"` | `fragmentindex` | `r'frag_(\d\d\d)_model_h.pdb'` | `frag_003_model_h.pdb` → `3` |
+| `"relax"` | `pathsid` | `r"\D*(\d+)\D*"` | 通用数字提取 |
+
+### ITScore 读取器
+
+**`read_itscore(filename, kind=None)`** 读取一个 ITScore 文件（`scores.itscore`），包含列 `(model: str, itscore: float)`，使用空格分隔的解析方式。如果提供了 `kind`，则会应用 `df_extract_index` 来派生数字索引列。
+
+### DFIRE 评分读取器
+
+**`read_dfire_from_goap(filename, all=False, kind=None)`** 读取一个 GOAP 评分文件（`goap_score.txt`），包含列 `(index: str, model: str, goap: float, dfire: float, extra: float)`。当 `all=False`（默认值）时，仅加载 `model` 和 `dfire` 列 —— 针对仅需要 DFIRE 评分的常见情况优化了内存使用。`kind` 参数的工作方式与 `read_itscore` 完全相同。
+
+| 格式常量 | 文件名 | 表头元组 |
+|---|---|---|
+| `itscore_file` | `scores.itscore` | `("model", "itscore")` |
+| `goap_file` | `goap_score.txt` | `("index", "model", "goap", "dfire", "extra")` |
+
+来源：[shared.py](/scripts/shared.py#L200-L242)
+
+## IDP-LZerD 领域函数
+
+### `create_windows(length)` —— 片段窗口生成器
+
+一个生成器函数，为 IDP-LZerD 流水线生成滑动窗口定义。每个窗口代表沿着内在无序蛋白质序列的一个重叠的 9 残基片段，步长为 6 个残基，重叠度为 3：
+
+```mermaid
+graph LR
+    subgraph "Sequence of length L"
+        W1["Window 1<br/>res 1–9<br/>position=1"]
+        W2["Window 2<br/>res 7–15<br/>position=7"]
+        W3["Window 3<br/>res 13–21<br/>position=13"]
+        WN["Window N<br/>res (L-8)–L<br/>position=L-8"]
+    end
+    W1 -.-> W2 -.-> W3 -.-> WN
+```
+
+每次生成的字典包含：
+
+| 键 | 描述 |
+|---|---|
+| `position` | 窗口的起始残基（从 1 开始） |
+| `res_start` | 对齐的起始残基（用于窗口索引） |
+| `res_end` | 结束残基（在最后一个窗口中截断至 `length`） |
+| `windowindex` | 与 `res_start` 相同，用作窗口的数据库主键 |
+
+最后一个窗口经过特殊处理：当 `end >= length` 时，窗口被截断至序列长度，且 `position` 被重新计算为 `length - 8`（以确保完整的 9 残基窗口），同时 `res_start` 向回对齐到最近的 6 残基网格点。如果 `position < 1`，则抛出 `IDPError` —— 这可以防止序列短于 9 个残基的情况，因为这种序列无法产生单个有效片段。
+
+来源：[shared.py](/scripts/shared.py#L244-L258)
+
+### `add_model_path(windowrows, model_db_file)` —— 路径解析
+
+将窗口-模型关联数据与数据库中的文件系统路径进行连接。它跨 `model`、`allmodel` 和 `window` 表执行 SQL 查询，将每个模型解析为其 PDB 文件路径（`<window_wd>/<fragmentindex>/decoys/model<N>.pdb`），然后将宽格式的窗口列熔融为长格式，与路径数据合并，再透视回去 —— 用实际文件路径替换模型 ID。这被[占据率评分计算](13-occupancy-score-computation)用于为每个组装的路径具体化 PDB 文件。
+
+来源：[shared.py](/scripts/shared.py#L260-L290)
+
+### `load_config()` —— 配置加载器
+
+从仓库根目录读取并验证 `[PATHS.ini](../PATHS.ini)` 文件。解析器非常精简：它按 `:` 分割每行，去除空白字符，并跳过括号括起来的行（如 `[paths]` 这样的节头）。四个键是**必需的** —— 如果缺少任何一个，将抛出 `IDPError`：
+
+| 必需键 | 用途 | 消费端 |
+|---|---|---|
+| `lzerd_path` | LZerD 发行版的根目录（包含 `LB3Dclust` 二进制文件） | `cluster_heuristic.py` |
+| `rosetta_path` | Rosetta 安装的根目录 | `run_rosetta.py` |
+| `nr_path` | NR BLAST 数据库的路径 | `run_rosetta.py` (PSI-BLAST) |
+| `blastpgp_exe` | `blastpgp` 可执行文件的路径 | `run_rosetta.py` (PSI-BLAST) |
+
+返回的 `dict` 由 `run_rosetta.py` 消费以定位 Rosetta 可执行文件，并由 `cluster_heuristic.py` 消费以定位 `LB3Dclust` 聚类二进制文件。完整的配置参考请参见[配置与 PATHS.ini](18-configuration-and-paths-ini)。
+
+来源：[shared.py](/scripts/shared.py#L293-L323), [PATHS.ini](/PATHS.ini#L1-L6)
+
+## 消费端导入映射
+
+下表提供了每个流水线脚本导入哪些 `shared` 符号的完整映射，从而在修改任何工具时能够进行定向影响分析：
+
+| 脚本 | `IDPError` | SQL (conn/stmt) | `db_to_pandas` | `missing` | `mkdir_p` | `CHDIR` | `strip_h` | `load_config` | `pd` |
+|---|---|---|---|---|---|---|---|---|---|
+| `create_database.py` | | `new_conn`, `create_insert_statement` | | ✓ | | | | | ✓ |
+| `run_rosetta.py` | | | | ✓ | ✓ | ✓ | | ✓ | |
+| `cluster_heuristic.py` | | `create_insert_statement` | | ✓ | | | | ✓ | |
+| `find_paths_stepwise.py` | | `ro_conn`, `write_conn`, `create_insert_statement`, `create_update_statement` | | | | | | | |
+| `select_paths.py` | | | ✓ | ✓ | ✓ | | | | |
+| `compute_occupancy_score.py` | | | ✓ | ✓ | | | ✓ | | |
+| `combine_receptor.py` | | | | | | | ✓ | | |
+
+---
+
+- [深入解析/配置与 PATHS.ini](https://zread.ai/kiharalab/idp_lzerd/18-configuration-and-paths-ini)
+
+---
+slug:18-configuration-and-paths-ini
+blog_type:normal
+---
+
+
+PATHS.ini 是核心配置文件，用于指定 IDP-LZerD 在文件系统中查找外部二进制依赖的路径。在任何流水线脚本执行之前，此文件中定义的四个路径必须解析为有效的已安装位置——否则流水线在启动时会抛出 `IDPError`。理解该文件的结构、解析方式以及每个值的流向，对于在任何系统上正确部署 IDP-LZerD 至关重要。
+
+来源: [PATHS.ini](/PATHS.ini#L1-L6), [shared.py](/scripts/shared.py#L293-L323)
+
+## 文件格式与结构
+
+PATHS.ini 采用了极简的 **INI 风格** 格式，包含一个 `[paths]` 节头，后跟以冒号分隔的键值对。仓库中提供的默认文件如下所示：
+
+```ini
+[paths]
+lzerd_path: $HOME/lzerddistribution
+rosetta_path: /apps/rosetta/w2016.08
+nr_path: /apps/blast+/databases/nr
+blastpgp_exe: /usr/bin/blastpgp
+```
+
+每行通过在首个冒号 (`:`) 字符处进行拆分来解析——而**不是**使用 Python 的 `ConfigParser` 模块。`shared.load_config()` 中的自定义解析器将恰好包含一个冒号的行视为键值对，并去除两侧的空白字符。以 `[` 开头并以 `]` 结尾的行会被识别为节头并静默跳过。任何不匹配这两种模式的行都会向标准输出 (stdout) 触发警告。这意味着值中不能包含冒号，且 `[paths]` 节头是必填的，但其名称不会被校验。
+
+来源: [PATHS.ini](/PATHS.ini#L1-L6), [shared.py](/scripts/shared.py#L293-L323)
+
+## 必需的配置键
+
+全部四个键均为**必填项**。如果缺少任何键，`load_config()` 将抛出 `IDPError` 并指明缺失的键。下表概述了每个键、其用途以及消费它的流水线阶段。
+
+| 键 | 用途 | 消费方 | 解析的二进制文件/资源 |
+|---|---|---|---|
+| `lzerd_path` | LZerD 发行版的根目录 | [cluster_heuristic.py](/scripts/cluster_heuristic.py) | `LB3Dclust`（3D 聚类二进制文件） |
+| `rosetta_path` | Rosetta 安装的根目录 | [run_rosetta.py](/scripts/run_rosetta.py) | `fragment_picker` 可执行文件、片段工具、Rosetta 数据库 |
+| `nr_path` | NCBI `nr` BLAST 数据库的路径 | [run_rosetta.py](/scripts/run_rosetta.py) | BLAST 序列搜索数据库 |
+| `blastpgp_exe` | `blastpgp` 可执行文件的路径 | [run_rosetta.py](/scripts/run_rosetta.py) | 用于生成谱系的 PSI-BLAST 二进制文件 |
+
+来源: [shared.py](/scripts/shared.py#L312-L322), [run_rosetta.py](/scripts/run_rosetta.py#L42-L108), [cluster_heuristic.py](/scripts/cluster_heuristic.py#L152-L153)
+
+## 配置的加载方式
+
+`shared.py` 中的 `load_config()` 函数会相对于包根目录 (`ROOTDIR`) 解析文件位置，该根目录被计算为 `scripts/` 文件夹的上一级目录。这意味着 PATHS.ini **必须**位于仓库根目录中。加载序列如下：
+
+```mermaid
+flowchart TD
+    A["Script calls shared.load_config()"] --> B["Resolve PATHS.ini via ROOTDIR"]
+    B --> C{"File exists?"}
+    C -- No --> D["Raise IDPError"]
+    C -- Yes --> E["Parse lines: split on ':'"]
+    E --> F["Build config dict from key:value pairs"]
+    F --> G{"All 4 required keys present?"}
+    G -- No --> H["Raise IDPError naming missing key"]
+    G -- Yes --> I["Return config dict"]
+```
+
+每次调用 `load_config()` 都会重新从磁盘读取并解析文件——没有缓存机制。这种设计意味着对 PATHS.ini 的运行时编辑会在下次脚本调用时生效，但同时也意味着缺失或格式错误的文件每次都会明确报错。
+
+来源: [shared.py](/scripts/shared.py#L293-L322)
+
+## 配置值在流水线中的流向
+
+`load_config()` 返回的配置字典由两个脚本消费，每个脚本访问四个键的不同子集。下图展示了完整的传播过程：
+
+```mermaid
+flowchart LR
+    subgraph PATHS.ini
+        LP[lzerd_path]
+        RP[rosetta_path]
+        NP[nr_path]
+        BP[blastpgp_exe]
+    end
+
+    subgraph "run_rosetta.py"
+        RP --> R1["make_fragments.pl path"]
+        RP --> R2["fragment_picker executable"]
+        RP --> R3["quota-protocol.flags template"]
+        NP --> R4["BLAST -d argument"]
+        BP --> R5["BLAST command prefix"]
+    end
+
+    subgraph "cluster_heuristic.py"
+        LP --> C1["LB3Dclust binary path"]
+    end
+```
+
+### 在 `run_rosetta.py` 中 —— 片段生成
+
+`run_rosetta.py` 在其 `run()` 类方法的开头调用 `load_config()`，并通过以下三种方式使用返回的字典：
+
+1. **Rosetta 工具解析** —— `rosetta_path` 与已知子目录拼接，以定位 `tools/fragment_tools/make_fragments.pl` 和 `main/source/bin/fragment_picker.linuxgccrelease`。
+2. **Rosetta 标志文件模板化** —— `rosetta_path` 作为 `{rosetta_path}` 传入 `quota-protocol.flags.template`，展开后用于设置 Rosetta 数据库 (`-in::path::database`) 和 vall 片段数据库 (`-in::file::vall`)。
+3. **BLAST 命令构建** —— 整个配置字典通过 `**config` 解包到 `blastcmdfmt` 格式字符串中，该字符串将 `blastpgp_exe` 放置为命令前缀，将 `nr_path` 放置为 `-d` 数据库参数，其余键作为 PSI-BLAST 调用的一部分。
+
+来源: [run_rosetta.py](/scripts/run_rosetta.py#L42-L108), [quota-protocol.flags.template](/scripts/rosetta_templates/quota-protocol.flags.template#L1-L38)
+
+### 在 `cluster_heuristic.py` 中 —— 路径聚类
+
+`cluster_heuristic.py` 在 `ClusterPdb.__init__()` 期间调用 `load_config()`，且**仅**使用 `lzerd_path`。它将该路径与二进制文件名 `LB3Dclust` 拼接，以构成聚类可执行文件路径：
+
+```python
+config = shared.load_config()
+self.clust_bin = os.path.join(config['lzerd_path'], "LB3Dclust")
+```
+
+该二进制文件随后通过 `subprocess.Popen` 调用，并传入配体列表文件和聚类截断值作为参数。如果在解析的路径中未找到该二进制文件，子进程将失败并报操作系统级别的错误。
+
+来源: [cluster_heuristic.py](/scripts/cluster_heuristic.py#L152-L153), [cluster_heuristic.py](/scripts/cluster_heuristic.py#L396-L407)
+
+## 配置 PATHS.ini
+
+要为你的环境配置 PATHS.ini，请按照以下步骤操作：
+
+1. **安装所有二进制依赖**，如[外部依赖设置](3-external-dependencies-setup)中所列。记录每个依赖的安装根目录。
+2. **打开仓库根目录中的 `PATHS.ini`**，将每个占位符值替换为你系统上的绝对路径。
+3. **验证每个路径是否存在**，然后再运行流水线。一个常见的错误是将 `rosetta_path` 指向包装脚本，而不是 Rosetta 源码树的根目录（该根目录必须包含 `main/source/bin/` 和 `tools/fragment_tools/`）。
+4. **对于 `lzerd_path`**，确保 LZerD 发行版目录直接包含 `LB3Dclust` 二进制文件（而不是在子目录中）。
+5. **对于 `nr_path`**，它必须指向 BLAST 数据库文件（如 `nr.psq`、`nr.pin`、`nr.phr`），而不是包含它们的目录——该路径应为不带文件扩展名的前缀。
+
+<CgxTip>解析器**不会**展开 `lzerd_path: $HOME/lzerddistribution` 中的 Shell 环境变量（如 `$HOME`）。字面字符串 `$HOME` 将被传递给 `os.path.join`，后者无法解析它。请始终使用绝对路径，或在写入 PATHS.ini 前手动展开变量。</CgxTip>
+
+来源: [PATHS.ini](/PATHS.ini#L1-L6), [README.md](/README.md#L50-L52)
+
+## 配置错误排查
+
+下表将常见的故障症状映射到 PATHS.ini 配置中的根本原因：
+
+| 症状 | 原因 | 解决方案 |
+|---|---|---|
+| `IDPError: Could not open .../PATHS.ini` | PATHS.ini 缺失或被移动 | 确保文件存在于仓库根目录中（与 `scripts/` 同级） |
+| `IDPError: '.../PATHS.ini' did not contain required key 'lzerd_path'` | 文件中缺少键 | 使用冒号分隔符添加缺失的键 |
+| `LB3Dclust` 上出现 `OSError: [Errno 2] No such file or directory` | `lzerd_path` 不包含该二进制文件 | 验证 `lzerd_path/LB3Dclust` 存在且可执行 |
+| Rosetta `fragment_picker` 启动失败 | `rosetta_path` 不正确或二进制文件未构建 | 确认 `rosetta_path/main/source/bin/fragment_picker.linuxgccrelease` 存在 |
+| BLAST 报告 "database not found" | `nr_path` 不正确 | 确保 `nr_path` 与 BLAST 数据库文件前缀匹配 |
+| BLAST 报告 "command not found" | `blastpgp_exe` 不正确 | 验证 `blastpgp_exe` 是一个可执行文件路径 |
+
+来源: [shared.py](/scripts/shared.py#L296-L320), [README.md](/README.md#L50-L52)
+
+## 相关配置文件
+
+PATHS.ini 是唯一的**运行时**配置文件，但仓库中的另外两个文件在不同阶段对流水线配置也有贡献：
+
+| 文件 | 作用域 | 修改时机 |
+|---|---|---|
+| **PATHS.ini** | 二进制依赖位置 | 每次安装一次 |
+| **idp_relax.inp** | CHARMM 弛豫参数（力常数、动力学步数、温度） | 每次精细化运行 |
+| **quota-protocol.flags.template** | Rosetta 片段选择器标志（数据库路径、片段大小、配额配置） | 通常不修改；`rosetta_path` 在运行时注入 |
+
+Rosetta 模板文件间接地从 PATHS.ini 接收 `rosetta_path`——`run_rosetta.py` 读取配置，用该值格式化模板，并写入具体的标志文件。有关该模板化过程的详细信息，请参阅 [Rosetta 片段选择器](5-rosetta-fragment-picker)。
+
+来源: [idp_relax.inp](/idp_relax.inp#L1-L119), [quota-protocol.flags.template](/scripts/rosetta_templates/quota-protocol.flags.template#L1-L38), [run_rosetta.py](/scripts/run_rosetta.py#L78-L127)
+
+## 下一步
+
+正确配置 PATHS.ini 后，你就可以运行流水线了。你在此处设置的配置值将首先被 [Rosetta 片段选择器](5-rosetta-fragment-picker) 消费（通过 `rosetta_path`、`nr_path`、`blastpgp_exe`），随后被 [启发式聚类](12-heuristic-clustering) 消费（通过 `lzerd_path`）。如果你尚未安装外部二进制文件，请从[外部依赖设置](3-external-dependencies-setup)开始。
+
+---
+
+## 片段生成
+
+- [深入解析/片段生成/Rosetta 片段选择器](https://zread.ai/kiharalab/idp_lzerd/5-rosetta-fragment-picker)
+
+---
+slug:5-rosetta-fragment-picker
+blog_type:normal
+---
+
+
+Rosetta 片段选择器是 IDP-LZerD 片段生成流程的第一阶段，负责从内在无序蛋白 (IDP) 序列中生成结构片段库。它封装了 Rosetta 的**基于配额的片段选择器**，将来自 PSI-BLAST 的序列谱信息与来自四种独立方法（PSIPRED、Porter、Jpred 和 SSPro）的共识二级结构预测相结合，生成位置特异性的 9 残基片段候选物，作为下游对接和路径组装的结构构建块。
+
+## 流程架构
+
+片段选择器作为一个由 `RunRosetta` 类完全编排的五阶段流程运行。每个阶段都会产生一个供下一阶段使用的中间产物，整个流程由**输出存在性检查**保护，当片段文件已存在时跳过重新计算。
+
+```mermaid
+flowchart TD
+    A["FASTA 序列输入"] --> B["PSI-BLAST 谱搜索"]
+    B --> C["检查点转换<br/>(parse.pl → make_fragments.pl)"]
+    C --> D["Rosetta 输入组装<br/>(quota.def + wghts + homolog_vall)"]
+    D --> E["标志文件生成<br/>(quota-protocol.flags.template → .flags)"]
+    E --> F["Rosetta fragment_picker<br/>(配额协议执行)"]
+    F --> G["{pdbid}.{nfrag}.9mers<br/>+ .fsc 评分文件"]
+
+    style A fill:#e8f5e9,stroke:#388e3c
+    style G fill:#e3f2fd,stroke:#1565c0
+    style F fill:#fff3e0,stroke:#e65100
+```
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L39-L148), [parse.pl](scripts/parse.pl#L1-L34)
+
+## RunRosetta 编排器
+
+`RunRosetta` 类将完整的片段生成流程封装为类方法 `run()`，并附带一个用于 CLI 调用的 `parse_args()` 方法。它被设计为**无状态编排器**——所有流程状态都通过局部变量和文件系统传递，绝不通过实例属性传递。
+
+### 类级别配置
+
+| 属性 | 值 | 用途 |
+|---|---|---|
+| `blastcmdfmt` | 格式化的 PSI-BLAST 命令字符串 | 用于生成谱的模板，最大命中数 1000，e 值 0.0009 |
+| `convert_blast` | `parse.pl` 的路径 | 委托检查点格式转换 |
+| `ss_methods` | `("psipred", "porter", "jpred", "sspro")` | 所需的二级结构预测方法 |
+| `default_nfrag` | `30` | 每个位置的默认片段数 |
+
+PSI-BLAST 命令模板编码了激进搜索参数：`-K1000`（最大 1000 次比对），`-h0.0009 -e0.0009`（包含阈值和 e 值阈值），以及 `-v10000 -b10000`（输出限制）。这些参数确保了片段选择器序列相似性评分的深度谱覆盖。
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L42-L46), [run_rosetta.py](scripts/run_rosetta.py#L106-L110)
+
+## 阶段 1：PSI-BLAST 谱生成
+
+当 Rosetta 检查点文件 (`.checkpoint`) 不存在时，流程首先检查 PSI-BLAST 二进制检查点 (`.chk`)。如果该文件也不存在，则针对 `nr` 数据库执行 PSI-BLAST：
+
+```
+blastpgp -t 1 -i {id}.fasta -F F -j2 -o {id}.blast
+         -d {nr_path} -v10000 -b10000 -K1000
+         -h0.0009 -e0.0009 -C {id}.chk -Q {id}.pssm
+```
+
+关键标志：`-j2` 运行 2 次 PSI-BLAST 迭代；`-F F` 禁用低复杂度过滤；`-C` 生成二进制检查点；`-Q` 生成 PSSM。blast 可执行文件路径和 `nr` 数据库路径通过 `shared.load_config()` 从 [PATHS.ini](PATHS.ini#L1-L6) 读取。
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L42-L43), [run_rosetta.py](scripts/run_rosetta.py#L104-L110), [PATHS.ini](PATHS.ini#L1-L6)
+
+## 阶段 2：检查点格式转换
+
+`parse.pl` 脚本桥接了 PSI-BLAST 二进制检查点格式和 Rosetta 期望的纯文本 `.checkpoint` 格式。它的操作方式是**将 Rosetta 自身的 `make_fragments.pl` 作为 Perl 模块加载**（通过 `do $make_fragments_path`），然后从中调用三个函数：
+
+1. `read_fasta($fasta_file)` — 解析查询序列
+2. `parse_checkpoint_file($chk_file)` — 读取二进制 PSI-BLAST 检查点
+3. `finish_checkpoint_matrix($sequence, @checkpoint_matrix)` — 完成谱矩阵
+4. `write_checkpoint_file($outfile, $sequence, @checkpoint_matrix)` — 写入 Rosetta 格式的输出
+
+这种委托策略意味着 IDP-LZerD 依赖 Rosetta 自身的检查点解析逻辑，而不是重新实现它，从而确保了跨 Rosetta 版本的格式兼容性。
+
+<CgxTip>`parse.pl` 脚本恰好需要 3 个位置参数：Rosetta 的 `make_fragments.pl` 路径、FASTA 文件和 `.chk` 文件。如果缺少任何一项，脚本将终止并输出用法信息。</CgxTip>
+
+来源: [parse.pl](scripts/parse.pl#L1-L34), [run_rosetta.py](scripts/run_rosetta.py#L112-L113)
+
+## 阶段 3：输入文件组装
+
+在运行片段选择器之前，`RunRosetta.run()` 会组装一个工作目录树，并使用所需的输入文件填充它：
+
+```
+quota{complexname}/
+├── input_files/
+│   ├── {pdbid}.fasta          ← 从 ligand_sequence 复制
+│   ├── {pdbid}.checkpoint     ← 由阶段 2 生成
+│   ├── quota.def              ← 从 rosetta_templates/ 复制
+│   ├── quota-protocol.wghts   ← 从 rosetta_templates/ 复制
+│   └── {pdbid}.homolog_vall   ← 生成（仅包含 pdbid）
+├── output_files/              ← 创建为空；fragment_picker 在此写入
+└── quota-protocol.flags       ← 由阶段 4 中的模板生成
+```
+
+**同源排除文件** (`{pdbid}.homolog_vall`) 是一个简单的单行文件，包含 PDB ID。这防止了片段选择器选择源自查询结构本身的片段，消除了片段库中的同源偏差。
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L81-L127)
+
+## 阶段 4：标志文件生成
+
+片段选择器通过**模板替换**生成的标志文件进行配置。模板 `quota-protocol.flags.template` 包含在运行时解析的 Python 格式占位符（`{rosetta_path}`、`{pdbid}`、`{nfrag}`、`{psipred_path}` 等）：
+
+| 模板占位符 | 来源 | 示例值 |
+|---|---|---|
+| `{rosetta_path}` | `PATHS.ini` 配置 | `/apps/rosetta/w2016.08` |
+| `{pdbid}` | `complexname + ligand_chain` | `4ah2A` |
+| `{nfrag}` | CLI 参数或默认值 | `30` |
+| `{psipred_path}` | CLI `--psipred_path` | SS 预测文件的绝对路径 |
+| `{native_line}` | 空字符串（无天然结构） | `""` |
+| `{protocol_type}` | 空字符串 | `""` |
+
+<CgxTip>`{native_line}` 和 `{protocol_type}` 占位符当前被硬编码为空字符串，这意味着没有用于评分的天然参考结构，并且权重文件始终为 `quota-protocol.wghts`（而非 `quota-protocol<type>.wghts`）。这对于没有可用结合态结构的 IDP 用例是有意为之的。</CgxTip>
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L79-L127), [quota-protocol.flags.template](scripts/rosetta_templates/quota-protocol.flags.template#L1-L38)
+
+## 阶段 5：配额协议执行
+
+组装好的标志文件驱动 Rosetta 的 `fragment_picker.linuxgccrelease` 二进制文件。**配额协议**是核心策略：它不是从单一评分机制中选择所有片段，而是将片段预算分配到多个**配额池**中，每个配额池与一种二级结构预测方法相关联。
+
+### 配额池分布
+
+`quota.def` 文件定义了 30 个片段槽的划分方式：
+
+| 池 ID | 方法 | 比例 | 片段数（共 30） |
+|---|---|---|---|
+| 1 | psipred | 0.25 | 7–8 |
+| 2 | sspro | 0.25 | 7–8 |
+| 3 | jpred | 0.25 | 7–8 |
+| 4 | porter | 0.25 | 7–8 |
+
+这种均等分配确保了**跨 SS 预测器的多样性**：如果一种方法错误预测了某个区域的二级结构，来自其他方法的片段仍能提供结构上截然不同的候选物。1000 个候选物 (`-frags::n_candidates 1000`) 为跨所有四种方法的基于配额的选择提供了足够大的池。
+
+### 评分机制
+
+`quota-protocol.wghts` 文件定义了一个**多信号复合评分函数**，包含按优先级加权的组件：
+
+| 评分项 | 优先级 | 权重 | SS 方法绑定 | 信号类型 |
+|---|---|---|---|---|
+| SecondarySimilarity | 350 | 0.5 | psipred | SS 共识一致性 |
+| SecondarySimilarity | 250 | 0.5 | porter | SS 共识一致性 |
+| SecondarySimilarity | 250 | 0.5 | jpred | SS 共识一致性 |
+| SecondarySimilarity | 250 | 0.5 | sspro | SS 共识一致性 |
+| RamaScore | 150 | 1.0 | psipred | 拉氏偏好 |
+| RamaScore | 150 | 1.0 | porter | 拉氏偏好 |
+| RamaScore | 150 | 1.0 | jpred | 拉氏偏好 |
+| RamaScore | 150 | 1.0 | sspro | 拉氏偏好 |
+| ProfileScoreL1 | 200 | 1.0 | — | 序列谱（L1 距离） |
+
+**优先级**列决定评估顺序（数值越高越先评估）；**权重**缩放每个评分的贡献。PSIPRED 的 `SecondarySimilarity` 获得最高优先级 (350)，使其在其配额池内对片段排名产生最强影响。`ProfileScoreL1` 使用 L1 范数将查询的 PSI-BLAST 谱与 vall 数据库谱进行比较，提供了一个独立于所有四种 SS 方法的正交序列相似性信号。存在两个被注释掉的评分项（`PhiPsiSquareWell` 和 `FragmentCrmsd`），但已被禁用——可能是因为它们需要天然结构参考，而这对于 IDP 是不可用的。
+
+来源: [quota-protocol.wghts](scripts/rosetta_templates/quota-protocol.wghts#L1-L14), [quota.def](scripts/rosetta_templates/quota.def#L1-L6), [quota-protocol.flags.template](scripts/rosetta_templates/quota-protocol.flags.template#L13-L37)
+
+## 输出产物
+
+成功执行后，`output_files/` 中会出现两个文件：
+
+| 文件 | 模式 | 内容 |
+|---|---|---|
+| 片段文件 | `{pdbid}.{nfrag}.9mers` | 具有 CA 坐标的选定 9 残基片段 |
+| 评分文件 | `{pdbid}.fsc.{nfrag}.9mers` | 所有候选片段的逐片段评分明细 |
+
+片段文件是 [Rosetta 转 PDB 转换](6-rosetta-to-pdb-conversion) 的主要输入，该转换将 Rosetta 的内部片段格式转换为标准 PDB 文件。评分文件支持对片段质量和选择行为进行事后分析。流程通过检查这两个文件是否存在来验证完成情况；如果 Rosetta 以代码 0 退出但未能生成它们，将引发 `RunRosettaError`，并显示消息 "Rosetta did not finish but exited 0"。
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L71-L78), [run_rosetta.py](scripts/run_rosetta.py#L146-L148)
+
+## CLI 参考
+
+该脚本作为独立模块使用以下参数调用：
+
+```
+python scripts/run_rosetta.py <PDB_ID> [options]
+```
+
+| 参数 | 必需 | 默认值 | 描述 |
+|---|---|---|---|
+| `complexname` | 是 | — | 复合物的 PDB ID |
+| `-l` / `--ligand_chain` | 否 | — | IDP 配体的链标识符 |
+| `-s` / `--ligand_sequence` | 否 | — | 配体序列的 FASTA 文件路径 |
+| `--psipred_path` | 否 | — | PSIPRED 二级结构预测路径 |
+| `--porter_path` | 否 | — | Porter 二级结构预测路径 |
+| `--jpred_path` | 否 | — | Jpred 二级结构预测路径 |
+| `--sspro_path` | 否 | — | SSPro 二级结构预测路径 |
+| `-d` / `--directory` | 否 | `quota{complexname}` | Rosetta 运行的工作目录 |
+| `-n` / `--nfrag` | 否 | `30` | 每个位置的片段数 |
+
+所有四个 SS 预测文件必须存在于磁盘上；如果缺少任何一个，将在流程开始时引发 `RunRosettaError`。二级结构文件必须采用 **PSIPRED VFORMAT**（由[二级结构解析](7-secondary-structure-parsing)生成）。
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L150-L181), [run_rosetta.py](scripts/run_rosetta.py#L84-L89)
+
+## 外部依赖
+
+片段选择器需要几个外部工具，均通过 [PATHS.ini](PATHS.ini#L1-L6) 配置：
+
+| 依赖项 | 配置键 | 流程中的作用 |
+|---|---|---|
+| PSI-BLAST (`blastpgp`) | `blastpgp_exe` | 序列谱生成 |
+| NR 数据库 | `nr_path` | PSI-BLAST 搜索数据库 |
+| Rosetta | `rosetta_path` | 片段选择器二进制文件 + `make_fragments.pl` + vall 数据库 |
+
+Rosetta 安装必须包含位于 `{rosetta_path}/main/source/bin/fragment_picker.linuxgccrelease` 的已编译片段选择器二进制文件，以及位于 `{rosetta_path}/tools/fragment_tools/` 的片段工具（用于 `make_fragments.pl` 和 `vall.apr24.2008.extended.gz` 片段数据库）。
+
+来源: [run_rosetta.py](scripts/run_rosetta.py#L55-L56), [quota-protocol.flags.template](scripts/rosetta_templates/quota-protocol.flags.template#L3-L5), [PATHS.ini](PATHS.ini#L1-L6)
+
+## 后续步骤
+
+此流程生成的 9-mer 片段文件将直接输入到 [Rosetta 转 PDB 转换](6-rosetta-to-pdb-conversion) 中，该转换将 Rosetta 的内部片段表示转换为适合使用 Pulchra 进行骨架重建以及后续 LZerD 对接的 PDB 格式文件。此处使用的二级结构预测由[二级结构解析](7-secondary-structure-parsing) 准备，它将每个预测服务器的输出标准化为配额协议所需的 PSIPRED VFORMAT。
+
+---
+
+- [深入解析/片段生成/Rosetta 到 PDB 的转换](https://zread.ai/kiharalab/idp_lzerd/6-rosetta-to-pdb-conversion)
+
+---
+slug:6-rosetta-to-pdb-conversion
+blog_type:normal
+---
+
+
+`rosetta_to_pdb.py` 脚本是 IDP-LZerD 流水线中的**关键格式桥梁**：它将 Rosetta 片段选择器专有的输出转换为仅包含 Cα 原子的标准 PDB 文件。此转换是必要的，因为下游的对接和评分阶段仅对 PDB 格式的结构进行操作，而 Rosetta 片段选择器输出的是其自身的紧凑文本格式，该格式编码了主链二面角和 Cα 坐标。该脚本不仅仅进行格式重整——它还将源 PDB 片段的**残基标识重新映射**到查询配体序列上，将片段划分到平铺窗口中，并在序列长度与 6 残基滑动网格无法完全对齐时，对最后一个窗口执行校正性截断。
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L1-L185), [shared.py](/scripts/shared.py#L245-L258)
+
+## 输入与输出契约
+
+`MakePdb` 类暴露了一个类方法 `run()`，该方法接受四个必需参数并生成基于目录的输出结构。下表概述了该接口：
+
+| 参数 | CLI 标志 | 描述 |
+|-----------|----------|-------------|
+| `fragment_file` | `-f` | Rosetta 片段选择器输出路径（例如 `4ah2I.30.9mers`） |
+| `ligand_chain` | `-l` | 在输出 PDB 文件中分配的单字符链标识符 |
+| `ligand_sequence` | `-s` | 包含查询配体氨基酸序列的 FASTA 文件 |
+| `pdbid` | `-p` | 用于命名输出文件和目录的 PDB 标识符 |
+
+输出由一个**位置目录树**和一个**窗口 CSV 文件**组成。对于每个有效的窗口位置 *p*，会在与片段文件相同的基础目录下创建一个名为 *p* 的子目录。在每个位置目录中，单独的片段 PDB 文件被写入为 `frag_001.pdb`、`frag_002.pdb` ……直至 Rosetta 选择的片段数量（通常为 30）。此外，基础目录中还会写入一个 `{pdbid}_data.csv` 文件，用于编码窗口到位置的映射。
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L63-L71), [rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L168-L180)
+
+## Rosetta 片段文件格式
+
+在分析转换逻辑之前，有必要了解 Rosetta 片段选择器的输出格式。当使用配额协议调用片段选择器时（参见 [Rosetta Fragment Picker](5-rosetta-fragment-picker)），它会写入具有以下结构的 9-mer 片段文件：
+
+```
+position 1
+  1a3k A  13  VAL  E  -121.8  132.5  179.7   5.231  12.456  -3.789
+  1a3k A  14  GLN  E  -118.2  128.1  178.9   6.112  13.201  -2.456
+  ...
+  1a3k A  21  LYS  E  -105.3  141.2  179.2  11.340  17.892   1.234
+
+position 7
+  2b4m B   5  ALA  H   -62.1  -42.3  179.8   3.456   8.901   0.123
+  ...
+```
+
+每个片段块以 `position N` 行开始，指示查询序列中 9-mer 窗口的起始残基。随后的行中，每个残基包含 **11 个以空格分隔的字段**：`pdbcode`、`pdbchain`、`resi`、`resn`、`ss`、`phi`、`psi`、`omega`、`x`、`y`、`z`。空行用于分隔同一位置内的各个片段。每个位置包含 *N* 个候选片段（通常为 30），每个片段有 9 行残基数据。
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L77-L130), [quota-protocol.flags.template](/scripts/rosetta_templates/quota-protocol.flags.template#L24-L31)
+
+## 窗口计算：滑动网格
+
+`shared.py` 中的 `create_windows()` 函数决定查询序列中**哪些位置**会接收片段集合。这不是一个简单的滑动窗口——它遵循具有边界校正的特定算术网格。
+
+```mermaid
+flowchart TD
+    A["序列长度 L"] --> B{"迭代: start=1,7,13,19...<br/>end=9,15,21,27..."}
+    B --> C["position = start"]
+    C --> D{"end ≥ L ?"}
+    D -->|No| E["产出: position=start<br/>res_start=start, res_end=end"]
+    D -->|Yes| F["end = L (截断至序列长度)"]
+    F --> G["position = L − 8<br/>(最后一个有效的 9-mer 起始位置)"]
+    G --> H["start = 6·⌊(position+4.4)/6⌋+1<br/>(对齐至网格)"]
+    H --> I["产出: position, res_start, res_end"]
+    I --> J["停止迭代"]
+    E --> B
+```
+
+网格在 **1, 7, 13, 19, 25, …**（即 `k = 0, 1, 2, …` 时的 `6k + 1`）处生成位置，每个窗口跨越 9 个残基。这会产生**步长为 6** 且**重叠为 3** 的窗口——前 9 个残基之后的每个残基至少被两个连续窗口覆盖，从而为下游对接一致性提供冗余。当序列末尾在网格对齐位置之前到达时，最后一个窗口的位置会被重新计算为 `L − 8`（最后一个有效的 9-mer 起始索引），其起始位置通过 `6·⌊(position + 4.4)/6⌋ + 1` 回溯对齐到最近的网格点。生成的窗口元数据被写入 `{pdbid}_data.csv`，包含 `windowindex`、`res_start`、`res_end` 和 `position` 列。
+
+例如，对于 20 个残基的序列，输出的 CSV 与测试数据相匹配：
+
+| windowindex | res_start | res_end | position |
+|-------------|-----------|---------|----------|
+| 1 | 1 | 9 | 1 |
+| 7 | 7 | 15 | 7 |
+| 13 | 13 | 20 | 12 |
+
+注意最终位置是 **12**（而不是 13），因为 `L − 8 = 20 − 8 = 12`，并且网格对齐得出 `res_start = 13`。
+
+来源：[shared.py](/scripts/shared.py#L245-L258), [rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L69-L71), [4ah2_data.csv](/test/4ah2_data.csv#L1-L4)
+
+## 转换流水线：Rosetta 文本行到 PDB ATOM 记录
+
+核心转换循环逐行解析片段文件并生成标准 PDB ATOM 记录。下图展示了完整的处理流程：
+
+```mermaid
+flowchart TD
+    A["读取 fragment_file 行"] --> B{"行类型?"}
+    B -->|"position N"| C["设置 position = N<br/>创建目录 N/<br/>重置片段索引"]
+    B -->|空行| D["刷新累积行<br/>写入 frag_NNN.pdb<br/>递增索引"]
+    B -->|残基数据| E["解析 11 个字段"]
+    E --> F["从 ligand_sequence<br/>查询残基"]
+    F --> G["构建 PDB ATOM 记录<br/>使用查询残基名称"]
+    G --> H["追加至当前<br/>片段缓冲区"]
+    H --> A
+    D --> A
+```
+
+### 残基标识重映射
+
+一个微妙但在架构上意义重大的方面是**残基标识重映射**。Rosetta 片段文件记录的是*源*残基名称（来自提取片段的 PDB 结构），但输出 PDB 必须使用配体 FASTA 序列中的*查询*残基名称。这是因为片段的目的是提供**结构主链几何**（Cα 坐标和二面角），而不是复制源残基标识。重映射过程如下：
+
+1. 计算 `query_idx = res_id - 1`（序列的从 0 开始的索引）
+2. 获取 `query_resn = ligand_sequence[query_idx]`（来自 FASTA 的单字母代码）
+3. 通过 `shared.one_to_three[query_resn]` 转换为三字母代码
+4. 将此三字母代码分配给 ATOM 记录的残基名称字段
+
+如果索引超出序列长度，将打印诊断信息并引发 `IndexError`——这可以防止格式错误的片段文件声称其位置超出了查询序列范围。
+
+### PDB 格式模板
+
+每个残基使用包含 16 个字段的严格 PDB 格式字符串作为单行 ATOM 输出。模板默认值为：
+
+| 字段 | 默认值 | 含义 |
+|-------|---------|---------|
+| 记录类型 | `ATOM` | PDB 记录标识符 |
+| 原子序号 | *(按残基设置)* | 顺序原子序列号 |
+| 原子名称 | ` CA ` | Cα 原子——仅写入主链 Cα |
+| 替代位置指示符 | *(空)* | 无替代位置指示符 |
+| 残基名称 | *(来自查询序列)* | 通过 `one_to_three` 转换的三字母代码 |
+| 链 | *(来自 `ligand_chain` 参数)* | 用户指定的链标识符 |
+| 残基序号 | *(按残基设置)* | 从 1 开始的残基序列号 |
+| 插入代码 | *(空)* | 无插入代码 |
+| X, Y, Z | *(来自 Rosetta 输出)* | 片段的 Cα 坐标 |
+| 占位率 | `1.00` | 固定的完全占位 |
+| B 因子 | `0.00` | 固定的零温度因子 |
+| 元素 | `C` | 碳元素符号 |
+| 电荷 | *(空)* | 无电荷 |
+
+每个片段文件还会接收一个 HEADER 记录，标识最初提取片段的源 PDB+链（例如 `HEADER 1a3kA`）。
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L44-L61), [rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L106-L130), [shared.py](/scripts/shared.py#L192-L198)
+
+## 末位截断
+
+当最后一个窗口位置**未与网格对齐**（即 `position % 6 != 1`）时，转换会执行校正性截断步骤。出现这种情况是因为 `create_windows()` 可能会将最后一个窗口重新定位到 `L − 8`，而这不一定落在 `6k + 1` 网格点上。截断逻辑如下：
+
+1. 使用 `Bio.PDB.PDBParser` 从未对齐的位置目录读取每个片段 PDB
+2. 验证每个结构是否恰好包含一个模型和一条链
+3. 计算 `residue_remove_slice = slice(new_start - last_pos)`——要移除的前导残基数量
+4. 从链对象中分离这些前导残基
+5. 将截断后的结构写入以网格对齐的 `new_start` 命名的新目录中
+6. 通过 `shutil.rmtree()` 移除旧的未对齐目录
+
+这确保了下游消费者始终会遇到以网格对齐位置（1, 7, 13, …）命名的目录，即使 Rosetta 片段选择器可能在未对齐位置生成了片段。网格对齐的 `new_start` 从窗口 DataFrame 中检索：`windowdf[windowdf['position'] == last_pos]['res_start']`。
+
+<CgxTip>截断步骤对于路径组装兼容性至关重要——[Stepwise Path Search](11-stepwise-path-search) 和 [Heuristic Clustering](12-heuristic-clustering) 假定片段目录遵循 6k+1 命名约定。未对齐的目录将导致路径组装遗漏 C 端窗口处的片段。</CgxTip>
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L132-L165)
+
+## 位置过滤与跳过逻辑
+
+并非 Rosetta 片段文件中的所有位置都会被转换——仅处理 `pos_list` 中存在的位置（派生自 `create_windows()`）。此过滤发生在 `position` 头行处：`keep_position = position in pos_list`。当 `keep_position` 为 `False` 时，该位置的所有残基行都会被静默跳过。这防止了转换落在计算窗口方案之外的片段位置，如果 Rosetta 片段选择器在运行时使用了与预期不同的窗口配置，则可能发生这种情况。
+
+此外，仅当单个片段 PDB 文件在磁盘上尚不存在时（`shared.missing(filepath)`）才会被写入，这使转换具有**幂等性**——对相同输入重新运行不会覆盖现有片段文件，这在恢复中断的流水线运行时非常重要。
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L87-L103), [shared.py](/scripts/shared.py#L151-L154)
+
+## 错误处理
+
+该模块定义了一个自定义 `MakePdbError` 异常（继承自 `RuntimeError`），在截断步骤中结构验证失败时使用。在截断期间对每个片段 PDB 执行两项特定检查：
+
+| 检查项 | 条件 | 异常信息 |
+|-------|-----------|-------------------|
+| 单一模型 | `len(structure.child_list) != 1` | `"More than one model in {filename}"` |
+| 单一链 | `len(model.child_list) != 1` | `"More than one chain in {filename}"` |
+
+在残基标识查找期间，如果 `query_idx` 超出配体序列长度，也可能引发 `IndexError`，这表明片段文件与 FASTA 序列之间存在数据一致性问题。
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L36-L39), [rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L115-L120), [rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L152-L156)
+
+## 依赖图
+
+```mermaid
+graph LR
+    A["rosetta_to_pdb.py<br/>(MakePdb)"] --> B["shared.py<br/>(create_windows,<br/>one_to_three, missing,<br/>mkdir_p)"]
+    A --> C["Bio.PDB<br/>(PDBParser, PDBIO)"]
+    A --> D["Bio.SeqIO<br/>(FASTA 读取)"]
+    A --> E["pandas<br/>(窗口 DataFrame)"]
+    B --> F["itertools, math<br/>(窗口算术)"]
+```
+
+该脚本依赖 `shared.py` 提供四个实用工具：`create_windows()`（窗口网格计算）、`one_to_three`（氨基酸代码转换）、`missing()`（文件存在性检查）和 `mkdir_p()`（递归目录创建）。Biopython 的 `PDB` 模块仅在截断步骤中用于读取和写入 PDB 结构，而 `SeqIO` 用于读取配体 FASTA 文件。Pandas 用于构建和序列化窗口 DataFrame。
+
+来源：[rosetta_to_pdb.py](/scripts/rosetta_to_pdb.py#L19-L31), [shared.py](/scripts/shared.py#L151-L166), [shared.py](/scripts/shared.py#L192-L198)
+
+## 流水线上下文
+
+Rosetta 到 PDB 的转换位于 IDP-LZerD 流水线中片段生成和数据库创建之间。其上游相邻环节是 [Rosetta Fragment Picker](5-rosetta-fragment-picker)，它生成作为主要输入的 `.9mers` 片段文件。其下游消费者是 [Database Creation and Schema](8-database-creation-and-schema)，它摄取按位置划分的片段 PDB 目录，以及最终的 [Stepwise Path Search](11-stepwise-path-search)，它跨位置索引的片段集组装路径。此处生成的窗口 CSV（`{pdbid}_data.csv`）也会被下游阶段使用，以在窗口索引和残基位置之间进行映射。
+
+```mermaid
+flowchart LR
+    A["Rosetta Fragment Picker"] -->|"*.9mers 文件"| B["Rosetta 至 PDB<br/>转换"]
+    B -->|"位置目录/<br/>frag_NNN.pdb"| C["Database Creation"]
+    B -->|"{pdbid}_data.csv"| D["路径搜索 &<br/>聚类"]
+    A -->|"*.fsc 评分文件"| C
+```
+
+<CgxTip>此阶段写入的片段 PDB 文件**仅包含 Cα 原子**，因为 Rosetta 片段选择器在调用时使用了 `-frags::write_ca_coordinates` 标志（参见 [quota-protocol.flags.template](/scripts/rosetta_templates/quota-protocol.flags.template#L26)）。全原子重构发生在稍后的 [CHARMM Relaxation Protocol](15-charmm-relaxation-protocol) 期间，而非此阶段。</CgxTip>
+
+---
+
+- [深入解析/片段生成/二级结构解析](https://zread.ai/kiharalab/idp_lzerd/7-secondary-structure-parsing)
+
+---
+slug:7-secondary-structure-parsing
+blog_type:normal
+---
+
+
+二级结构预测是 IDP-LZerD 中生成片段的关键前提。`parse_ss.py` 模块充当**格式归一化层**——它接收来自四个不同二级结构预测服务器（PORTER、Jpred、SSpro 和通用的双行格式）的原始输出，验证序列与预测长度的一致性，合成置信度分数，并输出统一的 **PSIPRED VFORMAT** `.ss2` 文件，供 Rosetta Fragment Picker 直接使用。若没有此归一化步骤，Rosetta 基于配额的片段选择机制将无法整合多个 SS 预测器来丰富片段质量。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L1-L34), [run_rosetta.py](scripts/run_rosetta.py#L44-L44)
+
+## 归一化问题
+
+各个二级结构预测服务器均以其特有的格式生成输出——PORTER 将预测结果嵌入电子邮件格式的文本中，Jpred 使用带有标签段的逗号分隔 `.concise` 文件，SSpro 采用行前缀键值对布局，而临时预测器可能仅输出双行序列-预测对。然而，Rosetta Fragment Picker 要求所有预测器提供单一标准格式的文件：**PSIPRED `.ss2` 格式**，该格式逐行记录残基索引、氨基酸、预测类别以及三个置信度值（对应卷曲 C、螺旋 H 和折叠 E）。`ParseSs` 类通过实现**基于分发的读取器模式**来解决此问题——`read_file` 方法接收一个方法名称字符串，通过 `getattr` 动态解析相应的 `read_<method>` 处理器，并将原始文件内容路由至适当的解析器。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L47-L64), [parse_ss.py](scripts/parse_ss.py#L197-L202)
+
+## 架构与数据流
+
+下图说明了 `parse_ss.py` 如何融入更广泛的片段生成流程：从原始 SS 预测器输出，经过归一化，直至 Rosetta 基于配额的片段选择：
+
+```mermaid
+flowchart LR
+    subgraph External["External SS Prediction Servers"]
+        P[PORTER<br/>email output]
+        J[Jpred<br/>.concise output]
+        S[SSpro<br/>email output]
+        G[Generic<br/>two-line format]
+    end
+
+    subgraph ParseSs["parse_ss.py — ParseSs"]
+        RP[read_porter]
+        RJ[read_jpred]
+        RS[read_sspro]
+        RG[read_generic]
+        W[write → .ss2]
+    end
+
+    P --> RP --> W
+    J --> RJ --> W
+    S --> RS --> W
+    G --> RG --> W
+
+    W -->|"{filebase}.{method}.ss2"| RF["quota-protocol.flags<br/>-frags::ss_pred"]
+    RF --> QD["quota.def<br/>equal 0.25 weights"]
+    QD --> FP[Rosetta Fragment Picker]
+```
+
+每个预测器的输出都会通过其专用的读取器，经过验证并补充置信度分数后，被写入独立的 `.ss2` 文件。随后，Rosetta 通过 `-frags::ss_pred` 标志同时读取所有四个 `.ss2` 文件，为每个预测器分配相等的 **0.25 配额份额**，从而确保片段候选源自所有四种预测的共识。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L47-L64), [quota-protocol.flags.template](scripts/rosetta_templates/quota-protocol.flags.template#L13-L13), [quota.def](scripts/rosetta_templates/quota.def#L1-L6)
+
+## ParseSs 类 — 核心 API
+
+`ParseSs` 类围绕三大设计支柱构建：**基于分发的读取**、**统一的置信度评分**和**标准输出写入**。
+
+### 类级常量
+
+| 常量 | 用途 | 值 |
+|---|---|---|
+| `fmt_str` | `.ss2` 行的输出格式模板 | `"{index: >4} {aa} {ss}   {C:.3f}  {H:.3f}  {E:.3f}\n"` |
+| `pred_set` | 有效的 3 类二级结构类型 | `{'C', 'E', 'H'}`（Coil、Strand、Helix） |
+| `aa_set` | 有效的 20 种标准氨基酸单字母代码 | `{'R','H','K','D','E','S','T','N','Q','C','G','P','A','V','I','L','M','F','Y','W'}` |
+
+`fmt_str` 严格匹配 PSIPRED V3.3 `.ss2` 的列布局：右对齐的 4 字符残基索引、氨基酸、预测类别，随后是三个以空格分隔的浮点置信度值。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L35-L38)
+
+### 置信度分数合成
+
+`ss_freq` 类方法为给定预测生成 3 类置信度分布：
+
+```python
+@classmethod
+def ss_freq(cls, ss):
+    return {k: 0.67 if ss == k else 0.15 for k in cls.pred_set}
+```
+
+此方法为预测类别分配 **0.67 的置信度**，为其余两个类别各分配 **0.15**（0.67 + 0.15 + 0.15 = 0.97，并不精确等于 1.0——这是 Rosetta 可以容忍的 deliberate 或 incidental 近似）。对于 Jpred 的输出，由于原始预测器提供了经验置信度值，因此直接使用这些原始值（直接从 `JNETPROPE`、`JNETPROPH` 和 `JNETPROPC` 字段中读取）。这种双重策略意味着 Jpred 受益于真实的逐残基置信度校准，而 PORTER、SSpro 和通用输入则接收固定的合成分布。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L40-L42), [parse_ss.py](scripts/parse_ss.py#L101-L137)
+
+## 读取器实现
+
+每个读取器方法将原始特定于预测器的文本转换为包含键 `{index, aa, ss, C, H, E}` 的字典列表。所有读取器都强制执行**序列-预测长度不变性**——如果氨基酸序列与二级结构预测的长度不同，则会抛出 `SSError`。下表比较了这四种读取器：
+
+| 读取器 | 方法标志 | 输入格式 | 序列检测 | 预测检测 | 置信度来源 |
+|---|---|---|---|---|---|
+| `read_porter` | `--porter` | 粘贴的电子邮件文本 | 所有字符均在 `aa_set` 中的行 | 紧跟序列行之后，且所有字符均在 `pred_set` 中的行 | 合成 (`ss_freq`) |
+| `read_jpred` | `--jpred` | `.concise` 逗号分隔 | `align1;` 标签段 | `jnetpred` 标签段；`JNETPROPE/H/C` 提供置信度 | 原始经验值 |
+| `read_generic` | `--generic` | 两条非注释行 | 首个非注释行（最后一个空格分隔的词元） | 第二个非注释行（最后一个空格分隔的词元） | 合成 (`ss_freq`) |
+| `read_sspro` | `--sspro` | 键前缀文本 | `"Amino Acids:"` 之后的行 | `"Predicted Secondary Structure"` 之后的行 | 合成 (`ss_freq`) |
+
+来源：[parse_ss.py](scripts/parse_ss.py#L66-L195)
+
+### PORTER 读取器 — 状态机解析
+
+`read_porter` 方法使用**有状态的逐行自动机**从非结构化的电子邮件文本中分离序列与预测。它维护一个 `prev_line_seq` 布尔标志：当某行通过氨基酸成员测试（`all(c in self.aa_set for c in line)`）时，将其追加至序列缓冲区并将标志设为 `True`。随后对下一行进行 SS 成员测试（`all(c in self.pred_set for c in line)`），若测试通过，则将其追加至预测缓冲区。包含小写字符的注释行将被完全跳过。此方法能够处理 PORTER 电子邮件输出中典型的交错多行格式。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L66-L99)
+
+### Jpred 读取器 — 标签段提取
+
+`read_jpred` 方法解析 `.concise` 格式，其中每个段由标签（如 `jnetpred:`、`align1;:`、`JNETPROPE:`）引入，后跟逗号分隔的值。`match_key_dict` 将这些标签映射到规范键（`ss`、`aa`、`E`、`H`、`C`）。一个值得注意的细节：序列标签键使用 `align1;`（带分号），以避免与 `align19` 等其他 `align` 变体发生错误匹配。提取后，所有置信度列均通过 `pd.to_numeric` 转换为数值，预测列中的卷曲指示符 `-` 被替换为 `C`。最终结果通过 `to_dict("records")` 从 `pandas.DataFrame` 转换为字典列表。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L101-L137)
+
+### Generic 和 SSpro 读取器 — 固定位置解析
+
+`read_generic` 读取器被明确标注为**脆弱的**——它假定首个非注释、非空行包含序列，第二行包含预测，并分别提取每行最后一个以空格分隔的词元。`read_sspro` 读取器则更为稳健，它会扫描哨兵前缀 `"Amino Acids:"` 和 `"Predicted Secondary Structure"` 并读取紧随其后的行。这两个读取器均应用 `-` → `C` 的卷曲归一化，并使用合成的置信度分数。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L139-L195)
+
+## 输出格式与文件命名
+
+`write` 方法在目标目录中生成名为 `{filebase}.{method}.ss2` 的文件，其中 `filebase` 默认为去除扩展名的输入文件名，`method` 为预测器名称字符串。每个文件以 `# PSIPRED VFORMAT (PSIPRED V3.3)` 头部开始，后跟一个空行，然后是每个残基的一行格式化输出。以下是残基 42 被预测为螺旋的输出示例：
+
+```
+  42 A H     0.150  0.670  0.150
+```
+
+Rosetta 的 `-frags::ss_pred` 标志所消费的正是这种标准格式。在 quota-protocol 标志模板中，所有四个预测器在一行内注册：
+
+```
+-frags::ss_pred {psipred_path} psipred {porter_path} porter {jpred_path} jpred {sspro_path} sspro
+```
+
+每个路径-标签对告知 Rosetta 将哪个 `.ss2` 文件与哪个配额池相关联。随后，`quota.def` 文件为每个池分配相等的 **0.25 份额**，确保没有任何单一预测器主导片段选择。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L197-L202), [quota-protocol.flags.template](scripts/rosetta_templates/quota-protocol.flags.template#L13-L13), [quota.def](scripts/rosetta_templates/quota.def#L1-L6)
+
+## 验证与错误处理
+
+该模块定义了专用的 `SSError` 异常类（继承自 `RuntimeError`），每当违反**序列-预测长度不变性**时便会抛出此异常。每个读取器方法在解析后都会检查此不变性，若检查失败，在抛出异常前会将序列和预测及其长度打印到 `stdout` 以供诊断。对于 Jpred，额外的检查 `len(set([len(v) for v in data_dict.values()])) != 1` 确保所有提取的列（序列、预测和三个置信度数组）长度相等。若将无法识别的方法名称传递给 `read_file`，`getattr(self, "read_%s" % method)` 将隐式抛出 `AttributeError`。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L28-L31), [parse_ss.py](scripts/parse_ss.py#L86-L89), [parse_ss.py](scripts/parse_ss.py#L125-L128), [parse_ss.py](scripts/parse_ss.py#L59-L60)
+
+<CgxTip>当为流程准备 SS 预测文件时，请注意 `run_rosetta.py` 需要**所有四个** SS 预测路径（`--psipred_path`、`--porter_path`、`--jpred_path`、`--sspro_path`）——缺失文件将触发 `RunRosettaError`。如果某个预测器不可用，你仍必须提供占位符 `.ss2` 文件（例如，通过 `parse_ss.py --generic` 从简单的双行文件生成）以满足流程需求。</CgxTip>
+
+## 命令行用法
+
+`ParseSs.commandline` 类方法暴露了四个互不排斥的参数，允许单次调用同时转换多个预测器的输出：
+
+```bash
+# 转换单个预测器
+python parse_ss.py --porter porter_output.txt
+
+# 同时转换所有预测器
+python parse_ss.py \
+  --porter porter_output.txt \
+  --jpred jpred_concise.txt \
+  --sspro sspro_output.txt \
+  --generic generic_ss.txt
+```
+
+每个参数都会触发一次独立的 `read_file` 调用，为每种方法生成独立的 `.ss2` 文件。除非通过程序指定 `destdir`，否则输出文件将写入与输入文件相同的目录。
+
+来源：[parse_ss.py](scripts/parse_ss.py#L204-L233)
+
+## 与 parse.pl 的关系
+
+伴随脚本 `parse.pl` 处理不同的转换任务：它将 **PSI-BLAST 二进制检查点文件**（`.chk`）转换为 Rosetta 片段选择器期望的纯文本检查点格式（`.checkpoint`），用于序列谱输入。此脚本在运行 `blastpgp` 生成 PSSM 之后、启动片段选择器之前，由 `run_rosetta.py` 调用。`parse_ss.py` 归一化二级结构预测，而 `parse.pl` 归一化序列谱——两者均为 Rosetta 配额协议的必要前置转换。
+
+来源：[parse.pl](scripts/parse.pl#L1-L34), [run_rosetta.py](scripts/run_rosetta.py#L103-L113)
+
+## 流程集成总结
+
+下表总结了 SS 解析产物在流程中的流转路径：
+
+| 产物 | 生产者 | 消费者 | Rosetta 标志 |
+|---|---|---|---|
+| `{pdbid}.checkpoint` | `parse.pl`（来自 PSI-BLAST `.chk`） | Rosetta Fragment Picker | `-in::file::checkpoint` |
+| `{filebase}.porter.ss2` | `parse_ss.py --porter` | Rosetta Fragment Picker | `-frags::ss_pred ... porter` |
+| `{filebase}.jpred.ss2` | `parse_ss.py --jpred` | Rosetta Fragment Picker | `-frags::ss_pred ... jpred` |
+| `{filebase}.sspro.ss2` | `parse_ss.py --sspro` | Rosetta Fragment Picker | `-frags::ss_pred ... sspro` |
+| `{filebase}.psipred.ss2` | PSIPRED（外部） | Rosetta Fragment Picker | `-frags::ss_pred ... psipred` |
+
+请注意，PSIPRED 的 `.ss2` 文件是外部生成并直接提供的——它已符合标准格式，因此无需通过 `parse_ss.py` 进行解析。
+
+来源：[run_rosetta.py](scripts/run_rosetta.py#L84-L91), [quota-protocol.flags.template](scripts/rosetta_templates/quota-protocol.flags.template#L11-L13)
+
+<CgxTip>`ss_freq` 合成置信度分布 (0.67 / 0.15 / 0.15) 的总和不为 1.0。这在 PSIPRED VFORMAT 约定中是故意的——Rosetta 片段选择器将这些值作为相对权重而非严格概率使用。如果你提供自定义 `.ss2` 文件，请确保三个置信度列的量级在各预测器间大致可比，因为配额系统会将它们视为同量纲分数。</CgxTip>
+
+## 后续步骤
+
+一旦二级结构预测被归一化为 `.ss2` 文件，流程将继续进入 [Rosetta Fragment Picker](5-rosetta-fragment-picker) 进行片段生成，以及 [Rosetta-to-PDB 转换](6-rosetta-to-pdb-conversion) 进行格式转换。有关完整的端到端流程上下文，请参阅[架构概述](4-architecture-overview)。
+
+---
+
+## 对接与评分
+
+- [深入解析/对接与评分/数据库创建与模式](https://zread.ai/kiharalab/idp_lzerd/8-database-creation-and-schema)
+
+---
+slug:8-database-creation-and-schema
+blog_type:normal
+---
+
+
+IDP-LZerD 流水线使用 SQLite 数据库作为所有下游阶段的核心协调基底——从对接分数存储、路径组装到最终排名。`create_database.py` 脚本是**此关系型基底的入口点**：它通过将文件系统结构与 CSV 窗口元数据融合为一个可查询的工件，物化了前两张表（`window` 和 `fragment`）。流水线的每个后续阶段都会读取或扩展该数据库，使其模式成为将整个工作流绑定在一起的结构契约。
+
+## 核心数据库：`scores_{complexid}.db`
+
+主数据库文件遵循命名规范 `scores_{pdbid}{r_ch}{l_ch}.db`，其中复合标识符由 PDB ID 与受体链和配体链标签拼接而成。例如，PDB ID 为 `4ah2`、受体链为 `1`、配体链为 `3` 的复合物将生成 `scores_4ah213.db`。此文件在由 `--directory` 参数指定的工作目录中创建。
+
+创建逻辑强制执行**幂等性保护**：如果目标数据库文件已存在且非空，函数将立即返回而不作任何修改。这可防止流水线重新运行期间发生意外覆盖，并表明数据库已被物化。
+
+来源：[create_database.py](scripts/create_database.py#L58-L66)
+
+## 模式定义：两张基础表
+
+数据库最初只包含两张表，它们编码了**窗口**（沿内在无序蛋白质滑动的残基范围）和**片段**（每个窗口由 Rosetta 生成的结构候选）之间的层级关系。这两张表是结构骨干；后续阶段添加的所有下游表均通过外键引用它们。
+
+### `window` 表
+
+| 列 | 类型 | 约束 | 描述 |
+|--------|------|------------|-------------|
+| `windowindex` | INTEGER | PRIMARY KEY NOT NULL | 窗口的数字标识符，派生自目录名 |
+| `window_wd` | TEXT | NOT NULL | 磁盘上窗口工作目录的绝对路径 |
+| `res_start` | INTEGER | NOT NULL | 窗口的起始残基位置 |
+| `res_end` | INTEGER | NOT NULL | 窗口的结束残基位置 |
+| `position` | INTEGER | NOT NULL | 完整序列内的对齐位置 |
+| `timestamp` | DATE | DEFAULT `datetime('now','localtime')` | 自动记录的插入时间戳 |
+
+`windowindex` 作为主键，也是将窗口连接到片段及下游模型数据的唯一连接列。`window_wd` 列在操作上至关重要：它存储每个窗口目录的绝对文件系统路径，使下游阶段能够定位片段子目录和诱饵 PDB 文件，而无需维护单独的路径注册表。
+
+### `fragment` 表
+
+| 列 | 类型 | 约束 | 描述 |
+|--------|------|------------|-------------|
+| `windowindex` | INTEGER | NOT NULL | 对父窗口的外键引用 |
+| `fragmentindex` | INTEGER | NOT NULL | 窗口内片段的数字标识符 |
+| `timestamp` | DATE | DEFAULT `datetime('now','localtime')` | 自动记录的插入时间戳 |
+
+复合主键 `(windowindex, fragmentindex)` 确保每个片段在其父窗口内被唯一标识。此复合键是 `allmodel` 表（稍后由[模型分数加载](9-model-score-loading)添加）使用的连接目标，用于将对接分数与其结构上下文相关联。
+
+来源：[create_database.py](scripts/create_database.py#L29-L49)
+
+## 模式演进：下游阶段添加的表
+
+`scores_{complexid}.db` 不是一个静态工件——它随着流水线的推进而增长。`create_database.py` 脚本建立了初始的双表模式，但后续阶段通过附加表对其进行扩展。理解这种演进对于在任何流水线检查点解释数据库至关重要。
+
+```mermaid
+graph TD
+    subgraph "create_database.py (本页)"
+        W[window<br/>windowindex · window_wd · res_start · res_end · position]
+        F[fragment<br/>windowindex · fragmentindex]
+    end
+    subgraph "load_model_scores.py"
+        AM[allmodel<br/>modelid · modelindex · dfire · itscore<br/>windowindex · fragmentindex]
+        M[model<br/>modelid · di · coordinates]
+    end
+    subgraph "每窗口配对数据库"
+        MD[modeldistNM 表<br/>modela · modelb · ifourdist<br/>mpdist · cosine · edgescore]
+    end
+
+    W -->|1:N| F
+    F -->|1:N| AM
+    AM -->|subset| M
+    M -->|pairwise| MD
+
+    style W fill:#4a9eff,color:#fff
+    style F fill:#4a9eff,color:#fff
+    style AM fill:#7b8a99,color:#fff
+    style M fill:#7b8a99,color:#fff
+    style MD fill:#7b8a99,color:#fff
+```
+
+**蓝色**表由 `create_database.py` 创建（本文档说明）。**灰色**表由下游阶段添加——具体而言，`allmodel` 和 `model` 由[模型分数加载](9-model-score-loading)添加，而 `modeldist` 配对表位于独立的每窗口数据库中。外键链单向流动：`window` → `fragment` → `allmodel` → `model`，`modeldist` 表引用 `model` 表中的 `modelid` 值。
+
+### `allmodel` 表（由模型分数加载添加）
+
+| 列 | 类型 | 约束 | 描述 |
+|--------|------|------------|-------------|
+| `modelid` | INTEGER | PRIMARY KEY NOT NULL | 自动生成的唯一模型标识符 |
+| `modelindex` | INTEGER | NOT NULL | 片段诱饵集内的模型编号 |
+| `dfire` | REAL | nullable | DFIRE 统计势分数 |
+| `itscore` | REAL | NOT NULL | ITScore（界面分数） |
+| `windowindex` | INTEGER | NOT NULL | 外键 → `fragment(windowindex)` |
+| `fragmentindex` | INTEGER | NOT NULL | 外键 → `fragment(fragmentindex)` |
+| `timestamp` | DATE | DEFAULT `datetime('now','localtime')` | 插入时间戳 |
+
+### `model` 表（由模型分数加载添加）
+
+| 列 | 类型 | 约束 | 描述 |
+|--------|------|------------|-------------|
+| `modelid` | INTEGER | PRIMARY KEY NOT NULL | 外键 → `allmodel(modelid)` |
+| `di` | REAL | NOT NULL | 组合缩放分数（dfire + itscore，Z 归一化） |
+| `coordinates` | TEXT | NOT NULL | 所选原子的 JSON 序列化 3D 坐标 |
+
+`model` 表是 `allmodel` 的**精选子集**——仅包含每个窗口中按组合 `di` 分数排名的顶级 *N* 个模型（默认 4,500）。`coordinates` 列将骨架原子位置（N, CA, C, CB）存储为 JSON 数组，从而无需重新解析 PDB 文件即可进行几何兼容性检查。
+
+来源：[load_model_scores.py](scripts/load_model_scores.py#L39-L53), [load_model_scores.py](scripts/load_model_scores.py#L478-L485)
+
+## 数据摄取：文件系统 → 关系型映射
+
+数据库创建过程执行双源合并：**CSV 元数据**提供残基范围信息，而**文件系统目录结构**提供窗口和片段标识符以及工作目录路径。理解此映射对于调试格式错误的数据库至关重要。
+
+### 输入来源
+
+脚本接受两个必须**彼此一致**的输入：
+
+1. **窗口 CSV**（`--input`）：一个逗号分隔文件，包含列 `windowindex`、`res_start`、`res_end`、`position`。每行描述沿 IDP 序列的一个滑动窗口。此文件通常由 `shared.py` 中的 `create_windows()` 实用函数生成，该函数计算步长为 6 个残基的重叠 9 残基窗口，并对末端窗口进行特殊处理。
+
+2. **目录结构**（`--directory` + `--pdbid`）：`{directory}/{pdbid}/` 下的文件系统必须包含名为 `{pdbid}{windowindex}` 的二级子目录（例如 `4ah21`、`4ah27`），每个子目录包含由其 `fragmentindex` 命名的三级子目录（例如 `1/`、`2/`、… `30/`）。
+
+### 具体示例
+
+给定 PDB ID `4ah2`、受体链 `1` 和配体链 `3`，以及如下 CSV：
+
+```
+windowindex,res_start,res_end,position
+1,1,9,1
+7,7,15,7
+13,13,20,12
+```
+
+脚本遍历目录 `4ah2/4ah21/` 提取片段目录（`1/` 至 `30/`），然后与 CSV 行 `windowindex=1` 合并，生成 `res_start=1, res_end=9, position=1` 的 `window` 行，以及为找到的每个片段目录生成包含 `(windowindex=1, fragmentindex=N)` 的 `fragment` 行。
+
+```mermaid
+flowchart LR
+    CSV["CSV 文件<br/>windowindex · res_start · res_end · position"] --> MERGE["pandas.merge()<br/>on windowindex"]
+    FS["目录遍历<br/>4ah2/4ah21/{1..30}/"] --> MERGE
+    MERGE --> DB["scores_4ah213.db<br/>window + fragment 表"]
+    
+    style CSV fill:#e8f4e8
+    style FS fill:#e8e8f4
+    style MERGE fill:#fff3cd
+    style DB fill:#4a9eff,color:#fff
+```
+
+此合并是在 CSV DataFrame 和派生自文件系统的窗口列表之间基于 `windowindex` 的**内连接**。这意味着 CSV 中存在但文件系统中缺失的任何窗口（反之亦然）将被静默丢弃——如果输入未对齐，这可能是数据丢失的潜在来源。
+
+来源：[create_database.py](scripts/create_database.py#L69-L106), [shared.py](scripts/shared.py#L245-L258), [4ah2_data.csv](test/4ah2_data.csv#L1-L4)
+
+## 目录结构契约
+
+数据库创建脚本对磁盘布局做出了严格假设。预期的三级层次结构通过目录嵌套隐式编码窗口-片段关系：
+
+```
+{directory}/
+└── {pdbid}/                          ← PDB 级目录
+    ├── {pdbid}{windowindex}/         ← 窗口目录（第 2 级）
+    │   ├── {fragmentindex}/          ← 片段目录（第 3 级）
+    │   │   ├── scores.itscore        ← ITScore 文件（下游使用）
+    │   │   ├── goap_score.txt        ← GOAP/DFIRE 文件（下游使用）
+    │   │   └── a-c.cluster4          ← LZerD 聚类文件（下游使用）
+    │   └── ...
+    └── ...
+```
+
+窗口目录名必须遵循模式 `{pdbid}{windowindex}`——对于 PDB ID `4ah2`，有效名称包括 `4ah21`、`4ah27`、`4ah213`。脚本通过剥离 PDB ID 前缀（不区分大小写）并将剩余部分转换为整数来提取 `windowindex`。如果剩余部分无法解析为整数，则会引发 `CreateDatabaseError`，并提示消息 `"Expected window directory format $PDBID$WINDOWINDEX"`。
+
+片段目录是每个窗口目录内的**三级子目录**。其名称必须可解析为整数，并直接用作 `fragmentindex` 值。片段目录内的文件（如 `scores.itscore` 和 `goap_score.txt`）**不会被** `create_database.py` 读取——它们稍后由[模型分数加载](9-model-score-loading)消费。
+
+来源：[create_database.py](scripts/create_database.py#L73-L92)
+
+## SQLite 连接管理
+
+所有数据库操作均使用 **APSW**（Another Python SQLite Wrapper）库，而非标准库的 `sqlite3` 模块。`shared.py` 模块提供三个上下文管理的连接工厂，对应三种 SQLite 打开模式：
+
+| 工厂 | 标志 | 用例 |
+|---------|-------|----------|
+| `ro_conn(dbfile)` | `SQLITE_OPEN_READONLY` | 查询现有数据库而无变异风险 |
+| `write_conn(dbfile)` | `SQLITE_OPEN_READWRITE` | 扩展现有数据库（添加表/行） |
+| `new_conn(dbfile)` | `SQLITE_OPEN_CREATE \| SQLITE_OPEN_READWRITE` | 创建新数据库或打开现有数据库以进行写入 |
+
+每个工厂都是用 `@contextmanager` 装饰的生成器，产出 `apsw.Connection` 并通过在重新抛出前打印数据库路径来处理 `CantOpenError`。`create_database.py` 脚本独占使用 `new_conn`，因为它从头创建数据库文件。下游阶段使用 `write_conn` 扩展模式，使用 `ro_conn` 进行只读查询。
+
+<CgxTip>APSW 在几个方面不同于 Python 内置的 `sqlite3`：它提供了更接近 C API 的轻量级封装，原生支持通过保存点实现嵌套事务，并且其游标 `executemany` 直接接受字典（匹配整个代码库中使用的命名参数绑定风格 `:param`）。这就是 `create_insert_statement` 辅助函数生成如 `VALUES (:windowindex, :fragmentindex)` 绑定而非位置 `?` 占位符的原因。</CgxTip>
+
+来源：[shared.py](scripts/shared.py#L40-L65), [shared.py](scripts/shared.py#L97-L111)
+
+## 插入语句生成
+
+`shared.create_insert_statement()` 实用函数使用**命名参数绑定**生成参数化 SQL 插入语句——这是 SQLite 中占位符以 `:` 为前缀的约定。给定表名和列列表，它生成：
+
+```sql
+INSERT INTO window (windowindex, window_wd, res_start, res_end, position) 
+VALUES (:windowindex, :window_wd, :res_start, :res_end, :position)
+```
+
+当使用字典列表（如 `DataFrame.to_dict("records")` 生成的列表）调用时，此风格与 `cursor.executemany()` 无缝集成，因为每个字典键与命名参数匹配。`create_database.py` 脚本对两次表插入均使用此模式：`window` 插入使用所有合并后的 DataFrame 列，而 `fragment` 插入仅使用 `["windowindex", "fragmentindex"]`。
+
+来源：[shared.py](scripts/shared.py#L97-L111), [create_database.py](scripts/create_database.py#L100-L106)
+
+## 命令行接口
+
+该脚本可直接调用或作为模块导入。其参数解析器接受五个参数：
+
+| 参数 | 标志 | 必需 | 描述 |
+|----------|------|----------|-------------|
+| `directory` | `-d` | 是 | 包含 PDB 子目录的根工作目录 |
+| `pdbid` | `-p` | 是 | PDB 标识符（命名一级子目录） |
+| `r_ch` | `-r` | 是 | 受体链标识符（用于数据库文件名） |
+| `l_ch` | `-l` | 是 | 配体链标识符（用于数据库文件名） |
+| `input` | `-i` | 是 | 窗口数据 CSV 文件路径 |
+
+调用示例：
+
+```bash
+python create_database.py \
+  -d /path/to/working \
+  -p 4ah2 \
+  -r 1 \
+  -l 3 \
+  -i /path/to/4ah2_data.csv
+```
+
+此命令生成 `/path/to/working/scores_4ah213.db`，其中包含已填充的 `window` 和 `fragment` 表。
+
+来源：[create_database.py](scripts/create_database.py#L108-L125)
+
+## 窗口计算：`create_windows()` 函数
+
+`create_database.py` 消费的窗口 CSV 通常由 `shared.py` 中的 `create_windows()` 函数生成。此生成器沿 IDP 序列生成重叠窗口，参数如下：
+
+- **窗口长度**：9 个残基（固定）
+- **步长**：6 个残基
+- **起始模式**：窗口始于残基 1, 7, 13, 19, …（即 `6k + 1`）
+- **末端处理**：调整最后一个窗口使 `res_end` 等于完整序列长度，并将 `position` 设为 `res_end - 8` 以维持 9 残基窗口约束
+
+对于 20 残基的序列，这恰好生成测试 CSV 中的三个窗口：`(1,9,1)`、`(7,15,7)`、`(13,20,12)`。每个窗口的 `windowindex` 等于其 `res_start`，形成自然排序键。6 残基步长与 9 残基窗口确保连续窗口间有 **3 残基重叠**——此重叠在[模型分数加载](9-model-score-loading)和[几何截断过滤器](10-geometric-cutoff-filters)的模型距离计算期间进行几何验证。
+
+<CgxTip>相邻窗口间的 3 残基重叠并非任意——它提供了在窗口边界处验证骨架连续性所需的最小结构上下文。`load_model_scores.py` 中的 `res_overlap=3` 参数直接对应此重叠，几何兼容性检查（i 至 i+4 CA 距离、骨架冲突、粘性原子距离和余弦角）均在此重叠区域内操作。</CgxTip>
+
+来源：[shared.py](scripts/shared.py#L245-L258)
+
+## 下游消费者与模式依赖
+
+`window` 和 `fragment` 表作为每个后续流水线阶段的关系基础。下表总结了各下游阶段依赖的表及其依赖方式：
+
+| 阶段 | 读取表 | 写入表 | 关键连接模式 |
+|-------|-------------|----------------|------------------|
+| [模型分数加载](9-model-score-loading) | `window`, `fragment` | `allmodel`, `model` | `fragment JOIN window USING(windowindex)` |
+| [逐步路径搜索](11-stepwise-path-search) | `model`, `allmodel`, `fragment` | `pathsN`, `clustersN`（在独立路径数据库中） | `model JOIN allmodel USING(modelid) JOIN fragment USING(windowindex, fragmentindex)` |
+| [占据分数计算](13-occupancy-score-computation) | `window`（用于排序） | 占据分数 | `window ORDER BY res_start` |
+
+模式作为**可增量扩展契约**的设计意味着，`create_database.py` 可以独立运行以建立基础表，并且只要所需的前驱表存在，每个下游阶段都可以独立运行（或重新运行）。这种解耦使得部分流水线重新执行和单个阶段调试成为可能。
+
+来源：[load_model_scores.py](scripts/load_model_scores.py#L78-L84), [find_paths_stepwise.py](scripts/find_paths_stepwise.py#L54-L63)
+
+## 下一步
+
+随着数据库的创建以及 `window`/`fragment` 表的填充，下一阶段将每个片段的对接分数加载到 `allmodel` 和 `model` 表中。请继续阅读[模型分数加载](9-model-score-loading)以了解如何摄取 ITScore 和 DFIRE 值、如何按组合分数对模型进行排名，以及如何将 3D 坐标序列化到数据库中。有关在距离计算阶段过滤模型兼容性的几何约束，请参阅[几何截断过滤器](10-geometric-cutoff-filters)。
+
+---
+
+- [深入解析/对接与评分/模型评分加载](https://zread.ai/kiharalab/idp_lzerd/9-model-score-loading)
+
+---
+slug:9-model-score-loading
+blog_type:normal
+---
+
+
+`LoadModelScores` 类是核心编排器，它将对接打分势能的评分与几何兼容性计算连接起来。它执行三个连续阶段——**评分摄取**、**模型选择与坐标加载**以及**成对模型间距离计算**——将原始的逐片段评分文件转换为存储在各窗口 SQLite 数据库中、可供查询的兼容模型对图。此流水线直接输入到[逐步路径搜索](11-stepwise-path-search)算法中，用于组装全长 IDP 构象。
+
+## 架构概述
+
+三阶段流水线处理由[数据库创建与模式](8-database-creation-and-schema)生成的数据，并生成供[几何截断过滤器](10-geometric-cutoff-filters)及下游路径搜索使用的 `modeldist` 数据库：
+
+```mermaid
+flowchart TD
+    subgraph Phase1["Phase 1: load()"]
+        A1["fragment/window tables<br/>(scores_*.db)"] --> A2["Read scores.itscore<br/>per fragment dir"]
+        A1 --> A3["Read goap_score.txt<br/>per fragment dir"]
+        A2 --> A4["Merge ITScore + dFire<br/>on modelindex"]
+        A4 --> A5["INSERT into allmodel table"]
+    end
+
+    subgraph Phase2["Phase 2: choose()"]
+        B1["allmodel table"] --> B2["Scale itscore & dfire<br/>to z-scores"]
+        B2 --> B3["Compute di = z(itscore) + z(dfire)"]
+        B3 --> B4["Select top 4500 models<br/>per window by di"]
+        B4 --> B5["Extract backbone coords<br/>from PDB decoys"]
+        B5 --> B6["INSERT into model table<br/>(modelid, di, coordinates)"]
+    end
+
+    subgraph Phase3["Phase 3: load_modeldist()"]
+        C1["model table<br/>(coordinates)"] --> C2["Compute pairwise<br/>midpoint CA distances"]
+        C2 --> C3{"Geometric<br/>filters pass?"}
+        C3 -->|"Yes (neighbors)"| C4["allowed table<br/>(ifourdist, mpdist,<br/>cosine, edgescore)"]
+        C3 -->|"No (non-neighbors)"| C5["disallowed table<br/>(modela, modelb, mpdist)"]
+    end
+
+    Phase1 --> Phase2 --> Phase3
+
+    style Phase1 fill:#e8f4e8,stroke:#2d7d2d
+    style Phase2 fill:#e8e8f4,stroke:#2d2d7d
+    style Phase3 fill:#f4e8e8,stroke:#7d2d2d
+```
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L63-L181), [load_model_scores.py](scripts/load_model_scores.py#L182-L373)
+
+## 阶段 1：评分摄取 — `load()`
+
+`load` 方法从每个片段目录读取两个原始评分输出，并填充复合数据库中的 **`allmodel`** 表。它遍历每个片段行（从 `create_database.py` 创建的 `fragment` 和 `window` 表连接而来），从文件系统读取评分并插入合并后的行。
+
+### 输入评分文件
+
+每个片段目录（例如，`4ah21/1/`、`4ah21/2/`）包含由 LZerD 对接引擎生成的两个评分文件：
+
+| 文件 | 格式 | 读取列 | 描述 |
+|------|--------|-------------|-------------|
+| `scores.itscore` | 空格分隔 | `model`, `itscore` | 每个势能的 LZerD ITScore（界面评分） |
+| `goap_score.txt` | 空格分隔 | `model`, `dfire` | GOAP 综合评分；提取 dFire（依赖于距离的有限理想气体参考） |
+
+`scores.itscore` 文件使用诸如 `model1`、`model10`、`model1000` 的模型名称，通过正则表达式 `model(\d+)\D*` 从中提取数字索引。`goap_score.txt` 文件包含 GOAP 总分、dFire 和额外列；仅保留 dFire 用于模型选择。
+
+来源: [shared.py](scripts/shared.py#L216-L242), [load_model_scores.py](scripts/load_model_scores.py#L73-L130)
+
+### allmodel 表模式
+
+`allmodel` 表存储每个已评分的势能，并通过外键链接回生成它的片段和窗口：
+
+```sql
+CREATE TABLE IF NOT EXISTS allmodel
+    (
+        modelid INTEGER PRIMARY KEY NOT NULL,
+        modelindex INTEGER NOT NULL,
+        dfire REAL,
+        itscore REAL NOT NULL,
+        windowindex INTEGER NOT NULL,
+        fragmentindex INTEGER NOT NULL,
+        timestamp DATE DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY(windowindex) REFERENCES fragment(windowindex),
+        FOREIGN KEY(fragmentindex) REFERENCES fragment(fragmentindex)
+    );
+```
+
+关键设计点：**`dfire` 可为空**（`REAL` 没有 `NOT NULL`），因为如果某个模型只出现在一个文件而未出现在另一个文件中，ITScore 和 dFire DataFrame 之间的左连接可能会产生空值。**`itscore` 是必需的**（`NOT NULL`），因为它是主要的对接质量指示器。两个文件之间的**评分计数不匹配**会立即引发 `LoadModelScoresError`，从而防止损坏或截断的对接输出。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L39-L54), [load_model_scores.py](scripts/load_model_scores.py#L104-L130)
+
+### 部分表处理
+
+该方法通过比较给定片段/窗口对在 `allmodel` 中已有的行数与当前 `scores.itscore` 文件中的模型数量，来检测部分加载的表。如果 `nmodelrows < nmodels` 且 `nmodelrows > 0`，则在重新插入之前删除现有的部分行。如果 `nmodelrows == nmodels`，则完全跳过该片段——这使得流水线的**安全重新执行**成为可能，而不会重复数据。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L108-L130)
+
+## 阶段 2：模型选择与坐标加载 — `choose()`
+
+`choose` 方法执行从**评分空间**到**几何空间**的关键转换：它选择每个窗口中评分最高的模型，从 PDB 文件读取其 3D 坐标，并将综合评分和序列化坐标插入到 **`model`** 表中。
+
+### 综合评分：`di`
+
+两个评分函数独立进行 z-score 归一化并求和，以生成综合选择度量 `di`：
+
+$$d_i = z(\text{itscore}) + z(\text{dfire})$$
+
+其中 z-score 归一化为：
+
+$$z(x) = \frac{x - \mu}{\sigma}$$
+
+两个评分均使用 `ascending=True`（值越低越好），因此不应用符号反转。静态方法 `scale_scores` 逐窗口计算此值，这意味着 z-score 基准是**每个窗口局部的**，而不是全局的——这可以防止具有内在不同评分分布的窗口使选择产生偏差。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L456-L468), [load_model_scores.py](scripts/load_model_scores.py#L140-L141)
+
+### 选择策略
+
+对于每个窗口，该方法查询**同时**具有 `itscore` 和 `dfire` 值的所有模型（`WHERE ... AND m.dfire IS NOT NULL` 子句过滤掉缺少 dFire 评分的模型），按 `di` 排序，并保留前 **4500 个模型**。此常量 `models_per_window` 控制着下游的组合爆炸：每个窗口约有 30 个片段，4500 的选择量代表了从原始势能池（每个片段可能包含 6000+ 个模型）中进行的激进剪枝。
+
+如果某个窗口已有 4500 个选定的模型，则跳过该窗口——这是流水线重新运行的另一个幂等保护。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L132-L177)
+
+### model 表模式
+
+`model` 表（与 `allmodel` 不同）仅存储选定的子集及其坐标：
+
+```sql
+CREATE TABLE IF NOT EXISTS model
+    (
+        modelid INTEGER PRIMARY KEY NOT NULL,
+        di REAL NOT NULL,
+        coordinates TEXT NOT NULL,
+        FOREIGN KEY(modelid) REFERENCES allmodel(modelid)
+    );
+```
+
+`coordinates` 列存储 **JSON 序列化的 3D 坐标**，作为所有残基中每个存储原子的 `[x, y, z]` 三元组的扁平列表。此序列化格式对阶段 3 至关重要，阶段 3 通过 `json.loads()` 将其反序列化为适合 NumPy 数组构建的列表。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L478-L485), [load_model_scores.py](scripts/load_model_scores.py#L451-L454)
+
+### 坐标提取 — `get_coords()`
+
+`get_coords` 方法使用 Biopython 的 `PDBParser` 解析每个选定的 PDB 势能文件，并提取每个残基特定**存储原子**集的坐标：
+
+| 原子集 | 成员 | 用途 |
+|----------|---------|---------|
+| `backbone_atoms` | N, CA, C | 用于碰撞检测和距离计算的主链几何 |
+| `cb` (CB) | CB（或 GLY 的虚拟 CB） | 用于重叠评估的侧链质心代理 |
+| `stored_atoms` | N, CA, C, CB | 上述的并集；每个模型 4 个原子 × 残基 |
+
+**甘氨酸的虚拟 CB 生成**：由于 GLY 缺少 CB 原子，通过将 CA→N 向量绕 CA→C 轴旋转 −120°，然后平移回 CA 位置来计算虚拟 CB。这保留了真实 CB 与主链之间应有的几何关系。
+
+在解析之前，会通过 `shared.strip_h()` 去除氢原子，并且插入码会被拒绝（引发 `LoadModelScoresError`）。残基计数将根据预期的窗口 `length` 进行验证。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L403-L454)
+
+## 阶段 3：成对模型间距离计算 — `load_modeldist()`
+
+这是计算最密集的阶段。对于每对相邻（和不相邻）的窗口，它计算所有模型对之间的几何兼容性，应用一系列过滤器来确定哪些模型可以在全长 IDP 构象中物理共存。
+
+### 几何过滤器级联
+
+对于来自窗口 $w_1$ 和 $w_2$ 的每对模型，依次应用以下过滤器。模型对必须通过**所有**适用的过滤器才能存储为“允许”：
+
+```mermaid
+flowchart TD
+    A["Model pair (m₁, m₂)"] --> B["1. Midpoint CA distance<br/>mpdist ∈ (min, max)?"]
+    B -->|"Fail"| X["DISALLOWED"]
+    B -->|"Pass"| C{"Adjacent<br/>windows?"}
+    C -->|"No"| D["DISALLOWED<br/>(mpdist only)"]
+    C -->|"Yes"| E["2. i→i+4 CA distance<br/>ifourdist ∈ [5.2, 13.6]?"]
+    E -->|"Fail"| X
+    E -->|"Pass"| F["3. Backbone clash<br/>n_clash ≤ max_clash?"]
+    F -->|"Fail"| X
+    F -->|"Pass"| G["4. Edge overlap<br/>(sticky atoms)"]
+    G -->|"Fail"| X
+    G -->|"Pass"| H["5. Backbone cosine<br/>cos(θ) ≥ 0.1?"]
+    H -->|"Fail"| X
+    H -->|"Pass"| I["ALLOWED"]
+
+    style I fill:#d4edda,stroke:#28a745
+    style X fill:#f8d7da,stroke:#dc3545
+    style D fill:#fff3cd,stroke:#ffc107
+```
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L250-L353)
+
+### 过滤器参数与物理原理
+
+| 参数 | 默认值 | 应用位置 | 原理 |
+|-----------|---------|------------|-----------|
+| `min_isixdist` | 6.5 Å | 相邻中点 CA 距离（下限） | 相邻窗口中残基 i+3 的 CA 原子之间的最小间距 |
+| `max_isixdist` | 18.5 Å | 相邻中点 CA 距离（上限） | 最大间距；对于不相邻对，按窗口间距缩放 |
+| `min_itwelvedist` | 3.8 Å | 不相邻中点 CA 距离（下限） | 间隔 ≥2 个位置的窗口的放宽下限 |
+| `min_ifourdist` | 5.2 Å | i→i+4 CA 距离（下限） | 跨越 4 个残基的 CA–CA 距离的生物学范围 |
+| `max_ifourdist` | 13.6 Å | i→i+4 CA 距离（上限） | 4 残基 CA 跨距的生物学上限 |
+| `bb_threshold` | 3.0 Å | 主链碰撞检测 | 距离小于此值的任意两个原子处于空间碰撞中 |
+| `max_clash` | 0 | 碰撞容忍度 | 允许的碰撞原子对的最大数量 |
+| `sticky_max_all` | 6.0 Å | 边缘重叠——所有原子 | 所有重叠区域的原子对距离必须在此值内 |
+| `sticky_max_any` | 10.0 Å | 边缘重叠——任意原子 | 至少有一对重叠原子距离必须在此值内 |
+| `min_cosine` | 0.1 | 主链方向余弦 | 连接处主链向量间夹角余弦的最小值 |
+| `res_overlap` | 3 | 重叠区域大小 | 相邻窗口之间共享的残基数量 |
+
+<CgxTip>`res_overlap=3` 参数定义了相邻窗口共享残基的重叠区域。`atom_overlap` 计算为 `res_overlap × n_atoms`（3 × 4 = 12 个原子），这决定了在边界处检查多少个原子以确定“粘性”兼容性和碰撞检测。</CgxTip>
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L515-L529), [load_model_scores.py](scripts/load_model_scores.py#L574-L582)
+
+### 距离计算详述
+
+**中点 CA 距离**：对于每个窗口，识别一个“中点”CA 原子。对于长度 >4 的窗口，这是距末端 `res_overlap + 1` 个位置的残基的 CA（使用索引 `n_atoms * (res_overlap + 1) + ca_index`）。对于长度为 4 的窗口，它是距末端第 4 个残基的 CA（索引 `-4`）。两个窗口的所有中点 CA 之间的成对距离通过 `scipy.spatial.distance.cdist` 计算——这是一种向量化的 O(n₁×n₂) 操作。
+
+**i→i+4 CA 距离**：对于相邻窗口，$w_1$ 中重叠起始残基的 CA（索引 `-n_atoms * (res_overlap + 1) + ca_index`）和 $w_2$ 中第 4 个残基的 CA（索引 `n_atoms * res_overlap + ca_index`）必须落在 `[min_ifourdist, max_ifourdist]` 范围内。
+
+**主链碰撞**：计算 $w_1$ 的完整坐标数组与 $w_2$ 的非重叠部分之间所有成对原子距离。任何低于 `bb_threshold` 的对计为一次碰撞；如果 `n_clash > max_clash`，则拒绝该模型对。
+
+**边缘评分（粘性检查）**：将 $w_1$ 的最后 `atom_overlap` 个原子与 $w_2$ 的前 `atom_overlap` 个原子通过 `cdist` 的对角线逐元素比较。如果**任何**距离超过 `sticky_max_any` 或**所有**距离超过 `sticky_max_all`，则拒绝该对。否则，`edgescore = mean(distances²)`。
+
+**余弦**：连接处的主链方向向量由 $w_1$ 的最后三个残基（倒数第三的 N → 最后的 C）和 $w_2$ 的前三个残基（第一个的 N → 第三个的 C）计算得出。这些向量之间夹角的余弦必须超过 `min_cosine`，以确保主链方向大致连续。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L218-L344)
+
+### modeldist 数据库结构
+
+每个窗口都有自己的 SQLite 数据库文件，命名为 `{pdbid}_modeldist{windowid}.db`（例如，`4ah2ac_modeldist2.db`）。在每个数据库中，创建了**一个允许表**（用于紧邻的前一个窗口）和**多个不允许表**（用于所有更早的窗口）：
+
+**允许表**（通过了所有过滤器的相邻窗口对）：
+
+```sql
+CREATE TABLE modeldist{prev}{cur}
+(
+    modela INTEGER NOT NULL,
+    modelb INTEGER NOT NULL,
+    ifourdist REAL NOT NULL,
+    mpdist REAL NOT NULL,
+    cosine REAL NOT NULL,
+    edgescore REAL NOT NULL,
+    PRIMARY KEY (modela, modelb)
+);
+```
+
+**不允许表**（不相邻或被过滤掉的对）：
+
+```sql
+CREATE TABLE modeldist{prev}{cur}
+(
+    modela INTEGER NOT NULL,
+    modelb INTEGER NOT NULL,
+    mpdist REAL NOT NULL,
+    PRIMARY KEY (modela, modelb)
+);
+```
+
+允许表存储[逐步路径搜索](11-stepwise-path-search)路径评分所需的完整几何度量，而不允许表仅存储 `mpdist`——足以将该对标记为不兼容，而不会在未使用的度量上浪费存储空间。为每个表创建了 `modela` 上的索引，以加速连接密集的路径搜索查询。
+
+<CgxTip>将允许/不允许对分离到不同的表中是路径搜索阶段的刻意优化。路径组装仅在允许表上针对相邻窗口进行连接；不允许表仅用于非相邻约束。这种模式拆分避免了在查询时过滤数百万个被拒绝的对。</CgxTip>
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L375-L401), [load_model_scores.py](scripts/load_model_scores.py#L531-L572)
+
+## 类初始化与执行流程
+
+`LoadModelScores` 构造函数链式调用所有三个阶段：
+
+```python
+def __init__(self, working_dir, **kwargs):
+    self.modeldist_sql_data['db_name_fmt'] = os.path.join(working_dir, "{pdbid}_modeldist{windowid}.db")
+    self.load(**kwargs)    # 阶段 1：评分摄取
+    self.choose(**kwargs)  # 阶段 2：模型选择 + 坐标
+```
+
+阶段 3（`load_modeldist`）在所有窗口处理完毕后，于 `choose()` 的末尾被调用。`**kwargs` 模式将所有 CLI 参数（复合数据库路径、PDB ID、链标识符）传播通过这两个阶段，而无需显式列出参数。
+
+### CLI 接口
+
+| 参数 | 标志 | 描述 |
+|----------|------|-------------|
+| `working_dir` | `-d` | modeldist 数据库的根工作目录 |
+| `complexdb` | `-b` | 复合评分数据库的路径（`scores_*.db`） |
+| `complexname` | `-p` | PDB 标识符（例如，`4ah2`） |
+| `receptor_chain` | `-r` | 受体链标识符 |
+| `ligand_chain` | `-l` | 配体链标识符 |
+
+`pdbid` 组合为 `complexname + receptor_chain + ligand_chain`（例如，`4ah2ac`），它作为所有 modeldist 数据库文件名的前缀。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L65-L71), [load_model_scores.py](scripts/load_model_scores.py#L584-L602)
+
+## 数据流总结
+
+下表追溯了从原始评分文件到 modeldist 数据库的完整数据谱系：
+
+| 阶段 | 输入 | 输出 | 记录 |
+|-------|-------|--------|---------|
+| `load()` | 每个片段的 `scores.itscore` + `goap_score.txt` | `scores_*.db` 中的 `allmodel` 表 | 所有已评分的势能（约 6000/片段） |
+| `choose()` | `allmodel` 表 + PDB 势能文件 | `scores_*.db` 中的 `model` 表 | 带有坐标的每个窗口前 4500 个模型 |
+| `load_modeldist()` | `model` 表坐标 | `{pdbid}_modeldist{n}.db` | 允许 + 不允许对表 |
+
+`model` 表充当流水线的**窄腰**：它将每个窗口的数千个原始势能减少为 4500 个具有预计算坐标数组的选定模型，从而使 O(n²) 的成对距离计算变得可行。每个窗口有 4500 个模型和约 30 个片段，单个相邻窗口比较涉及多达 4500 × 4500 = 2025 万次成对检查——但中点距离预过滤器（仅对中点坐标执行 `cdist`）在昂贵的全坐标碰撞和余弦检查之前，就排除了绝大多数检查。
+
+来源: [load_model_scores.py](scripts/load_model_scores.py#L63-L180), [load_model_scores.py](scripts/load_model_scores.py#L182-L373)
+
+## 下游消费
+
+此模块生成的 modeldist 数据库是以下模块的主要输入：
+
+- **[几何截断过滤器](10-geometric-cutoff-filters)**：对允许/不允许对表应用额外的几何约束
+- **[逐步路径搜索](11-stepwise-path-search)**：遍历允许对图以组装全长构象，使用 `edgescore`、`ifourdist` 和 `cosine` 进行路径质量评分
+- **[启发式聚类](12-heuristic-clustering)**：使用模型坐标按结构相似性对组装路径进行聚类
+
+---
+
+- [深入解析/对接与评分/几何截断过滤器](https://zread.ai/kiharalab/idp_lzerd/10-geometric-cutoff-filters)
+
+---
+slug:10-geometric-cutoff-filters
+blog_type:normal
+---
+
+
+几何截断过滤系统是 IDP-LZerD 对接流程中的关键质量门控，它决定了跨相邻序列窗口的对接模型对中，哪些能够被有效组装为连续的内在无序蛋白构象。该系统在 `LoadModelScores.load_modeldist()` 中实现，这些过滤器针对窗口间的每对模型组合评估五个独立的几何标准，存储通过所有检查的**允许**对及其计算出的几何分数，以及未通过任何检查的**禁止**对及其仅有的中点距离。这种二分划分直接决定了 [逐步路径搜索](11-stepwise-path-search) 中下游路径组装的可行搜索空间。
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L147-L398)
+
+## 过滤流水线架构
+
+来自相邻窗口的每对模型必须通过一系列级联的几何测试。这些过滤器以严格的短路顺序进行评估——如果任何较早的过滤器拒绝了该模型对，则所有后续（计算成本更高）的检查都会被跳过。这种排序是经过深思熟虑的：中点距离过滤器的计算成本最低（一次同时针对所有模型对的预计算 cdist 调用），而余弦和边缘分数过滤器则需要逐对进行向量算术运算。
+
+```mermaid
+flowchart TD
+    A["模型对 (w₁, w₂)"] --> B{"中点距离\nmp_min < mpdist < mp_max"}
+    B -->|失败| X["禁止<br/>(DISALLOWED)"]
+    B -->|通过| C{"相邻窗口?"}
+    C -->|否，非相邻| D{"mpdist ≤ max_isixdist?"}
+    D -->|是| E{"主链碰撞\nnclash ≤ max_clash"}
+    D -->|否| F["允许<br/>(ALLOWED)<br/>(无需碰撞检查)"]
+    E -->|失败| X
+    E -->|通过| F
+    C -->|是，相邻| G{"i→i+4 CA 距离\nmin < ifourdist < max"}
+    G -->|失败| X
+    G -->|通过| H{"主链碰撞\nnclash ≤ max_clash"}
+    H -->|失败| X
+    H -->|通过| I{"粘性边缘\nmax_any & max_all"}
+    I -->|失败| X
+    I -->|通过| J{"余弦角度\ncos θ ≥ min_cosine"}
+    J -->|失败| X
+    J -->|通过| K["允许<br/>(ALLOWED)<br/>(ifourdist, mpdist,<br/>cosine, edgescore)"]
+    F --> L["允许<br/>(ALLOWED)<br/>(仅 mpdist)"]
+```
+
+相邻窗口对与非相邻窗口对之间的区别在架构上具有重要意义：相邻窗口共享一个 3 残基的重叠区域，并需要通过全部五个过滤器；而非相邻窗口仅需进行中点距离检查及条件性的碰撞检查。未通过中点测试的非相邻模型对会被记录为禁止对，以约束路径搜索空间。
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L227-L369)
+
+## 五个几何过滤器
+
+### 1. 中点距离过滤器
+
+主要的几何约束。对于每个窗口，提取一个**中点坐标**——即位于 `res_overlap + 1` 位置残基的 Cα 原子（即从窗口 N 端算起的第 4 个残基）。对于 `res_overlap=3` 的 9 残基窗口，这是第 4 个残基的 Cα。对于 4 残基窗口，它是第 4 个（最后一个）残基的 Cα，在坐标数组末尾的索引位置为 `−4`。
+
+两个窗口的所有模型之间的成对中点距离，通过 `scipy.spatial.distance.cdist` 在单次向量化调用中计算，然后进行阈值判断：
+
+| 参数 | 默认值 | 缩放规则 |
+|---|---|---|
+| `min_isixdist` | 6.5 Å | 间隔 = 1（相邻）时的下界 |
+| `max_isixdist` | 18.5 Å | 每单位间隔的上界；线性缩放 |
+| `min_itwelvedist` | 3.8 Å | 间隔 ≥ 2（非相邻）时的下界 |
+
+边界会根据窗口间隔自适应调整：对于相邻窗口（间隔=1），`mp_min = min_isixdist`；对于非相邻窗口（间隔≥2），`mp_min = min_itwelvedist`。上界始终按线性缩放：`mp_max = separation × max_isixdist`。这反映了生物学上的预期，即 Cα 距离沿着无序链随序列间隔成比例增长。
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L231-L269)
+
+### 2. i→i+4 CA 距离过滤器
+
+**仅适用于相邻窗口**。该过滤器检查残基 *i*（靠近窗口 *w₁* 的 C 端）的 Cα 与残基 *i+4*（靠近窗口 *w₂* 的 N 端）的 Cα 之间的距离。具体的原子索引计算如下：
+
+- **i_idx** = `−n_atoms × (res_overlap + 1) + ca_index` —— 从 w₁ 坐标数组的末尾向后倒推 4 个残基，然后选择 Cα 原子
+- **i4_idx** = `n_atoms × res_overlap + ca_index` —— 从 w₂ 坐标数组的开头向前推 3 个残基，然后选择 Cα 原子
+
+其中 `n_atoms = 4` (N, CA, C, CB)，`ca_index = 1`（CA 是第二个存储的原子）。当 `res_overlap=3` 时，解析为 `i_idx = −16 + 1 = −15` 和 `i4_idx = 12 + 1 = 13`。
+
+| 参数 | 默认值 | 依据 |
+|---|---|---|
+| `min_ifourdist` | 5.2 Å | i→i+4 间距的最小 Cα–Cα 距离 |
+| `max_ifourdist` | 13.6 Å | i→i+4 间距的最大 Cα–Cα 距离 |
+
+这些边界强制执行符合物理现实的局部链几何结构。在无序蛋白质中，相隔 4 个残基的典型 Cα–Cα 距离范围约为 5–14 Å。
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L281-L293)
+
+### 3. 主链碰撞过滤器
+
+防止重叠模型的主链原子之间发生空间碰撞。当两个模型之间的中点距离在 `max_isixdist`（默认为 18.5 Å）以内时，会触发此过滤器，表明模型足够接近，原子可能发生重叠。
+
+对于**相邻窗口**，重叠区域（3 个残基 × 4 个原子 = 12 个原子）位于 w₂ 的起始处，通过 `w2_nooverlap = w2_coords[atom_overlap:]` 将其从碰撞检查中排除，因为根据构造，这些原子预计会靠近 w₁ 的 C 端原子。对于**非相邻窗口**，则检查 w₂ 的所有原子。
+
+成对原子距离通过 `scipy.spatial.distance.cdist` 计算，任何距离在 `bb_threshold`（3.0 Å）以内的原子对均被计为碰撞。如果总碰撞数超过 `max_clash`（0），则拒绝该模型对。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `bb_threshold` | 3.0 Å | 视为碰撞的原子间距离阈值 |
+| `max_clash` | 0 | 允许的碰撞原子对最大数量 |
+| `res_overlap` | 3 | 重叠残基数（决定原子重叠数 = res_overlap × n_atoms） |
+
+零容忍的 `max_clash=0` 默认值意味着**任何单个主链原子碰撞**都会使该模型对失去资格，使其成为流水线中最严格的过滤器。
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L295-L307)
+
+### 4. 粘性边缘过滤器
+
+**仅适用于相邻窗口**。该过滤器验证重叠区域本身的几何连续性——即连续窗口之间共享的 3 残基片段。它将 w₁ 的最后 `atom_overlap`（12）个原子与 w₂ 的前 `atom_overlap`（12）个原子进行比较，如果模型在几何上兼容，这些原子应近乎相同。
+
+使用对应原子之间的对角成对距离，应用两个独立的拒绝标准：
+
+| 参数 | 默认值 | 拒绝条件 |
+|---|---|---|
+| `sticky_max_any` | 10.0 Å | 如果**任何**单个原子对距离超过此值 → 拒绝 |
+| `sticky_max_all` | 6.0 Å | 如果**所有**原子对距离均超过此值 → 拒绝 |
+
+`sticky_max_any` 标准用于捕捉灾难性的错位（一个原子严重偏移），而 `sticky_max_all` 标准用于捕捉系统性漂移（所有重叠原子均匀偏移）。如果两项检查均通过，则将所有重叠原子对的均方距离存储为 `edgescore`——这是一个稍后在路径排序中使用的连续质量度量。
+
+<CgxTip>`edgescore` 是平方距离的均值（`np.mean(np.square(distances))`），而不是 RMSD。这比 RMSD 更严厉地惩罚较大的偏差，此设计专为 [路径选择与排序](14-path-selection-and-ranking) 中的路径排序而设。</CgxTip>
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L309-L319)
+
+### 5. 余弦角度过滤器
+
+**仅适用于相邻窗口**。该过滤器确保两个窗口交界处的主链方向在几何上是连续的，而不是弯折或反转的。它计算两个主链向量之间夹角的余弦值：
+
+- **w₁ 向量**：从倒数第三个残基的 N 原子（`w1_coords[−12]`）指向最后一个残基的 C 原子（`w1_coords[−2]`）
+- **w₂ 向量**：从第一个残基的 N 原子（`w2_coords[1]`）指向第三个残基的 C 原子（`w2_coords[11]`）
+
+余弦值计算公式为 `cos(θ) = (a·b) / (|a| × |b|)`。当 `min_cosine = 0.1` 时，该过滤器会拒绝任何主链向量夹角大于 ~84°（arccos(0.1) ≈ 84.3°）的模型对，从而有效防止窗口交界处出现急剧的主链反转。
+
+| 参数 | 默认值 | 几何含义 |
+|---|---|---|
+| `min_cosine` | 0.1 | 最小余弦值；角度必须 < ~84° |
+
+余弦值为 1.0 表示向量完全共线（0° 夹角），0.0 表示垂直（90°），−1.0 表示反平行（180° 反转）。0.1 的宽松阈值允许相当大的角度变化，同时阻断病态的弯折。
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L321-L343)
+
+## 默认参数参考
+
+所有几何过滤器参数均定义在 `LoadModelScores` 的 `_p` 类属性中。`params` 属性根据这些默认值派生出额外的计算值：
+
+| 参数 | 默认值 | 计算值 | 使用者 |
+|---|---|---|---|
+| `backbone_atoms` | `['N', 'CA', 'C']` | — | 坐标提取 |
+| `cb` | `'CB'` | — | GLY 的虚拟 CB 生成 |
+| `stored_atoms` | — | `backbone_atoms + [cb]` = `['N','CA','C','CB']` | 坐标数组布局 |
+| `n_atoms` | — | `len(stored_atoms)` = 4 | 索引算术 |
+| `ca_index` | — | `stored_atoms.index('CA')` = 1 | 中点/CA 提取 |
+| `atom_overlap` | — | `res_overlap × n_atoms` = 12 | 碰撞/粘性边缘过滤器 |
+| `res_overlap` | 3 | — | 窗口重叠定义 |
+| `bb_threshold` | 3.0 Å | — | 主链碰撞过滤器 |
+| `max_clash` | 0 | — | 主链碰撞过滤器 |
+| `sticky_max_all` | 6.0 Å | — | 粘性边缘过滤器 |
+| `sticky_max_any` | 10.0 Å | — | 粘性边缘过滤器 |
+| `min_cosine` | 0.1 | — | 余弦角度过滤器 |
+| `min_ifourdist` | 5.2 Å | — | i→i+4 CA 距离过滤器 |
+| `max_ifourdist` | 13.6 Å | — | i→i+4 CA 距离过滤器 |
+| `min_isixdist` | 6.5 Å | — | 中点距离（相邻） |
+| `max_isixdist` | 18.5 Å | — | 中点距离（缩放因子） |
+| `min_itwelvedist` | 3.8 Å | — | 中点距离（非相邻） |
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L480-L496), [load_model_scores.py](/scripts/load_model_scores.py#L545-L560)
+
+## 输出：模型距离数据库
+
+过滤结果持久化在以 `{pdbid}_modeldist{windowid}.db` 命名的按窗口划分的 SQLite 数据库中。每个数据库针对每个前序窗口包含两种类型的表：
+
+**允许对**（表 `modeldist{prev}{cur}`）——对于相邻窗口，通过所有几何检查的模型；对于非相邻窗口，通过中点 + 碰撞检查的模型：
+
+| 列 | 类型 | 描述 |
+|---|---|---|
+| `modela` | INTEGER | 较早窗口的 modelid |
+| `modelb` | INTEGER | 较晚窗口的 modelid |
+| `ifourdist` | REAL | i→i+4 Cα 距离（仅限相邻） |
+| `mpdist` | REAL | 中点 Cα 距离 |
+| `cosine` | REAL | 主链向量余弦（仅限相邻） |
+| `edgescore` | REAL | 重叠距离均方值（仅限相邻） |
+
+**禁止对**——未通过任何几何检查的模型：
+
+| 列 | 类型 | 描述 |
+|---|---|---|
+| `modela` | INTEGER | 较早窗口的 modelid |
+| `modelb` | INTEGER | 较晚窗口的 modelid |
+| `mpdist` | REAL | 中点 Cα 距离（用于诊断目的） |
+
+为每个表创建了基于 `modela` 的索引，以加速路径组装期间执行的连接查询。表结构由 `modeldist_sql()` 根据 `modeldist_sql_data` 类属性动态生成。
+
+<CgxTip>禁止对仅针对**非相邻**窗口存储。对于相邻窗口，未通过任何过滤器的模型对会被直接省略——它们不会出现在任何表中。这种不对称性意味着，对于相邻窗口，允许表中缺少某对记录即足以将其标记为禁止对；而对于非相邻窗口，禁止表提供了用于约束路径搜索的显式记录。</CgxTip>
+
+来源：[load_model_scores.py](/scripts/load_model_scores.py#L498-L540), [load_model_scores.py](/scripts/load_model_scores.py#L367-L397)
+
+## 流水线集成
+
+几何截断过滤器在 `LoadModelScores.choose()` 方法中执行，该方法首先基于 `itscore` 和 `dfire`（即 `di` 分数）的综合 Z 分数，为每个窗口选择排名前 4,500 的模型，提取其主链 + Cβ 坐标到 JSON 序列化数组中，然后调用 `load_modeldist()` 计算所有成对的几何关系。生成的模型距离数据库由 [逐步路径搜索](11-stepwise-path-search) 中的 `FindPathsStepwise.make_paths()` 消费，该方法使用允许对表构建有效的多窗口路径，并使用禁止对表修剪搜索空间。存储在允许对记录中的 `edgescore` 和 `cosine` 值通过路径组装，传递至 [路径选择与排序](14-path-selection-and-ranking) 使用的复合路径分数中。
+
+```mermaid
+flowchart LR
+    A["每个窗口排名前 4,500<br/>的模型 (按 di 排序)"] --> B["坐标<br/>提取"]
+    B --> C["几何截断<br/>过滤器"]
+    C --> D["modeldist<br/>数据库"]
+    D --> E["逐步路径<br/>搜索"]
+    E --> F["路径选择<br/>& 排序"]
+    C -.->|edgescore,<br/>cosine| F
+```
+
+---
+
+## 路径组装与排序
+
+- [深入解析/路径组装与排序/逐步路径搜索](https://zread.ai/kiharalab/idp_lzerd/11-stepwise-path-search)
+
+---
+slug:11-stepwise-path-search
+blog_type:normal
+---
+
+
+**逐步路径搜索**是 IDP-LZerD 路径组装流程的组合核心。它通过在连续残基窗口间逐步链接局部对接模型来构建候选的内在无序蛋白 (IDP) 构象——从双窗口的基准情况一直扩展到完整的目标窗口数。在每个归纳步骤中，已有的部分路径会向外扩展一个窗口，然后进行评分、基于聚类中心点进行过滤，并持久化到 SQLite 中。该算法通过基于中心点的剪枝、防碰撞约束以及批量事务写入，在穷举探索与计算可行性之间取得了平衡。
+
+## 架构概述
+
+逐步搜索由 `FindPathsStepwise` 类编排，该类迭代地为窗口数 *n* = 2, 3, …, *N* 构建路径。每次迭代遵循三阶段循环：**路径构建** → **聚类** → **聚类大小标注**。构造函数会循环遍历所有窗口大小，检查先前已计算的结果（支持中断后恢复），并对每个阶段进行计时以用于性能分析。
+
+```mermaid
+flowchart TB
+    subgraph Init["FindPathsStepwise.__init__"]
+        direction TB
+        L["Loop n = 2 … N"] --> CP{"count_paths()<br/>Paths exist?"}
+        CP -- No --> MP["make_paths(n)"]
+        CP -- Yes --> Skip["Skip path construction"]
+        MP --> CC{"Clusters exist?"}
+        Skip --> CC
+        CC -- No --> Cluster["ClusterPdb(n)"]
+        CC -- Yes --> SkipC["Skip clustering"]
+        Cluster --> US["Update cluster sizes<br/>(medoid rows only)"]
+        SkipC --> US
+        US --> L
+    end
+
+    subgraph MP_Detail["make_paths(n) — Path Extension"]
+        direction TB
+        A["Load previous paths<br/>(paths{n-1} or modeldist01)"] --> B["Load model scores<br/>(di from scores DB)"]
+        B --> C["Backup modeldist DB<br/>into SQLite in-memory"]
+        C --> D["gen_paths() generator"]
+        D --> E["Batch insert<br/>(default 10,000 per txn)"]
+    end
+
+    Init -.->|"delegates"| MP_Detail
+```
+
+`__init__` 构造函数接受 `complexid`（例如 `1ppeEI`）、`nwindows`（总窗口数）、`batchsize`（插入批量大小）和 `directory`（数据库位置）作为参数。它驱动整个迭代流程，并报告每个阶段（路径构建、聚类和聚类大小更新）的耗时占比——即占总运行时间的比例。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L50-L134)
+
+## 路径数据模型
+
+每条路径代表 IDP 在所有窗口上的一个候选构象。长度为 *n* 的路径作为一行存储在 `paths{n}` 表中，其结构如下：
+
+| 列名 | 类型 | 描述 |
+|--------|------|-------------|
+| `pathsid` | `INTEGER PK` | 自动生成的路径标识符 |
+| `window0` … `window{n-1}` | `INTEGER` | 为每个窗口选择的模型 ID |
+| `edgescores` | `REAL` | 所有相邻窗口对的平均成对接口分数 |
+| `nodescore` | `REAL` | 所有窗口的平均单体模型分数 (`di`) |
+| `timestamp` | `DATE` | 自动填充的插入时间戳 |
+
+**输出数据库**遵循命名模式 `path_{complexid}_all.db`，输出表命名为 `paths{nwindows}`。两者均派生自类级别的格式字符串 `out_db_fmt` 和 `out_tablename_fmt`。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L54-L60), [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L176-L183)
+
+## 归纳式路径构建
+
+`make_paths` 方法实现了核心的归纳算法。它根据当前窗口数区分三种情况：
+
+### 基准情况：nwindows = 2
+
+双窗口情况是归纳的基础。它直接从输入数据库 `{complexid}_modeldist1.db` 的 `modeldist01` 表中读取数据。`modeldist01` 中的每一行代表一对兼容的对接模型（每个窗口一个），这些模型在[模型分数加载](9-model-score-loading)阶段已经过几何阈值过滤。查询选取 `modela AS window0, modelb AS window1, edgescore`，每一对都成为一条路径，其 `edgescores = edgescore`，`nodescore = mean(di_window0, di_window1)`。
+
+### 基准情况：nwindows = 3
+
+三窗口情况同样以 `modeldist01` 作为起始点进行读取（与 nwindows=2 的查询相同），但随后通过查询下一个 `modeldist` 表来扩展每条双窗口路径。存在此单独分支的原因是，其起始数据源仍然是原始的成对表，而非先前计算出的路径表。
+
+### 归纳步骤：nwindows > 3
+
+对于大于 3 的窗口数，算法从输出数据库的 `paths{n-1}` 中读取**已有路径**——但关键是，仅读取那些**聚类中心点**的路径（通过 `JOIN clusters{n-1} USING (pathsid) WHERE is_medoid=1` 实现）。这是主要的剪枝机制：每个聚类中只有代表性路径能够存活到下一轮，从而呈指数级缩减搜索空间。
+
+```mermaid
+flowchart LR
+    subgraph Step_n["Step n-1 → n"]
+        P["paths{n-1}"] --> F["Filter: is_medoid = 1"]
+        F --> E["Extend each path<br/>by window n-1"]
+        M["modeldist{n-2}{n-1}"] --> E
+        S["scores DB<br/>(model di)"] --> E
+        E --> O["paths{n}"]
+    end
+```
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L159-L243)
+
+## 路径扩展与防碰撞约束
+
+`gen_paths` 内部生成器函数是 `make_paths` 的计算核心。对于每条先前路径，它会：
+
+1. 从先前的路径元组中**提取窗口模型 ID**（截去分数部分）。
+2. 针对内存中的 `modeldist` 数据库**构建子查询**，以寻找下一个窗口的兼容模型。
+3. **应用防碰撞约束**：`NOT IN` 子查询确保新窗口的候选模型未被同一路径的任何先前窗口使用过。
+
+子查询模板是动态构建的：
+
+```sql
+SELECT modelb AS window{n-1}, edgescore
+FROM modeldist{n-2}{n-1}
+WHERE modela = {path[n-2]}
+  AND window{n-1} NOT IN (
+    SELECT modelb FROM modeldist{0}{n-1} WHERE modela = {path[0]}
+  )
+  AND window{n-1} NOT IN (
+    SELECT modelb FROM modeldist{1}{n-1} WHERE modela = {path[1]}
+  )
+  ...for each prior window
+```
+
+每个 `NOT IN` 子查询都会阻止候选模型与已分配给较早窗口位置的模型发生冲突。这保证了任何路径中都不会多次出现同一个模型 ID。
+
+<CgxTip>防碰撞 `NOT IN` 子查询是通过编程方式为所有先前窗口（`range(prev_window)`）生成的，因此该约束会随路径长度而缩放。对于长路径，这会产生多子句 SQL——请确保内存数据库具有充足的查询计划缓存。</CgxTip>
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L234-L243), [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L269-L301)
+
+## 分数累积
+
+随着路径的增长，会维护两个累积分数：
+
+**边缘分数 (`edgescores`)**：所有相邻窗口对的平均成对接口分数。当路径从 *n-1* 个窗口扩展到 *n* 个窗口时，先前的平均值会反归一化为总和（`prev_edgescore * n_prev_edges`），加上新的边缘分数后，再在新的边缘数 *n_edges* 上重新取平均。这避免了存储连续总和，并确保无论路径多长，存储的值始终是平均值。
+
+**节点分数 (`nodescore`)**：所有窗口的平均单体模型分数 (`di`)。`di` 值在 `make_paths` 开始时从 `scores_{complexid}.db` 数据库中获取，并缓存在以 `modelid` 为键的字典中。随着每个新窗口模型被追加到路径中，其 `di` 值被添加到运行列表里并重新计算平均值。
+
+| 分数 | 步骤 *n* 的公式 | 数据来源 |
+|-------|---------------------|-------------|
+| `edgescores` | `(prev_edgescores × (n-2) + new_edgescore) / (n-1)` | `modeldist` 表 |
+| `nodescore` | `mean(di_0, di_1, …, di_{n-1})` | `scores_{complexid}.db` → `model.di` |
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L250-L254), [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L279-L301)
+
+## 内存数据库优化
+
+在第 257–265 行出现了一项重要的性能优化：当前窗口对的 `modeldist` 数据库通过 APSW 的备份 API 被完整加载到一个 **SQLite 内存数据库** 中。这意味着路径扩展期间的所有子查询都是针对驻留在 RAM 中的数据执行的，而非访问磁盘，这对于 `gen_paths` 生成器可能会发起数千次参数化查询的情况至关重要。
+
+```python
+in_db_disk = apsw.Connection(in_db_file, flags=apsw.SQLITE_OPEN_READONLY)
+memcon = apsw.Connection(":memory:")
+with memcon.backup("main", in_db_disk, "main") as backup:
+    backup.step()
+in_db_disk.close()
+in_db = memcon.cursor()
+```
+
+磁盘连接在备份完成后立即关闭。内存连接 (`memcon`) 用于 `gen_paths` 内的所有后续查询，并在所有路径插入完毕后于清理代码块中关闭。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L257-L265), [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L323-L325)
+
+## 批量事务写入
+
+路径通过由 `batchsize` 参数（默认值：10,000）控制的**批量**方式插入到输出数据库中。`gen_paths` 生成器通过 `itertools.izip_longest(*[iter(path_gen)] * batchsize)` 按块消费，每个块都包装在一个嵌套的 SQLite 事务中。这在写入性能（更少的提交点）、内存使用（受批量大小限制）和崩溃恢复（部分进度在批量边界处提交）之间取得了平衡。
+
+外部事务包裹了整个 `make_paths` 调用，而内部事务则提交每个批次。插入 SQL 通过 `shared.create_insert_statement` 生成，产生诸如 `INSERT INTO paths3 (window0, window1, window2, edgescores, nodescore) VALUES (:window0, :window1, :window2, :edgescores, :nodescore)` 的参数化查询。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L303-L322)
+
+## 聚类集成与聚类大小更新
+
+在每次调用 `make_paths` 之后，构造函数会调用 `ClusterPdb(complexid, nwindows, directory)` 对新生成的路径执行[启发式聚类](12-heuristic-clustering)。聚类完成后，构造函数会通过以下步骤更新 `clusters{n}` 表中的 `clustersize` 列：
+
+1. 从聚类表中读取所有行（`pathsid`、`cid`、`is_medoid`）。
+2. 通过 `groupby('cid').size()` 计算聚类大小。
+3. 将大小合并回 DataFrame。
+4. 过滤为**仅中心点行**（`is_medoid == 1`）。
+5. 执行参数化的 `UPDATE` 语句，为每个中心点写入 `clustersize`。
+
+只有中心点行会接收 `clustersize` 更新，因为中心点是在下一个归纳步骤中存活的唯一代表（通过 `make_paths` 中的 `WHERE is_medoid=1` 过滤器）。非中心点路径通过其 `cid` 关联隐式继承其聚类的大小。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L97-L122)
+
+## 恢复与幂等性
+
+`count_paths` 类方法通过查询输出数据库中的 `paths{n}` 和 `clusters{n}` 表来检查给定窗口级别是否已被计算。如果任一表包含行，则跳过相应的阶段。这实现了**中断后恢复**——如果进程在窗口 *n* 期间崩溃，窗口 2 到 *n-1* 的所有已完成工作都将保留，并且不会被重新计算。
+
+该检查使用 `apsw.SQLError` 异常处理来优雅地应对表尚不存在的情况（首次运行）。会首先短暂打开一个写连接以解析任何 SQLite 日志文件，然后再执行只读的计数查询。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L136-L157)
+
+## 数据库文件约定
+
+逐步路径搜索与三类 SQLite 数据库进行交互：
+
+| 数据库 | 命名模式 | 角色 | 方向 |
+|----------|---------------|------|-----------|
+| 模型距离 DB | `{complexid}_modeldist{cur_window}.db` | 相邻窗口间的成对接对模型，已通过几何阈值预过滤 | 输入 |
+| 分数 DB | `scores_{complexid}.db` | 单体模型分数（来自 `model JOIN allmodel` 的 `di` 列） | 输入 |
+| 路径 DB | `path_{complexid}_all.db` | 所有窗口级别的已构建路径（`paths{n}`）和聚类分配（`clusters{n}`） | 输出 |
+
+输入表名遵循 `modeldist{prev_window}{cur_window}` 格式（例如 `modeldist01`、`modeldist12`）。模型距离数据库由[模型分数加载](9-model-score-loading)生成，分数数据库由[数据库创建与结构](8-database-creation-and-schema)创建。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L54-L56), [find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L71-L73)
+
+## 命令行界面
+
+该脚本可直接调用或通过 `commandline` 类方法调用：
+
+```
+python find_paths_stepwise.py <complexid> -n <nwindows> [-d DIR] [-b BATCHSIZE] [-v]
+```
+
+| 参数 | 必需 | 默认值 | 描述 |
+|----------|----------|---------|-------------|
+| `complexid` | 是 | — | 带有链后缀的 PDB 标识符（例如 `1ppeEI`） |
+| `-n` / `--nwindows` | 是 | — | 要计算的总窗口数 |
+| `-d` / `--directory` | 否 | 脚本目录 | 数据库文件的路径 |
+| `-b` / `--batchsize` | 否 | 10000 | 每次插入批次的路径数 |
+| `-v` / `--verbose` | 否 | `INFO` | 启用 `DEBUG` 级别日志 |
+
+完成后，脚本会记录生成的路径总数和跳过的路径数。
+
+来源：[find_paths_stepwise.py](/scripts/find_paths_stepwise.py#L330-L361)
+
+## 流程位置与数据流
+
+逐步路径搜索位于 IDP-LZerD 流程的中心，它消费经过预过滤的成对接结果，并生成分数化、聚类的路径，以供下游的排序和优化使用：
+
+```mermaid
+flowchart LR
+    A["Database Creation<br/>& Schema"] --> B["Model Score Loading<br/>& Geometric Filters"]
+    B --> C["Stepwise Path Search"]
+    C --> D["Heuristic Clustering"]
+    D --> E["Occupancy Score"]
+    E --> F["Path Selection<br/>& Ranking"]
+    F --> G["CHARMM Relaxation"]
+    
+    style C fill:#4a90d9,stroke:#2c5f8a,color:#fff
+```
+
+逐步搜索依赖于[模型分数加载](9-model-score-loading)提供的 `modeldist` 数据库和 `scores` 数据库。其输出（路径表和聚类表）会被[占据分数计算](13-occupancy-score-computation)和[路径选择与排序](14-path-selection-and-ranking)所消费。它内部触发的聚类步骤在[启发式聚类](12-heuristic-clustering)中单独记录。
+
+<CgxTip>归纳步骤中基于中心点的剪枝意味着窗口 *n* 处的路径质量严重依赖于 *n-1* 处的聚类质量。较差的聚类（聚类过少、阈值错误）可能会提前剔除好的路径。请通过 DEBUG 日志输出监控每一级别的聚类计数，以确保具有充足的代表性。</CgxTip>
+
+---
+
+- [深入解析/路径组装与排序/启发式聚类](https://zread.ai/kiharalab/idp_lzerd/12-heuristic-clustering)
+
+---
+slug:12-heuristic-clustering
+blog_type:normal
+---
+
+
+启发式聚类模块（`cluster_heuristic.py`）将[逐步路径搜索](11-stepwise-path-search)产生的候选路径的组合爆炸问题，简化为易于处理且结构多样的代表集合。该模块并未对可能多达数百万的路径执行全对比较，而是采用**两阶段策略**：先通过外部的 `LB3Dclust` 二进制文件对随机采样的子集进行精确聚类，随后利用向量化配体-RMSD（LRMSD）将其余路径分配至最近的聚类中心。结果持久化于路径数据库的 `clusters{nwindows}` 表中，使下游的[占据度分数计算](13-occupancy-score-computation)与[路径选择和排序](14-path-selection-and-ranking)能够基于聚类中心点而非原始路径进行运算。
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L1-L448)
+
+## 架构概述
+
+本模块围绕两个协同工作的类构建，其职责清晰分离：**`ClusterPdb`** 负责编排整体聚类流程（数据库 I/O、外部进程调用、样本划分），而 **`ClusterLRMSD`** 则提供基于聚类中心进行向量化距离计算的纯数值引擎。这种分离确保了计算密集型的 LRMSD 运算能够得益于 NumPy 的向量化操作，而不会与 I/O 或进程管理逻辑交织在一起。
+
+```mermaid
+flowchart TB
+    subgraph ClusterPdb["ClusterPdb (编排器)"]
+        direction TB
+        A["__init__: 加载数据库文件<br/>检查完成状态"] --> B["partial_cluster:<br/>两阶段启发式"]
+        B --> C["阶段 1: 采样 +<br/>cluster_models"]
+        B --> D["阶段 2: 最近中心<br/>分配 via ClusterLRMSD"]
+        C --> E["cluster_models:<br/>写入临时 PDB →<br/>调用 LB3Dclust"]
+        E --> F["parse_cluster_out:<br/>解析 stdout"]
+    end
+
+    subgraph ClusterLRMSD["ClusterLRMSD (距离引擎)"]
+        direction TB
+        G["__init__: 预计算<br/>coord_matrix + factor"]
+        G --> H["find_min: 向量化<br/>‖M - v‖ × factor"]
+        G --> I["add_center: 动态<br/>vstack 到矩阵"]
+    end
+
+    F -->|中心点坐标| D
+    D -->|每条未分配路径| H
+    D -->|新中心| I
+    H -->|分配决策| D
+```
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L41-L89), [cluster_heuristic.py](scripts/cluster_heuristic.py#L96-L200)
+
+## 类：ClusterLRMSD — 向量化距离引擎
+
+`ClusterLRMSD` 封装了第二阶段分配的数学核心。它为所有聚类中心预分配坐标矩阵，并通过 NumPy 的向量化 `linalg.norm` 同时计算目标结构与每个中心之间的配体 RMSD，从而彻底避免了对聚类中心进行 Python 级别的迭代。
+
+**构造函数参数与内部状态：**
+
+| 参数 | 类型 | 描述 |
+|-----------|------|-------------|
+| `center_coords` | `list of 2-tuples` | 每个元组为 `(pathsid, coords_dict)`，其中 `coords_dict` 将残基索引映射至 3D 坐标 |
+| `n_res` | `int` | 配体中的残基数量；用于预计算 RMSD 归一化因子 |
+| `ligand` | `str` | 配体的链标识符（默认为 `'B'`） |
+
+**核心内部实现：**
+
+- **`self.factor = n_res ** -0.5`** — RMSD 归一化常数，仅预计算一次。由于 RMSD = √(Σd²/N) = ‖Δ‖ × N^(-0.5)，每个中心的距离计算便简化为单次向量化范数乘以此标量。
+- **`self.coord_matrix`** — 一个 `(n_centers, n_res × 3)` 的 float32 NumPy 矩阵。每行是某个聚类中心配体经展平后的 3D 坐标，提取方式为以步长 4 遍历坐标字典（仅从 `{residue: [x,y,z,bfactor]}` 结构中选择 CA 原子）。此步长 4 的提取方式对应于 Rosetta 片段坐标布局，其中每个残基存储 `[x, y, z, bfactor]`。
+- **`self.center_ids`** — 一个平行列表，将每个行索引映射回其 `pathsid`，以便在执行 argmin 操作后识别最近的中心。
+
+**`find_min(coords)`** 方法采用相同的步长 4 提取方式展平目标坐标，随后在单次向量化调用中计算 `np.linalg.norm(self.coord_matrix - fixed_coord, axis=1) * self.factor`，返回最近中心的 `pathsid` 和 LRMSD 以及展平后的目标坐标。**`add_center(pathsid, coords)`** 方法通过 `np.vstack` 动态扩展坐标矩阵，使得在分配阶段能够创建新的聚类中心，而无需重新初始化对象。
+
+<CgxTip>步长 4 的坐标提取（`coords[y+1] for y in range(0, len(coords)-1, 4)`）会跳过每四个元素（即 B 因子），仅从每个残基的 `[x, y, z, bfactor]` 元组中选取 x、y、z。此模式必须与分数数据库中的坐标序列化格式相匹配，否则 LRMSD 值将不正确。</CgxTip>
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L41-L89)
+
+## 类：ClusterPdb — 流程编排器
+
+`ClusterPdb` 管理完整的聚类生命周期：数据库校验、样本划分、外部聚类调用、第二阶段分配及结果持久化。它由 `FindPathsStepwise` 在每个窗口步骤（n=2, 3, …, N）中调用，这意味着聚类是在路径组装过程中增量执行的。
+
+### 初始化与幂等性
+
+构造函数接受 `complexid`、`nwindows`、`directory` 和 `limit` 参数。它会校验两个必需的数据库文件是否存在——`path_{complexid}_all.db`（包含来自逐步路径搜索的 `paths{nwindows}` 表）和 `scores_{complexid}.db`（包含模型坐标）——若任一文件缺失则抛出 `ClusterPdbError`。在执行计算前，它会检查 `clusters{nwindows}` 表中是否已包含所有路径的对应行（即 `cluster_count == path_count`）。若聚类已完成，则整体跳过；若部分完成（存在部分行而非全部），则抛出错误退出，以防出现不一致状态。
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L150-L202)
+
+### 两阶段启发式算法：`partial_cluster`
+
+`partial_cluster` 方法实现了本模块的核心算法贡献。其命名反映了设计思路：先对*部分*（采样）路径集合进行精确聚类，然后启发式地分配其余路径。
+
+**阶段 1 — 自适应采样与精确聚类：**
+
+采样大小 *k* 由平衡精度与计算成本的自适应启发式算法确定：
+
+| 条件 | 采样大小 *k* | 依据 |
+|-----------|-----------------|-----------|
+| n/2 ≤ 10,000 | n/2 | 小数据集：使用一半以提供足够的中心覆盖 |
+| 10% of n > 10,000 | 10,000 | 超大数据集：设上限以限制 LB3Dclust 运行时间 |
+| 其他 | 10% of n | 中等数据集：10% 即可提供充分的代表性 |
+
+其中 *n* 为路径总数。通过 `np.random.choice(n, k, replace=False)` 均匀随机选取 *k* 条路径，然后从分数数据库中通过串联路径中每个模型的 JSON 反序列化坐标来组装其 3D 坐标。`cluster_models` 方法将这些坐标写为临时 PDB 文件（每个残基一个 CA 原子），并使用聚类截断值和 0.1 Å 的 RMSD 容差调用 `LB3Dclust`，最后解析结构化的标准输出，以生成带有中心点标志的聚类分配结果。
+
+**阶段 2 — 最近中心分配：**
+
+阶段 1 完成后，使用所有中心点结构的坐标初始化一个 `ClusterLRMSD` 实例。对于剩余的 (n − k) 条路径，算法逐一执行：
+
+1. 加载并展平该路径的配体坐标
+2. 调用 `lrmsd.find_min()` 寻找最近的中心点及其 LRMSD
+3. **若 LRMSD ≤ 截断值**（默认 4.0 Å）：将该路径作为非中心点成员分配至该中心点的聚类中（`is_medoid=0`）
+4. **若 LRMSD > 截断值**：以 `cid = max_cluster_id + 1` 创建新聚类，将该路径指定为新中心点（`is_medoid=1`），并调用 `lrmsd.add_center()` 扩充坐标矩阵用于后续比较
+
+这构成了一种**中心点增长**策略：与任何现有中心均不相似的、结构新颖的路径会衍生出其自身的单例聚类，从而确保没有路径会被强行分配至距离不当的聚类中。
+
+```mermaid
+flowchart LR
+    subgraph Phase1["阶段 1: 精确聚类"]
+        S["k 条采样路径"] --> PDB["写入临时 PDB"]
+        PDB --> LB3D["LB3Dclust<br/>-c 4.0 -r 0.1"]
+        LB3D --> Parse["parse_cluster_out()"]
+        Parse --> Medoids["提取中心点<br/>坐标"]
+    end
+
+    subgraph Phase2["阶段 2: 分配"]
+        Medoids --> LRMSD["ClusterLRMSD 初始化"]
+        Unassigned["n-k 条未分配路径"] --> Loop{遍历每条路径}
+        Loop --> FindMin["lrmsd.find_min()"]
+        FindMin --> Check{LRMSD ≤ 4.0?}
+        Check -->|是| Assign["分配至<br/>最近聚类"]
+        Check -->|否| NewCenter["新建聚类<br/>+ add_center()"]
+        Assign --> Loop
+        NewCenter --> Loop
+    end
+```
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L237-L347)
+
+### 残基数量计算
+
+用于 LRMSD 归一化的残基数量（`n_res`）取决于当前窗口数是否等于总窗口数。当 `nwindows == total_windows` 时，正在对完整蛋白质进行建模，且重叠窗口每次重叠贡献 3 个额外残基：`n_res = nres + (total_windows - 1) * 3`。否则，使用简化估算 `nwindows * 9`（每窗口 9 个残基，反映片段生成流程中的默认窗口大小）。该值通过 `ClusterLRMSD` 中的 `n_res ** -0.5` 归一化因子直接影响 RMSD 量级。
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L308-L314)
+
+### 外部聚类：`cluster_models`
+
+此方法在 Python 与 LZerD C++ 聚类二进制文件之间起到了桥接作用。对于样本中的每条路径，它会将仅包含 CA 原子的 PDB 文件写入临时 `{groupid}merged/` 目录。所有文件路径均记录在 `ligand_list_{groupid}.txt` 文件中，该文件连同截断值与 RMSD 容差参数一并传递给 `LB3Dclust`：
+
+```
+LB3Dclust -L ligand_list.txt -c 4.0 -r 0.1
+```
+
+该二进制文件的标准输出由 `parse_cluster_out()` 解析，此函数区分中心点行（前缀为 `CID=`）与子节点行（前缀为 `chil`），并从固定列位置提取聚类 ID 和模型文件名。不符合规范的行将被写入 `clusters_{groupid}_out.txt` 错误日志。解析完成后，除非设置 `cleanup=False`，否则将清理临时文件。
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L348-L418), [cluster_heuristic.py](scripts/cluster_heuristic.py#L204-L235)
+
+### 输出解析：`parse_cluster_out`
+
+`LB3Dclust` 二进制文件输出结构化文本格式，包含两种行类型：
+
+| 行前缀 | 保留列 | 列索引 | 含义 |
+|-------------|-------------|----------------|---------|
+| `CID=` | (1, 7) → `cid`, `model` | 聚类 ID 与 PDB 文件名 | 聚类的中心点（代表） |
+| `chil` | (2, 6) → `cid`, `model` | 聚类 ID 与 PDB 文件名 | 子节点（非代表）成员 |
+
+中心点行设置 `is_medoid=1`；子节点行设置 `is_medoid=0`。模型文件名随后通过在 PDB 文件创建期间建立的 `lig_file_dict` 反向查找映射回 `pathsid`。
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L204-L235)
+
+## 数据库模式与持久化
+
+聚类结果存储于 `path_{complexid}_all.db` 的 `clusters{nwindows}` 表中。该表由 `make_sql()` 创建，其模式如下：
+
+| 列名 | 类型 | 约束 | 描述 |
+|--------|------|------------|-------------|
+| `pathsid` | INTEGER | PRIMARY KEY, FK → `paths{nwindows}` | 唯一路径标识符（与路径表 1:1 对应） |
+| `cid` | INTEGER | NOT NULL | 聚类分配标识符 |
+| `is_medoid` | INTEGER | NOT NULL | 若该路径为聚类代表则为 1，否则为 0 |
+| `clustersize` | INTEGER | — | 此聚类中的路径数（由 `FindPathsStepwise` 在聚类后更新） |
+
+指向 `paths{nwindows}` 的外键关系确保了引用完整性：每条被聚类的路径必须存在于逐步搜索结果中。聚类行以 10,000 为一批插入，使用带有由 `shared.create_insert_statement()` 生成的命名参数绑定的 `executemany`，从而在处理大型路径集时最大限度减少数据库往返开销。
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L101-L148), [cluster_heuristic.py](scripts/cluster_heuristic.py#L191-L199)
+
+## 流程集成
+
+在生产环境中，`ClusterPdb` 通常不从命令行直接调用——它在路径组装期间由 `FindPathsStepwise.__init__()` 在每个窗口步骤中调用。逐步搜索先为 `nwindows=2` 构建路径并聚类，随后推进至 `nwindows=3`，依此类推。每轮聚类完成后，`FindPathsStepwise` 会按 `cid` 分组计算每个中心点的 `clustersize` 并更新数据库。这些聚类大小成为[路径选择和排序](14-path-selection-and-ranking)中使用的四个评分维度之一，其中较小的聚类（代表罕见构象）可能会根据权重方案受到惩罚或青睐。
+
+命令行接口确实可供独立使用：
+
+```bash
+python cluster_heuristic.py 4ah2AB -n 3 -d /path/to/db/files -v
+```
+
+| 参数 | 必需 | 描述 |
+|----------|----------|-------------|
+| `complexid` | 是 | PDB 代码 + 受体链 + 配体链（例如 `4ah2AB`） |
+| `-n / --nwindows` | 是 | 要聚类的窗口数 |
+| `-d / --directory` | 否 | 包含数据库文件的目录（默认：脚本所在目录） |
+| `-v / --verbose` | 否 | 启用调试级别日志 |
+| `-l / --limit` | 否 | 限制处理路径数的 SQL LIMIT |
+
+<CgxTip>`clustersize` 列并非由 `ClusterPdb` 自身填充——它是在聚类完成后，由 `FindPathsStepwise` 使用 pandas 对 `cid` 进行 groupby 操作来更新的。任何对 `ClusterPdb` 的独立调用都将生成不含大小的聚类，若下游评分依赖于 `clustersize`，则需单独执行更新步骤。</CgxTip>
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L420-L447), [find_paths_stepwise.py](scripts/find_paths_stepwise.py#L82-L123)
+
+## 算法复杂度与性能特征
+
+与全对聚类相比，两阶段设计显著降低了计算成本。假设路径总数为 *n*，采样路径数为 *k*：
+
+| 方面 | 全对聚类 | 启发式聚类（本模块） |
+|--------|-----------|------------------------|
+| 距离计算 | O(n²) | O(k²) + O((n−k) × c)，其中 c = 最终中心数 |
+| 外部聚类成本 | O(n² × d)，其中 d = 原子数 | O(k² × d) — 取决于阶段 1 |
+| 内存（坐标矩阵） | O(n × d) | O(c × d) — 仅保留中心 |
+| 临时 PDB I/O | n 个文件 | k 个文件（仅阶段 1） |
+
+有效成本以 O(k × n) 而非 O(n²) 的规模增长，且由于 k = min(n/2, 0.1n, 10000)，对于大规模路径集，节省的计算量尤为可观。阶段 2 中 NumPy 的向量化距离计算进一步确保了单路径分配成本仅为单次矩阵减法与范数计算，而非对聚类中心执行 Python 循环。
+
+来源：[cluster_heuristic.py](scripts/cluster_heuristic.py#L237-L347), [cluster_heuristic.py](scripts/cluster_heuristic.py#L71-L89)
+
+## 下游消费
+
+`clusters{nwindows}` 表作为流水线剩余部分的结构多样性过滤器。[占据度分数计算](13-occupancy-score-computation)模块使用聚类中心点（即 `is_medoid=1` 的行）计算受体表面的空间占据度。[路径选择和排序](14-path-selection-and-ranking)模块查询与路径分数、聚类大小及占据度分数相连接的中心点，以计算加权 Z 分数排序。若没有聚类，路径选择将不得不评估所有路径（成本高昂难以承受），或面临选出结构冗余候选者的风险——基于中心点的方法确保了最终模型集同时在效率与结构多样性上得到保障。
+
+---
+
+- [深入解析/路径组装与排序/占有度评分计算](https://zread.ai/kiharalab/idp_lzerd/13-occupancy-score-computation)
+
+---
+slug:13-occupancy-score-computation
+blog_type:normal
+---
+
+
+**占据度分数**量化了每条组装路径与受体表面的接触广泛程度，生成一个奖励多样化界面覆盖的逐路径指标。这是路径选择前的最后一个评分组件，反映了一种生物物理直觉：一条接触多个受体残基的路径——尤其是那些也被其他高质量路径接触的残基——代表了一种结构上合理的对接排布。该计算在 `PlotPaths` 中实现，它遍历每条路径中的每个模型，在受体-配体界面上执行空间邻域搜索，并将接触计数聚合到逐残基的 B-factor 字段和逐路径的占据度 CSV 中，供下游的[路径选择与排序](14-path-selection-and-ranking)使用。
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L1-L309)
+
+## 算法概述
+
+占据度分数的计算在概念上分为三个阶段：**数据加载**（从路径和模型数据库中查询）、**接触枚举**（在距离截断值内对受体-配体残基对进行空间搜索）和**分数聚合**（计算接触每个受体残基的路径数，然后按路径对这些计数求和）。下图展示了端到端的流程：
+
+```mermaid
+flowchart TD
+    A["Path Database<br/>(path_*_all.db)"] -->|"SQL: medoid paths<br/>+ cluster sizes"| B["center_rows<br/>(DataFrame)"]
+    C["Model Database<br/>(scores_*.db)"] -->|"SQL: model paths"| D["filepaths<br/>(window→PDB map)"]
+    B --> D
+    D --> E["For each path,<br/>for each window model"]
+    E --> F["Bio.PDB.NeighborSearch<br/>radius = 5.0 Å"]
+    F --> G{"Inter-chain<br/>contact?"}
+    G -->|Yes| H["receptor_contacts[res_key]<br/>.add(pathsid)"]
+    G -->|No| I["Skip"]
+    H --> J["Per-residue: count<br/>unique pathsids"]
+    J --> K["Per-path: sum<br/>contact counts"]
+    K --> L["*_receptor_occupancy.csv<br/>(pathsid, occupancyscore)"]
+    J --> M["B-factor ← count<br/>(per receptor atom)"]
+```
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L67-L196)
+
+## 数据加载与查询构建
+
+`PlotPaths` 类通过 `find_db_files` 编排数据检索，该函数根据窗口数量动态构建 SQL 查询。涉及两个数据库：
+
+| 数据库 | 文件名模式 | 内容 |
+|---|---|---|
+| 路径数据库 | `path_{pdbid}_all.db` | `paths{n}` 表（路径 ID → 窗口模型 ID），`clusters{n}` 表（聚类分配） |
+| 模型数据库 | `scores_{pdbid}.db` | `model`、`allmodel` 和 `window` 表（模型 ID → 文件路径解析） |
+
+构建了三个 SQL 查询并存储在 `query_dict` 中：
+
+1. **`plot` 查询** — 通过连接 `clusters{nwindows}` 和 `paths{nwindows}`，检索中心点聚类中心及其 `pathsid`、`nodescore`、`edgescores`、`cid`、`clustersize` 和 `is_medoid` 标志。
+2. **`clustersize` 查询** — 通过在逐渐变宽的 `paths` 表上执行级联 `JOIN` 操作，计算每条路径在所有窗口级别（从 `clusters3` 到 `clusters{nwindows}`）上的聚类大小总和。
+3. **`paths` 查询** — 从 `paths{nwindows}` 中选择 `pathsid` 和所有 `window0…windowN-1` 列，随后由 `get_paths` 用于解析模型文件路径。
+
+当 `nwindows` 为 `None` 时，该方法会内省数据库的 `sqlite_master` 表以查找最大的 `pathsN` 表，默认使用最精细的路径组装结果。
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L208-L286)
+
+## 接触枚举：`count_receptor_contacts`
+
+这是计算的核心部分。在通过 `get_paths` → `shared.add_model_path` 解析每个窗口模型的 PDB 文件路径后，算法遍历每条路径及该路径下的每个模型文件：
+
+1. **结构解析** — 每个模型 PDB 在通过 `shared.strip_h` 去除氢原子后，由 `Bio.PDB.PDBParser` 加载，生成原子结构。
+2. **邻域搜索** — 根据结构中的所有原子构建 `Bio.PDB.NeighborSearch`。调用 `search_all(radius=5.0, level="R")` 返回原子间距离在 **5.0 Å** 以内的所有残基对。
+3. **链间过滤** — 对于每个残基对 `(res1, res2)`，算法检查是否一个残基属于受体链而另一个属于配体链。同链残基对被丢弃。受体侧残基被识别并使用 `{chain}_{resname}{resid}` 格式生成键。
+4. **路径注册** — 将 `pathsid` 添加到 `receptor_contacts` 默认字典中与该受体残基键关联的 `set` 中，确保每条路径在每个残基上最多被计数一次。
+
+<CgxTip>5.0 Å 截断值是结构生物学中标准的接触距离，大致涵盖了范德华接触加上一个溶剂层。在此距离内的残基被认为是结合界面的一部分。</CgxTip>
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L103-L169)
+
+## 分数聚合与输出
+
+处理完所有路径后，将生成两个输出：
+
+### 逐残基接触计数（B-factor）
+
+对于受体链中的每个残基，接触它的不同路径数计算为 `len(receptor_contacts[key])`。此计数被写入该残基中每个原子的 **B-factor** 字段。尽管源代码中 PDB 文件写入当前已被注释掉（第184–187行），但 B-factor 赋值在内存中仍然有效，从而支持下游的可视化或分析。
+
+### 逐路径占据度分数（CSV）
+
+每条路径的占据度分数通过遍历所有受体接触集并累加来计算：
+
+```
+对于每个受体残基 r：
+    n_contacts = |receptor_contacts[r]|   # 接触 r 的路径数
+    对于 receptor_contacts[r] 中的每个 pathid：
+        path_score_dict[pathid] += n_contacts
+```
+
+这意味着，接触**高度共享**受体残基（被许多其他路径接触的残基）的路径，比接触**唯一占据**残基的路径获得更大的贡献。生成的 `path_score_dict` 被序列化为 `{pdbwindowid}_receptor_occupancy.csv`，包含 `pathid` 和 `occupancyscore` 列。
+
+起始处的文件存在检查（`shared.missing(outfile) and shared.missing(path_score_file)`）确保在两个输出文件均已存在时跳过耗时的计算。
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L170-L196)
+
+## 残基键格式
+
+受体残基由复合键标识：`{chain}_{resname}{resid}`。例如，A链42位的谷氨酸生成键 `A_E42`。`resid` 字段来自 `residue.get_full_id()`，它返回一个四元组，其中第四个元素是异质残基 ID 元组——`[1]` 索引提取整数序列位置。即使存在多条链或插入码，此键方案也能唯一标识残基。
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L122-L125)
+
+## 与路径选择的下游集成
+
+占据度分数 CSV 由[路径选择与排序](14-path-selection-and-ranking)使用，在那里与其他评分组件合并。在 `select_paths.py` 中，四个分数组合为一个加权的复合分数：
+
+| 分数 | 权重 | 方向 | 含义 |
+|---|---|---|---|
+| `nodescore` | 0.5 | 越低越好 | 逐窗口对接分数之和 |
+| `edgescores` | 0.1 | 越低越好 | 成对窗口兼容性分数之和 |
+| `clustersize` | 0.3 | 越高越好 | 同一聚类中的路径数 |
+| `occupancyscore` | 0.1 | 越高越好 | 受体接触占据度 |
+
+每个分数被转换为 Z 分数，最终的 `weighted_score` 混合了“最佳分数”组件（所有四个分数中最小 Z 分数的 30% 权重）与各个 Z 分数的加权和（70% 权重）。因此，占据度分数既直接贡献（占加权和的 10%），也间接贡献（作为最佳分数项的候选）。
+
+来源: [select_paths.py](scripts/select_paths.py#L37-L152)
+
+## 命令行接口
+
+该脚本作为独立模块调用：
+
+```
+python compute_occupancy_score.py <complexname> \
+    -r <receptor_chain> -l <ligand_chain> \
+    -n <nwindows> [-d <directory>]
+```
+
+| 参数 | 必需 | 描述 |
+|---|---|---|
+| `complexname` | 是 | PDB 代码或标识符（位置参数） |
+| `-r` / `--receptor_chain` | 是 | 受体链标识符 |
+| `-l` / `--ligand_chain` | 是 | 配体链标识符 |
+| `-n` / `--nwindows` | 是 | 路径组装中的窗口数 |
+| `-d` / `--directory` | 否 | 数据库文件的位置（默认为脚本目录） |
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L288-L308)
+
+## 错误处理
+
+在几种表明是上游流水线问题而非简单数据异常的场景下，会引发 `PlotPathsError` 异常：
+
+| 条件 | 位置 | 消息 |
+|---|---|---|
+| `nwindows < 2` | 构造函数 | `"nwindows must be 2 or greater"` |
+| 路径数据库文件缺失 | `find_db_files` | `"File %s not found"` |
+| 未返回中心点行 | `run` | `"No rows"` |
+| 聚类大小为空 | `run` | `"Null sumcsize, may need to rerun find"` |
+| 结构文件为空 | `count_receptor_contacts` | `"No atoms in %s"` |
+| 接触残基均不在受体上 | `count_receptor_contacts` | `"Neither %s nor %s is receptor"` |
+
+空聚类大小检查尤为重要：它检测[启发式聚类](12-heuristic-clustering)是否未运行或未完成，因为 `sumcsize` 聚合依赖于已填充的 `clusters` 表。
+
+来源: [compute_occupancy_score.py](scripts/compute_occupancy_score.py#L40-L166)
+
+## 流水线位置与依赖关系
+
+占据度分数计算位于 IDP-LZerD 流水线的靠后阶段，在路径组装和聚类之后、最终路径选择之前。它需要以下前置条件：
+
+```mermaid
+flowchart LR
+    A["[Database Creation](8-database-creation-and-schema)"] --> B["[Model Score Loading](9-model-score-loading)"]
+    B --> C["[Stepwise Path Search](11-stepwise-path-search)"]
+    C --> D["[Heuristic3* Clustering](12-heuristic-clustering)"]
+    D --> E["**Occupancy Score**"]
+    E --> F["[Path Selection](14-path-selection-and-ranking)"]
+```
+
+- **路径数据库**必须包含已填充 `clustersize` 值（通过[启发式聚类](12-heuristic-clustering)）的 `paths{n}` 和 `clusters{n}` 表。
+- **模型数据库**必须包含具有正确文件路径（通过[数据库创建与模式](8-database-creation-and-schema)）的 `model`、`allmodel` 和 `window` 表。
+- **模型 PDB 文件**必须存在于模型数据库记录的路径下的磁盘上。
+
+计算出占据度分数后，流水线继续执行[路径选择与排序](14-path-selection-and-ranking)，将占据度分数集成到其加权评分函数中，最终进入 [CHARMM 弛豫协议](15-charmm-relaxation-protocol)进行结构精修。
+
+---
+
+- [深入解析/路径组装与排序/路径选择与排序](https://zread.ai/kiharalab/idp_lzerd/14-path-selection-and-ranking)
+
+---
+slug:14-path-selection-and-ranking
+blog_type:normal
+---
+
+
+**路径选择与排序**阶段是 IDP-LZerD 流程的决定性阶段：它将四个独立计算的质量指标合成为一个综合得分，选择排名最高的构象路径，并将其按窗口的结构模型组装成完整的蛋白质复合物 PDB 文件，以备进行 CHARMM 优化。该阶段在 `select_paths.py` 中实现，此模块消耗[逐步路径搜索](11-stepwise-path-search)、[启发式聚类](12-heuristic-clustering)和[占据度得分计算](13-occupancy-score-computation)的输出，是整个评分流程的汇聚点。
+
+来源：[select_paths.py](scripts/select_paths.py#L1-L304)
+
+## 评分架构：四分量组合
+
+排序系统沿四个正交的质量维度评估每个聚类中心路径。每个指标捕获一个独特的结构属性，并通过**双项加权公式**将它们组合起来，在起保护作用的“最佳得分”项与共识加权平均项之间取得平衡。
+
+```mermaid
+flowchart TB
+    subgraph Inputs
+        PATH_DB["path_&lt;pdbid&gt;_all.db<br/>clusters + paths 表"]
+        OCC_CSV["&lt;pdbwindowid&gt;_receptor_occupancy.csv"]
+        MODEL_DB["scores_&lt;pdbid&gt;.db"]
+    end
+
+    subgraph FourScores["四个评分分量"]
+        NS["nodescore<br/>窗口间的平均<br/>对接得分"]
+        ES["edgescores<br/>窗口间的平均<br/>成对边界得分"]
+        CS["clustersize<br/>聚类种群数<br/>(越大越典型)"]
+        OS["occupancyscore<br/>受体接触<br/>覆盖度"]
+    end
+
+    subgraph Normalize["Z-Score 标准化"]
+        Z1["nodescorez"]
+        Z2["edgescoresz"]
+        Z3["clustersizez"]
+        Z4["occupancyscorez"]
+    end
+
+    subgraph Composite["综合得分"]
+        BEST["best_score<br/>= min(所有 z-score)"]
+        WS["加权和<br/>= Σ weightᵢ × z-scoreᵢ"]
+        FINAL["weighted_score<br/>= 0.3 × best_score<br/>+ 0.7 × weighted_sum"]
+    end
+
+    PATH_DB --> NS & ES & CS
+    OCC_CSV --> OS
+    NS & ES & CS & OS --> Normalize
+    Normalize --> BEST & WS
+    BEST & WS --> FINAL
+    FINAL --> TOPN["Top-N 选择<br/>(默认: 100 条路径)"]
+    TOPN --> COMBINE["combine_paths()<br/>组装完整 PDB"]
+    MODEL_DB --> COMBINE
+```
+
+### 分量定义
+
+| 得分 | 方向 | 权重 | 来源 | 描述 |
+|---|---|---|---|---|
+| **nodescore** | 越低越好 ↑ | 0.5 | `paths{nwindows}` 表 | 路径中所有窗口的逐窗口对接界面得分（`di` 值）的平均值 |
+| **edgescores** | 越低越好 ↑ | 0.1 | `paths{nwindows}` 表 | 相邻窗口模型之间的平均成对几何兼容性得分 |
+| **clustersize** | 越高越好 ↓ | 0.3 | `clusters{nwindows}` 表 | 分配给同一聚类的路径数量——较大的聚类代表更典型的构象 |
+| **occupancyscore** | 越高越好 ↓ | 0.1 | `{pdbwindowid}_receptor_occupancy.csv` | 受体残基上的接触计数总和——衡量配体路径接触受体表面的充分程度 |
+
+“方向”列指示原始得分是**升序**（越低越好）还是**降序**（越高越好）。这一区别对 Z-score 的计算至关重要：降序得分在标准化前需乘以 −1，以确保所有 Z-score 都共享“越低越好”的语义。
+
+来源：[select_paths.py](scripts/select_paths.py#L37-L42)，[select_paths.py](scripts/select_paths.py#L130-L151)
+
+## Z-Score 标准化与组合公式
+
+四个原始得分中的每一个都使用应用于所有聚类中心路径的标准公式转换为 Z-score：
+
+$$z_i = \frac{s_i - \mu}{\sigma}$$
+
+对于**降序**指标（`clustersize`、`occupancyscore`），原始得分在进行 Z-score 转换前取负：`zscore(score × −1)`。此反转统一了所有四个 Z-score，使得**较低的值始终表示更好的质量**。
+
+来源：[select_paths.py](scripts/select_paths.py#L130-L139)，[select_paths.py](scripts/select_paths.py#L276-L278)
+
+### 双项加权得分
+
+综合 `weighted_score` 计算如下：
+
+```
+best_score    = min(nodescorez, edgescoresz, clustersizez, occupancyscorez)
+weighted_sum  = 0.5×nodescorez + 0.1×edgescoresz + 0.3×clustersizez + 0.1×occupancyscorez
+weighted_score = 0.3 × best_score + 0.7 × weighted_sum
+```
+
+**best_score** 项充当安全网：它捕获所有分量中最坏情况（最低）的 Z-score，确保任何在单一指标上得分极差的路径不会获得高排名。**weighted_sum** 项编码了分析师调整的各指标的相对重要性。全局常量 `b_weight = 0.3` 控制这两个项之间的权衡。
+
+<CgxTip>`b_weight` 参数 (0.3) 和 `neco_weights` 向量 ([0.5, 0.1, 0.3, 0.1]) 是模块级常量——修改它们需要直接编辑 `select_paths.py`。主要贡献者是 `nodescore`（权重 0.5），反映了逐窗口对接质量是首要的选择标准。</CgxTip>
+
+来源：[select_paths.py](scripts/select_paths.py#L37-L38)，[select_paths.py](scripts/select_paths.py#L140-L151)
+
+## 权重配置参考
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| `b_weight` | 0.3 | best_score（最小 Z-score）项的权重 |
+| `neco_weights[0]` | 0.5 | 加和中 `nodescorez` 的权重 |
+| `neco_weights[1]` | 0.1 | 加和中 `edgescoresz` 的权重 |
+| `neco_weights[2]` | 0.3 | 加和中 `clustersizez` 的权重 |
+| `neco_weights[3]` | 0.1 | 加和中 `occupancyscorez` 的权重 |
+| `default_count` | 100 | 如果省略 `--count`，要选择的顶级路径数量 |
+
+`neco_weights` 内的权重总和必须为 1.0，且 `b_weight` 与加和项的 `(1 − b_weight) = 0.7` 互补。这确保了综合得分是这两个项的凸组合。
+
+来源：[select_paths.py](scripts/select_paths.py#L37-L54)
+
+## 数据检索：查询聚类中心
+
+`select_paths` 方法构造一个 SQL 查询，连接 `clusters{nwindows}` 和 `paths{nwindows}` 表，并筛选为**仅聚类中心**（`is_medoid = 1`）。这是一个关键的设计选择：不对所有路径评分，而仅评估每个聚类的代表性中心，在保持结构多样性的同时大幅降低了计算成本。
+
+```sql
+SELECT pathsid, nodescore, edgescores, clustersize,
+       window0, window1, ..., windowN
+FROM clusters{nwindows}
+JOIN paths{nwindows} USING (pathsid)
+WHERE is_medoid = 1
+```
+
+然后通过在 `pathsid` 上进行左连接来合并占据度得分 CSV。如果任何中心缺少占据度得分，则会引发 `SelectPathsError`——这强制了数据完整性并防止了静默评分失败。
+
+来源：[select_paths.py](scripts/select_paths.py#L78-L128)
+
+## Top-N 选择与得分导出
+
+为所有中心计算 `weighted_score` 后，DataFrame 按升序排序（越低越好），并保留前 `ct` 条路径。在目标目录中生成两个输出：
+
+1. **`path_scores.csv`** — 包含每条选定路径的 `pathsid`、所有四个 Z-score、`best_score` 和 `weighted_score`，支持对排序决策进行事后分析。
+2. **`filelist.csv`** — 包含每个组装的 `combined.pdb` 的文件路径，作为后续 [CHARMM 弛豫协议](15-charmm-relaxation-protocol) 的输入清单。
+
+来源：[select_paths.py](scripts/select_paths.py#L149-L158)，[select_paths.py](scripts/select_paths.py#L272-L274)
+
+## 路径组合：组装完整的复合物结构
+
+`combine_paths` 方法将每条选定路径从逐窗口模型 ID 序列转换为单一连贯的 PDB 文件。这是模块中结构最复杂的操作，处理残基重新编号、重叠区坐标平均以及受体-配体组装。
+
+### 逐步组装流程
+
+```mermaid
+flowchart TD
+    A["通过 add_model_path()<br/>解析模型文件路径"] --> B["加载受体 PDB<br/>(如果是多链受体，<br/>撤销链合并)"]
+    B --> C["对于每条路径：<br/>加载窗口模型结构"]
+    C --> D["使用窗口起始偏移量<br/>对残基重新编号"]
+    D --> E["通过坐标平均<br/>合并重叠残基"]
+    E --> F["组装受体链<br/>+ 统一的配体链"]
+    F --> G["将 combined.pdb 写入<br/>路径子目录"]
+```
+
+**残基重新编号**：每个窗口模型包含从 1 开始编号的配体残基。`window_starts` 数组（从模型数据库的 `window` 表中查询）为每个窗口提供正确的起始残基编号。残基被分离，通过将每个残基 ID 加上 `(res_start − 1)` 重新编号，然后重新附加。
+
+**重叠解决**：相邻窗口共享重叠残基（通常在每个边界处有 3 个残基）。当一个残基 ID 出现在两个窗口链中时，重叠原子将被**平均**——合并后的残基接收位于两个模型中间的坐标。这种平滑混合避免了窗口边界处的不连续性。
+
+**受体整合**：受体结构仅加载一次并在所有路径中复用。如果受体原本是多链的（通过 `CombineChain` 合并），则 `undo` 操作会重建原始链分解。对于每条路径，构建一个包含所有受体链加上统一配体链的新结构，并保存为 `combined.pdb`。
+
+<CgxTip>重叠平均假设在窗口边界处恰好有 2 个残基共享同一 ID。如果在相同位置发现 0 或 3 个以上残基，则会引发 `SelectPathsError`——这可防止路径数据损坏或窗口定义未对齐。</CgxTip>
+
+来源：[select_paths.py](scripts/select_paths.py#L160-L274)，[shared.py](scripts/shared.py#L260-L290)，[combine_receptor.py](scripts/combine_receptor.py#L146-L157)
+
+## 目录布局与输出结构
+
+对于受体链为 `A`、配体链为 `C` 且有 7 个窗口的复合物 `4ah2`，输出目录的结构如下：
+
+```
+4ah2ac7/                      # 目标目录 (小写)
+├── path_scores.csv           # Top-N 路径的 Z-score 和 weighted_score
+├── filelist.csv              # combined.pdb 文件的路径 (CHARMM 输入)
+├── 1/
+│   └── combined.pdb          # pathsid 为 1 的组装复合物
+├── 2/
+│   └── combined.pdb
+├── ...
+└── 100/
+    └── combined.pdb
+```
+
+来源：[select_paths.py](scripts/select_paths.py#L87-L99)，[select_paths.py](scripts/select_paths.py#L203-L207)
+
+## 命令行接口
+
+```
+python select_paths.py <complexname> -r <receptor_chain> -l <ligand_chain> -n <nwindows> [-d DIR] [-c COUNT]
+```
+
+| 参数 | 必需 | 默认值 | 描述 |
+|---|---|---|---|
+| `complexname` | 是 | — | 4 字符 PDB 代码（例如 `4ah2`） |
+| `-r, --receptor_chain` | 是 | — | 受体链标识符 |
+| `-l, --ligand_chain` | 是 | — | 配体链标识符 |
+| `-n, --nwindows` | 是 | — | 窗口数量 |
+| `-d, --directory` | 否 | 脚本目录 | 数据库和占据度文件的位置 |
+| `-c, --count` | 否 | 100 | 要选择的顶级路径数量 |
+
+来源：[select_paths.py](scripts/select_paths.py#L280-L303)
+
+## 错误处理
+
+`SelectPaths` 类通过在以下情况引发 `SelectPathsError` 异常来强制执行严格的数据完整性：
+
+- 缺少占据度 CSV 文件——占据度得分必须由[占据度得分计算](13-occupancy-score-computation)预先计算
+- 合并后任何中心路径的占据度得分为空——表明评分数据不完整
+- 任何评分列包含空值——防止未定义的 Z-score
+- 重叠解决在同一位置遇到 0 或 3 个以上残基——表明结构不一致
+
+来源：[select_paths.py](scripts/select_paths.py#L45-L48)，[select_paths.py](scripts/select_paths.py#L117-L128)，[select_paths.py](scripts/select_paths.py#L265-L266)
+
+## 流程位置与依赖关系
+
+路径选择与排序位于三个上游生产者的汇聚处，并将其输出直接送入优化阶段：
+
+| 上游 | 提供 | 文件 |
+|---|---|---|
+| [逐步路径搜索](11-stepwise-path-search) | `path_{pdbid}_all.db` — 路径与聚类表 | `find_paths_stepwise.py` |
+| [启发式聚类](12-heuristic-clustering) | `clusters{nwindows}` 中的聚类中心与大小 | `cluster_heuristic.py` |
+| [占据度得分计算](13-occupancy-score-computation) | `{pdbwindowid}_receptor_occupancy.csv` | `compute_occupancy_score.py` |
+
+| 下游 | 消耗 | 文件 |
+|---|---|---|
+| [CHARMM 弛豫协议](15-charmm-relaxation-protocol) | 每条路径的 `filelist.csv` → `combined.pdb` | `idp_relax.inp` |
+
+---
+
+## 优化与输出
+
+- [深入解析/优化与输出/CHARMM 弛豫协议](https://zread.ai/kiharalab/idp_lzerd/15-charmm-relaxation-protocol)
+
+---
+slug:15-charmm-relaxation-protocol
+blog_type:normal
+---
+
+
+CHARMM 弛豫协议是 IDP-LZerD 流程中的最终精细化阶段，负责将原始组装路径转化为物理上合理的全原子复合物结构。该协议以 CHARMM 输入脚本（`idp_relax.inp`）实现，执行**三个顺序操作**：拓扑设置与氢键构建、带衰减谐和约束的分阶段能量最小化，以及短时分子动力学平衡。该协议是[路径选择与排序](14-path-selection-and-ranking)的组合路径组装输出与用于生物学分析的最终精细化模型之间的桥梁。
+
+来源: [idp_relax.inp](/idp_relax.inp#L1-L119), [README.md](/README.md#L59-L61)
+
+## 协议架构
+
+弛豫协议遵循一种审慎的渐进升级策略——它从不突然移除约束。相反，谐和力常数以分阶段递增的方式衰减，允许配体（内在无序蛋白）在受体保持固定的情况下逐渐探索其局部能量景观。这可以防止灾难性的结构扭曲，因为如果包含片段拼接几何缺陷的组装路径在无约束的情况下进行最小化，就会发生这种扭曲。
+
+```mermaid
+flowchart TD
+    A["路径选择<br/>(select_paths.py)"] --> B["combined.pdb<br/>每条路径"]
+    B --> C["准备 CHARMM 输入<br/>.seq, .cor 文件"]
+    C --> D["idp_relax.inp<br/>模板替换"]
+    D --> E["阶段 1: 设置"]
+    E --> E1["读取拓扑/参数<br/>(CHARMM27)"]
+    E1 --> E2["构建 PSF + 读取坐标"]
+    E2 --> E3["HBUILD: 添加氢原子<br/>+ 重构缺失原子"]
+    E3 --> F["阶段 2: 最小化"]
+    F --> F1["阶段 A: 全配体约束<br/>力: 50→40→30→20→10→0"]
+    F1 --> F2["阶段 B: 仅主链约束<br/>力: 10→5→1→0"]
+    F2 --> F3["无约束 ABNR<br/>5000 步"]
+    F3 --> G["阶段 3: 动力学"]
+    G --> G1["Cα 约束 (力=10)<br/>+ SHAKE 约束氢键"]
+    G1 --> G2["Langevin/Verlet MD<br/>20,000 步 × 2 fs"]
+    G2 --> H["输出: 弛豫后 .cor 文件"]
+```
+
+来源: [idp_relax.inp](/idp_relax.inp#L1-L119), [scripts/select_paths.py](/scripts/select_paths.py#L160-L275)
+
+## 模板变量与调用
+
+`idp_relax.inp` 文件**并非**直接执行——它包含 Python 风格的花括号占位符，在 CHARMM 解析之前必须将其替换为具体值。`select_paths.py` 脚本准备了作为 CHARMM 输入的子目录结构和合并的 PDB 文件，但实际的变量替换和 CHARMM 执行需由用户手动完成（如 README 中所述："编辑 CHARMM 输入文件 `idp_relax.inp` 以运行 CHARMM"）。
+
+| 占位符 | 描述 | 示例 |
+|---|---|---|
+| `{charmm_dir}` | CHARMM 安装的根目录 | `/apps/charmm` |
+| `{working_dir}` | 包含 `.seq` 和 `.cor` 文件的工作目录 | `/data/4ah2ac3/1` |
+| `{filename}` | 输入/输出文件的基本名称（不含扩展名） | `combined` |
+| `{receptor_chain}` | 受体的 CHARMM 片段标识符 | `A` |
+| `{ligand_chain}` | 配体/IDP 的 CHARMM 片段标识符 | `C` |
+
+替换后，脚本期望在 `@dir` 中有两个输入文件：`@nam.seq`（CHARMM 序列文件）和 `@nam.cor`（CHARMM 坐标文件）。必须使用标准的 CHARMM 准备流程，从[路径选择与排序](14-path-selection-and-ranking)的 `combined.pdb` 输出中准备这些文件。
+
+来源: [idp_relax.inp](/idp_relax.inp#L1-L8), [README.md](/README.md#L59-L61), [scripts/select_paths.py](/scripts/select_paths.py#L160-L164)
+
+## 阶段 1：拓扑设置与氢键构建
+
+脚本首先加载 **CHARMM27 全原子力场**（`top_all27_prot_na.rtf` 和 `par_all27_prot_na.prm`），该力场为蛋白质和核酸提供了残基模板以及成键/非键参数。序列从外部的 `.seq` 文件流式读入，生成蛋白质结构文件（PSF）并写入磁盘，随后从 `.cor` 文件读取坐标。
+
+紧接着是一个关键步骤：**缺失原子检测与重构**。脚本识别缺乏初始化坐标的原子（氢原子除外），若发现此类原子，则构建内部坐标（`ic para` / `ic buil`）来定位它们。随后通过 `HBUILD` 无条件重构氢原子，这一步至关重要，因为片段组装流程通常只产生重原子结构。
+
+| 操作 | CHARMM 命令 | 目的 |
+|---|---|---|
+| 读取拓扑 | `read rtf card` | 加载残基定义 |
+| 读取参数 | `read para card` | 加载力场参数 |
+| 流式读入序列 | `stream @nam.seq` | 定义序列连接性 |
+| 写入 PSF | `write psf card` | 持久化结构拓扑 |
+| 读取坐标 | `read coor card` | 加载原子位置 |
+| 检查缺失原子 | `if @misn .gt. 0` | 检测未初始化的重原子 |
+| 构建内部坐标 | `ic para` / `ic buil` | 重构缺失位置 |
+| 构建氢原子 | `hbuild` | 添加所有氢原子 |
+
+来源: [idp_relax.inp](/idp_relax.inp#L10-L27)
+
+## 阶段 2：分阶段能量最小化
+
+这是弛豫协议的核心。最小化通过**两个子阶段**进行，逐步放松谐和约束，并结合使用最速下降（SD）和类共轭梯度（ABNR）最小化器。受体原子在整个过程中保持**固定**（`cons fix sele rec end`），确保有序的伴侣蛋白保持刚性——这是一个具有物理动机的选择，因为假设受体是稳定折叠的。
+
+### 非键能量设置
+
+在最小化开始之前，脚本配置了两种互补的非键能量评估方法：
+
+- **标准 NBOND**：基于原子的截断，具有恒定介电常数（ε = 1.0），10–12 Å 之间的切换函数，以及 14 Å 的邻近列表截断。用于处理短程静电和范德华相互作用。
+- **FACTS**：快速解析连续溶剂化处理——一种隐式溶剂模型，表面张力参数 γ = 0.015，参考温度 298 K，以及类 GB 参数（tcps = 22, tkps = 8.0）。在没有显式水的情况下提供溶剂化自由能。注意：脚本中包含一条注释，指出 CHARMM 中关于这些值的 `tcil`/`tcic` 参数文档是**不正确的**。
+
+来源: [idp_relax.inp](/idp_relax.inp#L29-L49)
+
+### 阶段 A：全配体谐和约束
+
+所有配体原子通过谐和势被约束在其初始位置。力常数在六个最小化循环中衰减：
+
+| 循环 | 力常数 | 最小化器 | 步数 | 约束范围 |
+|---|---|---|---|---|
+| 1 | 50.0 | SD | 100 | 所有配体原子 |
+| 2 | 50.0 → 40.0 | ABNR | 100 | 所有配体原子 |
+| 3 | 40.0 → 30.0 | ABNR | 100 | 所有配体原子 |
+| 4 | 30.0 → 20.0 | ABNR | 100 | 所有配体原子 |
+| 5 | 20.0 → 10.0 | ABNR | 100 | 所有配体原子 |
+| 6 | 10.0 → 0.0 | ABNR | 100 | 所有配体原子 |
+
+第一个循环使用**最速下降**快速消除最严重的空间位阻，然后在后续精细化中切换到更高效的 **ABNR**（采用基牛顿-拉夫逊）最小化器。当力常数为 0.0 时，配体实际上已无约束，但在涉及氢的键上激活了 SHAKE，以便在后续动力学中使用更大的时间步长。
+
+### 阶段 B：仅主链谐和约束
+
+当全配体约束降至零后，**仅对配体主链原子**（N, CA, C, O）施加第二组约束序列，允许侧链自由弛豫：
+
+| 循环 | 力常数 | 最小化器 | 步数 | 约束范围 |
+|---|---|---|---|---|
+| 7 | 10.0 | ABNR | 100 | 配体主链 |
+| 8 | 10.0 → 5.0 | ABNR | 100 | 配体主链 |
+| 9 | 5.0 → 1.0 | ABNR | 100 | 配体主链 |
+| 10 | 1.0 → 0.0 | ABNR | 100 | 配体主链 |
+| 11 | 0.0 | ABNR | 5000 | 无约束 |
+
+最后 5000 步的无约束最小化允许整个复合物稳定至其最近的局部能量最小值。最小化后的坐标被写入 `@nam_min.cor`。
+
+<CgxTip>分阶段的约束衰减并非随意设定——每个力常数步长使有效约束能量减半，形成一个几何级数，将结构从刚性平滑退火至柔性。跳过阶段（例如，力常数从 50 直接跳至 0）存在使结构陷入由片段拼接伪影导致的高能局部最小值的风险。</CgxTip>
+
+来源: [idp_relax.inp](/idp_relax.inp#L57-L92)
+
+## 阶段 3：分子动力学平衡
+
+最小化之后，进行短时 **Langevin 动力学**模拟，通过允许热运动克服最小化无法穿越的小能量势垒，进一步弛豫结构。该设置在所有原子上施加弱 Cα 约束（力 = 10.0），并使用 **SHAKE** 约束涉及氢的键，从而启用 2 fs 的时间步长。
+
+| 参数 | 值 | 描述 |
+|---|---|---|
+| 积分器 | Leapfrog Verlet | 辛算法，时间可逆 |
+| 步数 | 20,000 | 总积分步数 |
+| 时间步长 | 0.002 ps (2 fs) | 结合 SHAKE，蛋白质的标准设置 |
+| 初始温度 | 100 K | 冷启动 |
+| 最终温度 | 200 K | 温和加热（非生产温度） |
+| 温度增量 | 每 1000 步 5.0 K | 在 20 个窗口内逐渐加热 |
+| 温度窗口 | ±5.0 K | 恒温器容差 |
+| 平衡频率 | 1000 步 | 重新分配速度的间隔 |
+| 能量检查阈值 | 500.0 | 能量超过则中止 |
+| 随机种子 | 893112, 766989, 542477, 934490 | 可复现轨迹 |
+
+动力学轨迹每 1000 步保存一次（`nsavc`），速度每 1000 步保存一次（`nsavv`），完整的重启文件每 5000 步写入一次（`isvfrq`）。动力学后的最终坐标被写入 `@nam_relax.cor`——这是弛豫协议的**主要输出**。
+
+来源: [idp_relax.inp](/idp_relax.inp#L94-L117)
+
+## 输出文件
+
+该协议在工作目录中生成一组明确定义的输出文件：
+
+| 文件 | 格式 | 内容 | 写入时机 |
+|---|---|---|---|
+| `@nam.psf` | CHARMM PSF | 蛋白质结构文件（拓扑） | 设置之后 |
+| `@nam_min.cor` | CHARMM coordinate | 最小化后的原子坐标 | 阶段 2 之后 |
+| `@nam.rst` | CHARMM restart | 动力学重启状态 | 阶段 3 期间 |
+| `@nam.trj` | CHARMM trajectory | 动力学轨迹帧 | 阶段 3 期间 |
+| `@nam_relax.cor` | CHARMM coordinate | **最终弛豫坐标** | 阶段 3 之后 |
+
+`@nam_relax.cor` 文件是最终交付物——完全弛豫的复合物结构，可用于下游分析、评分或提交。轨迹和重启文件使得在需要更长平衡时间时能够继续动力学模拟。
+
+来源: [idp_relax.inp](/idp_relax.inp#L14-L115)
+
+## 与 IDP-LZerD 流程的连接
+
+CHARMM 弛豫协议在 IDP-LZerD 工作流程中占据最终位置。其输入结构由[路径选择与排序](14-path-selection-and-ranking)准备，该模块的 `combine_paths()` 方法为每条选定的路径创建一个子目录，每个子目录包含一个 `combined.pdb` 文件，其中受体和组装的配体片段合并为单一结构。在运行弛豫之前，必须将这些 PDB 文件转换为 CHARMM 格式（`.seq` + `.cor`）。
+
+<CgxTip>该流程未自动化 CHARMM 执行——在 `select_paths.py` 生成 `combined.pdb` 文件和 `filelist.csv` 之后，用户必须手动将每个 PDB 转换为 CHARMM 格式，替换 `idp_relax.inp` 中的模板变量，并运行 CHARMM。这种分离是有意为之的，因为 CHARMM 格式转换通常需要根据具体情况调整（例如，处理非标准残基、链 ID 到 CHARMM 片段的映射）。</CgxTip>
+
+对于具有多链受体的结构，在准备 CHARMM 之前可能需要逆转[受体链组合](16-receptor-chain-combination)模块（`CombineChain.undo()`），因为 CHARMM 期望不同的链具有独立的片段。
+
+---
+
+- [深入解析/优化与输出/受体链组合](https://zread.ai/kiharalab/idp_lzerd/16-receptor-chain-combination)
+
+---
+slug:16-receptor-chain-combination
+blog_type:normal
+---
+
+
+**受体链组合**模块解决了 IDP-LZerD 流水线中的结构阻抗失配问题：LZerD 对接和 CHARMM 弛豫期望有序的受体伴侣作为**单条多肽链**，但生物受体经常跨越**多个 PDB 链**（例如，记录为链 A 和链 B 的同源二聚体）。`combine_receptor.py` 提供了一种可逆转换——将多个受体链**合并**为一条具有无冲突残基编号的连续链，并在下游处理完成后将其**拆分**回原始链标识。这种双向能力确保多链受体能够流经整个流水线而不丢失信息。
+
+来源: [combine_receptor.py](scripts/combine_receptor.py#L1-L233)
+
+## 流水线中的架构角色
+
+组合步骤位于**对接输出与 CHARMM 精修**的交界处。在[路径选择与排序](14-path-selection-and-ranking)阶段，`select_paths.py` 导入 `CombineChain` 并调用 `CombineChain.undo()`，在组装最终复合物结构进行弛豫之前，恢复原始链边界。正向（组合）操作通常在更早的阶段被调用——在片段生成之后、LZerD 对接之前——以便对接将受体作为单一实体处理。反向（撤销）操作在路径组装时被调用，恢复真实的多链受体，以便每条链都能在输出 PDB 中被正确放置。
+
+```mermaid
+flowchart LR
+    A["Multi-chain PDB<br/>(e.g. chains A + B)"] -->|"CombineChain()<br/>combine"| B["Single-chain PDB<br/>(chain A, renumbered)"]
+    B -->|"LZerD docking<br/>+ scoring"| C["Docked decoys"]
+    C -->|"SelectPaths<br/>+ CombineChain.undo()"| D["Final complex<br/>(chains A + B restored)"]
+    D --> E["CHARMM relaxation"]
+
+    style A fill:#f9e2ae,stroke:#b8860b
+    style B fill:#c3e6cb,stroke:#28a745
+    style D fill:#c3e6cb,stroke:#28a745
+    style E fill:#bee5eb,stroke:#17a2b8
+```
+
+上图描绘了多链受体在整个流水线中的生命周期。组合操作是无损的，因为重新编号的元数据作为 `REMARK` 记录嵌入到输出 PDB 中，从而实现可靠的逆向还原。
+
+来源: [select_paths.py](scripts/select_paths.py#L29-L30), [select_paths.py](scripts/select_paths.py#L190-L192)
+
+## `CombineChain` 类
+
+该模块暴露了一个单一类 `CombineChain`，包含三种操作：构造函数执行**正向组合**，`undo()` 执行**反向拆分**，而 `extract_residue_dict()` 读取使逆转成为可能的元数据。
+
+### 类概述
+
+| 方法 | 方向 | 目的 |
+|---|---|---|
+| `__init__(input, receptor, ligand)` | 正向 (组合) | 将受体链合并为一个，写入带有 `REMARK` 元数据的重新编号的 PDB |
+| `undo(input, outfile, ligand_chain, residue_dict, write)` | 反向 (拆分) | 从组合后的 PDB 恢复原始多链结构 |
+| `extract_residue_dict(input)` | 元数据读取 | 将 `REMARK RESIDUE=` 行解析为将残基编号映射到链标识的字典 |
+
+`allowed_chains` 类属性将有效的链 ID 空间定义为所有 ASCII 字母和数字（`string.ascii_letters + string.digits`），以适应 PDB 链标识符的完整范围。
+
+来源: [combine_receptor.py](scripts/combine_receptor.py#L42-L44), [combine_receptor.py](scripts/combine_receptor.py#L146-L157)
+
+## 正向操作：组合链
+
+当 `CombineChain` 实例化时，它会对输入 PDB 执行一系列**五种结构转换**：
+
+1. **氢原子去除** — `shared.strip_h()` 在解析前去除所有氢原子，减少原子数量并避免 CHARMM 不兼容性。
+2. **模型选择** — 丢弃第一个模型之后的所有模型，确保生成单模型结构。
+3. **链过滤** — 移除不属于受体或配体的链。如果 PDB 中缺少指定的链，则抛出 `CombineChainError` 异常。
+4. **杂原子去除** — 将具有非空白插入码的残基（杂原子、水分子）从每个剩余链中分离。
+5. **带偏移重编号的链合并** — 核心算法，详见下文。
+
+### 基于偏移的残基重编号
+
+重编号算法确保来自第二个及后续受体链的残基占据第一个链最后一个残基之上的**非重叠数字范围**。偏移量被计算并向上取整到最接近的 **100 的倍数**，在残基编号中创建清晰的视觉边界：
+
+```
+raw_offset = prev_chain_end - cur_chain_start + 1
+ceil_offset = ceil(raw_offset / 100) × 100
+```
+
+例如，如果链 A 在残基 150 处结束，链 B 从残基 1 开始，则原始偏移量为 150，取整偏移量变为 200。链 B 的残基被重新编号为 201、202、203……。然后，链 B 中的所有残基被**转移**到链 A 的 `Chain` 对象中，链 B 从模型中分离。最终结果是一条包含所有受体残基的单一链，呈单调递增且无冲突的序列。
+
+<CgxTip>基于 100 的取整偏移是一个刻意的设计选择：它使得在检查残基编号时链边界变得即刻可见（例如，从 150 跳跃到 201 标志着前一个链边界），并且留出的间隙可以容纳 PDB 插入码而不会发生冲突。</CgxTip>
+
+### 元数据持久化
+
+重编号后，构造函数在 ATOM 条目**之前**将 `REMARK` 记录写入输出文件。每条备注记录了新的残基编号、原始链 ID 和原始起始残基：
+
+```
+REMARK RESIDUE=201 CHAIN=B START=1
+```
+
+这些记录是 `undo()` 能够重建原始链拓扑的唯一机制。输出文件名遵循模式 `{pdbcode}{receptor_chains}{ligand}.pdb`（例如，`4ah2ABC.pdb`）。
+
+来源: [combine_receptor.py](scripts/combine_receptor.py#L46-L144), [shared.py](scripts/shared.py#L179-L190)
+
+## 反向操作：拆分链
+
+`undo()` 类方法执行逆变换：给定一个组合后的 PDB 文件，它使用 `REMARK` 元数据**恢复原始多链结构**。当 `len(receptor_chain) > 1` 时，`select_paths.py` 会调用此方法，确保最终组装的复合物在 CHARMM 弛豫之前携带受体的真实链拓扑。
+
+该算法的工作原理如下：
+
+1. **解析元数据** — `extract_residue_dict()` 读取所有 `REMARK RESIDUE=` 行，构建一个以重编号残基位置为键的字典，其值包含原始 `CHAIN` 和 `START` 字段。
+2. **验证输入** — 该方法验证结构是否仅包含一个模型，并且受体由单链（组合链）组成。如果存在多个模型、非唯一链 ID 或缺少元数据，则会抛出 `CombineChainError` 异常。
+3. **按链边界划分残基** — 元数据中排序后的残基键定义了转换点。对于每个边界，使用原始链 ID 创建一个新的 `Chain` 对象，并将组合链中序列号落在该边界范围内的所有残基转移至其中。
+4. **写入输出** — 默认情况下，输出文件命名为 `{input}_split.pdb` 并放置在同一目录中。如果 `write=False`，则直接返回修改后的 `Structure` 对象供内存中使用。
+
+<CgxTip>当从 `select_paths.py` 调用 `undo()` 时，它使用默认的 `write=True` 模式并以字符串形式返回输出文件路径。然后，该文件路径被传递给 `PDB.PDBParser` 以加载拆分后的受体结构用于路径组装。之所以存在两步往返过程（写入磁盘，然后重新解析），是因为 Biopython 的 PDBIO 需要文件句柄，但程序化调用时可使用内存中的 `write=False` 模式。</CgxTip>
+
+来源: [combine_receptor.py](scripts/combine_receptor.py#L159-L213), [select_paths.py](scripts/select_paths.py#L188-L194)
+
+## 命令行界面
+
+该模块可以直接调用，用于流水线之外的独立使用：
+
+```bash
+# 组合受体的链 A 和 B，以链 C 作为配体
+python scripts/combine_receptor.py input.pdb -r AB -l C
+```
+
+| 参数 | 标志 | 必需 | 描述 |
+|---|---|---|---|
+| `input` | 位置参数 | 是 | 输入 PDB 文件路径 |
+| `receptor` | `-r` / `--receptor` | 否 | 作为连续字符串的受体链 ID（例如，`AB`）；默认为 `A` |
+| `ligand` | `-l` / `--ligand` | 否 | 配体链 ID（恰好一个字符） |
+
+`CombineChain.commandline()` 类方法负责参数解析和实例化。当省略 `ligand` 时，它在输出中保持原样。当省略 `receptor` 时，仅将链 A 视为受体。
+
+来源: [combine_receptor.py](scripts/combine_receptor.py#L215-L232)
+
+## 错误处理
+
+所有异常条件均抛出 `CombineChainError`，它是 `RuntimeError` 的子类，确保流水线故障可与通用 Python 异常区分开来：
+
+| 条件 | 错误消息模式 |
+|---|---|
+| 配体参数长度超过一个字符 | `"Ligand can only be one chain: %s"` |
+| PDB 中缺少指定的受体/配体链 | `"Specified chains not found in %s"` |
+| `undo()` 的输入中未找到 `REMARK` 元数据 | `"No residue dict"` |
+| `undo()` 的输入具有多个模型 | `"Input has more than one model: %s"` |
+| `undo()` 的输入中存在非唯一链 ID | `"Non-unique chain IDs"` |
+| `undo()` 中移除配体后仍剩余多条链 | `"Input has more than one chain: %s"` |
+
+来源: [combine_receptor.py](scripts/combine_receptor.py#L36-L39), [combine_receptor.py](scripts/combine_receptor.py#L51-L85), [combine_receptor.py](scripts/combine_receptor.py#L163-L181)
+
+## 与 SelectPaths 的交互
+
+流水线中 `CombineChain` 的主要消费者是 `SelectPaths.combine_paths()`。当受体跨越多条链时，该方法在将预组合的受体文件加载到内存之前对其调用 `CombineChain.undo()`。然后，拆分后的受体被用于**单独重新添加每条原始链**到输出结构中（`select_paths.py` 的第 238–239 行），保留 CHARMM 在受限最小化和动力学期间用于区分受体和配体的正确区段标识。
+
+这种交互是有条件的：对于单链受体（`len(receptor_chain) == 1`），永远不会调用 `CombineChain.undo()`，而是直接加载受体 PDB。组合/拆分循环仅在受体真正需要多链表示时才被激活。
+
+来源: [select_paths.py](scripts/select_paths.py#L160-L194), [select_paths.py](scripts/select_paths.py#L237-L239)
+
+## 相关页面
+
+- [路径选择与排序](14-path-selection-and-ranking) — 调用 `CombineChain.undo()` 的下游消费者
+- [CHARMM 弛豫协议](15-charmm-relaxation-protocol) — 依赖于正确链/区段标识的精修步骤
+- [共享工具参考](17-shared-utilities-reference) — 记录了组合期间用于去除氢原子的 `shared.strip_h()`
+- [架构概述](4-architecture-overview) — 展示链组合所处位置的完整流水线上下文
+
+---
