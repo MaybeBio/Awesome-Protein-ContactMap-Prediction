@@ -479,6 +479,21 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **For IDR** 
 </details>
 
+--- 
+
+<details>
+<summary>IdpSAM</summary>
+
+- **Paper:** [Transferable deep generative modeling of intrinsically disordered protein conformations](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1012144) (PLOS Computational Biology, 2024)
+- **Docs:** [Read more →](docs/IdpSAM/) *to be written*
+- **Code:** https://github.com/giacomo-janson/idpsam
+- **Approach:** DL
+- **For IDR**
+</details>
+
+---
+
+
 <!-- More idr ensemble placeholders can be added here -->
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
 <!-- PLACEHOLDER: enhanced-sampling MD post-processing ensemble tool -->
@@ -692,6 +707,7 @@ Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to 
 - [ ] Add TIMELINE graph for each category so we can see the trend
 - [ ] Update the wiki in docs/, and manually refresh it in sync with the original repository commit date
 - [ ] extract the model architecture for those tools tagged `Approach: DL`, e.g., attention, GNN, flow-matching 
+- [ ] extract DATASET part in these models README
 
 ## Reference
 
