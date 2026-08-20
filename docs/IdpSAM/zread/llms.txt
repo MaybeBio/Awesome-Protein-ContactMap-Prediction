@@ -1,0 +1,38 @@
+# giacomo-janson/idpsam
+
+Source: https://zread.ai/giacomo-janson/idpsam
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/推理脚本使用](3-inference-script-usage.md)
+
+## 深入解析
+
+- [深入解析/两阶段架构概述](4-two-stage-architecture-overview.md)
+- [深入解析/SAM 模型 API 参考](14-sam-model-api-reference.md)
+- [深入解析/配置参考](15-configuration-reference.md)
+- [深入解析/数据集与数据流水线](16-dataset-and-data-pipeline.md)
+- [深入解析/通过 cg2all 进行全原子重构](17-all-atom-reconstruction-via-cg2all.md)
+### 自编码器模块
+
+- [深入解析/自编码器模块/欧几里得不变编码器](5-euclidean-invariant-encoder.md)
+- [深入解析/自编码器模块/Transformer 解码器](6-transformer-decoder.md)
+
+### 潜扩散模块
+
+- [深入解析/潜扩散模块/DDPM 采样过程](7-ddpm-sampling-process.md)
+- [深入解析/潜扩散模块/噪声预测网络](8-noise-prediction-network.md)
+
+### 几何与坐标处理
+
+- [深入解析/几何与坐标处理/距离图与扭转特征](9-distance-map-and-torsion-features.md)
+- [深入解析/几何与坐标处理/RBF 距离嵌入](10-rbf-distance-embedding.md)
+
+### Transformer 构建模块
+
+- [深入解析/Transformer 构建模块/自定义 Transformer 注意力](11-custom-transformer-attention.md)
+- [深入解析/Transformer 构建模块/自适应层归一化](12-adaptive-layer-normalization.md)
+- [深入解析/Transformer 构建模块/时间步与序列嵌入](13-timestep-and-sequence-embedding.md)
+

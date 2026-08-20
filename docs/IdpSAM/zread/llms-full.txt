@@ -1,0 +1,3716 @@
+# giacomo-janson/idpsam
+
+Source: https://zread.ai/giacomo-janson/idpsam
+
+# 入门
+
+- [入门/概述](https://zread.ai/giacomo-janson/idpsam/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**IdpSAM** 是一个潜在扩散模型，用于生成**本质无序蛋白 (IDPs)** 的三维 Cα 构象系综。IdpSAM 并非生成单一的静态结构，而是对多种构象状态进行采样，这些状态共同表征了无序多肽和蛋白质的结构异质性特征。该模型使用 PyTorch 实现，并暴露单个 `SAM` 类作为其推理接口，使得仅凭一条氨基酸序列即可轻松生成数千个构象。
+
+来源: [README.md](/README.md#L1-L75), [sam/model.py](/sam/model.py#L1-L50)
+
+## IdpSAM 解决了什么问题？
+
+本质无序蛋白不会折叠成单一的明确结构——它们以不断相互转化的构象动态系综形式存在。传统的结构预测方法（如 AlphaFold）专为有序蛋白设计，只能产生单一的静态输出。IdpSAM 弥补了这一缺陷，通过在粗粒化 Cα 层级**生成完整的构象系综**，其训练数据来自于使用 ABSINTH 隐式溶剂模型的马尔可夫链蒙特卡洛 (MCMC) 模拟。生成的系综还可以选择通过 [cg2all](https://github.com/huhlim/cg2all) 包重构为全原子细节。
+
+来源: [README.md](/README.md#L1-L6), [notebooks/idpsam_experiments.ipynb](/notebooks/idpsam_experiments.ipynb#L1-L40)
+
+## 两阶段架构
+
+IdpSAM 采用了**潜在扩散**架构，将生成过程分离为两个不同阶段。这种设计模式通过在压缩的潜在空间而非直接在三维坐标空间中运行，提升了样本质量和计算效率。
+
+**阶段 1 — 潜在扩散采样：** DDPM（去噪扩散概率模型）将随机潜在向量迭代去噪为结构化编码。一个基于 Transformer 的**噪声预测网络**（ε-网络）引导每一步去噪，该网络通过自适应层归一化以时间步和氨基酸序列为条件。
+
+**阶段 2 — 确定性解码：** Transformer **解码器**将生成的潜在编码映射回三维 Cα 坐标。编码器（仅在训练期间使用）通过计算欧几里得不变特征——经 RBF 嵌入的 Cα–Cα 距离图和骨架扭转角——从三维结构生成潜在表示。
+
+```mermaid
+flowchart LR
+    subgraph Stage1["阶段 1: 潜在扩散"]
+        direction TB
+        noise["𝑧 ~ 𝒩(0, I)"] --> ddpm["DDPM 逆向过程"]
+        ddpm --> |"T 步"| enc["潜在编码<br/>(L × 16)"]
+    end
+
+    subgraph Stage2["阶段 2: 解码"]
+        direction TB
+        enc --> decoder["Transformer 解码器"]
+        decoder --> xyz["Cα 坐标<br/>(L × 3)"]
+    end
+
+    seq["氨基酸序列<br/>(长度 L)"] --> ddpm
+    seq --> decoder
+
+    subgraph optional["可选"]
+        xyz --> cg2all["cg2all 重构"]
+        cg2all --> allatom["全原子坐标"]
+    end
+```
+
+来源: [sam/model.py](/sam/model.py#L120-L198), [sam/diffusion/diffusers_dm.py](/sam/diffusion/diffusers_dm.py#L130-L188), [sam/nn/autoencoder/decoder.py](/sam/nn/autoencoder/decoder.py#L33-L175), [sam/nn/autoencoder/encoder.py](/sam/nn/autoencoder/encoder.py#L58-L200)
+
+## 核心组件一览
+
+| 组件 | 模块 | 作用 | 关键细节 |
+|---|---|---|---|
+| **SAM** | `sam.model` | 推理封装 | 加载配置、权重，编排 `generate()` → `decode()` |
+| **Encoder** | `sam.nn.autoencoder.encoder` | 仅用于训练：3D → 潜在 | RBF 距离图 + 扭转角特征 → 16 维编码 |
+| **Decoder** | `sam.nn.autoencoder.decoder` | 潜在 → 3D 坐标 | 带序列条件注入的 Transformer |
+| **ε-Network** | `sam.nn.noise_prediction.eps` | 预测每一步的噪声 | 带 AdaLN-Zero 条件注入的 16 层 Transformer |
+| **Diffusion** | `sam.diffusion.diffusers_dm` | DDPM/DDIM 采样循环 | 封装 HuggingFace `diffusers` 调度器 |
+| **Coords** | `sam.coords` | 几何特征计算 | 距离图、扭转角、键角 |
+| **Geometric** | `sam.nn.geometric` | 距离嵌入层 | GaussianSmearing (RBF)、ExpNormalSmearing |
+
+来源: [sam/model.py](/sam/model.py#L52-L118), [sam/diffusion/diffusers_dm.py](/sam/diffusion/diffusers_dm.py#L1-L40), [sam/nn/geometric.py](/sam/nn/geometric.py#L1-L50), [sam/coords.py](/sam/coords.py#L1-L30)
+
+## 项目结构
+
+```
+idpsam/
+├── config/
+│   └── models.yaml            # 默认模型配置（架构、超参数）
+├── data/
+│   └── sequences/             # 训练、验证和测试 FASTA 文件
+├── notebooks/
+│   └── idpsam_experiments.ipynb  # 用于云端推理的 Google Colab 笔记本
+├── sam/                       # 核心 Python 包
+│   ├── model.py               # SAM 类 — 主推理接口
+│   ├── coords.py              # 距离图、扭转角、键角计算
+│   ├── data/
+│   │   ├── cg_protein.py      # 蛋白质批次的 Dataset 类
+│   │   ├── sequences.py       # 氨基酸定义与工具
+│   │   └── topology.py        # MDTraj 拓扑构建器
+│   ├── diffusion/
+│   │   ├── common.py          # 基础扩散类（EMA 选择）
+│   │   └── diffusers_dm.py    # 通过 HuggingFace diffusers 进行 DDPM/DDIM 采样
+│   └── nn/
+│       ├── autoencoder/
+│       │   ├── encoder.py     # CA_TransformerEncoder（训练）
+│       │   ├── decoder.py     # CA_TransformerDecoder（推理）
+│       │   └── ca_models.py   # 自编码器的共享 Transformer 模块
+│       ├── noise_prediction/
+│       │   ├── eps.py         # IdpGAN 噪声预测 Transformer
+│       │   └── embedding.py   # 时间步嵌入器、AdaLN、条件注入
+│       ├── transformer.py     # 带二维偏置的自定义多头注意力
+│       ├── geometric.py       # RBF / ExpNormal 距离嵌入模块
+│       └── common.py          # 共享工具（激活函数、位置嵌入）
+├── scripts/
+│   └── generate_ensemble.py   # CLI 推理脚本
+├── weights/
+│   └── v1.0/                  # 预训练模型权重（编码器、解码器、ε-网络、缩放器）
+├── sam.yml                    # Conda 环境规范
+└── setup.py                   # 包安装
+```
+
+来源: [setup.py](/setup.py#L1-L18), [config/models.yaml](/config/models.yaml#L1-L106)
+
+## 预训练权重
+
+本仓库在 `weights/v1.0/` 下提供了预训练权重，无需任何训练即可直接进行推理：
+
+| 文件 | 组件 | 描述 |
+|---|---|---|
+| `nn.enc.pt` | Encoder | Transformer 编码器权重（训练用） |
+| `nn.dec.pt` | Decoder | Transformer 解码器权重（推理用） |
+| `nn.eps.pt` | ε-Network | 噪声预测网络权重 |
+| `enc_std_scaler.pt` | Scaler | 潜在编码的标准缩放器（均值 μ，标准差 σ） |
+
+编码标准缩放器在 DDPM 采样之后应用，用于将生成的潜在向量重新缩放回编码器原始的分布：`enc = enc × σ + μ`。这由配置中的 `use_enc_std_scaler` 标志控制。
+
+来源: [sam/model.py](/sam/model.py#L96-L110), [config/models.yaml](/config/models.yaml#L5-L8)
+
+## 配置
+
+模型架构和推理行为由单个 YAML 配置文件（`config/models.yaml`）控制。该配置分为四个顶层部分，分别对应各架构组件：
+
+| 部分 | 控制 |
+|---|---|
+| `generative_model` | 编码维度 (16)、珠子类型 (Cα)、最大序列长度 (60)、标准缩放器使用 |
+| `encoder` | 编码器 Transformer 架构、RBF 距离嵌入、扭转角特征 |
+| `decoder` | 解码器 Transformer 架构、注意力类型、序列条件注入 |
+| `latent_generative_model` | 扩散调度器 (DDPM/DDIM)、噪声调度、损失类型 |
+| `latent_network` | ε-网络 Transformer 架构、时间步/序列嵌入、AdaLN 模式 |
+
+来源: [config/models.yaml](/config/models.yaml#L1-L106)
+
+## 推理工作流
+
+由 `SAM.sample()` 方法编排的端到端推理过程，遵循以下精确序列：
+
+1. 使用配置文件和设备**初始化** `SAM` 模型——这将把 ε-网络、解码器、扩散调度器和可选的编码缩放器加载到内存中
+2. 通过 `SAM.generate()` **生成潜在编码**——DDPM 逆向过程以氨基酸序列为条件，对高斯噪声进行 `n_steps` 步的迭代去噪
+3. 使用标准缩放器**缩放编码**（若已配置），以匹配编码器的输出分布
+4. 通过 `SAM.decode()` **解码为坐标**——解码器将每个潜在编码映射为形状为 `(L, 3)` 的 Cα 坐标张量
+5. **保存输出**——坐标被写入带有伴随 PDB 拓扑文件的 DCD 轨迹文件
+6. 通过 `SAM.cg2all()` **可选的全原子重构**——cg2all 包将 Cα 轨迹转换为全原子表示
+
+<CgxTip>DDPM 采样步数 (`n_steps`) 控制着质量与速度的权衡：默认的 100 步（总训练时间步为 1000）提供了良好的平衡。增加步数可以提升样本质量，但代价是更长的生成时间。</CgxTip>
+
+来源: [sam/model.py](/sam/model.py#L120-L198), [sam/model.py](/sam/model.py#L200-L320), [scripts/generate_ensemble.py](/scripts/generate_ensemble.py#L85-L113)
+
+## 接下来去哪
+
+现在你已经了解了 IdpSAM 是什么及其架构的组织方式，以下是推荐的阅读顺序：
+
+1. **[快速开始](2-quick-start)** — 安装 IdpSAM 并在几分钟内生成你的首个构象系综
+2. **[推理脚本用法](3-inference-script-usage)** — `generate_ensemble.py` 脚本的详细 CLI 参数和输出格式
+3. **[两阶段架构概述](4-two-stage-architecture-overview)** — 深入探讨编码器、潜在扩散和解码器如何作为一个统一的生成系统交互
+4. **[DDPM 采样过程](7-ddpm-sampling-process)** — 理解扩散逆向过程、调度器参数以及质量与速度的权衡
+5. **[SAM 模型 API 参考](14-sam-model-api-reference)** — `SAM` 类方法及返回类型的完整参考
+
+---
+
+- [入门/快速开始](https://zread.ai/giacomo-janson/idpsam/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+不到五分钟，让你的机器跑起 idpSAM——从克隆代码到生成你的首个 Cα 构象系综。本页涵盖**安装**、**通过 CLI 和 Python 进行首次推理**以及**理解输出**。如需了解脚本参数的详细说明，请参阅[推理脚本用法](3-inference-script-usage)；如需了解模型背后的架构，请参阅[两阶段架构概述](4-two-stage-architecture-overview)。
+
+## 前提条件
+
+在安装 idpSAM 之前，请确保你的系统满足以下要求：
+
+| 要求 | 详情 |
+|---|---|
+| **操作系统** | Linux (x86_64) — Conda 环境已锁定至 Linux 软件包 |
+| **CUDA** | 11.7 及兼容的 NVIDIA 驱动（可选，但对于大型系综强烈推荐） |
+| **Conda** | Miniconda 或 Anaconda，用于环境管理 |
+| **Git** | 用于克隆代码仓库 |
+
+<CgxTip>idpSAM 使用基于 CUDA 11.7 的 PyTorch 1.13.1，如 Conda 配置文件所锁定。在提供的 `sam.yml` 之外混用 PyTorch 或 CUDA 版本，可能会导致推理时出现隐性失败。</CgxTip>
+
+来源: [sam.yml](/sam.yml#L1-L139)
+
+## 安装
+
+推荐的安装路径使用提供的 Conda 环境文件，该文件将每一个依赖项——包括 PyTorch、diffusers、MDTraj 和 NumPy——均锁定至经过测试的版本。
+
+```mermaid
+flowchart TD
+    A["git clone repo"] --> B["conda env create -f sam.yml"]
+    B --> C["conda activate sam"]
+    C --> D["pip install -e ."]
+    D --> E{Need all-atom reconstruction?}
+    E -- Yes --> F["pip install cg2all"]
+    E -- No --> G["✅ Ready to generate"]
+    F --> G
+```
+
+**步骤 1 — 克隆代码仓库：**
+
+```bash
+git clone https://github.com/giacomo-janson/idpsam.git
+cd idpsam
+```
+
+**步骤 2 — 创建并激活 Conda 环境：**
+
+```bash
+conda env create -f sam.yml
+conda activate sam
+```
+
+**步骤 3 — 以可编辑模式安装 `sam` 包：**
+
+```bash
+pip install -e .
+```
+
+这会将 `sam` Python 库注册到你的 `PYTHONPATH` 上，使得 `from sam.model import SAM` 可以在任何工作目录下使用。`setup.py` 将该包声明为版本 `1.0.0` 的 `sam` 包。
+
+**步骤 4 (可选) — 安装 cg2all 以进行全原子重构：**
+
+```bash
+pip install git+http://github.com/huhlim/cg2all
+```
+
+仅当你计划将 Cα 轨迹转换为完整的全原子结构时才需要此步骤。上述仅 CPU 的安装已足以满足 idpSAM 的用例需求。
+
+来源: [README.md](/README.md#L18-L52), [setup.py](/setup.py#L1-L18), [sam.yml](/sam.yml#L1-L10)
+
+## 验证安装
+
+运行快速健全性检查以确认模型能否正确加载：
+
+```bash
+python -c "from sam.model import SAM; print('idpSAM imported successfully')"
+```
+
+预训练权重随代码仓库一起提供，位于 `weights/v1.0/` 目录下。请验证它们是否存在：
+
+| 权重文件 | 作用 |
+|---|---|
+| `nn.enc.pt` | 编码器网络参数 |
+| `nn.dec.pt` | 解码器网络参数 |
+| `nn.eps.pt` | 潜在噪声预测 (ε) 网络参数 |
+| `enc_std_scaler.pt` | 潜在编码的标准缩放器 |
+
+如果缺少任何文件，请重新克隆或从代码仓库中恢复。
+
+来源: [sam/model.py](/sam/model.py#L84-L135)
+
+## 你的首个系综 — CLI
+
+生成构象系综最快的方式是使用位于 `scripts/generate_ensemble.py` 的推理脚本。该脚本将完整的**采样 → 解码 → 保存**流程封装为一条单独的命令。
+
+```bash
+python scripts/generate_ensemble.py \
+  -c config/models.yaml \
+  -s MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT \
+  -o peptide \
+  -n 1000 \
+  -d cuda
+```
+
+各参数说明如下：
+
+| 标志 | 描述 | 默认值 |
+|---|---|---|
+| `-c` | 模型配置 YAML 文件路径 | *(必填)* |
+| `-s` | 氨基酸序列（仅限标准 20 个字母） | *(必填)* |
+| `-o` | 输出路径前缀——扩展名会自动追加 | *(必填)* |
+| `-n` | 要生成的构象数量 | `1000` |
+| `-t` | 扩散去噪步数 (1–1000) | `100` |
+| `-b` | 采样批次大小 | `250` |
+| `-a` | 通过 cg2all 启用全原子重构 | 关闭 |
+| `-d` | PyTorch 设备：`cpu` 或 `cuda` | `cpu` |
+| `-q` | 安静模式（抑制输出） | 关闭 |
+
+序列 `MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT` (Q2KXY0) 是代码仓库中包含的测试肽段之一。它是来自 DisProt 的 32 残基内在无序蛋白。
+
+<CgxTip>该模型在**12–60 个残基**的肽段上进行了训练。明显超出此范围的序列可能会产生非物理的构象（糟糕的链几何结构，不正确的相互作用模式）。</CgxTip>
+
+来源: [scripts/generate_ensemble.py](/scripts/generate_ensemble.py#L1-L113), [data/sequences/test.fasta](/data/sequences/test.fasta#L1-L45)
+
+## 你的首个系综 — Python API
+
+对于编程式使用，`SAM` 类提供了相同的三步流程：**初始化 → 采样 → 保存**。
+
+```python
+from sam.model import SAM
+
+# 1. 初始化模型（加载编码器、解码器、噪声网络和缩放器）
+idpsam = SAM(config_fp="config/models.yaml", device="cuda", verbose=True)
+
+# 2. 生成 Cα 构象
+out = idpsam.sample(
+    seq="MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT",  # 氨基酸序列
+    n_samples=1000,                            # 构象数量
+    n_steps=100,                               # 扩散去噪步数
+    batch_size_eps=250,                        # 扩散采样的批次大小
+    batch_size_dec=250,                        # 解码的批次大小
+    return_enc=False,                          # 设为 True 可同时返回潜在编码
+    out_type="numpy"                           # "numpy" 或 "torch"
+)
+
+# 3. 保存为 DCD 轨迹 + PDB 拓扑
+paths = idpsam.save(out=out, out_path="peptide", out_fmt="dcd")
+
+# 可选：全原子重构
+# idpsam.cg2all(ca_pdb_fp=paths["ca_pdb"], ca_traj_fp=paths["ca_dcd"],
+#               out_path="peptide", batch_size=250, device="cpu")
+```
+
+`sample()` 方法返回一个具有以下结构的字典：
+
+| 键 | 类型 | 形状 | 描述 |
+|---|---|---|---|
+| `seq` | `str` | — | 输入氨基酸序列 |
+| `name` | `str` | — | 蛋白质名称标识符 |
+| `xyz` | `ndarray` | `(n_samples, L, 3)` | Cα 坐标，单位为纳米 |
+| `time` | `dict` | — | 计时信息：`tot`、`ddpm`、`dec`（秒） |
+| `enc` | `ndarray` | `(n_samples, L, 16)` | 潜在编码（仅在 `return_enc=True` 时返回） |
+
+来源: [sam/model.py](/sam/model.py#L57-L195), [sam/model.py](/sam/model.py#L197-L380)
+
+## 理解输出
+
+运行 `save()` 后，以下文件将被写入磁盘：
+
+| 文件 | 格式 | 内容 |
+|---|---|---|
+| `peptide.ca.top.pdb` | PDB | 仅 Cα 拓扑（单帧，用于 MDTraj/MDAnalysis 加载） |
+| `peptide.ca.traj.dcd` | DCD | 包含所有 `n_samples` 构象的 Cα 轨迹 |
+| `peptide.seq.fasta` | FASTA | 输入氨基酸序列 |
+
+如果启用了全原子重构（通过 `-a` 标志或 `cg2all()` 方法），将出现两个额外文件：
+
+| 文件 | 格式 | 内容 |
+|---|---|---|
+| `peptide.aa.top.pdb` | PDB | 全原子拓扑 |
+| `peptide.aa.traj.dcd` | DCD | 全原子轨迹 |
+
+你可以使用 MDTraj 加载并分析 DCD 轨迹：
+
+```python
+import mdtraj
+traj = mdtraj.load("peptide.ca.traj.dcd", top="peptide.ca.top.pdb")
+print(f"Conformations: {traj.n_frames}, Residues: {traj.n_residues}")
+```
+
+来源: [sam/model.py](/sam/model.py#L310-L380)
+
+## 在 Google Colab 上运行
+
+如果你希望完全跳过本地安装，提供了一个预配置的 Colab 笔记本。它可在云端处理依赖安装、模型加载、生成和可视化。
+
+[![Google Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/giacomo-janson/idpsam/blob/main/notebooks/idpsam_experiments.ipynb)
+
+**重要提示：** 在 Colab 上运行时，请通过 **Edit → Notebook settings → Hardware accelerator → GPU** 启用 GPU 支持。使用 CPU 生成大型系综的速度会显著变慢。
+
+该笔记本遵循相同的三步模式——唯一的区别是 `weights_parent_path` 被设置为 `"idpsam"`，以适应 Colab 上克隆的子目录结构。
+
+来源: [notebooks/idpsam_experiments.ipynb](/notebooks/idpsam_experiments.ipynb#L1-L200), [README.md](/README.md#L54-L57)
+
+## 尝试测试序列
+
+代码仓库附带了一组以 FASTA 格式提供的即用型测试序列。以下是一些代表性示例：
+
+| 名称 | 序列 | 长度 |
+|---|---|---|
+| angiotensin | `DRVYIHPF` | 8 |
+| yesg6 | `YESGGGGGGATD` | 12 |
+| Q9EP54 | `MACYPVNIRARGLGKNMGMKSRGRGKG` | 27 |
+| Q2KXY0 | `MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT` | 32 |
+| drk_sh3 | `MEAIAKHDFSATADDELSFRKTQILKILNMEDDSNWYRAELDGKEGLIPSNYIEMKNHD` | 59 |
+
+从 `data/sequences/test.fasta` 中选取任意序列，并通过 `-s` 标志传入，即可立即尝试生成。
+
+来源: [data/sequences/test.fasta](/data/sequences/test.fasta#L1-L45)
+
+## 常见问题
+
+| 问题 | 原因 | 解决方案 |
+|---|---|---|
+| `OSError: CUDA is not available` | 无 GPU 或驱动不匹配 | 使用 `-d cpu` 或安装 CUDA 11.7 |
+| `ImportError: cg2all not installed` | 缺少 cg2all 但使用了 `-a` 标志 | 安装 cg2all 或移除 `-a` 标志 |
+| `ValueError: Invalid sequence` | 非标准氨基酸字母 | 仅使用 20 个标准单字母代码 |
+| 采样期间内存不足 | 批次大小对 GPU 而言过大 | 减小 `-b`（例如 `100` 或 `50`） |
+| 非物理构象 | 序列长度超出 12–60 范围 | 保持在训练的长度范围内 |
+
+来源: [scripts/generate_ensemble.py](/scripts/generate_ensemble.py#L43-L72), [sam/model.py](/sam/model.py#L84-L110)
+
+## 接下来去哪
+
+既然你已经能够生成系综，可以深入探索该系统：
+
+1. **[推理脚本用法](3-inference-script-usage)** — 完整的参数参考、批次大小策略和输出格式选项
+2. **[两阶段架构概述](4-two-stage-architecture-overview)** — 了解编码器–扩散–解码器流程的工作原理
+3. **[配置参考](15-configuration-reference)** — 通过 `config/models.yaml` 自定义模型行为
+4. **[通过 cg2all 进行全原子重构](17-all-atom-reconstruction-via-cg2all)** — 将 Cα 轨迹转换为完整原子结构的详细指南
+
+---
+
+- [入门/推理脚本使用](https://zread.ai/giacomo-janson/idpsam/3-inference-script-usage)
+
+---
+slug:3-inference-script-usage
+blog_type:normal
+---
+
+
+`generate_ensemble.py` 脚本是使用 idpSAM 生成内禀无序肽构象系综的主要命令行接口。它将完整的两阶段推理流程——**潜变量扩散采样**及随后的**解码器重建**——封装为单次调用，并可通过 cg2all 选择性地追加全原子重建。本页将向你逐一介绍每个参数、执行流程以及预期获得的输出产物。
+
+来源：[generate_ensemble.py](scripts/generate_ensemble.py#L1-L113), [model.py](sam/model.py#L1-L434)
+
+## 快速命令参考
+
+最简单的用法，在 CPU 上为一条肽生成 1,000 个 Cα 构象，如下所示：
+
+```bash
+python scripts/generate_ensemble.py \
+  -c config/models.yaml \
+  -s MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT \
+  -o peptide \
+  -n 1000
+```
+
+若要启用 GPU 加速和全原子重建，请添加 `-d cuda` 和 `-a` 标志：
+
+```bash
+python scripts/generate_ensemble.py \
+  -c config/models.yaml \
+  -s MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT \
+  -o peptide \
+  -n 1000 \
+  -a \
+  -d cuda
+```
+
+<CgxTip>当生成大型系综（n > 500）时，强烈建议通过 `-d cuda` 使用 GPU 执行——扩散采样阶段是性能瓶颈，能从 CUDA 加速中显著受益。</CgxTip>
+
+来源：[generate_ensemble.py](scripts/generate_ensemble.py#L14-L49), [README.md](README.md#L47-L59)
+
+## 参数参考
+
+该脚本暴露了三个**必需**参数和六个可选参数。下表列出了每个标志、其类型、默认值及用途。
+
+| 标志 | 类型 | 默认值 | 描述 |
+|------|------|---------|-------------|
+| `-c` / `--config_fp` | `str` | *(必需)* | idpSAM 模型的 YAML 或 JSON 配置文件路径。默认使用 `config/models.yaml`。 |
+| `-s` / `--seq` | `str` | *(必需)* | 使用单字母代码表示的氨基酸序列（如 `MFDNASTRN…`）。仅接受 20 种标准残基。 |
+| `-o` / `--out_path` | `str` | *(必需)* | 基础输出路径。根据所选输出格式自动追加文件扩展名。 |
+| `-u` / `--out_fmt` | `str` | `dcd` | 坐标存储格式。可选：`numpy` (`.npy`)、`dcd` (DCD 轨迹 + PDB 拓扑)。 |
+| `-n` / `--n_samples` | `int` | `1000` | 要生成的构象数量。 |
+| `-t` / `--n_steps` | `int` | `100` | 扩散逆向步数。范围：1–1000。步数越多 → 质量越高，但运行时间更长。 |
+| `-b` / `--batch_size` | `int` | `250` | 扩散采样与%解码的批次大小。如遇 GPU 内存错误，请减小此值。 |
+| `--cg2all_batch_size` | `int` | `None` | cg2all 全原子转换的批次大小。未设置时默认为 `--batch_size`。 |
+| `-a` / `--all_atom` | 标志 | `False` | 若设置此标志，则通过 cg2all 将 Cα 构象转换为全原子结构（需安装 cg2all）。 |
+| `-d` / `--device` | `str` | `cpu` | idpSAM 模型使用的 PyTorch 设备。可选：`cpu`、`cuda`。 |
+| `--cg2all_device` | `str` | `cpu` | cg2all 使用的 PyTorch 设备。与 `-d` 分离，因为即使 PyTorch 检测到 CUDA，cg2all 也可能无法检测到。 |
+| `-q` / `--quiet` | 标志 | `False` | 隐藏所有打印输出。 |
+
+来源：[generate_ensemble.py](scripts/generate_ensemble.py#L16-L49)
+
+## 执行流程
+
+该脚本按顺序经历四个阶段。下图可视化了从参数解析到最终输出的控制流：
+
+```mermaid
+flowchart TD
+    A["解析并验证 CLI 参数"] --> B["初始化 SAM 模型<br/>(加载配置、权重、网络)"]
+    B --> C["扩散采样<br/>生成潜变量编码"]
+    C --> D["解码器重建<br/>潜变量 → Cα xyz 坐标"]
+    D --> E["保存输出文件<br/>(FASTA, 轨迹, 拓扑)"]
+   :    E -->%F{--all_atom 标志是否设置?}
+#    F --2-- 是 --> G["cg2all 重建<br?/>Cα → 全原子"]
+     F -- 否 --> H["4"完成"]
+     G -->&>H
+```
+
+*（注：为保持原文格式，*%Mermaid 语法中*的英文标签已按原结构翻译$转换为中文字)文，如遇&影响渲染，请以原文英文标签/结构为准）*
+
+每个阶段直接对应 `SAM` 包装类上的一个方法调用：
+
+1. **模型初始化** — `SAM(config_fp=…, device=…, verbose=…)` 从配置文件和权重路径加载 epsilon 网络、解码器、标准缩放器和扩散调度器。[model.py](sam/model.py#L46-L122)
+2. **采样** — `model.sample()` 内部调用 `model.generate()`（扩散逆向过程 → 潜变量编码），然后调用 `model.decode()`（解码器网络 → Cα 坐标）。[model.py](sam/model.py#L134-L190)
+3. **保存** — `model.save()` 按请求的格式将坐标数据写入磁盘。[model.py](sam/model.py#L341-L393)
+4. **全原子重建**（可选） — `model.cg2all()` 借助 `convert_cg2all` 命令行工具执行。[model.py](sam/model.py#L396-L434)
+
+来源：[generate_ensemble.py](scripts/generate_ensemble.py#L88-L113), [model.py](sam/model.py#L134-L190)
+
+## 输入验证
+
+在任何计算开始之前，脚本会验证你的输入：
+
+- **序列检查**：氨基酸序列必须匹配正则表达式 `^[QWERTYIPASDFGHKLCVNM]*$` —— 仅允许 20 种标准单字母残基代码。非标准或小写字符将引发 `ValueError`。[generate_ensemble.py](scripts/generate_ensemble.py#L56-L58)
+- **全原子兼容性**：设置 `-a` 时，脚本会验证：(1) cg2all 可导入，(2) `--out_fmt` 为 `dcd`（唯一兼容 cg2all 的格式），以及 (3) `--cg2all_batch_size` 能被 `--n_samples` 整除。[generate_ensemble.py](scripts/generate_ensemble.py#L61-L81)
+
+<CgxTip>若出现 `ImportError: The cg2all library is not installed`，请在重新使用 `-a` 标志运行之前，通过 `pip install git+http://github.com/huhlim/cg2all`（仅 CPU 版）进行安装。</CgxTip>
+
+来源：[generate_ensemble.py](scripts/generate_ensemble.py#L52-L81)
+
+## 输出产物
+
+脚本生成一组文件，其名称派生自 `--out_path` 基础路径。具体文件取决于输出格式及是否启用了全原子重建。
+
+### 仅 Cα 输出（`--out_fmt dcd`，默认）
+
+| 文件 | 后缀 | 描述 |
+|------|--------|-------------|
+| FASTA 序列 | `.seq.fasta` | 包含输入氨基酸序列的纯文本文件。 |
+| Cα 轨迹 | `.ca.traj.dcd` | 包含所有生成 Cα 构象的 DCD 二进制轨迹。 |
+| Cα 拓扑 | `.ca.top.pdb` | 首帧的 PDB 文件 —— 用作加载 DCD 的拓扑参考。 |
+
+### 仅 Cα 输出（`--out_fmt numpy`）
+
+| 文件 | 后缀 | 描述 |
+|------|--------|-------------|
+| FASTA 序列 | `.seq.fasta` | 包含输入氨基酸序列的纯文本文件。 |
+| Cα 坐标 | `.ca.xyz.npy` | 形状为 `(n_samples, L, 3)` 的 NumPy 数组，其中 L 为序列长度。 |
+
+### 全原子输出（设置 `-a` 时，附加于 Cα 文件之外）
+
+| 文件 | 后缀 | 描述 |
+|------|--------|-------------|
+| 全原子轨迹 | `.aa.traj.dcd` | 包含由 cg2all 重建的全原子构象的 DCD 轨迹。 |
+| 全原子拓扑 | `.aa.top.pdb` | 全原子 DCD 轨迹的 PDB 拓扑文件。 |
+
+来源：[model.py](sam/model.py#L341-L393), [model.py](sam/model.py#L396-L434)
+
+## 配置文件
+
+`-c` 标志指向一个 YAML（或 JSON）配置文件，该文件定义了模型的每个架构和训练超参数。默认配置位于 `config/models.yaml`，并引用 `weights/v1.0/` 目录中的预训练权重。
+
+配置中的关键部分：
+
+| 部分 | 用途 | 关键字段 |
+|---------|---------|------------|
+| `generative_model` | 生成流程的顶层设置 | `data_type`, `bead_type`, `encoding_dim`, `max_len` |
+| `encoder` | 欧几里得不变编码器架构与权重 | `arch`, `num_layers`, `embed_dim`, `weights`, `std_scaler_fp` |
+| `decoder` | Transformer 解码器架构与权重 | `arch`, `num_layers`, `attention_type`, `weights` |
+| `latent_generative_model` | DDPM 扩散调度参数 | `sched_params`（beta 调度、时间步、方差类型） |
+| `latent_network` | 噪声预测（epsilon）网络架构与权重 | `arch`, `num_layers`, `attention_type`, `weights` |
+
+<CgxTip>配置中的权重文件路径**相对于当前工作目录**，而非配置文件本身。如果从其他目录运行脚本，请在配置中使用绝对路径，或在编程方式使用 `SAM` 类时设置 `weights_parent_path` 参数。</CgxTip>
+
+有关每个配置字段的完整解析，请参阅[配置参考](15-configuration-reference)。
+
+来源：[models.yaml](config/models.yaml#L1-L106), [model.py](sam/model.py#L46-L131), [README.md](config/README.md#L1-L2)
+
+## 平衡采样质量与速度
+
+有两个参数直接影响质量与运行时间的权衡：
+
+- **`-t` / `--n_steps`**（默认 100）：控制逆向扩散步数。默认配置中的扩散调度器使用 1,000 个时间步训练（`num_train_timesteps: 1000`），因此 `--n_steps 1000` 可产生理论最优的采样质量，而 `--n_steps 50` 则提供快速的近似结果。实践中，50–200 之间的值对大多数肽能达到良好的平衡。
+- **`-b` / `--batch_size`**（默认 250）：更大的批次能提高 GPU 利用率，但会消耗更多内存。如果在 GPU 上遇到内存不足错误，请将批次大小减半后重新运行。
+
+此关系可总结为：
+
+| 模式 | `--n_steps` | `--batch_size` | 适用场景 |
+|--------|-------------|----------------|----------|
+| 快速探索 | 50 | 250 | 快速原型设计、参数扫描 |
+| 均衡（默认） | 100 | 250 | 标准生产运行 |
+| 高保真 | 200–1000 | 128 | 最终发表质量的系综 |
+
+来源：[generate_ensemble.py](scripts/generate_ensemble.py#L29-L34), [models.yaml](config/models.yaml#L62-L69)
+
+## 故障排除
+
+| 症状 | 原因 | 解决方案 |
+|---------|-------|-----|
+| `ValueError: The input sequence can contain only standard amino acid letters` | `-s` 中包含非标准或小写残基代码 | 仅使用 20 个大写单字母代码 (A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y)。 |
+| `ImportError: The cg2all library is not installed` | 未安装 cg2all 却使用了 `-a` 标志 | 安装 cg2all：`pip install git+http://github.com/huhlim/cg2all`，或移除 `-a` 标志。 |
+| `ValueError: --out_fmt can only be in ('dcd',) when using --all_atom` | `--out_fmt numpy` 与 `-a` 组合使用 | 使用全原子重建时切换为 `--out_fmt dcd`（默认）。 |
+| `ValueError: cg2all batch size is not an exact divisor of --n_samples` | `--n_samples` 无法被批次大小整除 | 调整 `--n_samples` 或 `--cg2all_batch_size`，使后者能整除前者。 |
+| `OSError: CUDA is not available for PyTorch` | 在没有支持 CUDA 的 GPU 时使用了 `-d cuda` | 使用 `-d cpu` 或安装 CUDA 工具包及匹配的 PyTorch。 |
+| `subprocess.SubprocessError: Error when running cg2all` | 全原子转换期间 cg2all 失败 | 检查 cg2all 是否正确安装；若怀疑 CUDA 问题，请尝试 `--cg2all_device cpu`。 |
+
+来源：[generate_ensemble.py](scripts/generate_ensemble.py#L56-L81)
+
+## 后续去向
+
+既然你已能从命令行生成系综，接下来可以探索支撑它的架构与 API：
+
+- **[两阶段架构概览](4-two-stage-architecture-overview)** — 了解编码器、扩散模型和解码器如何组合成完整的生成流程。
+- **[SAM 模型 API 参考](14-sam-model-api-reference)** — 在你自己的 Python 代码中直接使用 `SAM` 类，以获得比 CLI 更强的控制力。
+- **[通过 cg2all 进行全原子重建](17-all-atom-reconstruction-via-cg2all)** — 深入了解 Cα 轨迹如何转换为完整的原子细节。
+- **[配置参考](15-configuration-reference)** — `models.yaml` 及自定义配置的完整字段级文档。
+
+---
+
+# 深入解析
+
+- [深入解析/两阶段架构概述](https://zread.ai/giacomo-janson/idpsam/4-two-stage-architecture-overview)
+
+---
+slug:4-two-stage-architecture-overview
+blog_type:normal
+---
+
+
+idpSAM 通过**隐扩散**范式生成内在无序蛋白的构象系综，该范式将生成过程解耦为两个独立的阶段。该架构并非直接在 3D 坐标空间中进行扩散（因为这需要模型从头学习刚体对称性和几何约束），而是首先将 Cα 结构压缩为紧凑的、学习到的隐表示，随后在该隐空间中执行扩散采样，最后再解码回笛卡尔坐标。此设计产生了**每残基 16 维编码**作为隐基底，将扩散问题的维度从 ℝ³ 大幅降低至 ℝ¹⁶，同时通过训练好的解码器保持了结构表达能力。
+
+来源: [model.py](sam/model.py#L41-L123), [models.yaml](config/models.yaml#L4-L9)
+
+## 架构蓝图
+
+这两个阶段由 `SAM` 包装类统一调度，该类暴露了一个 `sample()` 方法，并在内部依次调用 `generate()`（阶段 1）和 `decode()`（阶段 2）。编码器网络仅在训练期间使用，用于生成真实隐编码，供扩散模型学习复现。
+
+```mermaid
+flowchart TB
+    subgraph Training["TRAINING TIME"]
+        direction TB
+        XYZ_T["Cα coordinates<br/>(B, L, 3)"] --> ENC["Encoder<br/>CA_TransformerEncoder"]
+        ENC --> LAT["Latent encodings<br/>(B, L, 16)"]
+        LAT --> SC_T["Standard Scaler<br/>(zero-mean, unit-var)"]
+        SC_T --> DIFF_TRAIN["DDPM Training<br/>ε-prediction loss"]
+    end
+
+    subgraph Inference["INFERENCE TIME"]
+        direction TB
+        SEQ["Amino acid sequence<br/>(length L)"] --> STAGE1
+
+        subgraph STAGE1["Stage 1: Latent Diffusion Sampling"]
+            direction TB
+            NOISE["Gaussian noise<br/>z_T ~ N(0, I)"] --> DDPM["DDPM Reverse Process<br/>(n_steps denoising steps)"]
+            DDPM -->|"ε-network<br/>EpsTransformer"| Z0["Clean latent z₀<br/>(B, L, 16)"]
+        end
+
+        Z0 --> SC_INV["Inverse Standard Sccaler<br/>z = z̃·s + u"]
+        SC_INV --> STAGE2
+
+        subgraph STAGE2["Stage 2: Deterministic Decoding"]
+            direction TB
+            Z_DEC["Latent encoding<br/>(B, L, 16)"] --> DEC["Decoder<br/>CA_TransformerDecoder"]
+            DEC --> XYZ_OUT["Cα coordinates<br/>(B, L, 3)"]
+        end
+    end
+
+    style STAGE1 fill:#e8f4f8,stroke:#2196F3,stroke-width:2px
+    style STAGE2 fill:#f3e8f4,stroke:#9C27B0,stroke-width:2px
+    style Training fill:#fff8e1,stroke:#FF9800,stroke-width:2px
+    style Inference fill:#e8f5e9,stroke:#4CAF50,stroke-width:2px
+```
+
+来源: [model.py](sam/model.py#L134-L190), [model.py](sam/model.py#L201-L266), [model.py](sam/model.py#L269-L338)
+
+## 阶段 1：隐扩散采样
+
+第一阶段通过逆向运行**去噪扩散概率模型 (DDPM)** 来生成具有结构意义的隐编码。从纯高斯噪声 **z_T ~ 𝒩(0, I)** 开始，模型在 `n_steps` 个时间步上迭代去噪，以生成干净的隐向量 **z₀ ∈ ℝ^(B×L×16)**，其中 B 为批次大小，L 为序列长度，16 为编码维度。
+
+### 去噪循环
+
+`Diffusers.sample()` 方法使用 HuggingFace 的 `DDPMScheduler` 实现了逆扩散过程。在每个时间步 *i*，ε-网络预测噪声残差，调度器利用该残差计算噪声更低的状态：
+
+```
+z_T → z_{T-1} → ... → z_1 → z_0
+     ε_θ        ε_θ          ε_θ
+```
+
+该调度器支持 **DDPM**（随机）和 **DDIM**（确定性）两种采样机制，可通过模型配置中的 `sched_params` 进行配置。
+
+来源: [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L151-L187), [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L27-L66)
+
+### 噪声预测网络 (ε-Transformer)
+
+`EpsTransformer` 是预测噪声 ε_θ 的神经主干网络，其输入为带噪隐编码、扩散时间步和氨基酸序列。其架构遵循受 DiT（Diffusion Transformer）启发的设计，包含以下关键组件：
+
+| 组件 | 用途 | 默认配置 |
+|---|---|---|
+| `project_input` | 将带噪隐编码 z_t 线性投影到嵌入空间 | Linear(16 → 256) |
+| `TimestepEmbedder` | 扩散时间 *t* 的正弦频率嵌入 + MLP | freq_dim=256, hidden=256 |
+| `beads_embed` | 学习到的氨基酸嵌入（20 种残基类型） | Embedding(20, 32) |
+| `AF2_PositionalEmbedding` | AlphaFold2 风格的相对位置编码 | dim=64, r=32 |
+| `IdpGAN_TransformerBlock` ×16 | 带有 AdaLN 条件的堆叠 Transformer 层 | embed=256, heads=16 |
+| `ConditionalInjectionModule` | 用于注入时间步 + 氨基酸的自适应层归一化 (AdaLN-Zero) | mode="adanorm" |
+| `InputInjectionModule` | 注入原始输入 z_t 的残差连接 | mode="add", pos="out" |
+| `out_module` | 投影回编码维度的最终 MLP | 256 → 256 → 16 |
+
+**AdaLN-Zero** 条件机制是核心：时间步嵌入与投影后的氨基酸嵌入之和经过一个 SiLU + Linear 层，输出 **6 × embed_dim** 个参数，为注意力子块和 MLP 子块分别生成平移、缩放和门控值。这确保了扩散时间步和序列信息能够调制每一层的计算。
+
+**输入注入** 机制 (mode="add") 将原始带噪输入 z_t 的线性投影加到每个 Transformer 块的输出上，提供了一条跳跃连接，从而稳定训练并提高噪声预测精度。
+
+来源: [eps.py](sam/nn/noise_prediction/eps.py#L424-L678), [embedding.py](sam/nn/noise_prediction/embedding.py#L14-L52), [embedding.py](sam/nn/noise_prediction/embedding.py#L59-L200)
+
+### 编码标准缩放器
+
+采样完成后，原始隐编码会使用存储的均值和标准差，从其标准化训练分布重新缩放回原始编码空间：**z = z̃ · s + u**，其中 z̃ 为生成的编码，(u, s) 从 `enc_std_scaler.pt` 加载。该缩放器拟合于编码器的训练输出，用于归一化扩散模型的目标分布。
+
+来源: [model.py](sam/model.py#L96-L106), [model.py](sam/model.py#L260-L261)
+
+## 阶段 2：确定性解码
+
+第二阶段通过**确定性 Transformer 解码器**将隐编码映射回 3D Cα 坐标。给定隐编码 **z ∈ ℝ^(B×L×16)** 和氨基酸序列，解码器生成 **xyz ∈ ℝ^(B×L×3)**——即每个残基对应一个 3D 坐标。
+
+### 解码器架构
+
+`CA_TransformerDecoder` 通过具有独特注意力机制的 Transformer 层堆栈处理隐编码：
+
+| 组件 | 用途 | 默认配置 |
+|---|---|---|
+| `project_input` | 将编码投影到嵌入空间的双层 MLP | 16 → 128 → 128 |
+| `AF2_PositionalEmbedding` | 相对位置编码（轨迹顺序） | dim=64, r=32 |
+| `AE_IdpGAN_TransformerBlock` ×5 | 带有 **TimeWarp 注意力** 的堆叠 Transformer 块 | embed=128, d_model=512, heads=32 |
+| `out_module` | 生成 3D 坐标的最终 MLP | 128 → 128 → 3 |
+
+与 ε-网络的关键架构区别在于，解码器使用了 **TimeWarp 注意力** (`attention_type="timewarp"`)，该注意力通过 `TransformerTimewarpLayer` 实现。这种注意力变体专为解码结构表示而设计，在此场景下，隐特征与空间位置之间的关系得益于不同于标准多头自注意力的注意力模式。解码器还使用了相对于其 `embed_dim` (128) 明显更大的 `d_model` (512)，为更丰富的注意力计算创建了扩展的键值空间。
+
+请注意，在默认配置中，解码器**不使用氨基酸条件** (`embed_inject_mode: null`, `bead_embed_dim: null`)——隐编码本身已经捕获了依赖序列的结构信息，使得在此阶段显式注入氨基酸变得多余。
+
+来源: [decoder.py](sam/nn/autoencoder/decoder.py#L18-L169), [models.yaml](config/models.yaml#L39-L58)
+
+## 编码器（仅用于训练）
+
+虽然不属于推理流程的一部分，但编码器定义了整个系统运行的隐空间。`CA_TransformerEncoder` 通过**欧几里得不变**设计将 Cα 坐标映射到隐编码：它消费 **Cα–Cα 距离图**（通过 RBF 高斯展宽嵌入）和**骨架扭转角**（作为 cos/sin 对嵌入），而非原始坐标。这确保了编码对全局旋转和平移具有不变性。
+
+| 编码器输入 | 嵌入方式 | 维度 |
+|---|---|---|
+| Cα–Cα 距离图 | GaussianSmearing (RBF, 320 个高斯函数, 截断值 3.0 Å) → Linear | 192 (embed_2d_dim) |
+| 骨架扭转角 φ | cos(φ), sin(φ), mask → 2 层 MLP | 128 (embed_dim) |
+| 氨基酸标识 | 学习到的 Embedding(20, 32) | 32 (concat 模式) |
+| 残基位置 | AF2_PositionalEmbedding | 64 |
+
+编码器的 2D 距离图特征通过**拼接** (`embed_2d_inject_mode="concat"`) 注入到 Transformer 的注意力层中，在每个注意力步骤合并位置和结构配对信息。最终输出是经过 LayerNorm 处理的线性投影，降维至 16 维编码空间。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L32-L225), [models.yaml](config/models.yaml#L11-L37)
+
+## 端到端数据流总结
+
+下表追溯了单个构象经过完整推理流程的过程，展示了长度为 L、批次大小为 B 的蛋白质在每个阶段的张量形状：
+
+| 步骤 | 操作 | 输入形状 | 输出形状 | 模块 |
+|---|---|---|---|---|
+| 1 | 初始化噪声 | — | (B, L, 16) | `torch.randn_like` |
+| 2 | DDPM 逆过程 | (B, L, 16) + timestep | (B, L, 16) | `Diffusers.sample()` |
+| 3 | 逆标准缩放器 | (B, L, 16) | (B, L, 16) | `enc_std_scaler` |
+| 4 | 解码为坐标 | (B, L, 16) | (B, L, 3) | `CA_TransformerDecoder` |
+
+来源: [model.py](sam/model.py#L134-L190), [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L151-L187), [decoder.py](sam/nn/autoencoder/decoder.py#L134-L160)
+
+## 权重文件与配置
+
+这三个网络均作为独立的 PyTorch 状态字典保存在 `weights/v1.0/` 下：
+
+| 文件 | 网络 | 作用 |
+|---|---|---|
+| `nn.eps.pt` | `EpsTransformer` | 阶段 1 噪声预测 |
+| `nn.dec.pt` | `CA_TransformerDecoder` | 阶段 2 隐编码 → 坐标 |
+| `nn.enc.pt` | `CA_TransformerEncoder` | 训练时编码器 |
+| `enc_std_scaler.pt` | — | 编码归一化（均值 μ，标准差 σ） |
+
+完整架构在 [models.yaml](config/models.yaml) 中指定，`SAM` 类在初始化时读取该文件以实例化并加载每个组件。该配置被划分为四个顶层键——`generative_model`、`encoder`、`decoder` 和 `latent_network`/`latent_generative_model`——反映了编码器、扩散过程、ε-网络与解码器之间的架构分离。
+
+来源: [model.py](sam/model.py#L46-L123), [models.yaml](config/models.yaml#L1-L106)
+
+<CgxTip>在推理期间，**编码器权重不会被加载**——仅需 `nn.eps.pt`、`nn.dec.pt` 和 `enc_std_scaler.pt`。编码器 (`nn.enc.pt`) 专门作为训练时产物，用于为扩散训练生成真实隐目标。</CgxTip>
+
+<CgxTip>这两个阶段在**推理时完全解耦**：你可以独立于解码器的批次大小来改变 `n_steps`（扩散步数）和 `n_samples`。`sample()` 方法接受独立的 `batch_size_eps` 和 `batch_size_dec` 参数，允许在两个阶段间进行感知内存的调度。</CgxTip>
+
+## 建议阅读路径
+
+为了加深对每个组件的理解，请按照以下顺序阅读目录：
+
+1. **[欧几里得不变编码器](5-euclidean-invariant-encoder)** — 编码器如何从距离图和扭转角构建旋转/平移不变的隐表示
+2. **[Transformer 解码器](6-transformer-decoder)** — TimeWarp 注意力机制以及重建 3D 坐标的解码过程
+3. **[DDPM 采样过程](7-ddpm-sampling-process)** — 逆扩散循环与调度器配置的详细解析
+4. **[噪声预测网络](8-noise-prediction-network)** — ε-Transformer 架构、AdaLN-Zero 条件机制与输入注入
+5. **[SAM 模型 API 参考](14-sam-model-api-reference)** — `SAM` 类的完整 API 文档
+
+---
+
+- [深入解析/SAM 模型 API 参考](https://zread.ai/giacomo-janson/idpsam/14-sam-model-api-reference)
+
+---
+slug:14-sam-model-api-reference
+blog_type:normal
+---
+
+
+`SAM` 类是运行 idpSAM 推理的主要编程接口。它将完整的两阶段流水线——**潜空间扩散采样**及随后的 **Transformer 解码**——封装在一个紧凑的、配置驱动的 API 之后，仅需一个序列字符串即可生成 Cα 构象系综。本文档详细记录了每个公共方法、其参数、返回类型，以及连接它们的内部数据流。
+
+来源: [model.py](sam/model.py#L1-L434)
+
+## 类概述
+
+`SAM` 类位于 `sam.model` 中，充当一个自包含的推理封装器。在实例化时，它会读取 YAML/JSON 配置文件，加载三组预训练权重（ε-网络、解码器、可选的编码标准缩放器），并构建控制 DDPM 逆过程的 HuggingFace diffusers 调度器。后续所有的方法调用均基于这些预加载的组件运行。
+
+```mermaid
+classDiagram
+    class SAM {
+        +model_cfg: dict
+        +device: torch.device
+        +eps_model: nn.Module
+        +decoder: nn.Module
+        +diffusion: Diffusers
+        +enc_std_scaler: dict
+        +__init__(config_fp, device, weights_parent_path, verbose)
+        +sample(seq, n_samples, n_steps, "...") dict
+        +generate(seq, n_samples, n_steps, "...") Tensor
+        +decode(enc, seq, "...") Tensor
+        +save(out, out_path, out_fmt) dict
+        +cg2all(ca_pdb_fp, ca_traj_fp, out_path, "...") dict
+    }
+    class Diffusers {
+        +eps_model: nn.Module
+        +sched: DDPMScheduler|DDIMScheduler
+        +sample(batch, n_steps) Tensor
+        +loss(batch) Tensor
+    }
+    class CA_TransformerDecoder {
+        +forward(x, a, r) Tensor
+        +nn_forward(e, batch) Tensor
+    }
+    class Eps_Network {
+        <<ε-network>>
+    }
+    SAM --> Diffusers : diffusion
+    SAM --> CA_TransformerDecoder : decoder
+    SAM --> Eps_Network : eps_model
+```
+
+初始化期间加载的三个神经网络组件对应于架构的两个阶段加上扩散调度器：
+
+| 属性 | 配置项来源 | 权重文件 | 作用 |
+|---|---|---|---|
+| `eps_model` | `latent_network` | `nn.eps.pt` | 潜空间中的噪声预测 |
+| `decoder` | `decoder` | `nn.dec.pt` | 潜变量 → Cα 坐标重建 |
+| `diffusion` | `latent_generative_model` | (使用 `eps_model`) | DDPM/DDIM 采样循环 |
+| `enc_std_scaler` | `encoder.std_scaler_fp` | `enc_std_scaler.pt` | 反归一化生成的编码 |
+
+来源: [model.py](sam/model.py#L41-L123), [models.yaml](config/models.yaml#L1-L106)
+
+## 构造函数
+
+```python
+SAM(config_fp, device="cpu", weights_parent_path=None, verbose=False)
+```
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `config_fp` | `str` | *必填* | YAML 或 JSON 模型配置文件的路径（例如 `config/models.yaml`） |
+| `device` | `str` | `"cpu"` | PyTorch 设备——`"cpu"` 或 `"cuda"`。如果请求 `"cuda"` 但不可用，则抛出 `OSError` |
+| `weights_parent_path` | `str` | `None` | 可选的基础目录，将前置到配置中的所有权重路径。当为 `None` 时，权重路径将按原样使用 |
+| `verbose` | `bool` | `False` | 在初始化和推理期间打印进度消息 |
+
+**初始化序列** 分三个阶段进行：
+
+1. **配置阶段** — 通过 `read_cfg_file` 解析配置文件，支持 `.yaml`（需要 `pyyaml`）和 `.json` 扩展名。生成的字典存储为 `self.model_cfg`。
+2. **扩散阶段** — 通过 `get_eps_network(model_cfg)` 实例化 ε-网络，从磁盘加载其状态字典，并将其移动至目标设备。如果 `generative_model.use_enc_std_scaler` 为 `True`，则同时加载编码标准缩放器（均值 `u` 和标准差 `s` 张量）。随后，使用该网络和调度器参数构建 `Diffusers` 扩散对象。
+3. **解码阶段** — 通过 `get_decoder(model_cfg)` 实例化 `CA_TransformerDecoder`，加载其权重，并将其移动至目标设备。
+
+<CgxTip>在 CPU 上加载时，所有 `torch.load` 调用均使用 `map_location=torch.device('cpu')`，以避免在装有 GPU 驱动但无可用设备的机器上分配 CUDA 内存。</CgxTip>
+
+来源: [model.py](sam/model.py#L46-L123), [model.py](sam/model.py#L24-L38)
+
+## `sample()` — 端到端系综生成
+
+```python
+sample(seq, n_samples=1000, n_steps=100, batch_size_eps=256,
+       batch_size_dec=None, prot_name="protein", return_enc=False,
+       out_type="numpy") → dict
+```
+
+这是**主要公共方法**。它编排完整的流水线：通过 DDPM 采样生成潜空间编码，然后将其解码为 Cα xyz 坐标。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `seq` | `str` | *必填* | 氨基酸序列（单字母代码，例如 `"GSWYR"`） |
+| `n_samples` | `int` | `1000` | 要生成的构象数量 |
+| `n_steps` | `int` | `100` | DDPM 逆扩散步数（范围：1–1000） |
+| `batch_size_eps` | `int` | `256` | 扩散采样循环的批大小 |
+| `batch_size_dec` | `int` | `None` | 解码的批大小。若为 `None`，则回退至 `batch_size_eps` |
+| `prot_name` | `str` | `"protein"` | 嵌入在输出字典中的标识字符串 |
+| `return_enc` | `bool` | `False` | 若为 `True`，则在输出中包含原始潜空间编码 |
+| `out_type` | `str` | `"numpy"` | 输出张量格式：`"numpy"` (ndarray) 或 `"torch"` (CPU 张量) |
+
+**返回字典结构：**
+
+| 键 | 形状 | 类型 | 描述 |
+|---|---|---|---|
+| `"seq"` | — | `str` | 输入的氨基酸序列 |
+| `"name"` | — | `str` | 蛋白质名称标识符 |
+| `"xyz"` | `(n_samples, L, 3)` | ndarray 或 Tensor | Cα 坐标，单位为纳米 |
+| `"time"` | — | `dict` | 计时细分：`"tot"` (总时间)，`"ddpm"` (扩散时间)，`"dec"` (解码时间) |
+| `"enc"` | `(n_samples, L, enc_dim)` | ndarray 或 Tensor | 潜空间编码——**仅在 `return_enc=True` 时存在** |
+
+在内部，`sample()` 依次调用 `generate()` 和 `decode()`，并合并它们的计时信息：
+
+```mermaid
+flowchart LR
+    A["seq &#40;string&#41;"] --> B["generate&#40;&#41;"]
+    B -->|"enc: &#40;N, L, 16&#41;"| C["decode&#40;&#41;"]
+    C -->|"xyz: &#40;N, L, 3&#41;"| D["Output dict"]
+    B -->|"time_ddpm"| D
+    C -->|"time_dec"| D
+```
+
+来源: [model.py](sam/model.py#L134-L198)
+
+## `generate()` — 潜空间编码采样
+
+```python
+generate(seq, n_samples=1000, n_steps=100, batch_size=256,
+         prot_name="protein", return_time=False) → torch.Tensor
+```
+
+通过运行 DDPM 逆过程生成潜空间编码。如果你仅需要潜变量表示（例如用于分析或自定义解码），可以独立调用此方法。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `seq` | `str` | *必填* | 长度为 *L* 的氨基酸序列 |
+| `n_samples` | `int` | `1000` | 编码样本数 |
+| `n_steps` | `int` | `100` | DDPM 去噪步数 |
+| `batch_size` | `int` | `256` | 数据加载器的小批量大小 |
+| `prot_name` | `str` | `"protein"` | 数据集的蛋白质标识符 |
+| `return_time` | `bool` | `False` | 若为 `True`，返回 `(encodings, elapsed_time)` 元组 |
+
+**返回值：** 形状为 `(n_samples, L, enc_dim)` 的 `torch.Tensor`，其中 `enc_dim` 由 `model_cfg["generative_model"]["encoding_dim"]` 指定（默认值：16）。若 `return_time=True`，则返回 `(tensor, float)`。
+
+**内部数据流：**
+
+1. 构建一个 `EvalEncodedProteinDataset`，包含形状为 `(n_frames, L, enc_dim)` 的零初始化编码占位符。
+2. 标准的 PyTorch `DataLoader` 对该数据集进行批量迭代。
+3. 对于每个批次，`self.diffusion.sample(batch, n_steps=n_steps)` 执行完整的 DDPM 逆链，从纯高斯噪声 `x_T ~ N(0, I)` 开始，逐步去噪 `n_steps` 步。
+4. 生成的编码被拼接并裁剪至恰好 `n_samples` 个。
+5. 如果加载了 `enc_std_scaler`，则应用逆标准化 `enc = enc * s + u` 将编码重新缩放回原始分布。
+
+来源: [model.py](sam/model.py#L201-L266), [cg_protein.py](sam/data/cg_protein.py#L1275-L1324)
+
+## `decode()` — 编码到坐标解码
+
+```python
+decode(enc, seq, batch_size=256, prot_name="protein",
+       return_time=False) → torch.Tensor
+```
+
+使用预训练的 `CA_TransformerDecoder` 将潜空间编码映射为 Cα xyz 坐标。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `enc` | `torch.Tensor` | *必填* | 形状为 `(n_samples, L, enc_dim)` 的编码 |
+| `seq` | `str` | *必填* | 氨基酸序列（提供残基身份特征） |
+| `batch_size` | `int` | `256` | 解码的小批量大小 |
+| `prot_name` | `str` | `"protein"` | 数据集的蛋白质标识符 |
+| `return_time` | `bool` | `False` | 若为 `True`，返回 `(xyz, elapsed_time)` 元组 |
+
+**返回值：** 形状为 `(n_samples, L, 3)` 的 `torch.Tensor`，包含以纳米为单位的 Cα 位置。若 `return_time=True`，则返回 `(tensor, float)`。
+
+**内部数据流：**
+
+1. 从序列字符串构建 `EvalProteinDataset`，提供每个残基的氨基酸索引 (`batch.a`) 和残基位置索引 (`batch.r`)。
+2. 对于每个批次，将编码切片 `enc[tot:tot+batch_size]` 对齐到形状为 `(B, L, enc_dim)` 的 `batch_y` 中。
+3. 在 `torch.no_grad()` 下调用解码器的 `nn_forward(batch_y, batch)`，生成 xyz 坐标。
+4. 将结果拼接并裁剪至恰好 `n_samples` 个。
+
+来源: [model.py](sam/model.py#L269-L338)
+
+## `save()` — 将输出持久化到磁盘
+
+```python
+save(out, out_path, out_fmt="dcd") → dict
+```
+
+将输出字典（来自 `sample()`）写入磁盘。始终保存 FASTA 序列文件；坐标格式可选。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `out` | `dict` | *必填* | `sample()` 返回的输出字典 |
+| `out_path` | `str` | *必填* | 基础输出路径（扩展名会自动追加） |
+| `out_fmt` | `str` | `"dcd"` | 坐标格式：`"dcd"` 或 `"numpy"` |
+
+**按格式生成的输出文件：**
+
+| 格式 | 创建的文件 | 描述 |
+|---|---|---|
+| `"dcd"` | `*.seq.fasta`, `*.ca.traj.dcd`, `*.ca.top.pdb` | 兼容 MDTraj 的 DCD 轨迹 + Cα PDB 拓扑 |
+| `"numpy"` | `*.seq.fasta`, `*.ca.xyz.npy` | 坐标的原始 NumPy ndarray |
+
+**返回值：** 一个将文件类型键（`"fasta"`、`"ca_dcd"`、`"ca_pdb"` 或 `"ca_npy"`）映射到其 `pathlib.Path` 对象的字典。这些路径在链式调用 `cg2all()` 时非常有用。
+
+来源: [model.py](sam/model.py#L341-L393), [topology.py](sam/data/topology.py#L7-L13)
+
+## `cg2all()` — 全原子重建
+
+```python
+cg2all(ca_pdb_fp, ca_traj_fp, out_path, batch_size=1,
+       device="cpu") → dict
+```
+
+委托给外部 `cg2all` 工具，从 Cα 构象中重建全原子细节。此方法将 `convert_cg2all` 命令行工具作为子进程调用。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `ca_pdb_fp` | `str` | *必填* | Cα 拓扑 PDB 文件的路径（来自 `save()["ca_pdb"]`） |
+| `ca_traj_fp` | `str` | *必填* | Cα 轨迹 DCD 文件的路径（来自 `save()["ca_dcd"]`） |
+| `out_path` | `str` | *必填* | 全原子文件的基础输出路径 |
+| `batch_size` | `int` | `1` | 用于 GPU 加速的 cg2all 批大小 |
+| `device` | `str` | `"cpu"` | cg2all 推理的设备（`"cpu"` 或 `"cuda"`） |
+
+**返回值：** 包含键 `"aa_dcd"` 和 `"aa_top"` 的字典，分别映射到输出的全原子 DCD 轨迹和 PDB 拓扑路径。
+
+<CgxTip>必须单独安装 `cg2all` 库。如果外部命令失败，此方法将抛出 `subprocess.SubprocessError`——请检查异常消息中的 stderr 以进行诊断。</CgxTip>
+
+来源: [model.py](sam/model.py#L396-L434)
+
+## 完整使用模式
+
+以下示例反映了推理脚本，并按规范的调用顺序演示了每个公共方法：
+
+```python
+from sam.model import SAM
+
+# 1. 从配置初始化。
+model = SAM(config_fp="config/models.yaml", device="cuda", verbose=True)
+
+# 2. 生成 Cα 系综。
+out = model.sample(
+    seq="GSWYRAPTLLV",       # 氨基酸序列
+    n_samples=500,           # 构象数量
+    n_steps=100,             # 扩散去噪步数
+    batch_size_eps=250,      # 扩散批大小
+    batch_size_dec=250,      # 解码器批大小
+    return_enc=False,        # 设为 True 以同时获取潜空间编码
+    out_type="numpy"         # "numpy" 或 "torch"
+)
+
+# 3. 将坐标保存到磁盘。
+paths = model.save(out=out, out_path="outputs/my_protein", out_fmt="dcd")
+
+# 4. (可选) 重建全原子细节。
+aa_paths = model.cg2all(
+    ca_pdb_fp=str(paths["ca_pdb"]),
+    ca_traj_fp=str(paths["ca_dcd"]),
+    out_path="outputs/my_protein",
+    batch_size=50,
+    device="cuda"
+)
+```
+
+对于逐步分解，`generate()` 和 `decode()` 可以独立调用：
+
+```python
+# 仅阶段 1：潜空间采样
+enc = model.generate(seq="GSWYRAPTLLV", n_samples=500, n_steps=100)
+
+# 仅阶段 2：解码预存的编码
+xyz = model.decode(enc=enc, seq="GSWYRAPTLLV", batch_size=250)
+```
+
+来源: [generate_ensemble.py](scripts/generate_ensemble.py#L84-L112), [model.py](sam/model.py#L134-L198)
+
+## 方法交互图
+
+```mermaid
+flowchart TB
+    subgraph Init["SAM.__init__()"]
+        C["Read config"] --> E["Load ε-network"]
+        E --> S["Load enc_std_scaler"]
+        S --> D["Build Diffusers object"]
+        D --> Dec["Load decoder"]
+    end
+
+    subgraph Pipeline["Inference Pipeline"]
+        Sample["sample()"] --> Gen["generate()"]
+        Gen -->|encodings| Dec2["decode()"]
+        Dec2 -->|xyz coords| Out["Output dict"]
+    end
+
+    subgraph IO["I/O"]
+        Out --> Save["save()"]
+        Save -->|paths dict| CG["cg2all()"]
+    end
+
+    Init --> Pipeline
+```
+
+来源: [model.py](sam/model.py#L41-L123), [model.py](sam/model.py#L134-L434)
+
+## 内部辅助方法
+
+| 方法 | 签名 | 用途 |
+|---|---|---|
+| `_get_weights_path` | `(path) → str` | 解析权重文件路径。若设置了 `weights_parent_path`，则将其前置；否则原样返回该路径 |
+| `_to` | `(t, out_type) → ndarray 或 Tensor` | 将张量转换为所需的输出格式（`"numpy"` → `.cpu().numpy()`，`"torch"` → `.cpu()`） |
+
+来源: [model.py](sam/model.py#L125-L131), [model.py](sam/model.py#L192-L198)
+
+## SAM 类使用的配置键
+
+构造函数从模型配置字典中读取以下键。有关包含默认值的完整架构，请参见[配置参考](15-configuration-reference)。
+
+| 配置节 | 键 | 使用者 |
+|---|---|---|
+| `latent_network` | `weights` | `__init__` — ε-网络权重路径 |
+| `generative_model` | `use_enc_std_scaler` | `__init__` — 是否加载编码缩放器 |
+| `generative_model` | `encoding_dim` | `generate()` — 潜向量维度 |
+| `encoder` | `std_scaler_fp` | `__init__` — 缩放器权重路径 |
+| `decoder` | `weights` | `__init__` — 解码器权重路径 |
+| `latent_generative_model` | `type`, `sched_params` | `__init__` — 扩散调度器配置 |
+
+来源: [model.py](sam/model.py#L86-L111), [models.yaml](config/models.yaml#L60-L71)
+
+---
+
+**下一步：** 有关配置文件的详细参数架构，请参见[配置参考](15-configuration-reference)。有关为内部数据加载器提供支持的 Dataset 类，请参见[数据集与数据流水线](16-dataset-and-data-pipeline)。有关 cg2all 重建过程，请参见[通过 cg2all 进行全原子重建](17-all-atom-reconstruction-via-cg2all)。
+
+---
+
+- [深入解析/配置参考](https://zread.ai/giacomo-janson/idpsam/15-configuration-reference)
+
+---
+slug:15-configuration-reference
+blog_type:normal
+---
+
+
+idpSAM 模型由单个 **YAML 配置文件**驱动，该文件声明了两阶段自编码器 + 潜在扩散流水线中的每一个架构选择、超参数和权重路径。参考实现随 [`config/models.yaml`](config/models.yaml) 一起提供，它被 [`SAM`](sam/model.py#L48) 包装类通过 [`read_cfg_file()`](sam/model.py#L27) 消费。本页面为该配置文件中的每个部分和参数提供了完整的逐字段参考。
+
+来源：[models.yaml](config/models.yaml#L1-L106), [model.py](sam/model.py#L27-L46)
+
+## 配置文件格式
+
+系统同时接受 **YAML** (`.yaml`) 和 **JSON** (`.json`) 配置文件。YAML 是首选格式——它对 `!!float` 标签和嵌套字典的支持自然地映射到分层的模型规范。加载器根据文件扩展名进行分派，对 YAML 使用 `yaml.safe_load`，对 JSON 使用 `json.load`。**配置中的文件路径相对于当前工作目录**；请使用绝对路径指向系统上的特定位置。
+
+来源：[model.py](sam/model.py#L27-L46), [README.md](config/README.md#L1-L2)
+
+## 顶层结构
+
+配置被组织为 **五个顶层部分**，每个部分管控流水线的一个不同组件：
+
+| 部分 | 目标组件 | 用途 |
+|---|---|---|
+| `generative_model` | 全局流水线 | 数据类型、编码维度、序列限制 |
+| `encoder` | 欧几里得不变编码器 | 架构、距离图嵌入、扭转角特征 |
+| `decoder` | Transformer 解码器 | 架构、注意力机制、氨基酸条件化 |
+| `latent_generative_model` | DDPM 扩散过程 | 噪声调度、损失函数 |
+| `latent_network` | 噪声预测网络 | Transformer 架构、时间步/序列嵌入、EMA |
+
+```mermaid
+graph TD
+    CFG["models.yaml"] --> GM["generative_model"]
+    CFG --> ENC["encoder"]
+    CFG --> DEC["decoder"]
+    CFG --> LGM["latent_generative_model"]
+    CFG --> LN["latent_network"]
+    
+    GM --> |"encoding_dim, max_len"| SAM["SAM 包装器"]
+    ENC --> |"weights, std_scaler_fp"| SAM
+    DEC --> |"weights"| SAM
+    LGM --> |"sched_params"| DIFF["扩散过程"]
+    LN --> |"weights"| DIFF
+    
+    DIFF --> |"sample()"| DEC
+    DEC --> |"decode()"| OUT["Cα 坐标"]
+```
+
+来源：[models.yaml](config/models.yaml#L1-L106), [model.py](sam/model.py#L65-L120)
+
+## `generative_model` — 全局流水线设置
+
+此部分定义了粗粒度表示以及所有流水线阶段共享的潜在空间维度。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `data_type` | `str` | `"cg_protein"` | 数据格式标识符。目前仅支持 `"cg_protein"`。 |
+| `bead_type` | `str` | `"ca"` | 粗粒度珠类型。`"ca"` 表示仅 Cα 表示。 |
+| `encoding_dim` | `int` | `16` | 潜在编码向量的维度。此值同时传递给编码器输出和解码器/噪声预测输入。 |
+| `use_enc_std_scaler` | `bool` | `true` | 是否在生成编码之后、解码之前应用学习到的标准缩放器（均值/标准差）。当为 `true` 时，将加载 `encoder.std_scaler_fp` 处的缩放器权重。 |
+| `max_len` | `int` | `60` | 模型训练时的最大序列长度（以残基计）。 |
+
+`encoding_dim` 值尤为关键——它作为 `input_dim` 流入噪声预测网络，并作为 `encoding_dim` 流入解码器，从而确立了整个潜在空间的维度约束。
+
+来源：[models.yaml](config/models.yaml#L4-L9), [model.py](sam/model.py#L88-L99)
+
+## `encoder` — 欧几里得不变编码器
+
+此部分配置 [`CA_TransformerEncoder`](sam/nn/autoencoder/encoder.py#L32)，它将 Cα 坐标映射为潜在编码。这是唯一一个在推理时不由 `SAM` 包装器加载的组件（编码器仅在训练期间使用），但模型初始化一致性仍需其配置。
+
+### 架构参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `arch` | `str` | `"enc_ca_trf"` | 架构标识符。用于模型分派。 |
+| `num_layers` | `int` | `5` | Transformer 编码器层数。 |
+| `embed_dim` | `int` | `128` | 编码器全局的隐藏嵌入维度。 |
+| `embed_2d_dim` | `int` | `192` | 2D（成对）嵌入的维度——距离图投影。 |
+| `d_model` | `int|null` | `null` | 多头注意力的内部维度。当为 `null` 时，默认为 `embed_dim`。 |
+| `num_heads` | `int` | `8` | 注意力头数。 |
+| `mlp_dim` | `int` | `256` | 每个 Transformer 块中前馈 MLP 的隐藏维度。 |
+| `dropout` | `float|null` | `null` | Dropout 率。`null` 表示无 Dropout。 |
+| `norm_eps` | `float` | `1e-5` | LayerNorm 数值稳定性的 Epsilon 值。 |
+| `norm_pos` | `str` | `"pre"` | LayerNorm 位置：`"pre"`（前置归一化）或 `"post"`（后置归一化）。 |
+| `activation` | `str` | `"gelu"` | 激活函数名称。 |
+| `out_mode` | `str` | `"idpgan_norm"` | 输出模块样式。`"idpgan_norm"` 添加一个最终的非仿射 LayerNorm。 |
+
+### 嵌入与条件化参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `bead_embed_dim` | `int` | `32` | 氨基酸类型嵌入的维度（20 种残基类型 → `bead_embed_dim`）。 |
+| `pos_embed_dim` | `int` | `64` | 位置（序列间隔）嵌入的维度。 |
+| `use_bias_2d` | `bool` | `true` | 是否在 2D 嵌入线性投影中使用偏置。 |
+| `pos_embed_r` | `int` | `32` | AlphaFold2 风格位置嵌入的序列间隔阈值。 |
+| `embed_inject_mode` | `str` | `"concat"` | 氨基酸嵌入的注入方式：`"concat"`（拼接）或 `"adanorm"`（自适应层归一化）。 |
+| `embed_2d_inject_mode` | `str` | `"concat"` | 2D（成对）嵌入注入注意力的方式。 |
+
+### 距离图与扭转角参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `dmap_ca_min` | `float` | `0.0` | RBF 展开起始的最小 Cα–Cα 距离 (Å)。 |
+| `dmap_ca_cutoff` | `float` | `3.0` | RBF 展开终止的最大 Cα–Cα 距离 (Å)。 |
+| `dmap_ca_num_gaussians` | `int` | `320` | RBF 距离嵌入中高斯基函数的数量。 |
+| `dmap_embed_type` | `str` | `"rbf"` | 距离嵌入类型：`"rbf"`（高斯平滑）或 `"expnorm"`（指数归一化）。 |
+| `use_dmap_mlp` | `bool` | `true` | 是否在 RBF 投影后应用 2 层 MLP（对比单层线性层）。 |
+| `use_torsions` | `bool` | `true` | 是否将主链扭转角特征作为 1D 输入包含。 |
+
+### 权重路径
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `weights` | `str` | `"./weights/v1.0/nn.enc.pt"` | 编码器检查点文件的路径。 |
+| `std_scaler_fp` | `str` | `"./weights/v1.0/enc_std_scaler.pt"` | 编码标准缩放器检查点的路径。仅当 `generative_model.use_enc_std_scaler` 为 `true` 时使用。 |
+
+来源：[models.yaml](config/models.yaml#L11-L37), [encoder.py](sam/nn/autoencoder/encoder.py#L32-L183)
+
+## `decoder` — Transformer 解码器
+
+此部分配置 [`CA_TransformerDecoder`](sam/nn/autoencoder/decoder.py#L18)，它将潜在编码映射为 Cα 坐标。解码器在推理时加载，并分批应用于生成的编码。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `type` | `str` | `"deterministic"` | 解码器类型。`"deterministic"` 表示单次前向传播且无采样噪声。 |
+| `arch` | `str` | `"dec_ca_trf"` | 用于模型分派的架构标识符。 |
+| `use_input_mlp` | `bool` | `true` | 是否通过 2 层 MLP（`Linear → Activation → Linear`）投影潜在输入，而非单层线性层。 |
+| `num_layers` | `int` | `5` | Transformer 解码器层数。 |
+| `attention_type` | `str` | `"timewarp"` | 注意力机制：`"transformer"`（自定义）或 `"timewarp"`。 |
+| `embed_dim` | `int` | `128` | 隐藏嵌入维度。 |
+| `d_model` | `int` | `512` | 多头注意力的内部维度。覆盖 `null` 默认值以使用更宽的注意力瓶颈。 |
+| `num_heads` | `int` | `32` | 注意力头数。 |
+| `mlp_dim` | `int` | `256` | 前馈 MLP 隐藏维度。 |
+| `dropout` | `float|null` | `null` | Dropout 率。`null` 表示无 Dropout。 |
+| `norm_eps` | `float` | `1e-5` | LayerNorm Epsilon 值。 |
+| `norm_pos` | `str` | `"pre"` | LayerNorm 位置。 |
+| `activation` | `str` | `"gelu"` | 激活函数。 |
+| `bead_embed_dim` | `int|null` | `null` | 氨基酸嵌入维度。当为 `null` 时，不创建珠嵌入。 |
+| `pos_embed_dim` | `int` | `64` | 位置嵌入维度。 |
+| `use_bias_2d` | `bool` | `true` | 2D 嵌入投影中的偏置。 |
+| `pos_embed_r` | `int` | `32` | 位置嵌入阈值。 |
+!| `embed_inject_mode` | `str|null` | `null` | 氨基酸条件化模式。`null` 禁用解码器中的条件化。 |
+| `weights` | `str` | `"./weights/v1.0/nn.dec.pt"` | 解码器检查点的路径。 |
+
+解码器的 `embed_inject_mode: null` 是一个深思熟虑的设计选择：在推理时，解码器对氨基酸类型**无条件**操作——仅依赖位置嵌入和潜在编码输入。这与编码器和噪声预测网络形成对比，后者均使用了氨基酸条件化)。
+
+来源：[models.yaml](config/models.yaml#L39-L58), [decoder.py](sam/nn/autoencoder/decoder.py#L18-L187)
+
+## `latent_generative_model` — DDPM 扩散过程
+
+此部分配置 [`Diffusers`](sam/diffusion/diffusers_dm.py#L10) 扩散调度器和损失，它们管控前向/加噪过程和反向采样过程。它封装了 HuggingFace `diffusers` 库的 `DDPMScheduler`。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `type` | `str` | `"diffusers_dm"` | 扩散后端标识符。`"diffusers_dm"` 使用 HuggingFace diffusers 集成。 |
+| `loss` | `str` | `"l2"` | 训练损失函数。目前仅支持 `"l2"` (MSE)。 |
+
+### `sched_params` — 噪声调度参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `name` | `str` | `"ddpm"` | 调度器类型：`"ddpm"` 或 `"ddim"`。 |
+| `num_train_timesteps` | `int` | `1000` | 训练调度中扩散时间步 T 的总数。推理时通过 `n_steps` 使用其子集进行采样。 |
+| `beta_start` | `float` | `0.0001` | β 调度的起始值。 |
+| `beta_end` | `float` | `0.02` | β 调度的结束值。 |
+| `beta_schedule` | `str` | `"sigmoid"` | β 调度形状。选项包括 `"linear"`、`"scaled_linear"`、`"squaredcos5cos_cap_v2"` 和 `"sigmoid"`。 |
+| `variance_type` | `str` | `"fixed_small"` | 反向过程的方差类型。`"fixed_small"` 使用后验方差。 |
+| `prediction_type` | `str` | `"epsilon"` | 噪声预测网络的输出内容。`"epsilon"` 表示预测噪声（ε-预测）。 |
+
+在推理时，采样步数由传递给 [`SAM.sample()`](sam/model.py#L130) 的 `n_steps` 参数控制，而非配置文件。这允许在不修改模型定义的情况下权衡质量与速度。
+
+来源：[models.yaml](config/models.yaml#L60-L70), [diffusers_dm.py](B/sam/diffusion/diffusers_dm.py#L10-L66), [__init__.py](sam/diffusion/__init__.py#L4-L15)
+
+## `latent_network` — 噪声预测网络
+
+此部分配置 [`EpsTransformer`](sam/nn/noise_prediction/eps.py#L424)，它根据带噪潜在编码、扩散时间步和氨基酸序列预测噪声 ε。这是最大且参数最丰富的部分。
+
+### 核心架构
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `arch` | `str` | `"eps_trf"` | 噪声预测网络的架构标识符。 |
+| `num_layers` | `int` | `16` | Transformer 层数。这是流水线中最深的组件。 |
+| `attention_type` | `str` | `"transformer"` | 注意力类型：`"transformer"`（自定义实现）或 `"pytorch"`（PyTorch 原生）。 |
+| `embed_dim` | `int` | `256` | 隐藏嵌入维度。 |
+| `d_model` | `int|null` | `null` | 内部注意力维度。`null` 默认为 `embed_dim`。 |
+| `num_heads` | `int` | `16` | 多头注意力头数。 |
+| `mlp_dim` | `int` | `512` | 前馈 MLP 隐藏维度。 |
+| `dropout` | `float|null` | `null` | Dropout 率。`null` = 无 Dropout。 |
+| `norm_eps` | `float` | `1e-5` | LayerNorm Epsilon 值。 |
+| `norm_pos` | `str` | `"pre"` | LayerNorm 位置。 |
+| `activation` | `str` | `"gelu"` | 激活函数。 |
+| `out_mode` | `str` | `"idpgan"` | 输出模块样式。`"idpgan"` 使用 2 层 MLP：`Linear → Activation → Linear`。 |
+
+### 时间步与珠嵌入
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `time_embed_dim` | `int` | `256` | 时间步嵌入向量的维度。 |
+| `time_freq_dim` | `int` | `256` | 投影前正弦频率嵌入的维度。 |
+| `use_bead_embed` | `bool` | `true` | 是否使用氨基酸类型嵌入进行条件化。 |
+| `bead_embed_dim` | `int` | `32` | 氨基酸嵌入的维度。 |
+| `pt_embed_bead_dim` | `int|null` | `null` | 预训练氨基酸嵌入（如 ESM-2）的维度。`null` 表示从零开始学习嵌入。 |
+
+### 位置与边嵌入
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `pos_embed_dim` | `int` | `64` | 位置（序列间隔）嵌入的维度。 |
+| `use_bias_2d` | `bool` | `true` | 2D 嵌入线性投影中的偏置。 |
+| `pos_embed_r` | `int` | `32` | 序列间隔的位置嵌入阈值。 |
+| `edge_embed_dim` | `int` | `192` | 边（成对）嵌入的维度。 |
+| `edge_embed_mode` | `str|null` | `null` | 边嵌入模式。`null` 禁用位置以外的边嵌入。 |
+| `edge_update_mode` | `str|null` | `null` | 边更新机制。`null` 禁用边更新。 |
+| `edge_update_freq` | `int` | `1` | 应用边更新的频率（以层计）。 |
+
+### 条件化与注入模式
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `embed_inject_mode` | `str` | `"adanorm"` | 时间步 + 珠嵌入注入每个 Transformer 块的方式。`"adanorm"` 使用自适应层归一化 (AdaLN)。 |
+| `input_inject_mode` | `str` | `"add"` | 初始（带噪）输入重新注入 Transformer 层的方式。`"add"` 在投影后执行残差加法。 |
+| `input_inject_pos` | `str` | `"out"` | 块中输入注入发生的位置：`"out"` = 在 MLP 之后。 |
+
+### 混合精度与 EMA（仅训练时）
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `_use_fp16` | `bool` | `true` | 在训练期间启用 FP16 混合精度。前缀 `_` 表示仅训练时有效。 |
+| `_use_ema` | `bool` | `true` | 在训练期间启用模型权重的指数移动平均。 |
+| `_ema_params.beta` | `float` | `0.9999` | EMA 衰减率。 |
+| `_ema_params.update_after_step` | `int` | `100` | 在此训练步数之后开始 EMA 更新。 |
+| `_ema_params.update_every` | `int` | `10` | 每 N 步更新一次 EMA 权重。 |
+
+### 权重路径
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `weights` | `str` | `"./weights/v1.0/nn.eps.pt"` | 噪声预测网络检查点的路径。 |
+
+<CgxTip>`_use_fp16`、`_use_ema` 和 `_ema_params` 子参数是**仅训练时**的设置——它们在推理时无效。`SAM` 包装器直接从 `weights` 指定的检查点文件中加载最终的（EMA 平均后的）权重。</CgxTip>
+
+来源：[models.yaml](config/models.yaml#L72-L106), [eps.py](sam/nn/noise_prediction/eps.py#L424-L632), [eps.py](sam/nn/noise_prediction/eps.py#L711-L724)
+
+## 参数加载机制
+
+配置并非严格的模式——每个网络构造函数使用**基于 inspect 的签名匹配**来提取其识别的参数。`get_eps_network()` 和 `get_decoder()` 函数遍历其目标类的 `__init__` 参数名称，从相应的配置部分提取匹配的键：
+
+```python
+# 来自 get_eps_network():
+eps_args = list(inspect.signature(EpsTransformer.__init__).parameters.keys())
+eps_args.remove("input_dim")  # 由 generative_model.encoding_dim 提供
+eps_params = {}
+for eps_arg in eps_args:
+    if eps_arg in model_cfg["latent_network"]:
+        eps_params[eps_arg] = model_cfg["latent_network"][eps_arg]
+```
+
+这意味着：(1) 配置中与任何构造函数参数不匹配的**额外键**将被静默忽略，(2) **缺失键**将回退到构造函数的默认值。`input_dim` / `encoding_dim` 参数始终从 `generative_model.encoding_dim` 显式提供，而非来自该部分的字典。
+
+来源：[eps.py](sam/nn/noise_prediction/eps.py#L711-L724), [decoder.py](sam/nn/autoencoder/decoder.py#L172-L187)
+
+## 默认配置摘要
+
+下表一览总结了随附的 v1.0 配置，突出了三个网络组件之间的架构不对称性：
+
+| 方面 | 编码器 | 解码器 | 噪声预测 (ε) |
+|---|---|---|---|
+| 层数 | 5 | 5 | **16** |
+| `embed_dim` | 128 | 128 | **256** |
+| `d_model` | null (=128) | **512** | null (=256) |
+| `num_heads` | 8 | 32 | 16 |
+| `mlp_dim` | 256 | 256 | **512** |
+| 注意力类型 | — | **timewarp** | transformer |
+| AA 条件化 | **concat** | **none** | **adanorm** |
+| 2D 嵌入 | **192** (距离图) | none | none |
+| 输入投影 | 扭转角 MLP | 输入 MLP | 线性 |
+| 特殊特征 | RBF + 扭转角 | — | 时间步嵌入 + 输入注入 |
+
+<CgxTip>噪声预测网络是计算瓶颈——它拥有 16 层 256 维，而自编码器仅为 5 层 128 维。在调整批大小或序列长度限制时，请主要为此组件预算 GPU 显存。</CgxTip>
+
+来源：[models.yaml](config/models.yaml#L1-L106)
+
+## 修改配置
+
+要使用自定义配置，请复制 `config/models.yaml` 并调整所需参数。将推理脚本或 `SAM` 构造函数指向新文件：
+
+```bash
+# 通过推理脚本
+python scripts/generate_ensemble.py -c path/to/custom_models.yaml -s SEQUENCE -o output
+
+# 通过 Python API
+from sam.model import SAM
+model = SAM(config_fp="path/to/custom_models.yaml", device="cuda")
+```
+
+推理时最常见的调整是：(1) `encoder.weights`、`decoder.weights` 和 `latent_network.weights` 下的**权重路径**，用于加载不同的模型检查点；(2) `generative_model.max_len`，用于处理训练长度范围之外的序列。**架构参数**（层数、维度等）必须与加载的检查点相匹配——未经重训练而更改它们将产生形状不匹配错误。
+
+要深入探索这些参数如何在每个网络中体现，请参阅[欧几里得不变编码器](5-euclidean-invariant-encoder)、[Transformer 解码器](6-transformer-decoder)、[噪声预测网络](8-noise-prediction-network) 和 [DDPM 采样过程](7-ddpm-sampling-process)。
+
+---
+
+- [深入解析/数据集与数据流水线](https://zread.ai/giacomo-janson/idpsam/16-dataset-and-data-pipeline)
+
+---
+slug:16-dataset-and-data-pipeline
+blog_type:normal
+---
+
+
+idpsam 中的数据管道连接了原始分子轨迹数据与两阶段生成模型，将粗粒化蛋白质构象转换为批次张量，以供编码器/解码器使用及潜空间扩散采样。该管道的核心围绕 PyTorch `Dataset` 类的层次结构展开，这些类对存储格式（DCD 轨迹、NumPy 数组、Torch 张量）、珠子表示（Cα、质心、自定义粗粒化）和数据模态（XYZ 坐标 vs. 潜空间编码）进行了抽象——所有这些均通过一个基于 `namedtuple` 的共享批次协议统一起来，该协议在不引入依赖的情况下模拟了 `torch_geometric` 的语义。
+
+## 氨基酸词汇表与序列特征
+
+每个数据样本的基础是氨基酸序列。模块 [`sequences.py`](sam/data/sequences.py) 以固定顺序（`QWERTYIPASDFGHKLCVNM`）定义了 **20 种标准残基**，该顺序决定了由 `get_features_from_seq` 生成的独热编码。此顺序并非按字母排列——它是项目专属的约定，在训练和推理过程中必须保持一致。该模块还提供了双向单字母 ↔ 三字母字典、将残基划分为**带正电**（`K`、`R`）和**带负电**（`D`、`E`）的子集，以及一个用于计算序列净电荷比例的辅助函数 `get_net_q_res`。
+
+来源: [sequences.py](sam/data/sequences.py#L1-L34)
+
+## CG_Protein：分子数据容器
+
+`CG_Protein` 类是数据管道的原子单元——即承载其名称、序列、坐标数组和衍生特征的单一蛋白质实体。在构造时，它会立即计算**独热氨基酸特征向量** `a`（形状为 `(L,)`，包含整数类别索引，由 20 通道独热编码通过 `argmax` 导出），并为可选的氨基酸嵌入（`ae`）、能量（`e`）、编码（`enc`）和图结构属性（`edge_index`、`nr_edge_index`、`chain_torsion_mask`）预留槽位。坐标数组 `xyz` 遵循 `(n_frames, L, 3)` 的约定，其中 `L` 为序列长度，`r` 则存储可选的位置残基 ID（在下游默认为 `torch.arange(0, L)`）。
+
+```mermaid
+classDiagram
+    class CG_Protein {
+        +name: str
+        +seq: str
+        +a: "Tensor (L,)"
+        +ae: "Tensor | None"
+        +xyz: "ndarray (N, L, 3)"
+        +r: "list | None"
+        +enc: "Tensor | None"
+        +edge_index: None
+        +set_encoding(enc)
+    }
+    CG_Protein --> sequences : get_features_from_seq
+```
+
+来源: [cg_protein.py](sam/data/cg_protein.py#L94-L135)
+
+## 批次数据协议：StaticData 与 StaticDataEnc
+
+idpsam 没有依赖 `torch_geometric` 的 `Data` 对象，而是通过两个派生自 `namedtuple` 的类定义了自己的轻量级批次协议。**`StaticData`** 封装了 XYZ 帧批次，包含键 `x`、`a`、`ae`、`r`、`x_t`——供坐标空间编码器和解码器使用。**`StaticDataEnc`** 则用潜空间编码槽替换了坐标槽，包含键 `z`、`a`、`ae`、`r`、`z_t`——供潜空间扩散模型使用。两者均继承自 `StaticDataMixin`，该混合类提供了以下功能：
+
+| 方法 / 属性 | 用途 |
+|---|---|
+| `.to(device)` | 将所有张量字段移动到指定设备 |
+| `.num_graphs` | 返回批次大小（主张量的第一维度） |
+| `.num_nodes` | 返回批次中的节点总数 |
+| `.batch` | 构造一个 `torch.arange` 批次索引向量，用于按图聚合 |
+| `.select_ids(ids)` | 通过批次索引掩码对所有字段进行切片 |
+
+`x_t` / `z_t` 字段支持**基于模板的建模**（TBM），其中每个样本会附带一个参考构象。当禁用 TBM 时（`tbm_mode=None`），这些字段默认为 `0`。
+
+来源: [cg_protein.py](sam/data/cg_protein.py#L32-L88)
+
+## 数据集类层次结构
+
+数据集架构遵循清晰的继承链，将数据模态与使用上下文的关注点分离开来：
+
+```mermaid
+classDiagram
+    class torch_Dataset {
+        <<PyTorch>>
+    }
+    class CG_ProteinDatasetMixin {
+        +_init_common(...)
+        +load_data()
+        +_sample_traj_files()
+        +add_protein_frames()
+        +select_proteins(ids)
+        +get_aa_data(prot_idx)
+        +get_res_ids_data(prot_idx)
+    }
+    class ProteinDataset {
+        +data_type: xyz
+        +load_protein_data()
+        +get_xyz_data()
+        +__getitem__(idx) → StaticData
+    }
+    class EvalProteinDataset {
+        +__init__(name, prot_obj, n_frames)
+    }
+    class EncodedProteinDataset {
+        +data_type: enc
+        +get_enc_data()
+        +__getitem__(idx) → StaticDataEnc
+    }
+    class EvalEncodedProteinDataset {
+        +__init__(name, seq, enc_dim, n_frames)
+    }
+    torch_Dataset <|-- ProteinDataset
+    CG_ProteinDatasetMixin <|-- ProteinDataset : mixin
+    ProteinDataset <|-- EvalProteinDataset
+    torch_Dataset <|-- EncodedProteinDataset
+    CG_ProteinDatasetMixin <|-- EncodedProteinDataset : mixin
+    EncodedProteinDataset <|-- EvalEncodedProteinDataset
+```
+
+### ProteinDataset — 坐标空间训练数据
+
+`ProteinDataset` 是在自编码器训练期间加载原始分子动力学轨迹的主数据集。它接受一个 JSON 输入文件路径列表（`input_fp_list`），每个路径指向一个蛋白质的数据清单。关键的初始化参数控制着数据的选择与增强：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `input_fp_list` | `list` | 必需 | JSON 蛋白质清单的 Glob 模式或路径 |
+| `stride` | `int` | `1` | 帧步长（目前必须为 1） |
+| `n_trajs` | `int` | `None` | 每个蛋白质随机选择 N 个轨迹文件 |
+| `n_frames` | `int` | `None` | 从已加载数据中随机选择 N 帧 |
+| `frames_mode` | `str` | `"ensemble"` | `"trajectory"` 按文件采样；`"ensemble"` 从合并集合中采样 |
+| `input_format` | `str` | `"dcd"` | `"dcd"` 代表 MDTraj 轨迹；`"numpy"` 代表 `.npy` 文件 |
+| `bead_type` | `str` | `"ca"` | `"ca"`（Cα 原子），`"com"`（质心），`"cg"`（自定义粗粒化） |
+| `xyz_sigma` | `float` | `None` | 添加至坐标的高斯噪声标准差（用于数据增强） |
+| `xyz_perturb` | `dict` | `None` | 用于增强训练鲁棒性的指数进度坐标扰动 |
+
+在执行 `__getitem__(idx)` 时，该数据集从其内部帧列表中解析出一个帧元组 `(protein_index, n_residues, frame_index)`，随后通过获取 XYZ 坐标、氨基酸特征和残基位置 ID 来组装 `StaticData` 对象。`get_xyz_data` 方法可选择使用加性高斯噪声（`xyz_sigma`）或指数混合进度（`xyz_perturb`）对坐标进行扰动，并在 `tbm_mode="random"` 时检索模板帧。
+
+来源: [cg_protein.py](sam/data/cg_protein.py#L443-L709)
+
+### EncodedProteinDataset — 潜空间训练数据
+
+`EncodedProteinDataset` 与 `ProteinDataset` 相对应，但其操作对象是存储为 PyTorch 张量文件（`.enc.pt` 或 `.enc_std.pt`）的预计算编码器输出。它设定 `data_type="enc"` 且 `use_xyz=False`，从而使得 `__getitem__` 返回含有形状为 `(L, encoding_dim)` 的潜向量 `z` 的 `StaticDataEnc` 对象，而非 XYZ 坐标。`get_enc_data` 方法遵循与 `get_xyz_data` 相同的基于模板的逻辑，但访问的是 `protein.enc` 而非 `protein.xyz`。
+
+来源: [cg_protein.py](sam/data/cg_protein.py#L1092-L1272)
+
+### 评估数据集 — 推理时适配器
+
+`EvalProteinDataset` 和 `EvalEncodedProteinDataset` 均为专为**推理**设计的轻量级子类。它们完全绕过了完整的 JSON 清单/轨迹加载管道：
+
+- **`EvalProteinDataset`** 接受 `mdtraj.Trajectory` 对象或原始序列字符串。当给定字符串时，它会创建一个形状为 `(n_frames, L, 3)` 的零填充占位坐标数组——实际坐标在解码时无关紧要，因为解码器仅需氨基酸特征和残基 ID 作为条件。
+- **`EvalEncodedProteinDataset`** 接受序列字符串和 `enc_dim`，创建一个形状为 `(n_frames, L, enc_dim)` 的零填充编码张量。这些零值作为 DDPM 采样器在 `SAM.generate()` 期间迭代去噪的**初始噪声**。
+
+此设计干净利落地将“模型期望何种数据形状”与“数据从何而来”的关注点分离开来——在推理时，数据容器仅仅是模型前向传播的脚手架。
+
+来源: [cg_protein.py](sam/data/cg_protein.py#L1030-L1085), [cg_protein.py](sam/data/cg_protein.py#L1275-L1324)
+
+## 拓扑与质心投影
+
+[`topology.py`](sam/data/topology.py) 模块提供了两个用于从序列数据构建 MDTraj 拓扑的工具：
+
+- **`get_ca_topology(sequence)`** 构建一个单链 MDTraj `Topology`，其中每个残基恰好包含一个 Cα 碳原子。此函数用于将生成的构象保存为 DCD/PDB 格式。
+- **`slice_traj_to_com(traj)`** 将全原子轨迹投影至残基质心坐标上。它根据残基名称过滤重原子，计算每个残基的质量加权质心位置，并返回原始的 `(N_frames, L, 3)` NumPy 数组或带有 Cα 拓扑的 `mdtraj.Trajectory`——从而在 `ProteinDataset` 中启用了 `"com"` 珠子类型。
+
+来源: [topology.py](sam/data/topology.py#L1-L37)
+
+## 坐标工具
+
+[`coords.py`](sam/coords.py) 模块提供了馈入编码器距离图和扭转角特征计算的几何基元（详见[距离图与扭转角特征](9-distance-map-and-torsion-features)）：
+
+| 函数 | 输出 | 描述 |
+|---|---|---|
+| `calc_dmap(xyz)` | `(B, 1, L, L)` | 完整的成对欧氏距离图 |
+| `calc_dmap_triu(input_data)` | `(B, L*(L-1)/2)` | 上三角距离（无冗余） |
+| `torch_chain_dihedrals(xyz)` | `(B, L-3)` | 通过 `atan2` 计算主链二面角 |
+| `calc_chain_bond_angles(xyz)` | `(B, L-2)` | 主链键角 |
+| `sample_data(data, n_samples)` | `data` 的子集 | 带替换控制的均匀随机帧采样 |
+
+`sample_data` 函数是两个数据集类及评估适配器中 `n_frames` 子集逻辑的核心支撑。
+
+来源: [coords.py](sam/coords.py#L1-L141)
+
+## SAM 推理管道中的数据流
+
+下图描绘了调用 `SAM.sample()` 时的端到端数据流，展示了评估数据集如何与生成模型相集成：
+
+```mermaid
+flowchart TD
+    A["SAM.sample(seq, n_samples)"] --> B["EvalEncodedProteinDataset<br/>(seq, enc_dim=16, n_frames)"]
+    B --> C["DataLoader<br/>(batch_size=256)"]
+    C --> D["DDPM Sampler<br/>diffusion.sample(batch)"]
+    D --> E["Raw encodings<br/>(n_samples, L, 16)"]
+    E --> F{"use_enc_std_scaler?"}
+    F -->|Yes| G["Inverse standard scaler:<br/>z = z_raw * s + u"]
+    F -->|No| H["z = z_raw"]
+    G --> I["Scaled encodings"]
+    H --> I
+    I --> J["EvalProteinDataset<br/>(seq, n_frames)"]
+    J --> K["DataLoader<br/>(batch_size=256)"]
+    K --> L["Decoder<br/>decoder.nn_forward(batch_y, batch)"]
+    L --> M["xyz coordinates<br/>(n_samples, L, 3)"]
+    
+    style B fill:#e8f4e8
+    style J fill:#e8f4e8
+    style D fill:#f0e8f4
+    style L fill:#f0e8f4
+```
+
+此流程中有两个关键细节：(1) **编码标准缩放器**在 DDPM 采样*之后*通过逆变换（`z * s + u`）应用，这意味着扩散模型在标准化的潜空间中运行；(2) 解码时的 `EvalProteinDataset` 仅需序列——其零填充坐标不会被解码器读取，解码器以 `StaticData` 批次中的氨基酸特征 `a` 和残基 ID `r` 为条件。
+
+来源: [model.py](sam/model.py#L134-L199), [model.py](sam/model.py#L201-L266), [model.py](sam/model.py#L269-L338)
+
+## 配置交互
+
+数据管道通过 [`models.yaml`](config/models.yaml) 文件进行配置。`generative_model` 部分控制着与数据相关的参数：
+
+| YAML 键 | 值 | 管道作用 |
+|---|---|---|
+| `data_type` | `cg_protein` | 选择 `CG_Protein` 数据容器 |
+| `bead_type` | `ca` | `ProteinDataset` 中的 Cα 原子选择 |
+| `encoding_dim` | `16` | `EvalEncodedProteinDataset` 的潜空间维度 |
+| `use_enc_std_scaler` | `true` | 是否在采样后应用逆缩放器 |
+| `max_len` | `60` | 最大序列长度（模型容量约束） |
+
+编码器的 `std_scaler_fp` 指向预计算的缩放器权重（`enc_std_scaler.pt`），后者存储了用于潜空间归一化/反归一化的逐维度均值 `u` 和标准差 `s` 张量。
+
+来源: [models.yaml](config/models.yaml#L1-L9), [models.yaml](config/models.yaml#L36-L37)
+
+<CgxTip>评估数据集（`EvalProteinDataset`、`EvalEncodedProteinDataset`）有意创建零填充占位张量，因为它们充当的是**结构脚手架**——模型仅需氨基酸特征和残基 ID 来作为计算条件，而不需要实际的坐标/编码值。真实数据通过模型自身的前向传播流动（DDPM 采样 → 解码器）。这意味着你可以在推理时自由调整 `n_frames`，而不会产生任何 I/O 开销。</CgxTip>
+
+<CgxTip>`frames_mode` 参数存在一个微妙但重要的语义差异：`"trajectory"` **按每个轨迹文件**应用 `n_frames` 子集化，这可能产生 `n_frames × n_trajs` 的总帧数；`"ensemble"` 则先将所有轨迹的所有帧合并，再子采样至恰好 `n_frames` 帧。为了在多样化的构象上训练自编码器，通常首选 `"ensemble"`，以避免过度代表拥有大量轨迹文件的蛋白质。</CgxTip>
+
+## 序列数据文件
+
+本仓库在 [`data/sequences/`](data/sequences/) 目录下附带了预切分的 FASTA 序列文件：
+
+| 文件 | 用途 |
+|---|---|
+| `training.fasta` | 完整训练集序列 |
+| `training.part_{1-4}.fasta` | 切分为 4 个分片的训练集 |
+| `validation.fasta` | 验证集序列 |
+| `test.fasta` | 测试集序列 |
+
+这些 FASTA 文件被推理脚本和笔记本所使用，以定义用于生成构象集的蛋白质序列。
+
+来源: [data/sequences/](data/sequences/)
+
+## 相关页面
+
+- [SAM 模型 API 参考](14-sam-model-api-reference) — `SAM` 类在推理期间如何编排这些数据集
+- [DDPM 采样过程](7-ddpm-sampling-process) — 消耗 `EvalEncodedProteinDataset` 批次的扩散循环
+- [Transformer 解码器](6-transformer-decoder) — 解码器如何处理 `EvalProteinDataset` 批次
+- [距离图与扭转角特征](9-distance-map-and-torsion-features) — 通过 `coords.py` 从数据集坐标计算出的几何特征
+- [配置参考](15-configuration-reference) — 包含数据管道参数的完整 YAML 架构
+
+---
+
+- [深入解析/通过 cg2all 进行全原子重构](https://zread.ai/giacomo-janson/idpsam/17-all-atom-reconstruction-via-cg2all)
+
+---
+slug:17-all-atom-reconstruction-via-cg2all
+blog_type:normal
+---
+
+
+IdpSAM 原生生成**粗粒度仅含 Cα 的构象**——每个残基由一个碳阿尔法原子表示。对于许多下游应用（分子动力学、对接、实验验证），需要完整的原子细节。本文档说明了 idpSAM 如何集成外部 **[cg2all](https://github.com/huhlim/cg2all)** 库，从 Cα 轨迹重建全原子结构，从而弥合粗粒度生成输出与完整原子系综之间的差距。
+
+## Cα → 全原子桥接
+
+cg2all 是由 Lim 等人独立维护的深度学习模型，用于学习从粗粒度蛋白质表征到全原子结构的映射。在 idpSAM 流程中，它作为**后处理阶段**运行——消耗 SAM 解码器生成的 Cα PDB 拓扑和 DCD 轨迹，并返回包含每个残基所有重原子和氢原子的新轨迹。
+
+idpSAM 内部阶段与 cg2all 重建之间的关系如下图所示：
+
+```mermaid
+flowchart LR
+    subgraph idpSAM Internals
+        A[Latent Diffusion<br/>DDPM Sampling] --> B[Transformer Decoder<br/>z → Cα xyz]
+        B --> C[save<br/>Cα PDB + DCD]
+    end
+    subgraph cg2all Reconstruction
+        C --> D["convert_cg2all<br/>--cg ca"]
+        D --> E[All-Atom PDB + DCD]
+    end
+    style A fill:#e8f0fe,stroke:#4285f4
+    style B fill:#e8f0fe,stroke:#4285f4
+    style C fill:#fef7e0,stroke:#f9ab00
+    style D fill:#fce8e6,stroke:#ea4335
+    style E fill:#e6f4ea,stroke:#34a853
+```
+
+虚线边界表明 cg2all 是一个**外部依赖**——它通过 `try/except` 保护机制进行条件导入，即使没有它，idpSAM 仍能保持完整功能（尽管仅限于 Cα 输出）。
+
+来源: [generate_ensemble.py](scripts/generate_ensemble.py#L7-L11), [model.py](sam/model.py#L396-L434)
+
+## 安装
+
+基础 `sam` conda 环境**未包含** cg2all，必须单独安装。推荐方法是在已激活的 `sam` 环境内进行仅限 CPU 的 pip 安装：
+
+```bash
+conda activate sam
+pip install git+http://github.com/huhlim/cg2all
+```
+
+此操作将安装 `convert_cg2all` 命令行可执行文件和 `cg2all` Python 包。cg2all 也提供支持 GPU 的安装方式（有关 DGL/CUDA 设置说明，请参阅 [cg2all 仓库](https://github.com/huhlim/cg2all)），但对于典型的 idpSAM 系综大小，CPU 模式已足够，并可避免 DGL GPU 兼容性问题。
+
+推理脚本中的导入保护机制确保了平滑降级：如果未安装 cg2all，`-a/--all_atom` 标志将不可用，而不会在模块加载时导致导入崩溃。
+
+来源: [README.md](README.md#L33-L37), [generate_ensemble.py](scripts/generate_ensemble.py#L7-L11)
+
+## SAM.cg2all() — API 参考
+
+`SAM` 包装类将 cg2all 重建作为 `cg2all()` 方法暴露。该方法**不**直接调用 cg2all Python API——而是通过 `subprocess.run` 构建并执行 `convert_cg2all` CLI 命令。此设计选择将 cg2all 依赖隔离在子进程边界内，避免了 cg2all 的 DGL 后端与 idpSAM 的 PyTorch 生态系统之间出现进程内内存冲突。
+
+```python
+def cg2all(self,
+    ca_pdb_fp: str,       # Cα 拓扑 PDB 路径 (来自 SAM.save)
+    ca_traj_fp: str,      # Cα 轨迹 DCD 路径 (来自 SAM.save)
+    out_path: str,        # 全原子文件的输出路径前缀
+    batch_size: int = 1,  # cg2all 批大小
+    device: str = "cpu"   # cg2all 设备: "cpu" 或 "cuda"
+    ) -> dict             # 返回 {"aa_dcd": 路径, "aa_top": 路径}
+```
+
+内部构建的 CLI 命令为：
+
+```
+convert_cg2all -p <ca_pdb_fp> -d <ca_traj_fp> -o <aa_dcd_path>
+    --cg ca --device <device> --batch <batch_size> -opdb <aa_pdb_path>
+```
+
+`--cg ca` 标志明确选择 Cα 作为粗粒度表征类型，这与 idpSAM 的输出模式相匹配。成功时，该方法返回包含全原子 DCD 轨迹和 PDB 拓扑路径的字典。失败时，它将抛出 `subprocess.SubprocessError`，并附带从 cg2all 进程解码的 stderr 信息。
+
+来源: [model.py](sam/model.py#L396-L434)
+
+## 端到端工作流
+
+从序列到全原子系综的完整流程遵循严格的顺序：**生成 → 保存 → 重建**。`save` 步骤是必需的，因为 cg2all 消耗的是基于文件的输入（PDB + DCD），而非内存中的数组。
+
+```mermaid
+flowchart TD
+    A["SAM(config_fp, device)"] --> B["model.sample(seq, n_samples, ...)"]
+    B --> C["model.save(out, out_path, out_fmt='dcd')"]
+    C --> D{"--all_atom flag?"}
+    D -->|Yes| E["model.cg2all(ca_pdb, ca_dcd, out_path, ...)"]
+    D -->|No| F["Stop — Cα ensemble ready"]
+    E --> G["All-atom ensemble ready"]
+    
+    style A fill:#e8f0fe,stroke:#4285f4
+    style B fill:#e8f0fe,stroke:#4285f4
+    style C fill:#fef7e0,stroke:#f9ab00
+    style E fill:#fce8e6,stroke:#ea4335
+    style G fill:#e6f4ea,stroke:#34a853
+    style F fill:#e6f4ea,stroke:#34a853
+```
+
+### 通过推理脚本
+
+```bash
+python scripts/generate_ensemble.py \
+    -c config/models.yaml \
+    -s MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT \
+    -o peptide \
+    -n 1000 \
+    -a \
+    -d cuda \
+    --cg2all_batch_size 250 \
+    --cg2all_device cpu
+```
+
+### 通过 Python API
+
+```python
+from sam.model import SAM
+
+model = SAM(config_fp="config/models.yaml", device="cuda")
+out = model.sample(seq="MFDNASTRNNKRERGKRQGKQTRTQRHADRSQT",
+                   n_samples=1000, n_steps=100)
+save = model.save(out=out, out_path="peptide", out_fmt="dcd")
+aa   = model.cg2all(ca_pdb_fp=save["ca_pdb"],
+                    ca_traj_fp=save["ca_dcd"],
+                    out_path="peptide",
+                    batch_size=250,
+                    device="cpu")
+```
+
+来源: [generate_ensemble.py](scripts/generate_ensemble.py#L88-L113), [model.py](sam/model.py#L341-L434)
+
+## 全原子重建的 CLI 参数
+
+推理脚本暴露了四个控制 cg2all 行为的参数。其中两个是顶层标志；两个是 cg2all 专用覆盖项。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `-a` / `--all_atom` | 标志 | `False` | 启用全原子重建。需要安装 cg2all，并强制使用 `--out_fmt dcd`。 |
+| `--cg2all_batch_size` | int | `None` (→ `--batch_size`) | 每个 cg2all 批次处理的构象数量。必须是 `--n_samples` 的**精确因数**。如果出现内存错误，对于较长的肽段应减小此值。 |
+| `--cg2all_device` | str | `"cpu"` | cg2all 推理的 PyTorch 设备。即使 PyTorch CUDA 可用，如果 DGL 无法定位 CUDA，也应使用 `"cpu"`。 |
+
+**整除约束**（`n_samples % cg2all_batch_size == 0`）在参数解析阶段强制执行。这是 cg2all 的内部要求——转换脚本以固定大小的批次处理构象，无法处理末尾的非完整批次。
+
+来源: [generate_ensemble.py](scripts/generate_ensemble.py#L35-L49), [generate_ensemble.py](scripts/generate_ensemble.py#L60-L81)
+
+## 输入验证与错误处理
+
+当请求 `--all_atom` 时，推理脚本会在任何生成开始之前执行一系列**预检**：
+
+1. **cg2all 可用性**：如果 `import cg2all` 失败，将立即抛出 `ImportError`，并附带指向 cg2all 仓库的安装说明。
+2. **输出格式**：全原子重建仅兼容 DCD 输出。如果同时指定了 `--out_fmt numpy` 和 `--all_atom`，将抛出 `ValueError`。
+3. **批次整除性**：如果 `n_samples` 不能被 `cg2all_batch_size` 整除，将抛出 `ValueError`，并提示调整这些值。
+4. **子进程失败**：在重建过程中，如果 `convert_cg2all` 进程返回非零退出码，将抛出 `subprocess.SubprocessError`，并附带完整的 stderr 输出以供诊断。
+
+<CgxTip>cg2all 设备可以与 idpSAM 设备不同。这是有意为之：idpSAM 使用 PyTorch CUDA，而 cg2all 依赖的 DGL 可能无法检测到相同的 CUDA 安装。在 GPU 上运行 idpSAM（`-d cuda`）并在 CPU 上运行 cg2all（`--cg2all_device cpu`）是推荐的安全配置。</CgxTip>
+
+来源: [generate_ensemble.py](scripts/generate_ensemble.py#L56-L81), [model.py](sam/model.py#L424-L429)
+
+## 输出文件约定
+
+`save()` 和 `cg2all()` 方法生成一组共享公共路径前缀的协调文件。命名约定区分了仅含 Cα 的输出（`ca`）和全原子输出（`aa`）：
+
+| 阶段 | 方法 | 文件 | 返回字典中的键 |
+|---|---|---|---|
+| Cα 拓扑 | `save()` | `<prefix>.ca.top.pdb` | `"ca_pdb"` |
+| Cα 轨迹 | `save()` | `<prefix>.ca.traj.dcd` | `"ca_dcd"` |
+| 序列 | `save()` | `<prefix>.seq.fasta` | `"fasta"` |
+| 全原子拓扑 | `cg2all()` | `<prefix>.aa.top.pdb` | `"aa_top"` |
+| 全原子轨迹 | `cg2all()` | `<prefix>.aa.traj.dcd` | `"aa_dcd"` |
+
+Cα PDB 文件存储单帧拓扑，每个残基包含一个 CA 原子，由 `get_ca_topology()` 使用 MDTraj 构建。该文件具有双重作用：它提供了用于加载 Cα DCD 轨迹的拓扑，同时作为 cg2all `--cg ca` 重建模式的输入参考结构。
+
+来源: [model.py](sam/model.py#L341-L393), [model.py](sam/model.py#L403-L409), [topology.py](sam/data/topology.py#L7-L13)
+
+## Notebook 集成
+
+[Colab notebook](notebooks/idpsam_experiments.ipynb) 将 cg2all 作为表单切换选项暴露。布尔值 `all_atom` 参数控制是否执行可选的全原子单元格：
+
+```python
+if all_atom:
+    cg2all_data = idpsam.cg2all(
+        ca_pdb_fp=save_data["ca_pdb"],
+        ca_traj_fp=save_data["ca_dcd"],
+        out_path=out_path,
+        batch_size=cg2all_batch_size,
+        device=cg2all_device)
+else:
+    print("# Will not build all-atom structures.")
+```
+
+在 Colab 上，cg2all 的安装受 `use_cg2all` 标志（默认为 `False`）控制。将其设置为 `True` 会在设置单元格期间从 cg2all GitHub 仓库触发 pip 安装。如果安装失败，notebook 会将 `use_cg2all` 设为 `False` 并禁用 `all_atom` 复选框。
+
+<CgxTip>在 Colab 上运行时，`cg2all_device` 被硬编码为 `"cpu"`，因为 Colab 运行时上的 DGL GPU 支持不可靠。这与 idpSAM 设备无关，后者在可用时会使用 CUDA。</CgxTip>
+
+来源: [idpsam_experiments.ipynb](notebooks/idpsam_experiments.ipynb#L84-L118), [idpsam_experiments.ipynb](notebooks/idpsam_experiments.ipynb#L296-L307)
+
+## 架构原理
+
+通过**子进程**而非 Python API 调用 cg2all 的决定是深思熟虑的。cg2all 依赖于 [DGL (Deep Graph Library)](https://www.dgl.ai/)，后者管理着自己的 CUDA 上下文和内存分配器。在同一进程中加载 DGL 和 PyTorch 可能会产生 CUDA 上下文冲突，尤其是当它们针对不同的 CUDA 版本或运行时版本时。通过将 `convert_cg2all` 作为子进程执行，idpSAM 确保了：
+
+- DGL 进程拥有隔离的 CUDA 上下文（或完全在 CPU 上运行）。
+- idpSAM 的 PyTorch 张量和 CUDA 内存不会被 DGL 的分配器破坏。
+- cg2all 可以使用与 idpSAM 不同的 CUDA 工具链安装，而不会发生冲突。
+- cg2all 的崩溃不会拖垮父 idpSAM 进程——stderr 被捕获并作为 `SubprocessError` 报告。
+
+此模式以少量的进程间序列化开销（写入/读取 DCD 文件）换取了显著的鲁棒性提升，对于磁盘 I/O 相较于神经网络评估时间可忽略不计的纯推理流程而言，这是正确的权衡。
+
+来源: [model.py](sam/model.py#L411-L429)
+
+## 相关页面
+
+- [SAM 模型 API 参考](14-sam-model-api-reference) — `SAM` 类的完整文档，包括 `sample()`、`save()` 和 `cg2all()`。
+- [推理脚本用法](3-inference-script-usage) — `generate_ensemble.py` 的完整 CLI 参数参考。
+- [两阶段架构概述](4-two-stage-architecture-overview) — 输入到 cg2all 的 Cα 构象最初是如何生成的。
+- [数据集与数据流程](16-dataset-and-data-pipeline) — 准备 cg2all 的 Cα PDB 输入的 `EvalProteinDataset` 和拓扑构建。
+
+---
+
+## 自编码器模块
+
+- [深入解析/自编码器模块/欧几里得不变编码器](https://zread.ai/giacomo-janson/idpsam/5-euclidean-invariant-encoder)
+
+---
+slug:5-euclidean-invariant-encoder
+blog_type:normal
+---
+
+
+欧几里得不变编码器是 idpSAM 两阶段架构的第一阶段，将 Cα 坐标帧映射为紧凑的**旋转和平移不变**潜表示。通过仅提取内在不变几何特征——成对距离和主链二面角——该编码器保证在三维空间中任意放置的结构相同构象都能产生相同的编码。这一关键特性使得下游潜扩散模型能够在一个没有虚假欧几里得自由度的空间中运行。
+
+## 为什么欧几里得不变性至关重要
+
+由 Cα 坐标 **x** ∈ ℝ^(L×3) 描述的蛋白质构象包含六个物理上无意义的自由度：三个对应全局平移，三个对应全局旋转。如果编码器对这些自由度敏感，潜空间将包含对应于不同姿态下相同结构的冗余流形——严重损害扩散采样质量。`CA_TransformerEncoder` 通过从两个 **E(3) 不变**量构建其全部输入来消除此问题：
+
+| 不变量 | 计算 | 物理意义 |
+|---|---|---|
+| **成对距离** | d_ij = ‖x_i − x_j‖ | 捕获全局折叠几何 |
+| **主链二面角** | 由连续的 Cα 四元组计算出的 φ, ψ | 捕获局部链构象 |
+
+由于距离在任何等距变换（旋转 + 平移）下保持不变，且二面角由键向量的叉积和点积（两者均旋转不变）计算得出，因此编码器的输出**从结构上可证明是 E(3) 不变的**。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L1-L14), [coords.py](sam/coords.py#L5-L37), [coords.py](sam/coords.py#L73-L92)
+
+## 架构概述
+
+```mermaid
+flowchart TD
+    subgraph Input["输入: Cα 坐标 x ∊ (B, L, 3)"]
+        X["x (B, L, 3)"]
+    end
+
+    subgraph InvariantFeatures["E(3) 不变特征提取"]
+        DM["calc_dmap(x)\n→ dmap (B, 1, L, M)"]
+        RBF["GaussianSmearing\n→ (B, L, L, G)"]
+        PROJ_DMAP["project_dmap\n→ z (B, L, L, E₂)"]
+        TORS["torch_chain_dihedrals(x)\n→ (B, L-3)"]
+        TORS_F["cos/sin/mask 填充\n→ (B, L, 3)"]
+        PROJ_IN["project_input\n→ s (B, L, E)"]
+    end
+
+    subgraph SequenceFeatures["序列级特征"]
+        AA["beads_embed(a)\n→ a_e (B, L, D_bead)"]
+        POS["AF2_PositionalEmbedding\n→ p (B, L, L, D_pos)"]
+    end
+
+    subgraph TransformerStack["Transformer 模块 x N"]
+        BLOCK["AE_IdpGAN_TransformerBlock\n(s, a_e, p, z) → s'"]
+    end
+
+    subgraph Output["输出模块"]
+        OUT["Linear → Act → Linear\n→ (B, L, encoding_dim)"]
+    end
+
+    X --> DM --> RBF --> PROJ_DMAP
+    X --> TORS --> TORS_F --> PROJ_IN
+    X --> POS
+    PROJ_IN --> BLOCK
+    AA --> BLOCK
+    POS --> BLOCK
+    PROJ_DMAP --> BLOCK
+    BLOCK --> OUT
+```
+
+该编码器遵循受 AlphaFold2 启发的 **1D+2D 双流**设计：一维逐残基序列 `s` 携带局部结构上下文，而二维成对表示 `z` 编码成对几何关系。这两个流在每个 Transformer 模块的注意力机制内部进行交互。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L32-L72), [encoder.py](sam/nn/autoencoder/encoder.py#L190-L225)
+
+## 不变特征提取
+
+### 距离图 → RBF 嵌入 (2D 特征)
+
+通过 `calc_dmap(x)` 计算成对 Cα-Cα 距离矩阵，该函数为所有残基对 计算 ‖x_i − x_j‖，生成形状为 `(B, 1, L, L)` 的张量。原始距离并不直接馈入 Transformer，而是通过**径向基函数 (RBF) 核**进行展开：
+
+$$\text{RBF}(d, \mu_k) = \exp\!\left(-\frac{(d - \mu_k)^2}{2\delta^2}\right), \quad k = 1, \dots, G$$
+
+其中中心 μ_k 在 `[dmap_ca_min, dmap_ca_cutoff]` 之间均匀分布，δ 为相邻中心的间距。这会将每个标量距离映射为一个 G 维向量，提供适合神经网络处理的平滑、可微表示。支持两种 RBF 变体：
+
+| 变体 | 类 | 关键特性 |
+|---|---|---|
+| **高斯涂抹** | `GaussianSmearing` | 固定、均匀分布的中心；不可训练 |
+| **指数正态** | `ExpNormalSmearing` | PhysNet 风格参数化；中心和宽度可选可训练 |
+
+RBF 展开后，线性投影（或当 `use_dmap_mlp=True` 时的两层 MLP）将 G 维 RBF 特征映射到 2D 嵌入维度 `embed_2d_dim`。
+
+来源: [coords.py](sam/coords.py#L5-L37), [geometric.py](sam/nn/geometric.py#L6-L19), [geometric.py](sam/nn/geometric.py#L22-L64), [encoder.py](sam/nn/autoencoder/encoder.py#L90-L112)
+
+### 主链二面角 (1D 特征)
+
+使用 `torch_chain_dihedrals(x)` 从连续的 Cα 位置计算主链二面角，该函数将标准叉积公式应用于每个残基四元组 (i, i+1, i+2, i+3)。原始角度 α 随后被分解为每个残基的 **3 通道特征向量**：
+
+```python
+t_f = [cos(α_i), sin(α_i), 1.0]   # 形状 (B, L, 3)
+```
+
+`[cos, sin]` 对避免了直接使用原始角度在 ±π 处产生的不连续性，而常量通道充当可学习偏置。单侧填充 `(1, 2)` 用于处理无法定义二面角的边界残基。随后，两层 MLP (`project_input`) 将这 3 通道特征投影到 1D 嵌入维度 `embed_dim`。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L20-L25), [coords.py](sam/coords.py#L73-L92), [encoder.py](sam/nn/autoencoder/encoder.py#L113-L117)
+
+### 氨基酸嵌入
+
+标准的 `nn.Embedding(20, bead_embed_dim)` 将 20 种标准氨基酸分别映射为可学习的 `bead_embed_dim` 维向量。这些嵌入作为**条件信息**注入每个 Transformer 模块，可通过自适应层归一化（`embed_inject_mode="adanorm"`）或拼接（`embed_inject_mode="concat"`）实现。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L119-L123), [ca_models.py](sam/nn/autoencoder/ca_models.py#L109-L116)
+
+### 位置嵌入
+
+**受 AlphaFold2 启发的相对位置嵌入**编码残基对之间的序列偏移量。对于残基 i 和 j，偏移量 `j − i` 被划分到 `2 × pos_embed_r + 1` 个分箱之一，并通过一个可学习的 `nn.Embedding`，生成形状为 `(B, L, L, pos_embed_dim)` 的 2D 张量。该位置嵌入在每个 Transformer 模块内部与 2D 距离特征融合。
+
+来源: [common.py](sam/nn/common.py#L149-L198), [encoder.py](sam/nn/autoencoder/encoder.py#L126-L129)
+
+## Transformer 模块: AE_IdpGAN_TransformerBlock
+
+每个编码器层是一个 `AE_IdpGAN_TransformerBlock`，它执行带有条件氨基酸注入的**预归一化残差更新**：
+
+```mermaid
+flowchart LR
+    S_IN["s"] --> COND["条件\n注入"] --> NORM_ATTN["LayerNorm"] --> ATTN["自注意力\n(+ 2D 偏置 ẑ)"] --> RES1["+ 残差"]
+    RES1 --> NORM_MLP["LayerNorm"] --> MLP["MLP\n(fc1 → act → fc2)"] --> RES2["+ 残差"]
+    RES2 --> S_OUT["s'"]
+
+    A_E["a_e"] --> COND
+    Z["z, p"] --> ATTN
+```
+
+### 带有 2D 成对偏置的注意力
+
+自注意力机制接收 1D 查询/键/值投影和 2D 成对表示 `ẑ`。2D 特征通过以下两种模式之一与位置嵌入结合：
+
+| 模式 | 组合方式 | 结果维度 |
+|---|---|---|
+| `concat` | `ẑ = [z, p]`（沿特征轴拼接） | `embed_2d_dim + pos_embed_dim` |
+| `add` | `ẑ = z + W·p`（线性投影后相加） | `embed_2d_dim` |
+
+组合后的 2D 特征通过 `mlp_2d` 投影，产生**逐头注意力偏置**，并加到点积亲和力上：`attn_weights = softmax(QK^T/√d + mlp_2d(ẑ))`。这使得注意力能够优先关注在空间上接近（通过距离嵌入）且在序列上相关（通过位置嵌入）的残基对。
+
+来源: [ca_models.py](sam/nn/autoencoder/ca_models.py#L15-L157), [transformer.py](sam/nn/transformer.py#L10-L126)
+
+### 条件氨基酸注入
+
+氨基酸嵌入通过 `AE_ConditionalInjectionModule` 对 Transformer 模块进行条件化，支持两种注入策略：
+
+**自适应层归一化 (`adanorm`)：** 遵循 DiT（Diffusion Transformer）范式，氨基酸嵌入被投影以生成六个调制向量（偏移、缩放、门控）×（注意力、MLP）。这些向量调制归一化后的激活：`modulate(x, shift, scale) = x · (1 + scale) + shift`，并在每个子层后应用门控机制。
+
+**拼接 (`concat`)：** 氨基酸嵌入与隐藏状态拼接，并在注意力前通过线性层投影回 `embed_dim`。对于使用后归一化的 MLP，拼接发生在 MLP 输入处。
+
+来源: [ca_models.py](sam/nn/autoencoder/ca_models.py#L164-L279)
+
+## 输出模块
+
+在最后一个 Transformer 模块之后，1D 隐藏状态通过两层 MLP 映射到编码维度：
+
+```
+s → Linear(embed_dim, embed_dim) → Activation → Linear(embed_dim, encoding_dim) [→ LayerNorm]
+```
+
+当 `out_mode="idpgan_norm"` 时，应用可选的 `LayerNorm`（无仿射变换），提供归一化的编码以稳定下游扩散训练。输出张量的形状为 `(B, L, encoding_dim)`——每个残基对应一个紧凑向量，以欧几里得不变的方式编码局部结构环境。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L161-L183), [encoder.py](sam/nn/autoencoder/encoder.py#L219-L225)
+
+## 默认配置
+
+下表列出了已发布的 idpSAM v1.0 模型中使用的默认编码器超参数：
+
+| 参数 | 值 | 描述 |
+|---|---|---|
+| `encoding_dim` | 16 | 每残基潜向量维度 |
+| `num_layers` | 5 | Transformer 模块数量 |
+| `embed_dim` | 128 | 1D 隐藏状态维度 |
+| `embed_2d_dim` | 192 | 2D 成对表示维度 |
+| `num_heads` | 8 | 注意力头数量 |
+| `mlp_dim` | 256 | MLP 隐藏维度 |
+| `activation` | gelu | 激活函数 |
+| `norm_pos` | pre | LayerNorm 位置 (预归一化) |
+| `out_mode` | idpgan_norm | 带有无仿射 LayerNorm 的输出 |
+| `bead_embed_dim` | 32 | 氨基酸嵌入维度 |
+| `pos_embed_dim` | 64 | 位置嵌入维度 |
+| `pos_embed_r` | 32 | 相对位置范围 (±32) |
+| `embed_inject_mode` | concat | 氨基酸注入模式 |
+| `embed_2d_inject_mode` | concat | 2D 特征组合模式 |
+| `dmap_ca_num_gaussians` | 320 | RBF 中心数量 |
+| `dmap_ca_cutoff` | 3.0 | RBF 的最大距离 (Å, 缩放后) |
+| `dmap_embed_type` | rbf | RBF 变体 (高斯涂抹) |
+| `use_dmap_mlp` | true | 使用两层 MLP 进行距离投影 |
+
+<CgxTip>配置中的 `dmap_ca_cutoff` 值 3.0 作用于**内部缩放后**的距离（坐标已预归一化）。在埃空间中，这对应于覆盖相关残基间距离范围的更大截断值。</CgxTip>
+
+来源: [models.yaml](config/models.yaml#L11-L37)
+
+## 前向传播总结
+
+`CA_TransformerEncoder.forward(x, a, r)` 的完整前向传播过程如下：
+
+1. **计算距离图**: `dmap_ca = calc_dmap(x)` → 形状 `(B, 1, L, L)`
+2. **RBF 展开 + 投影**: `z = project_dmap(dmap_ca_expansion(dmap_ca))` → 形状 `(B, L, L, embed_2d_dim)`
+3. **计算扭转特征 + 投影**: `s = project_input(get_chain_torsion_features(x))` → 形状 `(B, L, embed_dim)`
+4. **氨基酸嵌入**: `a_e = beads_embed(a)` → 形状 `(B, L, bead_embed_dim)`
+5. **位置嵌入**: `p = embed_pos(x, r)` → 形状 `(B, L, L, pos_embed_dim)`
+6. **Transformer 堆叠**: `for layer in layers: s = layer(s, a_e, p, z)`
+7. **输出投影**: `enc = out_module(s)` → 形状 `(B, L, encoding_dim)`
+
+<CgxTip>原始 3D 坐标 `x` **绝不**作为任何可学习层的直接输入。它们仅出现在 `calc_dmap` 和 `torch_chain_dihedrals` 内部——两者均产生 E(3) 不变输出。这一架构约束使得编码器具有*可证明的*欧几里得不变性，而非仅仅是近似不变。</CgxTip>
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L190-L225)
+
+## 与解码器的关系
+
+编码器和解码器构成一个**确定性自编码器**对。编码器使用距离和扭转特征将 `(B, L, 3)` 映射为 `(B, L, encoding_dim)`，而 [Transformer 解码器](6-transformer-decoder) 则将 `(B, L, encoding_dim)` 映射回 `(B, L, 3)`——从潜编码重建 Cα 坐标。值得注意的是，解码器**不**共享编码器的不变性约束：它必须在特定的欧几里得帧中生成坐标，它通过使用在已学习的 3D 坐标投影上操作的 `TransformerTimewarpLayer` 注意力机制来实现这一点。这两个网络联合训练，学习到的编码作为 [DDPM 采样过程](7-ddpm-sampling-process) 的目标分布。
+
+---
+
+- [深入解析/自编码器模块/Transformer 解码器](https://zread.ai/giacomo-janson/idpsam/6-transformer-decoder)
+
+---
+slug:6-transformer-decoder
+blog_type:normal
+---
+
+
+**Transformer 解码器**是 idpSAM 两阶段架构的第二阶段——一个确定性的神经网络，将隐编码向量映射回三维 Cα 坐标空间。它接收紧凑的结构编码（由[欧几里得不变编码器](5-euclidean-invariant-encoder)生成，或由[DDPM 采样过程](7-ddpm-sampling-process)采样），并通过一堆注意力驱动的 Transformer 块重建完整的骨架构象。与生成分布的生成式解码器不同，该解码器是**确定性的**：给定的编码始终产生相同的 Cα 坐标集，使其成为编码器压缩过程的学习逆映射。
+
+来源: [decoder.py](sam/nn/autoencoder/decoder.py#L1-L50), [model.py](sam/model.py#L127-L132)
+
+## 架构概述
+
+解码器遵循四阶段流水线——**投影 → 嵌入 → 注意 → 输出**——该流水线以逆序镜像编码器的结构。编码向量通过线性投影输入，经氨基酸和位置嵌入丰富后，穿过可配置的 Transformer 块堆栈，最终输出为 `(B, L, 3)` 的 Cα 坐标张量。
+
+```mermaid
+flowchart TB
+    subgraph Input["输入阶段"]
+        E["隐编码<br/>(B, L, encoding_dim)"]
+        P["project_input<br/>Linear 或 MLP"]
+    end
+
+    subgraph Embed["嵌入阶段"]
+        AA["氨基酸嵌入<br/>nn.Embedding(20, bead_embed_dim)"]
+        POS["位置嵌入<br/>AF2_PositionalEmbedding"]
+    end
+
+    subgraph Attend["注意阶段"]
+        TB1["TransformerBlock 1"]
+        TB2["TransformerBlock 2"]
+        TBD["TransformerBlock N"]
+        TB1 --> TB2 --> TBD
+    end
+
+    subgraph Output["输出阶段"]
+        OUT["out_module<br/>Linear → Act → Linear"]
+        XYZ["Cα 坐标<br/>(B, L, 3)"]
+    end
+
+    E --> P --> TB1
+    AA -.->|"条件注入"| TB1
+    POS -.->|"对偏置"| TB1
+    TBD --> OUT --> XYZ
+```
+
+解码器通过 `get_decoder` 工厂函数实例化，该函数从模型配置中读取 `decoder` 部分，并仅将匹配的参数传递给 `CA_TransformerDecoder` 构造函数。这种设计将 YAML 配置架构与类签名解耦，允许未使用的构造函数参数自然采用默认值。
+
+来源: [decoder.py](sam/nn/autoencoder/decoder.py#L151-L178), [decoder.py](sam/nn/autoencoder/decoder.py#L184-L199)
+
+## 组件分解
+
+### 输入投影
+
+解码器的第一个操作将输入的隐编码从其压缩维度（`encoding_dim`，通常为 16）映射到 Transformer 的工作维度（`embed_dim`，通常为 128）。通过 `use_input_mlp` 标志控制，共有两种可用模式：
+
+| 模式 | `use_input_mlp` | 结构 | 行为 |
+|------|:---:|------|----------|
+| **Linear** | `False` | `nn.Linear(encoding_dim → embed_dim)` | 单仿射投影 |
+| **MLP** | `True` | `Linear → Activation → Linear` | 具有非线性扩展的两层网络 |
+
+MLP 模式在投影期间提供了额外的表征容量，这很重要，因为编码维度（16）远小于嵌入维度（128）。默认配置使用 `use_input_mlp: true`。
+
+来源: [decoder.py](sam/nn/autoencoder/decoder.py#L83-L89)
+
+### 氨基酸嵌入
+
+当 `embed_inject_mode` 不为 `None` 时，解码器通过 `nn.Embedding(20, bead_embed_dim)` 学习残基类型嵌入，将 20 种标准氨基酸中的每一种映射到 `bead_embed_dim` 维向量。这些嵌入作为**条件信号**，通过 `AE_ConditionalInjectionModule`（详见下文）注入每个 Transformer 块，使解码器能够根据蛋白质的序列特性——而不仅仅是其几何编码——来调整其重建过程。
+
+当 `embed_inject_mode` 为 `None`（如在默认的 v1.0 配置中）时，**不使用**氨基酸嵌入，解码器完全基于隐编码和位置信息进行操作。此设计选择反映了编码器已在其编码向量中捕获了依赖序列的结构信息。
+
+来源: [decoder.py](sam/nn/autoencoder/decoder.py#L91-L95), [ca_models.py](sam/nn/autoencoder/ca_models.py#L143-L161)
+
+### 位置嵌入
+
+解码器使用**受 AlphaFold2 启发的成对位置嵌入**（`AF2_PositionalEmbedding`），它生成一个二维表征，编码每对残基之间的相对序列距离。这是一个基于离散距离区间的学习嵌入：
+
+1. 计算成对距离：`p[i,j] = i - j`
+2. 将距离划分到 `2 * pos_embed_r + 1` 个区间中（默认：当 `pos_embed_r=32` 时为 65 个区间）
+3. 为每个区间查找维度为 `pos_embed_dim`（默认：64）的学习嵌入向量
+
+结果是一个形状为 `(B, L, L, pos_embed_dim)` 的张量，它作为**成对偏置**输入到每个 Transformer 块的注意力机制中，使注意力权重能够考虑残基的序列邻近度。当提供自定义残基索引 `r` 时（通过 `use_res_ids: true`），它们将替换默认的顺序索引，从而支持非连续或断链序列。
+
+来源: [common.py](sam/nn/common.py#L144-L198), [decoder.py](sam/nn/autoencoder/decoder.py#L97-L100)
+
+### Transformer 块堆栈
+
+解码器的核心是包含 `num_layers` 个相同 `AE_IdpGAN_TransformerBlock` 模块的堆栈。每个块执行一个**自注意力子层**，随后是一个 **MLP 子层**，每个阶段都带有残差连接、层归一化和条件注入。该块的内部计算流程如下：
+
+```mermaid
+flowchart TB
+    X_IN["x (输入)"] --> RES1["残差 = x"]
+    RES1 --> INJ0["inject_0: 拼接或恒等"]
+    INJ0 --> NORM_A["LayerNorm (若 pre-norm)"]
+    NORM_A --> INJ1P["inject_1_pre: adaLN 缩放/平移或恒等"]
+    INJ1P --> ATTN["自注意力 + 成对偏置"]
+    ATTN --> INJ1Q["inject_1_post: adaLN 门控或恒等"]
+    INJ1Q --> ADD1["x = 残差 + 注意力输出"]
+    ADD1 --> RES2["残差 = x"]
+    RES2 --> NORM_M["LayerNorm (若 pre-norm)"]
+    NORM_M --> INJ2P["inject_2_pre: adaLN 缩放/平移或恒等"]
+    INJ2P --> MLP["fc1 → 激活 → fc2"]
+    MLP --> INJ2Q["inject_2_post: adaLN 门控或恒等"]
+    INJ2Q --> ADD2["x = 残差 + mlp 输出"]
+    ADD2 --> X_OUT["x (输出)"]
+```
+
+**注意力类型选择。** 每个块通过 `attention_type` 参数支持两种注意力机制：
+
+| 类型 | 类 | 亲和度计算 | 属性 |
+|------|-------|---------------------|------------|
+| `"transformer"` | `TransformerLayer` | 缩放点积：`softmax(QKᵀ/√d + P)` | 带有成对偏置的标准多头注意力 |
+| `"timewarp"` | `TransformerTimewarpLayer` | 负平方距离：`softmax(-(‖qᵢ - kⱼ‖²/ℓ²) + P)` | 具有**SE(3)等变性**的注意力，带有可学习长度尺度 `ℓ` |
+
+**timewarp** 注意力是解码器的默认设置（v1.0 中 `attention_type: timewarp`）。它基于投影的 3D 坐标查询和键之间的*平方欧几里得距离*计算亲和度，而不是点积。这使得注意力权重对查询/键坐标表示的**旋转和平移具有内在的不变性**。可学习参数 `elle`（初始化为 1.0，通过 softplus 应用）控制每个头的长度尺度，该尺度决定了注意力随距离衰减的急剧程度。
+
+**归一化位置。** `norm_pos` 参数控制层归一化是在注意力/MLP 子层之前（`"pre"`）还是之后（`"post"`）应用。v1.0 默认值为 `"pre"`，这是现代深度 Transformer 训练保证稳定性的标准做法。
+
+来源: [ca_models.py](sam/nn/autoencoder/ca_models.py#L16-L141), [transformer.py](sam/nn/transformer.py#L8-L109), [transformer.py](sam/nn/transformer.py#L113-L265)
+
+### 条件信息注入
+
+`AE_ConditionalInjectionModule` 控制氨基酸嵌入（以及在噪声预测网络中的时间步嵌入）如何注入每个 Transformer 块。它支持两种主要模式：
+
+**自适应层归一化（`"adanorm"`）。** 这是 DiT 风格的注入策略。氨基酸嵌入 `a` 通过两层调制网络（`SiLU → Linear(bead_embed_dim → 6 × embed_dim)`），产生六个逐标记向量：`(shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp)`。这些向量在每个块的四个注入点应用：
+
+- `inject_1_pre`：将注意力输入调制为 `x * (1 + scale_msa) + shift_msa`
+- `inject_1_post`：将注意力输出门控为 `x * gate_msa`
+- `inject_2_pre`：将 MLP 输入调制为 `x * (1 + scale_mlp) + shift_mlp`
+- `inject_2_post`：将 MLP 输出门控为 `x * gate_mlp`
+
+当 `embed_inject_mode == "adanorm"` 时，`LayerNorm` 层设置 `elementwise_affine=False`（无可学习的缩放/平移参数），因为自适应归一化已经包含了该作用。
+
+**拼接（`"concat"`）。** 一种更简单的策略，将氨基酸嵌入在特定点直接拼接到标记表征上，然后通过学习的线性层投影回 `embed_dim`。
+
+**空模式（`None`）。** 不进行条件注入。解码器完全依赖隐编码和位置嵌入。这是 v1.0 的默认设置，因为编码器已经编码了依赖序列的结构信息。
+
+来源: [ca_models.py](sam/nn/autoencoder/ca_models.py#L143-L279)
+
+### 输出模块
+
+在最后一个 Transformer 块之后，序列表征（形状为 `(L, B, embed_dim)`）通过两层输出 MLP：`Linear(embed_dim → embed_dim) → Activation → Linear(embed_dim → output_dim)`。`output_dim` 默认为 3，为每个残基生成一个 Cα 坐标。最终的转置将 Transformer 的 `(L, B, 3)` 约定转换为输出的 `(B, L, 3)` 约定。
+
+来源: [decoder.py](sam/nn/autoencoder/decoder.py#L127-L130)
+
+## 默认配置
+
+v1.0 生产配置（来自 `config/models.yaml`）使用以下参数实例化解码器：
+
+| 参数 | 值 | 描述 |
+|-----------|-------|-------------|
+| `type` | `"deterministic"` | 解码器是非概率性的 |
+| `use_input_mlp` | `true` | 两层输入投影 |
+| `num_layers` | `5` | 五个 Transformer 块 |
+| `attention_type` | `"timewarp"` | SE(3)等变平方距离注意力 |
+| `embed_dim` | `128` | 标记嵌入维度 |
+| `d_model` | `512` | 注意力 QKV 投影维度 |
+| `num_heads` | `32` | 注意力头数 (head_dim = 16) |
+| `mlp_dim` | `256` | MLP 隐藏维度 |
+| `norm_pos` | `"pre"` | 预归一化 |
+| `activation` | `"gelu"` | GELU 激活 |
+| `bead_embed_dim` | `null` | 无氨基酸嵌入 |
+| `pos_embed_dim` | `64` | 位置嵌入维度 |
+| `pos_embed_r` | `32` | 位置区间半径 (65 个区间) |
+| `embed_inject_mode` | `null` | 无条件注入 |
+
+注意**扩展比**：注意力在计算多头亲和度之前从 `embed_dim=128` 投影到 `d_model=512`（4 倍扩展），然后再投影回去。在 32 个头的情况下，每个头操作的维度为 16 (512/32)，从而产生相对紧凑的逐头表征，这些表征在多个头之间共享。
+
+来源: [models.yaml](config/models.yaml#L41-L62)
+
+## 前向传播执行
+
+解码器的 `forward` 方法编排了整个流水线：
+
+```python
+def forward(self, x, a=None, r=None):
+    # 1. 将隐编码投影到嵌入维度
+    x = self.project_input(x).transpose(0, 1)     # (B,L,E) → (L,B,embed_dim)
+
+    # 2. 计算氨基酸嵌入（如果启用）
+    a_e = self.beads_embed(a).transpose(0, 1)      # (B,L) → (L,B,bead_embed_dim)
+
+    # 3. 计算成对位置嵌入
+    p = self.embed_pos(x, r=r)                     # → (B,L,L,pos_embed_dim)
+
+    # 4. 穿过 Transformer 块
+    for layer in self.layers:
+        x, attn = layer(x=x, a=a_e, p=p, z=None, x_0=None)
+
+    # 5. 输出投影到 3D 坐标
+    x = self.out_module(x)                          # (L,B,embed_dim) → (L,B,3)
+    xyz = x.transpose(0, 1)                         # → (B,L,3)
+    return xyz
+```
+
+`nn_forward` 方法提供了一个便捷的包装器，它从批处理对象中提取氨基酸索引（`batch.a`）和残基索引（`batch.r`），然后委托给 `forward`。这是[SAM 模型 API 参考](14-sam-model-api-reference)在推理期间使用的入口点。
+
+<CgxTip>解码器在推理期间始终在 `torch.no_grad()` 下执行（参见 `sam/model.py` 的 `decode` 方法）。这意味着不存储梯度，从而显著降低了内存消耗——这对于在单次运行中解码数千个采样构象至关重要。</CgxTip>
+
+来源: [decoder.py](sam/nn/autoencoder/decoder.py#L132-L149), [decoder.py](sam/nn/autoencoder/decoder.py#L152-L158), [model.py](sam/model.py#L246-L267)
+
+## 完整流水线中的解码器
+
+在 `SAM.decode` 方法中，解码器接收生成的编码全量张量，并逐批将其转换为 Cα 坐标。工作流程如下：
+
+1. 通过隐扩散模型**生成编码** → 形状为 `(n_samples, L, encoding_dim)` 的张量
+2. 如果启用了 `use_enc_std_scaler`，则**应用标准缩放器**（逆归一化）
+3. **解码**每个批次：`xyz = decoder.nn_forward(encodings_batch, protein_batch)` → `(batch_size, L, 3)`
+4. 将所有解码后的批次**拼接**成形状为 `(n_samples, L, 3)` 的最终系综
+
+因此，解码器的作用纯粹是**确定性映射**：每个唯一的编码精确生成一个构象。生成系综的随机多样性完全来自上游的隐扩散采样步骤。
+
+<CgxTip>解码器的 `encoding_dim`（16）远小于其 `embed_dim`（128），这意味着隐空间被高度压缩。8:1 的压缩比确保了扩散模型在紧凑且信息密集的空间中运行，而解码器庞大的 Transformer 堆栈则具有足够的容量从这些紧凑编码中重建精细的 3D 结构。</CgxTip>
+
+来源: [model.py](sam/model.py#L220-L267)
+
+## 设计理念：解码器中的 Timewarp 注意力
+
+解码器选择 timewarp 注意力（而非[噪声预测网络](8-noise-prediction-network)中的标准点积注意力）在架构上具有重要意义。解码器的任务是从抽象编码重建**3D 坐标**——这是一种内在的几何操作。Timewarp 注意力基于投影坐标向量之间的*平方距离*计算亲和度，这意味着：
+
+- **旋转等变性**：旋转输入坐标表示会一致地旋转注意力模式，因为距离是旋转不变的
+- **平移不变性**：将所有坐标平移一个常数不会改变注意力权重
+- **几何局部性**：在投影坐标空间中接近的残基彼此之间的注意力更强，从而产生天然的空间局部性先验
+
+这与点积注意力形成对比，在点积注意力中，亲和度取决于查询和键向量之间的*角度*——当目标是坐标重建时，这是一个几何意义较弱的量。可学习的长度尺度 `ℓ`（通过 `elle` 和 softplus 参数化）允许每个注意力头自适应地控制其基于距离的门控的敏锐度。
+
+来源: [transformer.py](sam/nn/transformer.py#L113-L265), [models.yaml](config/models.yaml#L45-L46)
+
+## 下一步
+
+- 了解生成隐编码的编码器：[欧几里得不变编码器](5-euclidean-invariant-encoder)
+- 探索采样新编码的扩散过程：[DDPM 采样过程](7-ddpm-sampling-process)
+- 深入了解 timewarp 注意力机制：[自定义 Transformer 注意力](11-custom-transformer-attention)
+- 学习自适应归一化策略：[自适应层归一化](12-adaptive-layer-normalization)
+
+---
+
+## 潜扩散模块
+
+- [深入解析/潜扩散模块/DDPM 采样过程](https://zread.ai/giacomo-janson/idpsam/7-ddpm-sampling-process)
+
+---
+slug:7-ddpm-sampling-process
+blog_type:normal
+---
+
+
+DDPM（去噪扩散概率模型）采样过程是 idpSAM 潜在扩散阶段的核心生成引擎。它运行在**经学习的 16 维潜在空间**中——而非原始 3D 坐标上——逐步将纯高斯噪声去噪为结构化的蛋白质编码，随后解码器将这些编码映射为 Cα 坐标。本页将阐述其数学公式、迭代的逆向过程、由 Hugging Face Diffusers 支持的调度器配置，以及采样如何集成到完整的推理流程中。
+
+## 数学基础
+
+idpSAM 在潜在空间中采用了**前向-逆向扩散框架**。在训练期间，干净的编码 **x₀** 通过在 *T* 个时间步上添加高斯噪声被逐步破坏，产生带噪分布 *q(xₜ|x₀)*。在推理时，该过程被逆转：从纯噪声 **xₜ** ~ 𝒩(0, I) 开始，训练好的噪声预测网络 εθ 迭代地去噪以恢复干净的编码。
+
+**前向过程**（仅用于训练——定义破坏进度）：
+
+*q(xₜ|x₀) = 𝒩(xₜ; √ᾱₜx₀, (1−ᾱₜ)I)*
+
+其中 ᾱₜ 是 (1−βₜ) 的累积乘积，由调度器的 beta schedule 控制。
+
+**逆向过程**（采样——核心生成循环）：
+
+*xₜ₋₁ = (1/√αₜ)(xₜ − (βₜ/√(1−ᾱₜ))εθ(xₜ, t)) + σₜz*
+
+其中当 *t > 1* 时 *z ~ 𝒩(0, I)*，当 *t = 1* 时 *z = 0*。方差 σₜ 由 `variance_type` 设置决定。预测目标为 **ε-prediction**（噪声预测），意味着网络学习预测被添加的噪声，而非直接预测干净信号。
+
+来源: [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L27-L42), [models.yaml](config/models.yaml#L60-L70)
+
+## 调度器配置
+
+扩散过程由 Hugging Face 的 `DDPMScheduler` 编排，在 `Diffusers` 类内部构建。默认配置（来自 `config/models.yaml`）定义了以下参数：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------------|-------------|
+| `name` | `ddpm` | 调度器类型（也支持 `ddim`） |
+| `num_train_timesteps` | `1000` | 总扩散时间步 *T*（训练） |
+| `beta_start` | `0.0001` | 起始噪声水平 β₁ |
+| `beta_end` | `0.02` | 结束噪声水平 βₜ |
+| `beta_schedule` | `sigmoid` | 在起始和结束之间插值 β 的进度安排 |
+| `variance_type` | `fixed_small` | 后验方差：使用下界 σ²ₜ = βₜ(1−ᾱₜ₋₁)/(1−ᾱₜ) |
+| `prediction_type` | `epsilon` | 网络预测噪声 ε（而非 x₀ 或速度） |
+
+**sigmoid beta schedule** 使用 sigmoid 函数在 `beta_start` 和 `beta_end` 之间平滑地插值 β 值，产生平缓的噪声增加，避免了急剧的过渡。**`fixed_small` 方差**选项使用解析推导的后验方差（两个有效选择中较小的一个），这往往能产生更稳定的样本。关键的是，`clip_sample=False`——调度器从不裁剪中间样本，从而保留了潜在空间的完整动态范围。
+
+在采样时，可以通过 `n_steps` 参数（默认值：100）将步数减少到 1000 以下，该参数调用 `sched.set_timesteps(n_steps)` 对 1000 步的调度进行子采样。这是权衡样本质量与速度的主要调节旋钮。
+
+来源: [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L27-L61), [models.yaml](config/models.yaml#L62-L70)
+
+## 迭代去噪循环
+
+`Diffusers` 类中的 `sample()` 方法将逆向扩散过程实现为遍历调度器时间步序列的确定性循环。以下是精确的流程：
+
+```mermaid
+flowchart TD
+    A["使用 batch.z 形状<br/>初始化 xₜ ~ 𝒩(0, I)"] --> B["设置时间步<br/>sched.set_timesteps(n_steps)"]
+    B --> C{"对于每个时间步<br/>sched.timesteps 中的 i"}
+    C --> D["将 t 广播至批次：<br/>对所有图 t = full(i)"]
+    D --> E["预测噪声：<br/>εθ(xₜ, t, batch)"]
+    E --> F["缩放模型输入：<br/>sched.scale_model_input()"]
+    F --> G["调度器步进：<br/>sched.step(residual, i, xₜ)"]
+    G --> H["提取 prev_sample：<br/>xₜ ← result.prev_sample"]
+    H --> C
+    C -- 完成 --> I["将最终的 xₜ 作为<br/>生成的编码返回"]
+```
+
+**逐步机制：**
+
+1. **初始化** —— 使用 `torch.randn_like(batch.z)` 创建纯高斯噪声张量 `x_t`，其形状与潜在编码张量 *(B, L, 16)* 匹配，其中 *B* 为批次大小，*L* 为序列长度，16 为编码维度。
+
+2. **时间步广播** —— 对于调度器时间步序列中的每个离散时间步 `i`，通过用相同值 `i` 填充批次大小的向量来创建张量 `t`，确保批次中的所有样本处于相同的扩散步骤。
+
+3. **噪声预测** —— 调用噪声预测网络 `model(xt=x_t, t=t, batch=batch)`。这是 [噪声预测网络](8-noise-prediction-network)，一个 16 层的 Transformer，它接收带噪潜在表示 `xₜ`、时间步嵌入 `t` 以及来自 `batch` 的氨基酸序列上下文。它输出与 `xₜ` 形状相同的预测噪声 ε 张量。
+
+4. **模型输入缩放** —— `sched.scale_model_input()` 应用调度器公式所需的任何依赖于时间步的缩放。对于使用 epsilon 预测的标准 DDPM 调度器，这本质上是一个无操作（identity），但它确保了与其他预测类型的兼容性。
+
+5. **调度器步进** —— `sched.step(noisy_residual, i, x_t)` 使用预测的噪声、当前时间步和当前带噪样本计算逆向转换 *xₜ → xₜ₋₁*。结果的 `.prev_sample` 属性保存在下一个较低时间步的去噪样本。
+
+6. **循环完成** —— 在所有时间步耗尽后，最终的 `x_t` 即为标准化潜在空间中完全去噪的编码。
+
+来源: [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L151-L187)
+
+## 与 SAM 推理流程的集成
+
+DDPM 采样器并非孤立运行——它被嵌入到由 `SAM` 类编排的两阶段推理流程中。`generate()` 方法处理扩散阶段，其输出流入 `decode()` 以进行坐标重建。
+
+```mermaid
+flowchart LR
+    subgraph Stage1["阶段 1: 潜在扩散 (DDPM)"]
+        A1["EvalEncodedProteinDataset<br/>创建占位批次<br/>包含序列元数据"] --> A2["Diffusers.sample()<br/>迭代去噪循环"]
+        A2 --> A3["标准缩放器<br/>逆变换：<br/>enc = enc·s + u"]
+    end
+    subgraph Stage2["阶段 2: 解码"]
+        B1["解码器接收<br/>编码 + 序列"] --> B2["Transformer 解码器<br/>映射 enc → Cα xyz"]
+    end
+    A3 --> B1
+```
+
+**用于采样的数据集准备** —— `EvalEncodedProteinDataset` 仅从氨基酸序列构建轻量级数据集对象。它创建 `n_frames` 个形状为 *(n_frames, L, 16)* 的全零占位编码张量。这些零张量**并不**用作输入数据——它们仅仅定义了供 `torch.randn_like()` 用来生成初始噪声的张量形状 `batch.z`。实际的氨基酸特征（`batch.a`）是传入扩散循环的唯一有意义的信息，提供了将去噪引导至正确蛋白质的序列条件。
+
+**批量生成** —— `generate()` 方法遍历 DataLoader，为每个批次调用 `diffusion.sample(batch, n_steps=n_steps)`，并拼接结果直到生成 `n_samples` 个构象。这允许通过 `batch_size` 控制内存使用量，从而生成任意大的系综。
+
+**标准缩放器逆变换** —— 采样后，如果训练期间使用了标准缩放器（由 `use_enc_std_scaler: true` 控制），生成的编码将通过 `enc_gen = enc_gen * s + u` 进行反归一化，其中 `s` 和 `u` 是保存的标准差和均值张量。这将在传递给解码器之前，把标准化后的潜在表示映射回编码器的原始分布。
+
+来源: [model.py](sam/model.py#L201-L266), [cg_protein.py](sam/data/cg_protein.py#L1275-L1321), [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L151-L187)
+
+## 噪声预测作为去噪核心
+
+在逆向过程的每一步中，生成样本的质量完全取决于噪声预测网络 εθ。网络在采样循环中的 `forward` 签名为：
+
+```python
+model(xt=x_t, t=t, batch=batch)
+```
+
+这由 `SAM_EpsTransformer` 封装，它从批次中提取氨基酸特征（`batch.a`）、残基索引（`batch.r`）和模板编码（`batch.z_t`），然后委托给核心的 `EpsTransformer.forward(z_t, t, a, r, z_tem)`。该网络处理三种类型的条件：
+
+| 条件类型 | 来源 | 在采样中的作用 |
+|-------------------|--------|-----------------|
+| **时间步** *t* | 扩散循环 | 告知网络在此步中要去除*多少*噪声 |
+| **氨基酸** *a* | `batch.a`（独热编码） | 将去噪引导至正确蛋白质的潜在分布 |
+| **带噪潜在表示** *xₜ* | 上一步的输出 | 正在被逐步净化的信号 |
+
+氨基酸条件至关重要——没有它，模型将生成随机的类蛋白质编码，而非特定输入序列的编码。这正是 idpSAM 成为**条件**扩散模型的原因。
+
+如需深入了解实现 εθ 的 Transformer 架构，请参阅[噪声预测网络](8-noise-prediction-network)。
+
+来源: [eps.py](sam/nn/noise_prediction/eps.py#L699-L708), [eps.py](sam/nn/noise_prediction/eps.py#L634-L678)
+
+## 训练损失：学习预测噪声
+
+扩散模型通过 `loss()` 方法进行训练，该方法实现了标准的 DDPM 训练目标。该过程以与逆向采样循环相反的顺序进行：
+
+1. **采样时间步** —— 对于批次中的每个图，从 {0, 1, ..., *T*−1} 中均匀采样 *t*。
+2. **采样噪声** —— 采样与干净编码 `batch.z` 形状相同的 ε ~ 𝒩(0, I)。
+3. **创建带噪输入** —— `xₜ = sched.add_noise(x₀, noise, t)` 将前向过程应用于干净编码。
+4. **预测噪声** —— 网络预测 εθ(xₜ, t, batch)，输出通过 `sched.scale_model_input()` 进行缩放。
+5. **计算损失** —— 在 `prediction_type="epsilon"` 的情况下，目标是真实噪声 ε，损失为 **L2 (MSE)**：`F.mse_loss(noise, model_out)`。
+
+这是简化后的 DDPM 目标——数据对数似然变分下界的单样本蒙特卡洛估计，这对于训练有效的去噪网络已足够。
+
+来源: [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L89-L148)
+
+## EMA 与推理时的模型选择
+
+`DiffusionCommon` 基类提供了 `get_sample_model()`，它决定了在采样期间使用哪个版本的噪声预测网络：
+
+- 如果 **EMA（指数移动平均）** 可用，则使用 EMA 平滑后的权重（`self.ema.ema_model`）。
+- 否则，使用标准的训练权重（`self.eps_model`）。
+
+在当前的推理流程（`SAM.__init__`）中，`self.eps_ema` 被设置为 `None`，因此始终使用标准权重。然而，配置文件表明训练期间使用了 EMA 参数（`_use_ema: true`，`beta: 0.9999`），并且发布的权重（`nn.eps.pt`）可能已经包含了内置的 EMA 平均参数。
+
+来源: [common.py](sam/diffusion/common.py#L5-L11), [model.py](sam/model.py#L90-L93), [models.yaml](config/models.yaml#L100-L105)
+
+## DDIM 支持：加速采样
+
+虽然 DDPM 是默认选项，但 `Diffusers` 类也支持 **DDIM**（去噪扩散隐式模型）调度。DDIM 用确定性过程取代了随机逆向过程，从而实现：
+
+- **更少步骤下更高质量** —— DDIM 能够以远少于 DDPM 的步数生成优质样本，因为它以有原则的方式跳过时间步，而不是对 DDPM 调度进行子采样。
+- **确定性生成** —— 给定相同的初始噪声，DDIM 总是产生相同的输出（逆向过程中无随机性）。
+
+要切换至 DDIM，请在 `sched_params` 配置块中设置 `name: ddim`。DDIM 调度器中的 `set_alpha_to_one=True` 和 `steps_offset=0` 参数控制累积 alpha 乘积的边界行为。在推理时，必须为 DDIM 显式调用 `sched.set_timesteps(n_steps)`（不像 DDPM 那样是可选的）。
+
+<CgxTip>当使用极少步数（例如 20–50）的 DDIM 时，对于这种潜在空间扩散模型，样本质量仍能保持出人意料的高水平，使其成为快速原型设计或交互式探索的绝佳选择。然而，带有 `fixed_small` 方差的 DDPM 调度器通常能产生更多样化的系综——当目标是捕获 IDP 构象分布的全貌时，这更为可取。</CgxTip>
+
+来源: [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L43-L61), [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L166-L168)
+
+## 自条件化（实验性）
+
+配置基础设施包含一个**自条件化**机制（`sc_params`），该机制将允许模型在每个去噪步中以其自身的先前预测为条件——将预测的 x₀ 作为额外输入馈送到下一步中。这种技术受图像扩散模型中类似机制的启发，可以通过在每一步为网络提供更纯净信号的估计来提高样本质量。然而，在当前的代码库中，自条件化在 `loss()` 和 `sample()` 路径中均引发 `NotImplementedError`，表明这是一个尚未完全集成的实验性特性。
+
+来源: [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L68-L73), [diffusers_dm.py](sam/diffusion/diffusers_dm.py#L114-L123)
+
+## 实践中的关键采样参数
+
+当调用 `SAM.sample()` 或生成脚本时，有三个参数直接控制 DDPM 过程：
+
+| 参数 | 默认值 | 范围 | 影响 |
+|-----------|---------|-------|--------|
+| `n_samples` | 1000 | ≥ 1 | 要生成的总构象数；更大的值能更好地捕获 IDP 分布 |
+| `n_steps` | 100 | 1–1000 | 扩散去噪步数；更多步 = 更高质量但更慢；100 是强有力的默认值 |
+| `batch_size_eps` | 256 | ≥ 1 | 控制采样期间的 GPU 内存使用量；更大的批次每样本效率更高 |
+
+`n_steps` 参数是对质量与速度权衡影响最大的参数。在 1000 步（完整6完整训练调度）时，每个去噪步非常小，模型的噪声预测最为准确。在 100 步时，调度器对每第 10 个时间步进行子采样，模型必须进行更大的修正——由于潜在空间平滑，它能很好地处理这一点，但会损失一些细粒度细节。在 ~50 步以下，质量退化将变得明显。
+
+来源: [model.py](sam/model.py#L134-L160), [generate_ensemble.py](scripts/generate_ensemble.py#L29-L33)
+
+## 接下来去哪
+
+DDPM 采样过程依赖于本指南其他部分中记录的两个关键组件：
+
+- **[噪声预测网络](8-noise-prediction-network)** —— 驱动每个去噪步的 16 层条件 Transformer (εθ)，包括其时间步/序列条件化机制和自适应层归一化。
+- **[两阶段架构概述](4-two-stage-architecture-overview)** —— DDPM 潜在扩散阶段如何融入将氨基酸序列转换为 3D 构象系综的完整编码器 → 扩散 → 解码器流程中。
+
+---
+
+- [深入解析/潜扩散模块/噪声预测网络](https://zread.ai/giacomo-janson/idpsam/8-noise-prediction-network)
+
+---
+slug:8-noise-prediction-network
+blog_type:normal
+---
+
+
+**噪声预测网络**（ε-network）是 idpSAM 潜在扩散过程的神经骨干——这是一种基于 Transformer 的架构，用于学习预测在任意扩散时间步 *t* 下注入潜在编码中的噪声 ε。在 DDPM 采样期间，对该网络的迭代调用会逐步将随机潜在向量去噪为结构化的蛋白质构象编码。该设计借鉴了 DiT（Diffusion Transformer）范式，引入了**自适应层归一化**以实现时间步和氨基酸的条件化，通过 AlphaFold2 风格的相对序列嵌入实现了**成对位置偏置**，以及可选的**边表示更新**，从而跨层丰富残基间的信息交流。
+
+## 架构概述
+
+该网络被实现为 `EpsTransformer`——一个由 `IdpGAN_TransformerBlock` 层组成的堆栈，通过条件化自注意力和 MLP 更新来处理一系列潜在向量（每个残基一个）。三条并行的嵌入流为每一层提供输入：**时间步嵌入**（扩散时间 *t*）、**氨基酸嵌入**（序列标识）和**成对位置嵌入**（相对序列间隔）。整体的数据流过程如下：
+
+```mermaid
+flowchart TD
+    subgraph Input["Input Processing"]
+        Z_t["z_t<br/>(B, L, 16)"] --> PI["project_input<br/>Linear(16→256)"]
+        T["t<br/>(B,)"] --> TE["TimestepEmbedder"]
+        A["a<br/>(B, L)"] --> AE["nn.Embedding(20, 32)"]
+        H["h (L, B, 256)"]
+    end
+
+    subgraph Embeddings["Embedding Streams"]
+        TE --> T_E["t_e (L, B, 256)"]
+        AE --> A_E["a_e (L, B, 32)"]
+        H --> PE["AF2_PositionalEmbedding"]
+        PE --> P["p (B, L, L, 64)"]
+    end
+
+    PI --> H
+
+    subgraph Layers["Transformer Blocks × N"]
+        direction TB
+        TB1["IdpGAN_TransformerBlock<br/>Layer 1"] --> TB2["IdpGAN_TransformerBlock<br/>Layer 2"]
+        TB2 --> TBD["..."]
+        TBD --> TBN["IdpGAN_TransformerBlock<br/>Layer N"]
+    end
+
+    H --> TB1
+    T_E --> TB1
+    A_E --> TB1
+    P --> TB1
+    TB1 --> |"h, p"| TB2
+    TB2 --> |"h, p"| TBD
+    TBD --> |"h, p"| TBN
+
+    subgraph Output["Output Projection"]
+        TBN --> |"h"| OM["out_module<br/>Linear->Act->Linear"]
+        OM --> EPS["ε (B, L, 16)"]
+    end
+```
+
+**输入维度**（`input_dim=16`）与自编码器的编码维度相匹配，这意味着网络直接在每个残基的 16 维潜在向量上进行操作。这些向量在进入 Transformer 堆栈之前被向上投影到 `embed_dim=256`，而最终的输出模块则将其重新向下投影到 16 维——从而生成与输入形状相同的噪声估计。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L403-L588), [models.yaml](/config/models.yaml#L68-L106)
+
+## 输入嵌入流水线
+
+在 Transformer 层进行任何处理之前，四个不同的嵌入分支会准备条件化的输入。每个分支都发挥着特定作用，为网络提供关于我们在扩散过程中的**何时**、正在建模**何种**蛋白质序列以及残基之间**相对何处**的信息。
+
+### 时间步嵌入
+
+`TimestepEmbedder` 遵循 GLIDE / DiT 系列模型的正弦频率嵌入策略，将标量扩散时间步 *t* 转换为密集向量。首先，正弦位置编码使用最大周期为 10,000 的半余弦/半正弦基函数，将 *t* 映射到 `frequency_embedding_size=256` 维度。随后，一个两层 MLP（层间带有 SiLU 激活函数）将其投影到 `time_embed_dim=256` 维度。生成的嵌入将在所有 *L* 个残基位置上复制，以便序列中的每个 token 都能接收到相同的时间上下文。
+
+来源：[embedding.py](/sam/nn/noise_prediction/embedding.py#L14-L50)
+
+### 氨基酸嵌入
+
+当 `use_bead_embed=True` 时，一个可学习的 `nn.Embedding(20, bead_embed_dim)` 查找表会将 20 种标准氨基酸中的每一种映射为一个 32 维向量（通过 `bead_embed_dim=32` 配置）。该嵌入与时间步嵌入一起被**条件化注入**——在默认的 `adanorm` 模式下，氨基酸嵌入首先通过一个线性层投影到 `time_embed_dim`，然后与时间步嵌入相加，再进入自适应层归一化调制路径。设置 `use_bead_embed=False` 将完全禁用此分支，从而生成一个**氨基酸无条件**模型。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L518-L530), [embedding.py](/sam/nn/noise_prediction/embedding.py#L100-L130)
+
+### 成对位置嵌入
+
+`AF2_PositionalEmbedding` 生成一个 2D 表示，用于编码每对残基 (i, j) 之间的**相对序列间隔**。对于长度为 *L* 的序列，这会生成一个形状为 `(B, L, L, pos_embed_dim)` 的张量。该模块计算所有残基对的 `|i - j|`，将结果划分到 `2 × pos_embed_r + 1` 个区间之一（其中 `pos_embed_r=32`），并索引到可学习的嵌入查找表中。该成对信号作为**偏置项**被送入每个 Transformer 层的自注意力计算中，使网络能够根据序列距离进行不同的注意力分配——这是蛋白质结构建模中一种关键的归纳偏置。
+
+来源：[common.py](/sam/nn/common.py#L130-L198)
+
+### 边嵌入（可选）
+
+当设置了 `edge_embed_mode`（例如 `"concat"`）时，`EPS_EdgeEmbedder` 模块会通过将位置嵌入与时间步嵌入（在残基对上广播）和氨基酸嵌入（针对残基 i 和 j）进行拼接来丰富成对位置嵌入，然后通过 MLP 将组合后的向量投影到目标 `edge_embed_dim`。在默认配置中，此模块处于**禁用**状态（`edge_embed_mode: null`），因此原始位置嵌入将直接作为成对信号传递。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L272-L307)
+
+## Transformer 块：IdpGAN_TransformerBlock
+
+每个 `IdpGAN_TransformerBlock` 实现了一个条件化 Transformer 层，按顺序执行以下子操作：
+
+```mermaid
+flowchart TD
+    X_IN["x (residue embeddings)"] --> RES1["residual = x"]
+
+    RES1 --> CI1["ConditionalInjection.inject_1_proto"]
+    CI1 --> |"adanorm: identity"| NORM1["attn_norm (LayerNorm)"]
+    NORM1 --> CI2["inject_1_pre<br/>modulate(x, shift_msa, scale_msa)"]
+    CI2 --> ATTN["Self-Attention(x, x, x, p)"]
+    ATTN --> CI3["inject_1_post<br/>x * gate_msa"]
+    CI3 --> ADD1["x = residual + x"]
+
+    ADD1 --> RES2["residual = x"]
+    RES2 --> NORM2["final_norm (LayerNorm)"]
+    NORM2 --> CI4["inject_2_pre<br/>modulate(x, shift_mlp, scale_mlp)"]
+    CI4 --> MLP["fc2(act(fc1(x)))"]
+    MLP --> CI5["inject_2_post<br/>x * gate_mlp"]
+    CI5 --> ADD2["x = residual + x"]
+
+    ADD2 --> INJ["inject_input<br/>(input injection)"]
+    INJ --> EDGE["update_edges<br/>(edge update)"]
+    EDGE --> OUT["x, p"]
+```
+
+### 条件化自注意力
+
+自注意力机制通过 `attention_type` 参数支持两种后端实现：
+
+| 后端 | 类 | 核心特征 |
+|---|---|---|
+| `"transformer"` | `TransformerLayer` | 自定义多头注意力，将成对位置偏置直接加到点积亲和力矩阵中 |
+| `"pytorch"` | `PyTorchAttentionLayer` | 封装了 `nn.MultiheadAttention`，将边投影的注意力偏置作为 `attn_mask` 输入 |
+
+在这两种情况下，形状为 `(B, L, L, pos_embed_dim)` 的成对嵌入 *p* 会被线性投影到 `num_heads` 个通道，然后重塑并作为**逐头偏置** 在 softmax 之前加到注意力 logits 中。这使得每个注意力头都能学习独特的成对交互模式。
+
+默认配置使用 `attention_type: "transformer"`，包含 16 个头，`embed_dim=256`，且没有单独的 `d_model`（默认为 `embed_dim`），从而产生为 16 的头维度。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L30-L165), [transformer.py](/sam/nn/transformer.py#L11-L118)
+
+### 条件注入：AdaLN-Zero
+
+`ConditionalInjectionModule` 是使每个 Transformer 层具备**时间和序列感知**能力的核心机制。支持三种注入模式，默认模式为 `adanorm`：
+
+| 模式 | 机制 | 输出维度 |
+|---|---|---|
+| `"adanorm"` | 自适应层归一化（DiT 风格）——生成 6 个调制参数 × {attention, MLP} | 与 `embed_dim` 相同 |
+| `"concat"` | 在 MLP 之前将条件拼接到隐藏状态 | `embed_dim + bead_embed_dim + time_embed_dim` |
+| `"add"` | 将条件加性投影到隐藏状态 | 与 `embed_dim` 相同 |
+
+在 **adanorm** 模式下，组合条件向量 `c = bead_project(a) + t` 会经过一个 `SiLU → Linear(time_embed_dim, 6 × embed_dim)` 调制网络，然后被切分为六个参数：
+
+- **(shift_msa, scale_msa)** —— 在自注意力*之前*通过 `modulate(x, shift, scale) = x * (1 + scale) + shift` 应用
+- **gate_msa** —— 在自注意力*之后*作为乘法门应用：`x = x * gate_msa`
+- **(shift_mlp, scale_mlp)** —— 在 MLP 块*之前*通过相同的 `modulate` 函数应用
+- **gate_mlp** —— 在 MLP 块*之后*作为乘法门应用
+
+**adaLN-Zero** 初始化（将最终线性层的权重和偏置零初始化）确保了每个 Transformer 块最初充当恒等映射——这是 DiT 论文中一项关键的训练稳定化技术，允许网络从平凡函数平滑过渡到完整的噪声预测器。
+
+来源：[embedding.py](/sam/nn/noise_prediction/embedding.py#L63-L190)
+
+### 输入注入
+
+`input_inject_mode` 参数控制如何将**原始噪声输入** `z_t` 重新注入到每个 Transformer 层的输出中。可用两种模式：
+
+- **`"add"`**（默认）：通过一个可学习的线性层将 `z_t` 投影到 `embed_dim`，将其加到层输出中，然后应用 LayerNorm。这为每一层提供了到原始输入的直接“跳跃连接”，有助于保留有关当前噪声状态的信息。
+- **`"adanorm"`**：使用 `InputInjectionModule`，该模块应用以 `z_t` 和时间步 `t` 为条件的 adaLN 风格调制，随后是一个带有残差连接的小型 MLP。这是一种更具表达力的路径，允许网络学习如何基于当前扩散时间来整合输入。
+
+当 `input_inject_mode` 为 `None` 时，不发生输入注入，Transformer 层仅处理其内部表示。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L202-L230), [embedding.py](/sam/nn/noise_prediction/embedding.py#L197-L288)
+
+### 边表示更新
+
+每个 Transformer 块可以选择在节点更新之后，通过以下两个边更新模块之一来更新成对（边）表示 *p*：
+
+| 更新器 | 核心操作 |
+|---|---|
+| `EdgeUpdaterFrameDiff` | 计算下投影节点特征的外积（通过拼接或相加），与当前边特征拼接，应用带残差的 MLP，然后进行 LayerNorm |
+| `EdgeUpdaterSAM_0` | 将对称的成对节点贡献加到投影的边特征中，应用带残差的 MLP 和 LayerNorm |
+
+边更新由 `edge_update_mode` 和 `edge_update_freq` 控制——后者决定边更新器运行的频率（每 *k* 层运行一次）。**最后一个 Transformer 层从不执行边更新**，因为其边输出不会被使用。在默认配置中，边更新处于**禁用**状态（`edge_update_mode: null`）。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L309-L396)
+
+## 输出模块
+
+在最后一个 Transformer 层之后，形状为 `(L, B, 256)` 的残基嵌入 *h* 会通过一个两层 MLP 输出模块。可用两种输出模式：
+
+| 模式 | 架构 |
+|---|---|
+| `"idpgan"`（默认） | `Linear(256, 256) → Activation → Linear(256, 16)` |
+| `"esm"` | `Linear(256, 256) → Activation → LayerNorm(256) → Linear(256, 16)` |
+
+输出被转置回 `(B, L, 16)` 以匹配输入形状——为每个残基的潜在编码生成预测噪声 ε_θ(z_t, t, a)。在训练期间，此预测将与通过前向扩散过程采样的真实噪声通过 L2 损失进行比较（参见 [DDPM 采样过程](7-ddpm-sampling-process)）。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L590-L600)
+
+## SAM_EpsTransformer 包装器
+
+`SAM_EpsTransformer` 类封装了 `EpsTransformer`，通过 `prepare_eps_input` 处理批次级别的输入准备。该函数根据网络的配置标志（`use_bead_embed`、`use_pt_aa_embeddings`、`use_res_ids`、`tem_inject_mode`）从批次对象中提取氨基酸索引、残基索引和模板张量。包装器的 `forward` 签名接受 `(xt, t, batch)`，将扩散循环与批次数据布局的细节解耦。
+
+工厂函数 `get_eps_network(model_cfg)` 会检查 `EpsTransformer.__init__` 的签名，从 `model_cfg["latent_network"]` 中提取匹配的参数，并自动从 `model_cfg["generative_model"]["encoding_dim"]` 设置 `input_dim`——确保噪声预测器的输入/输出维度始终与自编码器的潜在空间相匹配。
+
+来源：[eps.py](/sam/nn/noise_prediction/eps.py#L728-L779)
+
+## 默认配置摘要
+
+下表总结了在 idpSAM v1.0 中部署的噪声预测网络，数据直接取自模型配置：
+
+| 参数 | 值 | 描述 |
+|---|---|---|
+| `arch` | `eps_trf` | 架构标识符 |
+| `num_layers` | 16 | Transformer 块的数量 |
+| `attention_type` | `transformer` | 带有成对偏置的自定义注意力 |
+| `embed_dim` | 256 | 隐藏嵌入维度 |
+| `num_heads` | 16 | 多头注意力头数 |
+| `mlp_dim` | 512 | MLP 隐藏维度 (4× embed_dim) |
+| `norm_pos` | `pre` | 前归一化（在 attention/MLP 之前进行 LayerNorm） |
+| `activation` | `gelu` | GELU 非线性 |
+| `out_mode` | `idpgan` | 两层输出投影 |
+| `time_embed_dim` | 256 | 时间步嵌入维度 |
+| `bead_embed_dim` | 32 | 氨基酸嵌入维度 |
+| `pos_embed_dim` | 64 | 成对位置嵌入维度 |
+| `embed_inject_mode` | `adanorm` | AdaLN-Zero 条件化 |
+| `input_inject_mode` | `add` | 加性输入注入 |
+| `edge_embed_mode` | `null` | 无边嵌入丰富 |
+| `edge_update_mode` | `null` | 无边表示更新 |
+| `_use_fp16` | `true` | 混合精度训练 |
+| `_use_ema` | `true` | β=0.9999 的 EMA |
+
+<CgxTip>adaLN-Zero 条件化与加性输入注入相结合，创建了一种双跳跃架构：adaLN-Zero 初始化使每个块作为恒等映射开始，而输入注入提供了从 z_t 到每一层的直接路径。这种组合对于在扩散设置中稳定训练深达 16 层的噪声预测器至关重要。</CgxTip>
+
+<CgxTip>故意将 `bead_embed_dim=32` 设置为小于 `time_embed_dim=256`。氨基酸嵌入在进入 adaLN 路径求和之前会被向上投影到时间嵌入维度，这意味着这个 32 维瓶颈充当了信息正则化器——在序列条件化调制完整的 256 维隐藏状态之前，强制其通过紧凑的表示。</CgxTip>
+
+来源：[models.yaml](/config/models.yaml#L68-L106)
+
+## 在扩散流水线中的角色
+
+在**训练**期间，ε-network 接收噪声潜在变量 `z_t = √(ᾱ_t) · z_0 + √(1 - ᾱ_t) · ε` 和时间步 *t*，并通过 L2 损失训练以恢复噪声 ε。在**采样**期间，训练好的网络在每个反向扩散步骤中被迭代调用：从纯高斯噪声 z_T 开始，调度器利用网络的预测计算去噪估计 z_{t-1}。此反向过程在 `Diffusers` 类中实现（参见 [DDPM 采样过程](7-ddpm-sampling-process)），该类将 HuggingFace 的 `DDPMScheduler` 委托用于噪声调度和步长计算。
+
+完整的推理流程——从氨基酸序列到 3D 坐标——将 ε-network 的去噪与解码器的潜在到坐标映射相链接，由 `SAM.sample()` 方法编排。
+
+来源：[diffusers_dm.py](/sam/diffusion/diffusers_dm.py#L75-L145), [model.py](/sam/model.py#L82-L112)
+
+## 建议阅读
+
+- **[DDPM 采样过程](7-ddpm-sampling-process)** —— ε-network 的预测如何驱动反向扩散循环
+- **[自适应层归一化](12-adaptive-layer-normalization)** —— 深入探讨 adaLN-Zero 条件化机制
+- **[自定义 Transformer 注意力](11-custom-transformer-attention)** —— 成对偏置注意力实现的详细信息
+- **[时间步与序列嵌入](13-timestep-and-sequence-embedding)** —— 正弦时间步和氨基酸嵌入策略
+
+---
+
+## 几何与坐标处理
+
+- [深入解析/几何与坐标处理/距离图与扭转特征](https://zread.ai/giacomo-janson/idpsam/9-distance-map-and-torsion-features)
+
+---
+slug:9-distance-map-and-torsion-features
+blog_type:normal
+---
+
+
+距离图和主链扭转角特征是两种互补的几何表示，它们为 idpSAM 两阶段架构的 **编码器** 提供动力。距离图以 2D 信号的形式捕获所有残基对之间的**成对**空间关系，而扭转特征则以 1D 信号的形式编码主链上的**序列**角度几何。它们共同提供了每个构象的欧几里得不变描述——根据构造，距离图是置换等变的且旋转/平移不变的，而扭转角则是内部旋转不变的。这种双重表示使得编码器能够生成独立于坐标系的编码结构，这是稳定隐式扩散采样的先决条件。
+
+## 距离图计算
+
+距离图由 `calc_dmap` 函数计算，该函数接收形状为 `(B, L, 3)`（批次 × 残基 × xyz）的 3D 坐标张量，并返回形状为 `(B, 1, L, L)` 的成对欧几里得距离矩阵。核心计算是广播减法：对于每对残基 *(i, j)*，函数计算 `√(Σ(xyz_i − xyz_j)² + ε)`，其中极小值 epsilon (`1e-12`) 用于防止零距离处的梯度奇异性。预处理管道也支持 NumPy 后端。输出中保留单一通道维度，以便与后续沿该通道轴操作的 RBF 展开层干净地对接。
+
+来源: [coords.py](sam/coords.py#L5-L37)
+
+### 上三角提取
+
+伴随函数 `calc_dmap_triu` 仅提取距离图的上三角元素（offset=1，排除对角线）。这在计算损失或序列化时非常有用，因为此时完整的对称矩阵是冗余的。它接受原始坐标或预计算的距离图张量，检测输入形状并在必要时委托给 `calc_dmap`。
+
+来源: [coords.py](sam/coords.py#L40-L70)
+
+### 边级距离图
+
+对于图结构输入（例如，噪声预测网络中使用的稀疏邻居图），`get_edge_dmap` 仅计算由 `nr_edge_index` 对指定的边的距离，避免了完整距离图 O(L²) 的物化。给定坐标 `xyz` 以及包含 `(row, col)` 索引张量的 `batch.nr_edge_index` 批次对象，它返回形状为 `(num_edges,)` 的 1D 距离向量。
+
+来源: [coords.py](sam/coords.py#L144-L150)
+
+## 主链扭转（二面角）特征
+
+主链二面角由 `torch_chain_dihedrals` 计算，它计算链上每四个连续 Cα 原子的类 φ 二面角。给定形状为 `(B, L, 3)` 的坐标，它为每个四元组构造三个键向量 — **b₀** = −(r_{i+1} − r_i)，**b₁** = r_{i+2} − r_{i+1}，**b₂** = r_{i+3} − r_{i+2} — 然后计算叉积 **b₀×b₁** 和 **b₂×b₁**。二面角通过 `atan2(y, x)` 恢复，其中 *x* = (b₀×b₁)·(b₂×b₁) 且 *y* = ((b₀×b₁)×(b₂×b₁))·b₁ / ‖b₁‖。这会生成形状为 `(B, L−3)` 且值在 `[−π, π]` 范围内的张量。可选的 `norm` 标志会除以 π 将其归一化至 `[−1, 1]`。
+
+来源: [coords.py](sam/coords.py#L73-L92)
+
+### 扭转特征构造
+
+原始二面角通过编码器模块中的 `get_chain_torsion_features` 转换为丰富的 3 通道特征。对于每个二面角 *α*，生成三个值：**cos(α)**、**sin(α)** 和 **1**（掩码/有效性指示符）。这种 cos-sin 编码避免了原始角度在 ±π 处的不连续性，并在单位圆上提供了唯一的 2D 表示。沿残基维度应用 `(1, 2)` 的填充：前置一个位置（用于没有前置二面角的第一个残基），追加两个位置（用于没有足够邻居来定义二面角的最后两个残基）。生成的张量形状为 `(B, L, 3)`，提供了完整的逐残基扭转特征向量。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L20-L25)
+
+## 编码器集成管道
+
+距离图和扭转特征通过编码器（`CA_TransformerEncoder.forward`）的两个并行分支流入，并在 Transformer 层内部汇聚：
+
+```mermaid
+flowchart TB
+    subgraph Input["输入: xyz (B, L, 3)"]
+        XYZ["Cα 坐标"]
+    end
+
+    subgraph DmapBranch["2D 分支: 距离图"]
+        D1["calc_dmap(xyz)"]
+        D2["RBF 展开<br/>(GaussianSmearing / ExpNormalSmearing)"]
+        D3["project_dmap: Linear<br/>→ embed_2d_dim"]
+        D1 --> D2 --> D3
+    end
+
+    subgraph TorsionBranch["1D 分支: 扭转特征"]
+        T1["torch_chain_dihedrals(xyz)"]
+        T2["cos, sin, mask<br/>+ padding"]
+        T3["project_input: Linear → act → Linear<br/>→ embed_dim"]
+        T1 --> T2 --> T3
+    end
+
+    subgraph Transformer["Transformer 层"]
+        TL["AE_IdpGAN_TransformerBlock<br/>z → 注意力中的 2D 偏置<br/>s → 1D 节点嵌入"]
+    end
+
+    XYZ --> D1
+    XYZ --> T1
+    D3 -->|z: 2D 边特征| TL
+    T3 -->|s: 1D 节点特征| TL
+```
+
+**2D 分支（距离图 → 边偏置）：** 计算完整的成对距离图，然后通过径向基函数 (RBF) 核进行展开——`GaussianSmearing`（默认，`"rbf"`）或 `ExpNormalSmearing`（`"expnorm"`）——生成形状为 `(B, L, L, num_gaussians)` 的多通道 2D 特征图。该特征图通过 `E `project_dmap`（单层线性层，或当 `use=-use_dmap_mlp-True` 时为两层 MLP）投影至 `embed_2d_dim` 个通道。生成的张量 **z** 作为**8成(成对)偏置**注入到每个 Transformer 块4(的)(注)意力机制中。
+
+**1D 分支（扭转 → 节点嵌入）：** 形状为 `(B, L, 3)` 的扭转特征向量通过 `project_input`（带激活函数的两层 MLP）投影至 `embed_dim`，生成进入 Transformer 堆栈的初始逐残基节点嵌入 **s**。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L190-L225), [encoder.py](sam/nn/autoencoder/encoder.py#L90-L117)
+
+## 键角计算
+
+尽管当前未接入编码器的前向传播，该模块还提供了 `calc_chain_bond_angles` 和 `calc_angles` 用于计算每个连续三原子组的键角。给定角度索引 `[i, i+1, i+2]`，函数归一化共享中心原子的两个键向量并返回 `arccos(u · v)`。该功能在 NumPy 中实现，可作为未来扩展的潜在附加 1D 几何特征。
+
+来源: [coords.py](sam/coords.py#L95-L114)
+
+## 配置参考
+
+距离图和扭转特征参数在模型 YAML 的 `encoder` 部分进行配置。下表列出了所有相关键及其在发布的 `v1.0` 模型中的默认值：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `dmap_ca_min` | `0.0` | RBF 核中心范围的最小距离 (Å) |
+| `dmap_ca_cutoff` | `3.0` | RBF 核中心范围的最大距离 (Å)；超出此范围的距离将收到可忽略的激活 |
+| `dmap_ca_num_gaussians` | `320` | RBF 展开中的高斯基函数数量 |
+| `dmap_embed_type` | `"rbf"` | RBF 展开类型：`"rbf"` (GaussianSmearing) 或 `"expnorm"` (ExpNormalSmearing) |
+| `dmap_embed_trainable` | `False` | RBF 中心/宽度是否可训练（仅适用于 `"expnorm"`） |
+| `use_dmap_mlp` | `True` | 若为 `True`，`project_dmap` 为两层 MLP；若为 `False`，为单层线性层 |
+| `use_torsions` | `True` | 启用扭转角特征作为 1D 输入（为清晰起见存在于配置中） |
+| `embed_2d_dim` | `192` | 距离图投影的输出维度（2D 边特征维度） |
+
+来源: [models.yaml](config/models.yaml#L30-L35), [encoder.py](sam/nn/autoencoder/encoder.py#L57-L65)
+
+<CgxTip>高达 320 的 `dmap_ca_num_gaussians` 值配合 3.0 Å 的窄截断，提供了极细粒度的距离分辨率（每个高斯中心约 0.009 Å）。这是有意为之：IDP 构象变异性由局部和中等范围接触主导，因此编码器将其绝大部分 2D 表示容量分配给 3 nm 以下的距离，以捕捉区分不同无序系综的细微空间变化。</CgxTip>
+
+## 与下游模块的关系
+
+距离图和扭转特征仅供**编码器**阶段使用。解码器和噪声预测网络操作的是隐式编码而非原始几何特征。然而，噪声预测网络确实使用 `AF2_PositionalEmbedding` 为其自身的注意力层构造 2D 成对位置偏置——这是一种基于残基分离的学习型位置编码，而非根据坐标计算的距离图。RBF 展开模块（`GaussianSmearing`、`ExpNormalSmearing`）定义在几何模块中，并在 [RBF 距离嵌入](10-rbf-distance-embedding) 页面上有详细文档说明。
+
+来源: [geometric.py](sam/nn/geometric.py#L6-L64), [eps.py](sam/nn/noise_prediction/eps.py#L557-L567)
+
+要深入了解编码器的 Transformer 块如何在注意力机制内融合 1D 扭转嵌入与 2D 距离图偏置，请参阅 [欧几里得不变编码器](5-euclidean-invariant-encoder)。有关高斯和指数正态涂抹核的数学细节，请参阅 [RBF 距离嵌入](10-rbf-distance-embedding)。
+
+---
+
+- [深入解析/几何与坐标处理/RBF 距离嵌入](https://zread.ai/giacomo-janson/idpsam/10-rbf-distance-embedding)
+
+---
+slug:10-rbf-distance-embedding
+blog_type:normal
+---
+
+
+RBF（径向基函数）距离嵌入模块将原始的两两距离值转换为高维、富有表现力的特征向量，作为编码器 Transformer 架构的 **2D 几何骨架**。如果直接将标量距离输入神经网络——这几乎无法为模型提供学习距离依赖模式的表征能力——RBF 展开会将每个距离在一组高斯核上“展宽”，生成多通道信号，下游的线性投影层随后可将其塑造成信息丰富的配对表示。这是欧几里得几何与注意力机制之间的关键桥梁。
+
+## 在流水线中的架构角色
+
+RBF 嵌入位于编码器前向传播的最开端，在任何 Transformer 处理发生之前，对完整的 Cα–Cα 距离图进行操作。数据流如下：
+
+```mermaid
+flowchart LR
+    A["Cα 坐标<br/>(B, L, 3)"] -->|calc_dmap| B["距离图<br/>(B, 1, L, L)"]
+    B -->|RBF 展开| C["高斯特征<br/>(B, 1, L, L, K)"]
+    C -->|转置| D["(B, K, L, L, 1)"]
+    D -->|project_dmap| E["2D 配对嵌入<br/>(B, L, L, E₂)"]
+    E --> F["Transformer<br/>注意力偏置"]
+```
+
+3D 坐标首先通过 `calc_dmap` 转换为两两距离图，然后通过选定的 RBF 核进行展开，最后由一个可学习的线性层投影到 `embed_2d_dim` 维的配对表示中，该表示作为注意力偏置被注入到每一个 Transformer 块中。这确保了**几何邻近信息在编码的每一层都可用**，而不仅仅是在输入层。
+
+来源: [coords.py](sam/coords.py#L5-L37), [encoder.py](sam/nn/autoencoder/encoder.py#L190-L199)
+
+## GaussianSmearing — 固定中心 RBF 展开
+
+`GaussianSmearing` 是 idpSAM 中默认且主要的 RBF 变体。它在距离范围内放置**等距分布的固定高斯中心**，并根据每个中心评估输入距离，生成类似软直方图的表示。
+
+**数学定义：**
+
+$$\phi_k(d) = \exp\!\left(-\frac{(d - \mu_k)^2}{2\delta^2}\right)$$
+
+其中 $\mu_k$ 是从 `start` 到 `stop` 线性间隔的中心，$\delta$ 是相邻中心之间的均匀间距，$d$ 是输入距离。系数 $-\frac{1}{2\delta^2}$ 在构建时预计算以提高效率。
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `start` | `0.0` | 第一个高斯中心的最小距离 (Å) |
+| `stop` | `5.0` | 最后一个高斯中心的最大距离 (Å) |
+| `num_gaussians` | `50` | 高斯核数量（控制输出维度） |
+
+**实现细节：** 偏移张量（中心）被注册为缓冲区——而非可学习参数——并被重塑为 `(1, K, 1, 1)`，以便与形状为 `(B, 1, L, L)` 的距离图进行广播时，生成形状为 `(B, K, L, L)` 的输出。系数以普通浮点数存储，因为它在初始化后永远不会改变。
+
+来源: [geometric.py](sam/nn/geometric.py#L6-L19)
+
+## ExpNormalSmearing — 可训练的指数-正态 RBF
+
+`ExpNormalSmearing` 实现了 **PhysNet 风格**的径向基函数展开，它在评估高斯核之前对距离应用指数变换。该设计的动机源于一个观察：蛋白质中的原子间相互作用在距离上高度非线性——短距离范围内的微小距离变化远比长距离范围内的同等变化重要。指数映射自然地将表征容量集中在最关键的地方。
+
+**数学定义：**
+
+$$\phi_k(d) = \text{cutoff}(d) \cdot \exp\!\left(-\beta_k \left(\exp\!\left(\alpha(-d + d_{\min})\right) - \mu_k\right)^2\right)$$
+
+其中 $\alpha = 5 / (d_{\max} - d_{\min})$ 是缩放因子，均值 $\mu_k$ 从 $\exp(-d_{\max} + d_{\min})$ 到 1 线性初始化，宽度 $\beta_k$ 基于核间距均匀初始化。关键是，`means` 和 `betas` 都可以是**可训练参数**，允许网络在训练期间调整核的位置和锐度。
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `cutoff_lower` | `0.0` | 距离下界 (Å) |
+| `cutoff_upper` | `5.0` | 距离上界 (Å) — 也是截断半径 |
+| `num_rbf` | `50` | RBF 核数量 |
+| `trainable` | `True` | 若为 `True`，means 和 betas 为 `nn.Parameter`；否则为缓冲区 |
+
+当 `trainable=True` 时，`means` 和 `betas` 张量被注册为 `nn.Parameter` 对象，将通过梯度下降进行更新。当 `trainable=False` 时，它们作为缓冲区被冻结——在可更新性方面与 `GaussianSmearing` 的行为完全相同，尽管函数形式仍然不同。
+
+来源: [geometric.py](sam/nn/geometric.py#L22-L64)
+
+## CosineCutoff — 平滑距离衰减
+
+`CosineCutoff` 模块提供了**平滑、可微的衰减**，在截断边界处将 RBF 输出逐渐减至零。若无此模块，嵌入在 `cutoff_upper` 处将存在硬间断，这会导致梯度异常并可能破坏训练稳定性。
+
+对于 `cutoff_lower = 0` 的常见情况：
+
+$$\text{cutoff}(d) = \frac{1}{2}\left(\cos\!\left(\frac{d \cdot \pi}{d_{\max}}\right) + 1\right) \cdot \mathbb{1}[d < d_{\max}]$$
+
+当 `cutoff_lower > 0` 时，在上下界之间应用对称余弦包络，并使用指示函数将区间外的贡献置零。指示掩码使用浮点转换的布尔乘法，该方法几乎处处可微，并在边界处产生精确的零值。
+
+来源: [geometric.py](sam/nn/geometric.py#L67-L95)
+
+## 编码器如何选择和使用 RBF 变体
+
+`CA_TransformerEncoder` 基于 `dmap_embed_type` 配置键分派至相应的 RBF 类：
+
+```python
+if dmap_embed_type == "rbf":
+    self.dmap_ca_expansion = GaussianSmearing(
+        start=dmap_ca_min, stop=dmap_ca_cutoff,
+        num_gaussians=dmap_ca_num_gaussians)
+elif dmap_embed_type == "expnorm":
+    self.dmap_ca_expansion = ExpNormalSmearing(
+        cutoff_lower=dmap_ca_min, cutoff_upper=dmap_ca_cutoff,
+        num_rbf=dmap_ca_num_gaussians, trainable=dmap_embed_trainable)
+```
+
+展开后，原始的 K 维 RBF 输出被投影到 2D 嵌入空间。有两种可用的投影模式，由 `use_dmap_mlp` 控制：
+
+| `use_dmap_mlp` | 投影 | 参数 |
+|----------------|-----------|------------|
+| `False`（默认） | 单层线性：`K → E₂` | 最少；一个权重矩阵 |
+| `True` | 带激活函数的两层 MLP：`K → E₂ → E₂` | 更具表达力；在已发表的模型中使用 |
+
+在**已发表的 v1.0 配置**中，编码器使用 `GaussianSmearing`，包含 320 个跨越 0.0–3.0 Å 的高斯核，以及两层 MLP 投影。3.0 Å 这一较窄的截断值值得注意——它将所有表征容量集中在**局部和中程距离**上，这些距离对骨架几何最具信息量，同时忽略了长距离，后者通过 Transformer 的多跳注意力被间接捕获。
+
+来源: [encoder.py](sam/nn/autoencoder/encoder.py#L91-L112), [models.yaml](config/models.yaml#L30-L34)
+
+## 集成到 Transformer 注意力机制
+
+投影后的 2D 嵌入作为 `z` 参数流入每一个编码器 Transformer 块。在 `AE_IdpGAN_TransformerBlock.forward` 内部，2D RBF 特征在与位置嵌入组合后，作为注意力偏置传入：
+
+| `embed_2d_inject_mode` | 组合方式 | 传入注意力的形状 |
+|------------------------|------------|--------------------------|
+| `"concat"` | `z_hat = cat([z, p], dim=-1)` | `(B, L, L, E₂ + P)` |
+| `"add"` | `z_hat = z + project(p)` | `(B, L, L, E₂)` |
+| `None` | `z_hat = p`（忽略 RBF） | `(B, L, L, P)` |
+
+v1.0 模型使用 `"concat"`，因此源自 RBF 的配对特征与相对位置嵌入作为**独立通道堆叠**，而非加性混合——在注意力机制学习融合它们之前，保留了每种模态的独特信息内容。
+
+来源: [ca_models.py](sam/nn/autoencoder/ca_models.py#L128-L136)
+
+## 配置参考
+
+编码器配置中完整的 RBF 相关参数集，如 `models.yaml` 所示：
+
+| 键 | v1.0 值 | 类型 | 描述 |
+|-----|-----------|------|-------------|
+| `dmap_ca_min` | `0.0` | float | 距离范围下界 (Å) |
+| `dmap_ca_cutoff` | `3.0` | float | 上界 / 截断距离 (Å) |
+| `dmap_ca_num_gaussians` | `320` | int | RBF 核数量 |
+| `dmap_embed_type` | `"rbf"` | str | `"rbf"` 对应 GaussianSmearing，`"expnorm"` 对应 ExpNormalSmearing |
+| `dmap_embed_trainable` | — | bool | 仅适用于 `"expnorm"`：means/betas 是否可学习 |
+| `use_dmap_mlp` | `true` | bool | 使用两层 MLP 投影代替单层线性 |
+
+<CgxTip>在 0–3 Å 范围内的 320 个高斯核产生了约 0.0094 Å 的核间距——远细于骨架原子典型的热涨落尺度（约 0.1 Å）。这种超分辨率是刻意的：它使得线性投影层能够充当一个可学习的滤波器组，从 RBF 表示中提取关于距离的任意平滑函数，类似于傅里叶基在给定足够项数时能够表示任何周期函数。</CgxTip>
+
+来源: [models.yaml](config/models.yaml#L30-L34)
+
+## 与其他模块的关系
+
+RBF 距离嵌入是编码器中两个几何特征提取器之一，另一个是通过 `torch_chain_dihedrals` 计算的**扭转角特征**。它们共同提供了 Transformer 架构学习从结构到潜在编码映射所需的 1D（扭转）和 2D（配对距离）几何信号。RBF 模块具体回答了以下问题：*“应该如何表示两两距离，以便 Transformer 能够高效地从中学习？”*——答案是平滑、高维的固定基展开，随后是可学习的投影。
+
+关于配套的 1D 几何特征，请参阅 [距离图与扭转特征](9-distance-map-and-torsion-features)。关于投影后的 2D 嵌入如何与注意力计算交互，请参阅 [自定义 Transformer 注意力](11-custom-transformer-attention)。
+
+---
+
+## Transformer 构建模块
+
+- [深入解析/Transformer 构建模块/自定义 Transformer 注意力](https://zread.ai/giacomo-janson/idpsam/11-custom-transformer-attention)
+
+---
+slug:11-custom-transformer-attention
+blog_type:normal
+---
+
+
+idpsam 不同于标准的 PyTorch Transformer 层，它在单一模块中实现了**三种自定义注意力机制**，每种机制旨在捕获与蛋白质构象生成相关的不同结构归纳偏置。这些层共享共同的架构基因 —— 一个**成对 2D 偏置分支**，将位置或边级别的信息直接注入到注意力对数中 —— 而它们的不同之处在于计算主要注意力亲和度的方式：经典点积、高斯核距离或 PyTorch 原生多头注意力。
+
+## 三种注意力变体一览
+
+| 层类 | 亲和度计算 | 关键归纳偏置 | 使用方 |
+|---|---|---|---|
+| `TransformerLayer` | 缩放点积：$QK^\top / \sqrt{d}$ | 基于内容的 token 交互 | 噪声预测网络 (`EpsTransformer`) |
+| `TransformerTimewarpLayer` | 负平方距离：$-\|q_i - k_j\|^2 / \ell^2$ | **高斯核空间邻近度** —— 附近残基获得更多注意力 | 自编码器解码器 (`CA_TransformerDecoder`) |
+| `PyTorchAttentionLayer` | 带有 `attn_mask` 的 `nn.MultiheadAttention` | 带边偏置的 PyTorch 优化 MHA | 噪声预测网络（替代方案） |
+
+来源：[transformer.py](sam/nn/transformer.py#L1-L312)
+
+## 架构概述
+
+下图展示了这三种注意力变体如何融入更广泛的 Transformer 块中，以及它们如何与共享的 2D 偏置分支交互：
+
+```mermaid
+graph TD
+    subgraph "Input Tensors"
+        S["s ∈ ℝ^(L×N×I)<br/>序列特征"]
+        P["p ∈ ℝ^(N×L×L×E_p)<br/>成对 2D 特征"]
+    end
+
+    subgraph "TransformerLayer (点积)"
+        Q1["q = W_q · s"]
+        K1["k = W_k · s"]
+        V1["v = W_v · s"]
+        DP["dp_aff = (q·k^T) / √d"]
+        Q1 --> DP
+        K1 --> DP
+        V1 --> ATTN1
+        DP --> ATTN1
+    end
+
+    subgraph "TransformerTimewarpLayer (距离)"
+        Q3["q³ = W_q · q  →  ℝ^(N×H×L×3)"]
+        K3["k³ = W_k · k  →  ℝ^(N×H×L×3)"]
+        V3["v = W_v · v"]
+        SD["sd = ‖q³_i − k³_j‖²"]
+        ELLE["÷ ℓ²  (可学习，softplus²)"]
+        NEG["−sd  (高斯核)"]
+        Q3 --> SD
+        K3 --> SD
+        SD --> ELLE --> NEG
+        V3 --> ATTN2
+        NEG --> ATTN2
+    end
+
+    subgraph "共享 2D 偏置分支"
+        MLP2D["mlp_2d: ℝ^(E_p) → ℝ^H"]
+        BIAS["bias ∈ ℝ^(N×H×L×L)"]
+        MLP2D --> BIAS
+    end
+
+    P --> MLP2D
+
+    subgraph "注意力合并与输出"
+        TOT1["tot_aff = dp_aff + bias"]
+        TOT2["tot_aff = −sd/ℓ² + bias"]
+        ATTN1["softmax → attn"]
+        ATTN2["softmax → attn"]
+        OUT["out = W_o · (attn · v)"]
+        TOT1 --> ATTN1 --> OUT
+        TOT2 --> ATTN2 --> OUT
+    end
+
+    BIAS --> TOT1
+    BIAS --> TOT2
+    S --> Q1
+    S --> K1
+    S --> V1
+```
+
+来源：[transformer.py](sam/nn/transformer.py#L10-L127), [transformer.py](sam/nn/transformer.py#L129-L271)
+
+## TransformerLayer —— 带 2D 偏置的缩放点积注意力
+
+`TransformerLayer` 从头实现了多头缩放点积注意力，其显著特点是增加了一个 **2D 偏置分支**，在 softmax 之前将成对位置偏置添加到注意力对数中。
+
+### 构造
+
+该层接受 `in_dim`（输入嵌入维度）、`d_model`（总注意力维度 = `head_dim × nhead`）以及选择缩放分母的关键参数 `dp_attn_norm`：
+
+```python
+self.q_linear = nn.Linear(in_dim, d_model, bias=False)
+self.k_linear = nn.Linear(in_dim, d_model, bias=False)
+self.v_linear = nn.Linear(in_dim, d_model, bias=False)
+self.out_linear = nn.Linear(d_model, in_dim)
+```
+
+注意，Q、K、V 投影是**无偏置**的，而输出线性层保留了偏置项。当提供 `in_dim_2d` 时，会有条件地实例化 2D 分支：
+
+```python
+if self.in_dim_2d is not None:
+    self.mlp_2d = nn.Sequential(
+        nn.Linear(in_dim_2d, self.nhead, bias=use_bias_2d))
+```
+
+这个单一线性层将成对特征直接映射到**每个注意力头的一个标量偏置**，这是一种高效的设计 —— 不需要多层 MLP，因为成对输入（通常是 `AF2_PositionalEmbedding` 的输出）已经携带了丰富的结构编码。
+
+来源：[transformer.py](sam/nn/transformer.py#L10-L49)
+
+### 前向传播 —— 张量形状流转
+
+前向传播的签名为 `forward(self, s, _k, _v, p)`，其中 `s` 是序列张量，`p` 是成对 2D 张量。虽然存在 `_k` 和 `_v` 参数（为了 API 兼容性），但它们被**忽略**了 —— 这是严格的自注意力。
+
+| 阶段 | 张量形状 | 操作 |
+|---|---|---|
+| 输入 `s` | `(L, N, I)` | 序列长度 × 批次 × 输入维度 |
+| Q, K, V | `(L, N, D·H)` | 线性投影 |
+| 重塑的 Q, K, V | `(N·H, L, D)` | 为 `bmm` 合并批次与头 |
+| 点积亲和度 | `(N·H, L, L)` | 缩放 `1/√d` 后的 `bmm(q, k^T)` |
+| 2D 偏置 `p` | `(N, L, L, H)` → `(N·H, L, L)` | 经 `mlp_2d` 投影，随后转置并重塑 |
+| 总亲和度 | `(N·H, L, L)` | `dp_aff + p` |
+| 注意力权重 | `(N·H, L, L)` | `softmax(dim=-1)` |
+| 更新的值 | `(L, N, D·H)` | `bmm(attn, v)`，重塑回去 |
+| 输出 | `(L, N, I)` | `out_linear` |
+
+**缩放因子** `w_t` 由 `dp_attn_norm` 控制：当设置为 `"d_model"`（idpsam 中的默认值）时，缩放为 $1/\sqrt{d_{\text{model}}}$；当设置为 `"head_dim"` 时，缩放为 $1/\sqrt{d_{\text{head}}}$（标准的逐头归一化）。解码器和噪声预测网络中均使用了默认配置 `"d_model"`。
+
+来源：[transformer.py](sam/nn/transformer.py#L52-L126), [ca_models.py](sam/nn/autoencoder/ca_models.py#L75-L82), [eps.py](sam/nn/noise_prediction/eps.py#L59-L66)
+
+## TransformerTimewarpLayer —— 高斯核距离注意力
+
+`TransformerTimewarpLayer` 用查询和键 token 的低维坐标投影之间的**负平方欧几里得距离**代替了点积亲和度。这产生了一种**高斯核注意力**模式，即投影坐标在 3D 空间中更近的 token 会获得更高的注意力权重 —— 对于蛋白质结构而言，这是一种自然的归纳偏置，因为空间邻近性驱动了相互作用。
+
+### 坐标投影与距离计算
+
+Q 和 K 不再投影到 `d_model` 维向量，而是投影到**每个头的 3D 坐标向量**：
+
+```python
+self.n_points = 1
+self.n_coords = 3
+self.q_linear = nn.Linear(in_dim, nhead * n_points * n_coords, bias=False)
+self.k_linear = nn.Linear(in_dim, nhead * n_points * n_coords, bias=False)
+```
+
+因此，每个$H$头生成一个单一的 3D 点（`n_points=1, n_coords=3`）。平方距离亲和度计算如下：
+
+$$\text{sd\_aff}_{h}(i,j) = \frac{\|q^3_{h,i} - k^3_{h,j}\|^2}{\ell_h^2 + \epsilon}$$
+
+其中 $\ell_h$ 是一个**逐头可学习的长度尺度**参数，初始化为 1.0，并通过 softplus 平方进行参数化以保证正定性：
+
+```python
+elle_init = torch.log(torch.exp(torch.full((1, nhead, 1, 1), 1.)) - 1.)
+self.elle = nn.Parameter(elle_init)
+# ...
+elle_sp = nn.functional.softplus(self.elle)**2
+sd_aff = sd_aff / (elle_sp + self.eps_elle)
+```
+
+最$H$终的亲和度为 `tot_aff = -sd_aff`，因此 softmax 计算如下：
+
+$$\text{attn}_{h}(i,j) = \frac{\exp\left(-\|q^3_{h,i} - k^3_{h,j}\|^2 / \ell_h^2\right)}{\sum_j \exp\left(-\|q^3_{h,i} - k^3_{h,j}\|^2 / \ell_h^2\right)}$$
+
+这恰好是投影坐标上的一个**高斯 (RBF) 核**，使得注意力权重随空间距离平滑衰减。逐头长度尺度 $\ell_h$ 允许不同的头在不同的空间分辨率上关注 —— 某些头可以捕获长程相互作用，而其他头则聚焦于局部邻域。
+
+### 值投影
+
+值分支比 Q/K 更灵活。它投影到 `v_dim = nhead × v_dim_head` 维度，其中 `v_dim_head` 由 `v_dim_mode` 控制：
+
+- `"custom"`：`v_dim_head = d_model // nhead`，允许值空间大于 3D 坐标空间
+- 否则：`v_dim_head = n_points × n_coords = 3`，与 Q/K 维度匹配
+
+来源：[transformer.py](sam/nn/transformer.py#L129-L271)
+
+### 距离计算 —— 张量形状流转
+
+| 阶段 | 张量形状 | 操作 |
+|---|---|---|
+| 输入 `q` | `(L, N, I)` | 序列长度 × 批次 × 输入维度 |
+| `q³`, `k³` | `(L, N, H·1·3)` | 投影到每个头的 3D 坐标 |
+| 重塑的 `q³`, `k³` | `(N·H, L, 1, 3)` | 用于成对差值计算 |
+| 成对差值 | `(N·H, L, L, 1, 3)` | `q³[:,None,...] - k³[:,:,None,...]` |
+| 平方距离 | `(N·H, L, L)` | 在坐标和点上求和 |
+| `elle` 缩放后 | `(N·H, L, L)` | 除以 `softplus(elle)²` |
+| 总亲和度 | `(N·H, L, L)` | `−sd_aff + bias_2d` |
+| 注意力 → 输出 | `(L, N, I)` | softmax，与 v 进行 bmm，out_linear |
+
+来源：[transformer.py](sam/nn/transformer.py#L182-L271)
+
+## PyTorchAttentionLayer —— 带边偏置的原生 MHA
+
+`PyTorchAttentionLayer` 封装了 PyTorch 内置的 `nn.MultiheadAttention`，并将成对边特征作为 `attn_mask` 偏置注入。这提供了一个标准化、优化的替代方案来取代自定义的 `TransformerLayer`，同时保留了 2D 偏置分支模式：
+
+```python
+self.mha = nn.MultiheadAttention(embed_dim, num_heads, ...)
+self.edge_to_bias = nn.Linear(edge_dim, num_heads, bias=use_bias_2d)
+```
+
+在前向传播中，边特征被投影为逐头标量，并重塑为 `(N·H, L, L)` 以作为 `attn_mask` 参数：
+
+```python
+p = self.edge_to_bias(p)
+p = p.transpose(1, 3).transpose(2, 3)
+p = p.contiguous().view(b_size * num_heads, seq_l, seq_l)
+out = self.mha(q, k, v, attn_mask=p)
+```
+
+<CgxTip>PyTorch 的 `MultiheadAttention` 中的 `attn_mask` 在 softmax 之前**加到**注意力权重上（而非相乘），这在语义上与自定义层中的 2D 偏置注入完全一致。这确保了在使用相同成对特征时，所有三种注意力变体的行为一致性。</CgxTip>
+
+来源：[transformer.py](sam/nn/transformer.py#L278-L312)
+
+## 2D 偏置分支 —— 成对特征注入
+
+所有三种注意力层共享 **2D 偏置分支** 模式，这是将成对结构信息（位置嵌入、边特征）注入注意力的核心机制。该设计在不同变体中保持一致：
+
+1. **输入**：形状为 `(N, L, L, E_p)` 的 4D 张量 `p` —— 序列上的成对表示（例如，来自 `AF2_PositionalEmbedding` 的相对位置嵌入）
+2. **投影**：单一线性层映射 `E_p → H`（头的数量），为每个头每个残基对生成一个偏置标量
+3. **转置与重塑**：将 `(N, L, L, H)` 结果置换为 `(N, H, L, L)` 并重塑为 `(N·H, L, L)`，以与批头注意力矩阵布局对齐
+4. **相加**：偏置在 softmax 之前**加到**主要注意力亲和度上
+
+这种设计意味着 2D 偏置充当了注意力模式上的**软结构先验**。例如，当 `p` 编码相对序列间隔时（通过 `AF2_PositionalEmbedding`），附近的残基无论内容如何都会获得偏置提升 —— 这对于局部接触在统计上更常见的蛋白质来说，是一种有用的归纳偏置。
+
+来源：[transformer.py](sam/nn/transformer.py#L99-L108), [transformer.py](sam/nn/transformer.py#L248-L256), [transformer.py](sam/nn/transformer.py#L305-L311)
+
+## 注意力类型选择 —— 各变体的使用场景
+
+`attention_type` 字符串参数选择在 Transformer 块内实例化哪个层。下表展示了调度逻辑和实际配置：
+
+| `attention_type` | Transformer 块 | 实例化的层 | 配置使用 |
+|---|---|---|---|
+| `"transformer"` | `AE_IdpGAN_TransformerBlock` | `TransformerLayer` | — |
+| `"timewarp"` | `AE_IdpGAN_TransformerBlock` | `TransformerTimewarpLayer` | **解码器** (`attention_type: timewarp`) |
+| `"transformer"` | `IdpGAN_TransformerBlock` | `TransformerLayer` | **噪声预测** (`attention_type: transformer`) |
+| `"pytorch"` | `IdpGAN_TransformerBlock` | `PyTorchAttentionLayer` | — |
+
+**自编码器解码器**使用 `"timewarp"` 注意力（高斯核距离），因为它重建的是 3D 坐标，空间邻近性是其自然的注意力模式。**噪声预测网络**使用 `"transformer"`（点积）注意力，因为它在潜空间编码上操作，此时基于内容的交互比空间邻近性更合适。
+
+### 配置快照
+
+```yaml
+# 解码器 —— 使用 timewarp 注意力
+decoder:
+  attention_type: timewarp
+  d_model: 512
+  num_heads: 32    # head_dim = 512/32 = 16
+
+# 噪声预测 —— 使用点积注意力
+latent_network:
+  attention_type: transformer
+  d_model: null    # 默认为 embed_dim = 256
+  num_heads: 16    # head_dim = 256/16 = 16
+```
+
+注意，两种配置都产生了**头维度 16**，这可能是一个有意的设计选择，旨在保持两个阶段间一致的逐头容量。
+
+来源：[ca_models.py](sam/nn/autoencoder/ca_models.py#L75-L91), [eps.py](sam/nn/noise_prediction/eps.py#L59-L76), [models.yaml](config/models.yaml#L39-L58), [models.yaml](config/models.yaml#L72-L101)
+
+## 自注意力 API 契约
+
+所有三层都暴露了相同的前向传播签名：`forward(q, k, v, p)`，其中 `p` 是成对 2D 张量。然而，在实践中它们总是作为**自注意力**被调用 —— 相同的张量被传递给 `q`、`k` 和 `v`：
+
+```python
+# 在 AE_IdpGAN_TransformerBlock 中
+x = self.self_attn(x, x, x, p=z_hat)[0]
+
+# 在 IdpGAN_TransformerBlock 中
+x = self.self_attn(x, x, x, p=p)[0]
+```
+
+输出始终是**单元素元组** `(output,)`，在调用处通过 `[0]` 解包。这种元组返回约定允许未来扩展（例如，返回注意力权重以进行可视化）而不破坏接口。
+
+<CgxTip>`TransformerLayer` 的前向传播签名使用命名参数 `(s, _k, _v, p)`，其中 `_k` 和 `_v` 带有下划线以表明它们未被使用 —— 这仅是自注意力。`TransformerTimewarpLayer` 使用 `(q, k, v, p)`，但在实践中也应用自注意力。如果需要交叉注意力，`TransformerTimewarpLayer` 可以自然地支持，因为 Q 和 K 被独立投影到 3D 坐标。</CgxTip>
+
+来源：[ca_models.py](sam/nn/autoencoder/ca_models.py#L136-L136), [eps.py](sam/nn/noise_prediction/eps.py#L173-L173)
+
+## 后续步骤
+
+注意力层与准备其输入的归一化和嵌入机制紧密交互。要理解 Transformer 块中的完整数据流：
+
+- **[自适应层归一化](12-adaptive-layer-normalization)** —— 时间步和氨基酸嵌入如何通过 AdaLN 调制注意力前和 MLP 前的激活
+- **[时间步与序列嵌入](13-timestep-and-sequence-embedding)** —— 扩散时间步和氨基酸标识如何在注入注意力流水线之前进行编码
+
+---
+
+- [深入解析/Transformer 构建模块/自适应层归一化](https://zread.ai/giacomo-janson/idpsam/12-adaptive-layer-normalization)
+
+---
+slug:12-adaptive-layer-normalization
+blog_type:normal
+---
+
+
+自适应层归一化（AdaLN）是 idpsam 噪声预测网络中的主要条件化机制，使扩散 Transformer 能够根据**时间步**和**氨基酸序列**嵌入来调制其隐藏表征。与简单的条件化策略（拼接或相加）不同，AdaLN 将 LayerNorm 的仿射参数——缩放和平移——重新参数化为条件信号的学习函数，产生随 Transformer 块变化且依赖于时间步和序列的归一化。该实现遵循 DiT 架构中的 **AdaLN-Zero** 变体，它将调制层初始化为恒等变换并包含输出门控，从而确保训练从一开始就保持稳定。
+
+## 理论基础
+
+标准 LayerNorm 在归一化后应用固定的仿射变换：`LayerNorm(x) = γ · Norm(x) + β`，其中 γ（缩放）和 β（平移）是所有输入共享的可学习参数。在条件生成模型中，这是不够的——网络在不同的扩散时间步和对于不同的蛋白质序列必须表现出不同的行为。**自适应层归一化**用条件网络产生的动态值替换静态的 γ 和 β：`AdaLN(x, c) = γ(c) · Norm(x) + β(c)`，其中 c 是条件信号。这等价于 **FiLM**（特征线性调制）条件化范式，并且与 DiT 论文中描述的自适应实例归一化和自适应组归一化密切相关。核心洞见是，调制归一化特征的*缩放*和*平移*提供了一种比简单相加或拼接条件嵌入更具表达力且参数效率更高的条件化路径。
+
+```mermaid
+flowchart TB
+    subgraph Cond["条件信号 c"]
+        T["时间步嵌入 t"]
+        A["氨基酸嵌入 a"]
+    end
+    subgraph AdaLN["自适应 LayerNorm-Zero"]
+        LN["LayerNorm<br/>(elementwise_affine=False)"]
+        MOD["modulate(x, shift, scale)<br/>x · (1 + scale) + shift"]
+        GATE["门控 ⊙ 输出"]
+    end
+    subgraph MLP_mod["调制网络"]
+        ACT["SiLU 激活"]
+        LIN["Linear → 6 × embed_dim"]
+        CHK["分块为 6 部分"]
+    end
+    
+    T --> |"+"| COMB["c = bead_project(a) + t"]
+    A --> |"bead_project"| COMB
+    COMB --> ACT --> LIN --> CHK
+    CHK --> |"shift_msa, scale_msa"| MOD
+    CHK --> |"gate_msa"| GATE
+    CHK --> |"shift_mlp, scale_mlp"| MOD2["modulate (MLP 路径)"]
+    CHK --> |"gate_mlp"| GATE2["门控 (MLP 路径)"]
+    
+    X_IN["输入 x"] --> LN --> MOD --> ATTN["自注意力"] --> GATE --> RES1["残差 + 门控输出"]
+    RES1 --> LN2["LayerNorm"] --> MOD2 --> MLP_F["前馈"] --> GATE2 --> RES2["残差 + 门控输出"]
+```
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L59-L60), [embedding.py](sam/nn/noise_prediction/embedding.py#L62-L156)
+
+## `modulate` 函数
+
+所有 AdaLN 条件化的基础原子操作是 `modulate` 函数，它将学习到的缩放和平移应用于归一化后的张量：
+
+```
+modulate(x, shift, scale) = x * (1 + scale) + shift
+```
+
+`1 + scale` 的公式确保当 `scale` 被零初始化时，调制退化为对归一化特征的恒等变换加上一个平移项——同样也是零初始化的。这就是 AdaLN-Zero 中的 **Zero**：在初始化时，整个调制路径充当恒等映射，意味着 Transformer 作为一个标准的预归一化 Transformer 启动，条件化路径的残差贡献为零。这种设计极大地稳定了扩散模型中早期的训练动态。
+
+| 参数 | 形状 | 作用 |
+|-----------|-------|------|
+| `x` | `(L, B, D)` | 归一化后的隐藏状态（LayerNorm 输出） |
+| `shift` | `(1, B, D)` | 每个嵌入维度的加性调制（偏置） |
+| `scale` | `(1, B, D)` | 每个嵌入维度的乘性调制（增益） |
+
+在序列维度 `L` 上的广播语义至关重要：**平移和缩放在批次元素内的所有残基间共享**，反映了时间步和序列条件化的全局性质。每个残基接收相同的调制参数，但这些参数的*值*在每个批次元素（每个扩散样本和时间步）中是不同的。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L59-L60)
+
+## `ConditionalInjectionModule`：核心 AdaLN-Zero 实现
+
+`ConditionalInjectionModule` 是主要的 AdaLN 条件化机制，在每个 Transformer 块中实例化一次。当 `mode="adanorm"` 时，它实现了完整的 AdaLN-Zero 协议，每个块包含**六个调制参数**：用于注意力机制和 MLP 归一化点的缩放与平移，以及用于这两条路径的门控标量。
+
+### 条件信号组合
+
+条件信号 `c` 通过将时间步嵌入 `t` 与（可选投影的）氨基酸嵌入 `a` 相加来构建：
+
+```
+c = bead_project(a) + t    (氨基酸条件化)
+c = t                       (氨基酸非条件化)
+```
+
+当 `bead_embed_dim ≠ time_embed_dim` 时，一个学习到的线性投影 `bead_project` 将氨基酸嵌入对齐到时间步嵌入空间。当维度匹配时，则使用 `nn.Identity()`。将两个嵌入求和为单一条件向量 `c` 意味着调制网络在单次前向传播中联合处理时间与序列信息。
+
+### 调制网络架构
+
+调制参数由一个两层序列网络产生：
+
+```
+adaLN_modulation = Sequential(SiLU(), Linear(time_embed_dim → 6 × embed_dim))
+```
+
+SiLU 激活函数首先处理条件信号 `c`，然后单层线性层将其投影到 `6 × embed_dim` 个输出。这些输出沿嵌入维度被均分为六个块：
+
+| 块索引 | 名称 | 目标 | 作用 |
+|-------------|------|--------|------|
+| 0 | `shift_msa` | 注意力预归一化 | 自注意力前的加性调制 |
+| 1 | `scale_msa` | 注意力预归一化 | 自注意力前的乘性调制 |
+| 2 | `gate_msa` | 注意力后 | 自注意力后的输出门控 |
+| 3 | `shift_mlp` | MLP 预归一化 | 前馈层前的加性调制 |
+| 4 | `scale_mlp` | MLP 预归一化 | 前馈层前的乘性调制 |
+| 5 | `gate_mlp` | MLP 后 | 前馈层后的输出门控 |
+
+### 零初始化
+
+`initialize_weights` 方法将最终线性层的权重和偏置设置为零：
+
+```python
+nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
+nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
+```
+
+这确保了所有六个调制参数从零开始，使得 `modulate(x, 0, 0) = x * (1 + 0) + 0 = x`。门控参数（`gate_msa`、`gate_mlp`）也从零开始，意味着条件化的残差贡献最初为零，并在训练过程中逐渐增长。
+
+### 与 LayerNorm 的交互
+
+当 `embed_inject_mode="adanorm"` 时，`IdpGAN_TransformerBlock` 中伴随的 `LayerNorm` 层在创建时设置了 `elementwise_affine=False`：
+
+```python
+self.attn_norm = nn.LayerNorm(embed_dim, elementwise_affine=embed_inject_mode != "adanorm")
+```
+
+这禁用了 LayerNorm 中默认可学习的 γ 和 β，因为 `modulate` 函数现在承担了该作用。因此，LayerNorm 仅执行标准化步骤（零均值、单位方差），而仿射变换则完全委托给条件化路径。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L62-L156), [eps.py](sam/nn/noise_prediction/eps.py#L56-L57), [eps.py](sam/nn/noise_prediction/eps.py#L89-L91)
+
+## 注入协议：AdaLN 如何集成到 Transformer 块中
+
+`ConditionalInjectionModule` 暴露了一个多阶段注入 API，`IdpGAN_TransformerBlock` 在其前向传播的精确位置调用它。此协议实现了预归一化 Transformer 的 AdaLN-Zero 变体：
+
+```mermaid
+sequenceDiagram
+    participant Block as TransformerBlock
+    participant CIM as ConditionalInjectionModule
+    participant Attn as 自注意力
+    participant MLP as 前馈
+
+    Block->>CIM: forward(a, t) → inj_out
+    Block->>CIM: inject_1_proto(x, inj_out) [adanorm 下为恒等]
+    Block->>Block: attn_norm(x) [elementwise_affine=False]
+    Block->>CIM: inject_1_pre(x, inj_out) → modulate(x, shift_msa, scale_msa)
+    Block->>Attn: self_attn(x, x, x, p)
+    Block->>CIM: inject_1_post(x, inj_out) → x * gate_msa
+    Block->>Block: 残差 + 门控注意力输出
+
+    Block->>Block: final_norm(x) [elementwise_affine=False]
+    Block->>CIM: inject_2_pre(x, inj_out) → modulate(x, shift_mlp, scale_mlp)
+    Block->>MLP: fc2(act(fc1(x)))
+    Block->>CIM: inject_2_post(x, inj_out) → x * gate_mlp
+    Block->>Block: 残差 + 门控 MLP 输出
+```
+
+注入阶段如下：
+
+1. **`inject_1_proto`** — AdaLN 模式下的恒等直通（被 `concat`/`add` 模式用于早期注入；AdaLN 将条件化推迟到归一化之后）。
+2. **`inject_1_pre`** — 在 LayerNorm 之后、自注意力之前应用 `modulate(x, shift_msa, scale_msa)`。这是注意力路径的核心 AdaLN 操作。
+3. **`inject_1_post`** — 将注意力输出乘以 `gate_msa`，实现了区分 AdaLN-Zero 与标准 AdaLN 的输出门控。
+;4. **`inject_2_pre`** — 在第二个 LayerNorm 之后、前馈 MLP 之前应用 `modulate(x, shift_mlp, scale_mlp)`。
+5. **`inject_2_post`** — 将 MLP 输出乘以 `gate_mlp`，完成 MLP 路径的 AdaLN-Zero 门控。
+
+<CgxTip>门控参数（`gate_msa`、`gate_mlp`）是 AdaLN-Zero 区别于普通 AdaLN 的决定性特征。它们缩放每个子层（注意力或 MLP）的*整体残差贡献*，而不仅仅是调制输入。通过零初始化，Transformer 对于条件化路径以恒等映射启动，并在训练过程中逐渐学习“打开”这些门。</CgxTip>
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L158-L212), [eps.py](sam/nn/noise_prediction/eps.py#L164-L200)
+
+## `InputInjectionModule`：用于结构输入条件化的 AdaLN
+
+除了时间步和序列条件化之外，idpsam 还支持一条辅助 AdaLN 路径，用于注入**初始结构编码** `x_0`（扩散步为零时的编码器输出）。带有 `mode="adanorm"` 的 `InputInjectionModule` 实现了一个简化变体，使用**三个调制参数**而非六个：
+
+```
+adaLN_modulation = Sequential(SiLU(), Linear(embed_dim → 3 × embed_dim))
+```
+
+| 块索引 | 名称 | 作用 |
+|-------------|------|------|
+| 0 | `shift_mlp` | LayerNorm 后的加性调制 |
+| 1 | `scale_mlp` | LayerNorm 后的乘性调制 |
+| 2 | `gate_mlp` | MLP 后的输出门控 |
+
+条件信号结合了投影后的输入编码和时间步嵌入：`c = input_project(x_0) + time_project(t)`。前向传播随后应用一个完整的残差块模式：归一化 → 调制 → MLP → 门控 → 添加残差。该模块在 Transformer 块的 `output` 位置（在注意力和 MLP 子层均完成后）被调用，为结构信息提供了一条后期融合路径。
+
+<CgxTip>`InputInjectionModule` 的 AdaLN 在其自身内部的 `nn.LayerNorm` 上使用了 `elementwise_affine=False`，这与调制函数替代静态仿射参数的原则一致。然而，该模块包含其自身*独立*的 LayerNorm 实例，与块的 `attn_norm` 和 `final_norm` 不同。</CgxTip>
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L219-L288), [eps.py](sam/nn/noise_prediction/eps.py#L118-L140), [eps.py](sam/nn/noise_prediction/eps.py#L203-L220)
+
+## 模式对比：AdaLN 与替代条件化策略
+
+`ConditionalInjectionModule` 支持三种条件化模式，通过 `embed_inject_mode` 参数选择。下表对比了它们在 Transformer 块内的行为：
+
+| 方面 | `adanorm` (AdaLN-Zero) | `concat` | `add` |
+|--------|------------------------|----------|-------|
+| **归一化仿射** | 禁用 (`elementwise_affine=False`) | 启用 | 启用 |
+| **注意力前置** | `modulate(LN(x), shift, scale)` | 标准 `LN(x)` | 标准 `LN(x)` |
+| **注意力后置** | 输出 × `gate_msa` | 恒等 | 恒等 |
+| **MLP 输入** | `modulate(LN(x), shift, scale)` | 沿维度 `cat([x, a, t])` | 标准 `x` |
+| **MLP 后置** | 输出 × `gate_mlp` | 恒等 | 恒等 |
+| **早期注入** | 恒等（延迟） | 恒等 | `x + project(a + t)` |
+| **每块参数量** | `6 × embed_dim`（调制） | 0（拼接改变输入维度） | `embed_dim`（投影） |
+| **初始化** | 零（恒等启动） | 标准 | 标准 |
+| **表达力** | 每个子层的缩放 + 平移 + 门控 | 拼接 + MLP 学习交互 | 仅加性偏置 |
+
+在默认的 idpsam 配置中，潜变量扩散网络使用 `embed_inject_mode: adanorm`，而编码器使用 `embed_inject_mode: concat`，解码器使用 `embed_inject_mode: null`（无条件化）。这反映了一个设计原则：AdaLN 在**条件生成**场景中最具价值，2此时网络必须在不同扩散时间步之间显著区分其行为。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L62-L212), [models.yaml](config/models.yaml#L97-L98), [models.yaml](config/models.yaml#L28-L29), [models.yaml](config/models.yaml#L57)
+
+## 生产配置
+
+`config/models.yaml` 中的默认模型配置指定了潜变量噪声预测网络的 AdaLN 设置：
+
+```yaml
+latent_network:
+  embed_inject_mode: adanorm     # 主要条件化：AdaLN-Zero
+  input_inject_mode: add         # 输入注入：加性（非 AdaLN）
+  input_inject_pos: out          # 在块输出处注入
+  time_embed_dim: 256            # 时间步嵌入维度
+  bead_embed_dim: 32             # 氨基酸嵌入维度（投影至 256）
+  embed_dim: 256                 # Transformer 隐藏维度
+  num_layers: 16                 # 16 个; Transformer 块，每个都有独立的 AdaLN
+  norm_pos: pre                  # 预归一化架构
+  activation: gelu               # Transformer 中使用 GELU；调制 MLP 中使用 SiLU
+```
+
+16 个 Transformer 块中的每一个都包含一个独立的 `ConditionalInjectionModule` 及其自身的 `adaLN_modulation` 网络（SiLU → Linear(256 → 1536)）。调制参数在层间**不共享**，允许每个块学习不同的条件化变换。当 `bead_embed_dim=32` 且 `time_embed_dim=256` 时，一个学习到的 `bead_project: Linear(32 → 256)` 在与时间步嵌入相加之前对齐氨基酸嵌入。
+
+来源: [models.yaml](config/models.yaml#L72-L106), [eps.py](sam/nn/noise_prediction/eps.py#L578-L617)
+
+## 与 DiT 架构的关系
+
+实现文件头将 Facebook Research 的 [Diffusion Transformer (DiT)](https://github.com/facebookresearch/DiT) 归功为参考架构。idpsam 的适配在几个显著方面扩展了原始 DiT 设计：
+
+- **双重条件信号**：DiT 以时间步和类别标签为条件；idpsam 以时间步和氨基酸序列嵌入为条件，需要 `bead_project` 对齐层。
+- **二维位置（边）偏置**：Transformer 块将成对位置嵌入作为注意力偏置纳入，这是图像域 DiT 中不存在的蛋白质结构特有添加项。
+- **输入注入模块**：用于结构编码注入的辅助 `InputInjectionModule` 及其自身 AdaLN 路径在 DiT 中没有对应物。
+- **预归一化架构**：idpsam 默认使用预归一化（`norm_pos: pre`），而 DiT 也在预归一化模式下运行——这种对齐确保了 AdaLN-Zero 协议在两个子层中均在归一化后一致地应用调制。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L10-L12)
+
+## 延伸阅读
+
+AdaLN 机制在更广泛的 Transformer 块架构内运行，该架构记录于[自定义 Transformer 注意力](11-custom-transformer-attention)中，并依赖于[时间步与序列嵌入](13-timestep-and-sequence-embedding)产生的条件嵌入。关于完整的网络级集成，请参阅[噪声预测网络](8-noise-prediction-network)。
+
+---
+
+- [深入解析/Transformer 构建模块/时间步与序列嵌入](https://zread.ai/giacomo-janson/idpsam/13-timestep-and-sequence-embedding)
+
+---
+slug:13-timestep-and-sequence-embedding
+blog_type:normal
+---
+
+
+**时间步**和**序列（珠）嵌入**是两个主要的条件信号，它们引导噪声预测 Transformer 朝着与特定扩散时间和氨基酸序列一致的去噪潜构象方向进行。它们共同构成了 `EpsTransformer` 网络的条件骨干：时间步嵌入告诉模型它在反向扩散过程中的*位置*，而珠嵌入则告诉模型它正在生成*什么*蛋白质序列。这些嵌入通过 `ConditionalInjectionModule` 融合并注入到每个 Transformer 块中，该模块支持三种不同的注入范式——**自适应层归一化**、**拼接**和**加性投影**——每种范式对条件信息如何调节内部表示施加了不同的归纳偏置。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L1-L288), [eps.py](sam/nn/noise_prediction/eps.py#L424-L678)
+
+## 时间步嵌入：正弦频率编码 + MLP
+
+`TimestepEmbedder` 通过一个两阶段流水线将标量扩散时间步 $t \in [0, T)$ 转换为密集向量表示：**正弦频率编码**，随后是一个**两层 MLP**。此设计改编自 DiT（Diffusion Transformer）架构，并可追溯至最初的 GLIDE 位置嵌入方案。
+
+**阶段 1 —— 正弦频率编码。** 静态方法 `timestep_embedding(t, dim, max_period=10000)` 将一批标量时间步映射到 `dim` 维的频率表示。对于半维度 `half = dim // 2`，它计算指数间隔的频率：
+
+$$\text{freqs}_i = \exp\left(-\ln(\text{max\_period}) \cdot \frac{i}{\text{half}}\right), \quad i = 0, 1, \ldots, \text{half}-1$$
+
+然后，该嵌入是在缩放时间步下求值的余弦和正弦的拼接：$[\cos(t \cdot \text{freqs}),\; \sin(t \cdot \text{freqs})]$。如果 `dim` 是奇数，则会追加一个零填充列以确保精确E精确的维度。`max_period=10000` 参数控制最小频率——较大的值会产生变化较慢（较粗糙）的频率分量，使模型能够区分相近和较远的时间步。
+
+**阶段 2 —— MLP 投影。** 正弦编码通过带有 SiLU 激活函数的两层 MLP：`Linear(freq_dim → hidden_dim) → SiLU → Linear(hidden_dim → hidden_dim)`。这种可学习的投影将固定的正弦基重塑为适合模型内部几何结构的表示。默认配置使用 `frequency_embedding_size=256` 和 `hidden_size=256`（等于 `time_embed_dim`）。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L14-L52), [eps.py](sam/nn/noise_prediction/eps.py#L544-L550)
+
+## 序列（珠）嵌入：氨基酸查找表
+
+珠嵌入向 Transformer 提供每个残基的氨基酸身份。它被实现为一个标准的 `nn.Embedding` 查找&表，包含 **20 个条目**（每个标准氨基酸一个5一个）和可配置的 `bead_embed_dim`。氨基酸排序遵循在(在 `aa_list = list("QWERTYIPASDFGHKLCVNM")` 中定义的)项目特定约定，该约定将 20 个标准残基中的?中的每一个映射到整数索引 0–19。在数据层面，`get_features_from_seq(seq)` 构建一个 20 通道的独热编码，`argmax` 提取存储在 `CG_Protein.a` 中的整数索引。
+
+当 `use_bead_embed=False` 时，模型在?在**氨基酸无条件**模式下运行——在没有序列特异性的情况下生成构象。该架构还通过 `pt_embed_bead_dim` 为预训练嵌入（例如 ESM-2）预留了基础设施，尽管该路径目前未被激活。
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `use_bead_embed` | `True` | 启用/禁用序列条件 |
+| `bead_embed_dim` | `32` | 每个残基的嵌入维度 |
+| `pt_embed_bead_dim` | `None` | 预训练 AA 嵌入的维度（未使用） |
+| `use_single_bead` | `False` | 折叠为单个珠类型（1 个条目） |
+
+来源: [sequences.py](sam/data/sequences.py#L1-L1), [cg_protein.py](sam/data/cg_protein.py#L96-L135), [eps.py](sam/nn/noise_prediction/eps.py#L527-L542)
+
+## EpsTransformer 内部的嵌入流
+
+`EpsTransformer` 的前向传播在将两种嵌入传入 Transformer 层之前，协调它们的创建和广播：
+
+```mermaid
+flowchart TD
+    subgraph Input
+        t["t: (B,) scalar timesteps"]
+        a["a: (B, L) amino acid indices"]
+    end
+
+    subgraph "Timestep Path"
+        TE["TimestepEmbedder<br/>sinusoidal + MLP"]
+        t --> TE
+        te["t_e: (B, E_t)"]
+        TE --> te
+        BC["Broadcast: unsqueeze + repeat<br/>+ transpose"]
+        te --> BC
+        te_broad["t_e: (L, B, E_t)"]
+        BC --> te_broad
+    end
+
+    subgraph "Bead Path"
+        BE["nn.Embedding(20, E_b)"]
+        a --> BE
+        ae["a_e: (B, L, E_b)"]
+        BE --> ae
+        TP["Transpose: (L, B, E_b)"]
+        ae --> TP
+        ae_broad["a_e: (L, B, E_b)"]
+        TP --> ae_broad
+    end
+
+    subgraph "Transformer Layers × N"
+        CIM["ConditionalInjectionModule<br/>(a=a_e, t=t_e)"]
+        te_broad --> CIM
+        ae_broad --> CIM
+    end
+```
+
+时间步嵌入 `t_e` 计算一次，形状为 `(B, E_t)`，然后通过 `unsqueeze(1).repeat(1, L, 1).transpose(0, 1)` **在所有序列位置上进行广播**，以生成 `(L, B, E_t)` 张量——批次元素中的每个残基都接收相同的时间步表示。珠嵌入 `a_e` 在转置后自然具有每个残基的变化，形状为 `(L, B, E_b)`。两者都作为参数传递给每个 `IdpGAN_TransformerBlock`。
+
+来源: [eps.py](sam/nn/noise_prediction/eps.py#L634-L671)
+
+## ConditionalInjectionModule：三种注入范式
+
+`ConditionalInjectionModule` 是将时间步和珠嵌入与 Transformer 隐藏状态融合的核心机制。它支持三种模式，每种模式具有不同的架构含义：
+
+### AdaLN-Zero 模式 (`mode="adanorm"`)
+
+这是噪声预测网络中**主要且默认**的模式。它遵循 DiT 设计，实现了带有零初始化的自适应层归一化。组合条件信号 `c = bead_project(a_e) + t_e`（或在无条件下仅为 `c = t_e`）被馈送到 `SiLU → Linear(E_t → 6·E_embed)` 调制 MLP，通过 `.chunk(6, dim=2)` 产生六个缩放/偏移/门控向量：
+
+| 输出 | 符号 | 应用点 |
+|--------|--------|-------------------|
+| `shift_msa` | $\gamma_1$ | 注意力前：$\text{modulate}(x, \gamma_1, \beta_1) = x(1+\beta_1) + \gamma_1$ |
+| `scale_msa` | $\beta_1$ | 注意力前（相同调制） |
+| `gate_msa` | $\alpha_1$ | 注意力后：$x \cdot \alpha_1$ |
+| `shift_mlp` | $\gamma_2$ | MLP 前：$\text{modulate}(x, \gamma_2, \beta_2)$ |
+| `scale_mlp` | $\beta_2$ | MLP 前（相同调制） |
+| `gate_mlp` | $\alpha_2$ | MLP 后：$x \cdot \alpha_2$ |
+
+如果 `bead_embed_dim ≠ time_embed_dim`，一个可学习的线性投影 `bead_project: Linear(E_b → E_t)` 会在求和前将珠嵌入对齐到时间步维度。最后线性层的权重和偏置的**零初始化**确保每个 Transformer 块始于恒等变换——条件信号在初始化时没有影响，其影响在训练期间逐渐增长。
+
+### 拼接模式 (`mode="concat"`)
+
+在此模式下，珠和时间步嵌入在 `inject_2_pre` 中直接拼接到 MLP 输入：MLP 输入变为 `[x; a_e; t_e]`（或在无条件下为 `[x; t_e]`），相应地扩展了 MLP 的输入维度。这是一种更简单、参数效率较低的方法，曾在原始 idpGAN 编码器中使用（配置中的 `embed_inject_mode: concat`）。
+
+### 加性模式 (`mode="add"`)
+
+加性模式将组合条件信号 `seq_project(t_e + bead_project(a_e))` 投影到嵌入维度，并将其添加到隐藏状态：`x = x + seq_project(t_e + bead_project(a_e))`。这仅在 `inject_1_proto` 阶段（归一化和注意力之前）应用，为所有位置提供统一的偏移。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L59-L212), [eps.py](sam/nn/noise_prediction/eps.py#L94-L102)
+
+## InputInjectionModule：调节潜输入
+
+次级注入路径 `InputInjectionModule` 将**初始潜编码** `z_0` 与时间步嵌入融合，为网络提供对其输入的直接访问。它在每个 Transformer 块的输出处运行（由 `input_inject_pos="out"` 控制）。在 **`add` 模式**下，它将 `z_0` 投影到嵌入空间，并使用层归一化将其相加。在 **`adanorm` 模式**下，它使用完整的 adaLN 残差块：组合信号 `c = input_project(z_0) + time_project(t_e)` 驱动调制 MLP 产生偏移/缩放/门控三元组，这些三元组调节内部的 MLP，并封装在残差连接中。默认配置使用 `input_inject_mode="add"`。
+
+来源: [embedding.py](sam/nn/noise_prediction/embedding.py#L219-L288), [eps.py](sam/nn/noise_prediction/eps.py#L117-L140)
+
+## 配置摘要
+
+下表将 `models.yaml` 中 `latent_network` 下的配置键映射到嵌入架构：
+
+| 配置键 | 默认值 | 嵌入组件 |
+|------------|---------|---------------------|
+| `time_embed_dim` | `256` | `TimestepEmbedder` 的输出维度 |
+| `time_freq_dim` | `256` | 正弦频率编码维度 |
+| `use_bead_embed` | `true` | 启用氨基酸条件 |
+| `bead_embed_dim` | `32` | `nn.Embedding` 输出维度 |
+| `embed_inject_mode` | `adanorm` | `ConditionalInjectionModule` 模式 |
+| `input_inject_mode` | `add` | `InputInjectionModule` 模式 |
+| `input_inject_pos` | `out` | 应用输入注入的位置 |
+
+<CgxTip>`bead_embed_dim=32` 被刻意设置为小于 `time_embed_dim=256` ——可学习的 `bead_project: Linear(32→256)` 投影将氨基酸身份扩展到完整的条件空间，确保时间步和序列信号在 adaLN 路径中共享公共维度以便求和。</CgxTip>
+
+<CgxTip>六参数 adaLN-Zero 调制（偏移、缩放、门控 × {注意力, MLP}）意味着条件信号*同时*控制注意力/MLP 输入的归一化和它们输出的门控。这种双向控制对扩散模型至关重要：在早期时间步（高噪声），门控可以抑制注意力以防止对嘈杂输入的过拟合；在晚期时间步（低噪声），偏移和缩放可以锐化模型对近乎收敛结构的响应。</CgxTip>
+
+来源: [models.yaml](config/models.yaml#L72-L106), [eps.py](sam/nn/noise_prediction/eps.py#L424-L460)
+
+## 架构关系图
+
+```mermaid
+graph TB
+    subgraph "EpsTransformer Forward Pass"
+        subgraph "Embedding Creation"
+            T["t: (B,)"] --> TS["TimestepEmbedder"]
+            TS --> T_EMB["t_e: (B, 256)"]
+            A["a: (B, L)"] --> BE["nn.Embedding(20, 32)"]
+            BE --> A_EMB["a_e: (B, L, 32)"]
+        end
+
+        subgraph "Per Transformer Block"
+            T_EMB --> CIM["ConditionalInjectionModule"]
+            A_EMB --> CIM
+            CIM --> |"shift/scale/gate"| ATTN["Self-Attention"]
+            CIM --> |"shift/scale/gate"| MLP_BLOCK["Feed-Forward MLP"]
+            ATTN --> IIM["InputInjectionModule"]
+            MLP_BLOCK --> IIM
+        end
+    end
+
+    style TS fill:#e8f4e8,stroke:#2d7d2d
+    style BE fill:#e8e8f4,stroke:#2d2d7d
+    style CIM fill:#f4e8e8,stroke:#7d2d2d
+    style IIM fill:#f4f4e8,stroke:#7d7d2d
+```
+
+时间步嵌入不变地流经**每个** Transformer 层——它只计算一次并被重用。类似地，珠嵌入在序列级别计算一次并广播到所有层。每层的 `ConditionalInjectionModule` 独立学习如何调节该层的注意力和 MLP 子块，赋予每个深度级别自身的条件行为。
+
+有关这些嵌入如何与 Transformer 注意力机制和层归一化交互的更深层上下文，请参阅[自定义 Transformer 注意力](11-custom-transformer-attention)和[自适应层归一化](12-adaptive-layer-normalization)。有关协调这些组件的完整噪声预测网络，请参阅[噪声预测网络](8-noise-prediction-network)。
+
+---
