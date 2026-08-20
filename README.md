@@ -493,6 +493,31 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
+<details>
+<summary>IDP-o</summary>
+
+- **Paper:** [Advancing Protein Ensemble Predictions Across the Order–Disorder Continuum](https://www.biorxiv.org/content/10.1101/2025.10.18.680935v2) (bioRxiv, 2025)
+- **Docs:** [Read more →](docs/IDP-o/) *to be written*
+- **Code:** https://github.com/PeptoneLtd/IDP-o
+- **Approach:** DL
+- **For IDR**
+</details>
+
+---
+
+<details>
+<summary>PepTron</summary>
+
+> ⚠️ PepTron and IDP-o 
+
+- **Paper:** [Advancing Protein Ensemble Predictions Across the Order–Disorder Continuum](https://www.biorxiv.org/content/10.1101/2025.10.18.680935v2) (bioRxiv, 2025)
+- **Docs:** [Read more →](docs/PepTron/) *to be written*
+- **Code:** https://github.com/PeptoneLtd/PepTron
+- **Approach:** DL
+- **For IDR**
+</details>
+
+---
 
 <!-- More idr ensemble placeholders can be added here -->
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
