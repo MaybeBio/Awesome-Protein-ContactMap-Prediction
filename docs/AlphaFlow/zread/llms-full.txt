@@ -1,0 +1,5985 @@
+# bjing2016/alphaflow
+
+Source: https://zread.ai/bjing2016/alphaflow
+
+# 入门
+
+- [入门/概述](https://zread.ai/bjing2016/alphaflow/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+AlphaFlow 是一个创新的蛋白质结构预测系统，它扩展了 AlphaFold 的能力，能够生成**构象集合**——即代表蛋白质在不同条件下动态特性的多种蛋白质结构。传统的 AlphaFold 预测单一静态结构，而 AlphaFlow 利用流匹配目标来模拟蛋白质的柔性，从而生成与**实验条件**（X 射线晶体学、冷冻电镜）以及生理温度下的**分子动力学集合**相关的多样化结构状态。
+
+来源：[README.md](README.md#L1-L15), [alphafold.py](alphaflow/model/alphafold.py#L37-L62)
+
+## AlphaFlow 的独特之处
+
+AlphaFlow 的核心创新在于将**流匹配**与经过验证的 AlphaFold 架构相结合。这种方法使模型能够学习蛋白质构象的分布，而不仅仅是预测单一的最佳结构。该系统可以为给定的蛋白质序列生成多个结构样本，每个样本代表蛋白质在不同条件下可能采用的一种合理构象。
+
+![AlphaFlow Animation](https://github.com/bjing2016/alphaflow/blob/master/assets/6uof_A_animation.gif?raw=true)
+
+上面的动画展示了 AlphaFlow 生成构象多样性的能力，展示了蛋白质在分子动力学模拟过程中可以探索的多种结构状态。
+
+来源：[README.md](README.md#L16-L28), [diffusion.py](alphaflow/utils/diffusion.py#L1-L60)
+
+## 系统架构
+
+AlphaFlow 建立在 OpenFold 实现的 AlphaFold 2 之上，引入了几个关键修改以支持集合生成。该架构由三个主要组件组成，它们在一个统一的流程中协同工作。
+
+```mermaid
+flowchart TB
+    subgraph Input[Input Processing]
+        A[Sequence] --> B[MSA Generation]
+        A --> C[Feature Extraction]
+        D[Templates<br/>MD+Templates only] --> C
+    end
+    
+    subgraph Core[Core Architecture]
+        C --> E[Input Embedder]
+        E --> F[Evoformer Stack<br/>48 or 12 layers]
+        F --> G[Structure Module]
+    end
+    
+    subgraph Output[Flow Matching Layer]
+        G --> H[Harmonic Prior<br/>Noise Injection]
+        H --> I[Flow Matching<br/>Training]
+        H --> J[Diffusion Sampling<br/>Inference]
+    end
+    
+    J --> K[Conformational Ensemble<br/>Multiple Structures]
+    I --> L[Trained Model<br/>with flow matching]
+    
+    style H fill:#ff9999
+    style I fill:#ffcc99
+    style J fill:#99ccff
+```
+
+流匹配层集成了一个**谐波先验**，它沿蛋白质链生成噪声，使模型能够学习如何去噪并恢复物理上合理的构象。在训练期间，模型学习如何预测从噪声状态到清洁结构的转换；而在推理期间，它可以通过从不同噪声级别采样来生成多种多样的构象。
+
+来源：[wrapper.py](alphaflow/model/wrapper.py#L38-L52), [diffusion.py](alphaflow/utils/diffusion.py#L32-L48), [alphafold.py](alphaflow/model/alphafold.py#L56-L80)
+
+## 项目结构
+
+该仓库被组织成清晰的功能模块，支持训练和推理工作流程。
+
+```
+alphaflow/
+├── config.py              # Model and training configurations
+├── data/                  # Data processing and pipeline
+│   ├── data_modules.py    # Dataset and data loader classes
+│   ├── data_pipeline.py   # Feature extraction pipeline
+│   ├── feature_pipeline.py # Feature engineering
+│   ├── inference.py       # Inference data handling
+│   └── input_pipeline.py  # Input preprocessing
+├── model/                 # Neural network architectures
+│   ├── alphafold.py       # AlphaFold-based model
+│   ├── esmfold.py         # ESMFold-based model
+│   ├── wrapper.py         # Lightning module wrapper
+│   └── layers.py          # Custom neural network layers
+└── utils/                 # Utility functions
+    ├── diffusion.py       # Flow matching utilities
+    ├── loss.py            # Loss functions
+    └── protein.py         # Protein structure utilities
+```
+
+这种模块化设计允许轻松尝试不同的模型变体和训练策略，同时保持清晰的关注点分离。
+
+来源：[data_modules.py](alphaflow/data/data_modules.py#L1-L30), [wrapper.py](alphaflow/model/wrapper.py#L1-L20), [config.py](alphaflow/config.py#L1-L30)
+
+## 模型变体
+
+AlphaFlow 提供两个模型家族，每个都针对不同场景进行了优化：**AlphaFlow**（基于 AlphaFold 2）和 **ESMFlow**（基于 ESMFold）。这两个家族都支持多种训练变体和配置。
+
+| 模型家族 | 训练数据 | 使用场景 | 输入要求 |
+|-------------|---------------|----------|-------------------|
+| **AlphaFlow-PDB** | PDB 结构 | 不同条件下的实验集合 | 序列 + MSA |
+| **AlphaFlow-MD** | 300K 下的 MD 轨迹 | 分子动力学集合 | 序列 + MSA |
+| **AlphaFlow-MD+Templates** | MD 轨迹 + PDB 模板 | 带有参考结构的 MD 集合 | 序列 + MSA + 模板 |
+| **ESMFlow-PDB** | PDB 结构 | 更快的实验集合 | 仅序列 |
+| **ESMFlow-MD** | 300K 下的 MD 轨迹 | 更快的 MD 集合 | 仅序列 |
+| **ESMFlow-MD+Templates** | MD 轨迹 + PDB 模板 | 带有参考的更快 MD 集合 | 序列 + 模板 |
+
+<CgxTip>当有 MSA 数据可用时，选择 AlphaFlow 模型以获得最高精度。ESMFlow 模型提供 10-20 倍更快的推理速度，但可能会牺牲一些精度，特别是对于进化信息有限的序列。</CgxTip>
+
+每个模型家族提供**三个版本**以平衡速度和精度：**base**（完整的 48 层 Evoformer）、**distilled**（更快，精度略有权衡）和 **12-layer**（比 base 快 2.5 倍，对于 MD+Templates 模型精度损失极小）。
+
+来源：[README.md](README.md#L61-L105), [predict.py](predict.py#L10-L30), [train.py](train.py#L20-L30)
+
+## 主要功能和特性
+
+**构象集合生成**：与标准的结构预测不同，AlphaFlow 为每个蛋白质序列生成多种多样的结构。这是通过训练期间的流匹配目标实现的，该目标学习构象的分布而不是单一结构。在推理期间，你可以指定样本数（默认：10）和采样步数（默认：10）来控制多样性和质量。
+
+**模板集成**：MD+Templates 模型接受参考 PDB 结构作为输入，允许模型围绕已知的起始结构生成集合。这对于探索实验确定结构周围的构象变化特别有用。
+
+**灵活的噪声调度**：推理管道通过 `--tmax` 参数支持可自定义的噪声调度，从而能够控制多样性（较高的 tmax）和精度（较低的 tmax）之间的权衡。还可以启用自调节，通过迭代改进来提高样本质量。
+
+**全面的训练管道**：该系统支持在 PDB 结构和分子动力学轨迹上进行训练，并提供数据预处理、MSA 生成和评估的脚本。训练管道集成了多种损失函数，包括 FAPE、扭转角损失和流匹配损失，以确保高质量的集合生成。
+
+来源：[predict.py](predict.py#L31-L45), [train.py](train.py#L1-L50), [loss.py](alphaflow/utils/loss.py#L40-L65)
+
+## 安装和快速开始
+
+AlphaFlow 需要 Python 3.9 和支持 CUDA 11 的 PyTorch 1.12.1。安装过程包括设置 OpenFold 作为依赖项，它提供了 AlphaFlow 所基于的核心 AlphaFold 实现。
+
+该仓库提供了两个主要入口点：`train.py` 用于训练新模型，`predict.py` 用于使用预训练权重运行推理。对于推理，你需要准备输入文件，包括序列（CSV 格式）、MSA（用于 AlphaFlow 模型）以及可选的模板（用于 MD+Templates 模型）。
+
+来源：[README.md](README.md#L30-L60), [predict.py](predict.py#L1-L45), [train.py](train.py#L1-L30)
+
+## 后续步骤
+
+要开始使用 AlphaFlow：
+
+1. **[快速开始](2-quick-start)** - 设置你的环境并运行你的第一次推理
+2. **[AlphaFlow 与 ESMFlow 模型家族](3-alphaflow-vs-esmflow-model-families)** - 了解模型家族之间的差异并选择适合你需求的模型
+3. **[模型版本：Base、Distilled 和 12 层配置](4-model-versions-base-distilled-and-12-layer-configurations)** - 了解不同模型变体之间的速度与精度权衡
+
+为了更深入的技术理解：
+
+4. **[与 AlphaFold 集成的流匹配目标](6-flow-matching-objective-integration-with-alphafold)** - 了解集合生成背后的核心创新
+5. **[推理管道和采样过程](14-inference-pipeline-and-sampling-process)** - 学习如何在生成过程中控制多样性和质量
+6. **[PDB 和 MD 数据集的训练管道](10-training-pipeline-for-pdb-and-md-datasets)** - 探索如何训练自定义 AlphaFlow 模型
+
+---
+
+- [入门/快速开始](https://zread.ai/bjing2016/alphaflow/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+AlphaFlow 是 AlphaFold 的一个修改版本，使用流匹配目标进行微调，专为蛋白质构象集的生成建模而设计。本快速入门指南将帮助你在几分钟内上手运行 AlphaFlow，无论你是想根据 PDB 建模实验构象集，还是模拟生理温度下的分子动力学构象集。
+
+![AlphaFlow Protein Animation](https://github.com/bjing2016/alphaflow/blob/master/assets/6uof_A_animation.gif?raw=true)
+
+AlphaFlow 扩展了原始 AlphaFold 架构的功能，能够生成代表蛋白质构象集的多种构象，而不仅仅是单一的静态结构。这使得研究人员能够探索蛋白质的柔性、构象动力学以及在功能上可能相关的替代结构状态。该框架还包括 ESMFlow，这是对 ESMFold 的类似微调，适用于那些更喜欢基于序列的方法的用户。
+
+来源：[README.md](README.md#L1-L30), [predict.py](predict.py#L1-L20)
+
+## 安装和环境设置
+
+AlphaFlow 需要 Python 3.9 和支持 CUDA 的 GPU（推荐 CUDA 11）。最简单的安装方法是使用 conda 环境来清晰地管理依赖项。
+
+```bash
+conda create -n alphaflow python=3.9
+conda activate alphaflow
+pip install numpy==1.21.2 pandas==1.5.3
+pip install torch==1.12.1+cu113 -f https://download.pytorch.org/whl/torch_stable.html
+pip install biopython==1.79 dm-tree==0.1.6 modelcif==0.7 ml-collections==0.1.0 scipy==1.7.1 absl-py einops
+pip install pytorch_lightning==2.0.4 fair-esm mdtraj==1.9.9 wandb
+pip install 'openfold @ git+https://github.com/aqlaboratory/openfold.git@103d037'
+```
+
+如果你的系统具有不兼容的 CUDA 版本，你可以在安装 OpenFold 之前在你的 conda 环境中安装 CUDA 11。这种方法隔离了所需的 CUDA 版本，而不会影响你系统范围的安装。OpenFold 安装特别需要 CUDA 11，因为其自定义的 PyTorch 内核是针对该版本编译的。
+
+对于更喜欢容器化环境的用户，代码库中提供了一个 Dockerfile，它是基于 OpenFold 容器构建的。这种方法确保了可复现性，对于部署或在不同机器上工作特别有用。Docker 镜像大约为 20GB（不包含权重），如果包含预下载的模型权重，则大约为 25GB。
+
+来源：[README.md](README.md#L34-L49), [Dockerfile](Dockerfile#L1-L87)
+
+## 下载模型权重
+
+AlphaFlow 提供了针对不同用例优化的多种模型变体。所有模型权重都托管在 Google Cloud Storage 上，可以直接下载。主要的三个模型系列是：
+
+- **AlphaFlow-PDB**：在 PDB 结构上训练，用于在不同条件下模拟来自 X 射线晶体学或冷冻电镜的实验构象集。
+- **AlphaFlow-MD**：在 300K 下全原子显式溶剂 MD 轨迹上训练。
+- **AlphaFlow-MD+Templates**：接受 PDB 结构作为输入，并模拟 300K 下相应的 MD 构象集。
+
+每个系列都有基础版本和精简版本。精简模型运行速度显著更快，但代价是精度略有降低，正如论文中详述的那样。对于 MD+Templates 系列，还提供 12 层变体，推理速度快 2.5 倍，性能损失很小。
+
+| Model Family | Base Version | Distilled Version | 12-Layer Base | 12-Layer Distilled |
+|--------------|-------------|------------------|---------------|-------------------|
+| AlphaFlow-PDB | alphaflow_pdb_base_202402.pt | alphaflow_pdb_distilled_202402.pt | - | - |
+| AlphaFlow-MD | alphaflow_md_base_202402.pt | alphaflow_md_distilled_202402.pt | - | - |
+| AlphaFlow-MD+Templates | alphaflow_md_templates_base_202402.pt | alphaflow_md_templates_distilled_202402.pt | alphaflow_12l_md_templates_base_202406.pt | alphaflow_12l_md_templates_distilled_202406.pt |
+
+要下载模型，只需使用 wget 或 curl：
+
+```bash
+# 示例：下载 AlphaFlow-MD+Templates 基础版本
+wget https://storage.googleapis.com/alphaflow/params/alphaflow_md_templates_base_202402.pt
+```
+
+对于大多数用户，从 MD+Templates 基础版本或精简版本开始可以在性能和计算效率之间取得良好的平衡。如果你需要更快的推理或处理更大的蛋白质，12 层版本尤其有吸引力。
+
+来源：[README.md](README.md#L60-L81), [assets/12l_md_templates.md](assets/12l_md_templates.md#L1-L17)
+
+## 准备输入数据
+
+AlphaFlow 接受特定格式的输入数据，具体取决于你运行的是 AlphaFlow 还是 ESMFlow 模型，以及你是否需要模板结构。
+
+### 创建输入 CSV
+
+准备一个包含两个必需列的 CSV 文件：`name` 和 `seqres`。每一行代表你想要生成构象集的蛋白质序列。名称将用于组织输出文件并查找相应的 MSA 和模板。
+
+```csv
+name,seqres
+6o2v_A,GWNDPDRMLLRDVKALTLHYDRYTTSRRLDPIPQLKCVGGTAGCDSYTPKVIQCQNKGWDGYDVQWECCTDLDIAYKFGKTVVSCEGYESSEDQYVLRGSCGLEYNLDYTELGLQKLKESGKQHGFCSFSDYYYK
+7ead_A,GLPYPEGYRFWTHVKSMELKPGHPLYESFGGLHHIYVNPTGLRTYLEGKKAPFPKGTVIVFDLLEAKVEGNALLEGPRKLIGVMAKDPGRYPDTGGWGYYAFGPDKKPLAIDPKACHACHQGAANTDYVFSAFRP
+```
+
+代码库在 `splits` 目录中包含示例文件，例如 `splits/atlas_test.csv`，它们演示了预期的格式 [splits/atlas_test.csv](splits/atlas_test.csv#L1-L10)。
+
+### 准备 MSA（仅限 AlphaFlow）
+
+AlphaFlow 模型需要 A3M 格式的多序列比对。MSA 应按如下目录结构组织：
+
+```
+alignment_dir/
+├── 6o2v_A/
+│   └── a3m/
+│       └── 6o2v_A.a3m
+├── 7ead_A/
+│   └── a3m/
+│       └── 7ead_A.a3m
+```
+
+如果你没有预先生成的 MSA，你可以使用两种方法创建它们。第一种是查询 ColabFold 服务器，这适合小规模使用：
+
+```bash
+python -m scripts.mmseqs_query --split [PATH_TO_CSV] --outdir [OUTPUT_DIR]
+```
+
+对于大规模使用或当你需要更多控制时，你可以在本地下载 UniRef30 和 ColabDB 数据库并离线运行搜索。这需要遵循 ColabFold 设置说明来下载数据库，然后运行：
+
+```bash
+python -m scripts.mmseqs_search_helper --split [PATH_TO_CSV] --db_dir [DB_DIR] --outdir [OUTPUT_DIR]
+```
+
+辅助脚本自动执行 MSA 搜索过程并将结果组织成预期的目录结构 [scripts/mmseqs_search_helper.py](scripts/mmseqs_search_helper.py#L1-L30)。
+
+### 准备模板（仅限 MD+Templates 模型）
+
+使用 MD+Templates 模型时，你需要为输入 CSV 中的每个蛋白质提供一个参考 PDB 结构。将模板 PDB 文件放在模板目录中，文件名与 CSV 中的名称匹配。每个 PDB 文件应只包含单条链，没有残基缺口。
+
+```
+templates_dir/
+├── 6o2v_A.pdb
+├── 7ead_A.pdb
+```
+
+模板结构作为起点，模型生成一个构象集，代表该参考结构在生理温度（300K）下的构象空间。
+
+来源：[README.md](README.md#L83-L95), [alphaflow/data/inference.py](alphaflow/data/inference.py#L1-L91)
+
+## 运行推理
+
+一旦你的数据准备就绪，你就可以使用 `predict.py` 脚本运行 AlphaFlow 推理。基本工作流程包括选择模型模式、提供输入路径和指定输出选项。
+
+```mermaid
+flowchart TD
+    A[准备输入 CSV] --> B{模型模式?}
+    B -->|AlphaFlow| C[生成/准备 MSA]
+    B -->|ESMFlow| D[跳过 MSA 步骤]
+    C --> E{需要模板?}
+    D --> E
+    E -->|是| F[准备模板 PDB]
+    E -->|否| G[下载模型权重]
+    F --> G
+    G --> H[运行 predict.py 命令]
+    H --> I[检查输出 PDB 文件]
+```
+
+### 基本 AlphaFlow 推理
+
+AlphaFlow 推理的最低命令是：
+
+```bash
+python predict.py \
+    --mode alphafold \
+    --input_csv [PATH_TO_CSV] \
+    --msa_dir [MSA_DIRECTORY] \
+    --weights [PATH_TO_WEIGHTS] \
+    --samples 10 \
+    --outpdb [OUTPUT_DIRECTORY]
+```
+
+对于 PDB 模型，作者建议添加 `--self_cond --resample` 标志以提高性能 [predict.py](predict.py#L1-L20)。
+
+### 基本 ESMFlow 推理
+
+ESMFlow 遵循类似的模式，但不需要 MSA：
+
+```bash
+python predict.py \
+    --mode esmfold \
+    --input_csv [PATH_TO_CSV] \
+    --weights [PATH_TO_WEIGHTS] \
+    --samples 10 \
+    --outpdb [OUTPUT_DIRECTORY]
+```
+
+ESMFlow 在你希望在不进行 MSA 生成步骤的情况下加快推理速度，或者处理可用同源序列有限的序列时特别有用。
+
+### 常用命令行选项
+
+| 选项 | 描述 | 默认值 |
+|--------|-------------|---------|
+| `--mode` | 模型类型：`alphafold` 或 `esmfold` | `alphafold` |
+| `--input_csv` | 输入 CSV 文件的路径 | `splits/transporters_only.csv` |
+| `--msa_dir` | 包含 MSA 文件的目录 | `./alignment_dir` |
+| `--templates_dir` | 包含模板 PDB 的目录 | `None` |
+| `--weights` | 模型权重文件的路径 | `None` |
+| `--samples` | 要生成的构象数量 | `10` |
+| `--steps` | 扩散采样步数 | `10` |
+| `--outpdb` | PDB 文件的输出目录 | `./outpdb/default` |
+| `--pdb_id` | 要处理的特定蛋白质（空格分隔） | `[]` (全部) |
+
+### 模型变体的高级选项
+
+运行精简模型时，追加 `--noisy_first --no_diffusion` 以使用针对这些更快模型优化的专用推理管道。为了以较低的多样性提高精度，你可以使用调度参数截断推理过程：
+
+```bash
+python predict.py \
+    --mode alphafold \
+    --input_csv [PATH] \
+    --msa_dir [DIR] \
+    --weights [PATH] \
+    --samples 10 \
+    --tmax 0.2 --steps 2 \
+    --outpdb [DIR]
+```
+
+默认设置使用 `--tmax 1.0 --steps 10`，这在多样性和精度之间提供了良好的平衡。论文附录 B.1 提供了这些权衡的详细分析。
+
+要从 CSV 中选择特定的蛋白质，请使用带有空格分隔标识符的 `--pdb_id` 标志：
+
+```bash
+python predict.py --mode alphafold --input_csv splits/atlas_test.csv \
+    --msa_dir alignment_dir --weights params/alphaflow_md_templates_base_202402.pt \
+    --pdb_id 6o2v_A 7ead_A --samples 10 --outpdb ./outpdb/test
+```
+
+来源：[README.md](README.md#L97-L115), [predict.py](predict.py#L1-L50), [predict.py](predict.py#L100-L134)
+
+## 理解输出
+
+AlphaFlow 生成包含请求数量构象的输出 PDB 文件。每个输出文件将所有采样的结构组合成一个多模型 PDB 文件。
+
+输出文件根据输入 CSV 中的 `name` 字段命名，并放置在 `--outpdb` 指定的目录中。例如，如果你使用 10 个样本处理 `6o2v_A`，你将得到：
+
+```
+outpdb/
+└── 6o2v_A.pdb  # 包含 10 个模型 (MODEL 1 到 MODEL 10)
+```
+
+可以使用标准的分子可视化工具（如 PyMOL、ChimeraX 或 VMD）可视化 PDB 文件。这些工具允许你检查构象集并分析构象多样性。
+
+对于高级分析，代码库提供了用于根据参考数据（如 ATLAS 数据集）评估构象集的脚本。`analyze_ensembles.py` 脚本计算成对 RMSD、RMSF 和接触变异性等指标 [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L1-L80)。
+
+<CgxTip>
+在解释构象集时，请记住每个构象代表从模型分布中采样的合理结构状态。样本之间的多样性反映了模型对该蛋白质在指定条件（例如，PDB 模型的实验条件或 MD 模型的 300K）下预测的构象柔性。
+</CgxTip>
+
+### 架构概览
+
+AlphaFlow 建立在 AlphaFold 架构之上，并进行了关键修改以支持生成式构象集建模：
+
+```mermaid
+graph TB
+    subgraph Input
+        A[Sequence] --> B[MSA]
+        B --> C[Input Stack]
+        A --> C
+        D[Template] --> C
+    end
+    
+    C --> E[Evoformer]
+    E --> F[Folding Trunk]
+    F --> G[Structure Module]
+    
+    subgraph Flow Matching
+        H[Noise Schedule] --> I[Flow Matching Objective]
+        G --> I
+        I --> J[Harmonic Prior]
+    end
+    
+    I --> K[Generated Ensemble]
+    
+    style H fill:#f9f,stroke:#333
+    style I fill:#f9f,stroke:#333
+    style J fill:#f9f,stroke:#333
+```
+
+该架构结合了流匹配目标，用生成过程取代了 AlphaFold 的单结构预测。噪声调度和谐先导指导采样过程，能够受控地生成多样化的构象。有关深层架构细节，请参阅 [Evoformer 和 Folding Trunk 架构](8-evoformer-and-folding-trunk-architecture) 页面。
+
+来源：[alphaflow/model/alphafold.py](alphaflow/model/alphafold.py), [alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py)
+
+## 后续步骤
+
+既然你已经运行了 AlphaFlow，你可以探索更多高级功能和能力。有关为你的特定用例选择合适模型的指导，请参阅 [为你的用例选择合适的模型](5-choosing-the-right-model-for-your-use-case)。如果你想了解 AlphaFlow 和 ESMFlow 系列之间的区别，请查阅 [AlphaFlow 与 ESMFlow 模型系列](3-alphaflow-vs-esmflow-model-families)。
+
+为了更深入的技术理解，核心架构页面解释了 [流匹配目标与 AlphaFold 的集成](6-flow-matching-objective-integration-with-alphafold) 和 [谐先导和噪声调度](7-harmonic-prior-and-noise-scheduling) 机制，这些机制实现了构象集生成。[推理管道和采样过程](14-inference-pipeline-and-sampling-process) 页面提供了有关如何针对特定应用自定义生成的详细信息。
+
+如果你计划处理更大的数据集或生产系统，请查看 [批处理和优化技术](17-batch-processing-and-optimization-techniques) 指南以获取性能提示。对于根据参考数据的评估，[ATLAS 数据集上的构象集评估指标](22-ensemble-evaluation-metrics-on-atlas-dataset) 页面提供了全面的基准和分析方法。
+
+---
+
+## 模型变体与选择
+
+- [入门/模型变体与选择/AlphaFlow 与 ESMFlow 模型系列](https://zread.ai/bjing2016/alphaflow/3-alphaflow-vs-esmflow-model-families)
+
+---
+slug:3-alphaflow-vs-esmflow-model-families
+blog_type:normal
+---
+
+
+AlphaFlow 提供两个不同的模型系列——AlphaFlow 和 ESMFlow，它们基于不同的基础架构构建，但都通过流匹配（flow matching）进行了增强，用于生成式蛋白质系综建模。本指南将帮助你理解它们之间的关键差异，并为你的用例选择合适的模型。
+
+## 架构概览
+
+这两个系列之间的根本区别在于它们的序列表示策略：AlphaFlow 通过 Evoformer 架构利用多重序列比对（MSA）信息，而 ESMFlow 使用预训练蛋白质语言模型（ESM-2）作为其序列编码器。
+
+```mermaid
+flowchart TB
+    subgraph AlphaFlow["AlphaFlow 架构"]
+        A1[MSA 输入] --> A2[输入嵌入器]
+        A3[模板] --> A4[模板嵌入器]
+        A2 --> A5[Evoformer 堆栈<br/>48 层（基础版）或 12 层]
+        A4 --> A5
+        A5 --> A6[结构模块]
+        A6 --> A7[输出结构]
+    end
+    
+    subgraph ESMFlow["ESMFlow 架构"]
+        E1[仅序列] --> E2[ESM-2 语言模型<br/>冻结的预训练编码器]
+        E2 --> E3[折叠主干<br/>简化的 Evoformer]
+        E3 --> E4[结构模块]
+        E4 --> E5[输出结构]
+    end
+    
+    style AlphaFlow fill:#e3f2fd
+    style ESMFlow fill:#fff3e0
+```
+
+### AlphaFlow：基于 MSA 的架构
+
+AlphaFlow 基于 AlphaFold 2 架构构建，包含了完整的 Evoformer 流水线以及 MSA 处理能力。该模型由几个关键组件组成：用于初始特征处理的 InputEmbedder 和 RecyclingEmbedder，用于处理额外 MSA 序列的可选 ExtraMSAEmbedder 和 ExtraMSAStack，用于迭代表示优化的核心 EvoformerStack，以及用于 3D 坐标预测的 StructureModule [alphafold.py#L40-L95](alphaflow/model/alphafold.py#L40-L95)。
+
+<CgxTip>
+Evoformer 堆栈是 AlphaFlow 的计算核心，它执行多达 48 层（基础模型）或 12 层（12l 模型）的迭代注意力操作，以优化 MSA 和成对表示。这是模型学习将来自 MSA 的进化信息与结构约束相结合的地方。
+</CgxTip>
+
+AlphaFlow 模型通过模板嵌入和模板成对堆栈支持可选的模板信息，当存在同源结构时，这可以显著提高准确性。该架构包含流匹配组件，具有输入成对嵌入和时间投影，用于生成目标 [alphafold.py#L100-L115](alphaflow/model/alphafold.py#L100-L115)。
+
+### ESMFlow：基于语言模型的架构
+
+ESMFlow 用 ESM-2 蛋白质语言模型替代了依赖 MSA 的 Evoformer，它提供了丰富的序列表示，而无需外部 MSA 数据。该架构包括预训练的 ESM 模型（冻结、半精度）、具有可学习权重的 ESM 特征组合层、用于将 ESM 特征转换为适当维度的 MLP，以及处理 LM 特征的简化 FoldingTrunk [esmfold.py#L49-L95](alphaflow/model/esmfold.py#L49-L95)。
+
+ESM 模型对原始氨基酸序列进行操作，并在所有 Transformer 层上生成嵌入，然后使用学习权重将这些嵌入组合起来。这消除了生成 MSA 的需要，使 ESMFlow 非常适合快速推理，特别是对于同源物很少的序列 [esmfold.py#L137-L155](alphaflow/model/esmfold.py#L137-L155)。
+
+<CgxTip>
+ESM-2 在训练期间保持冻结（禁用梯度计算），这显著减少了内存使用并加快了训练速度。可学习的 esm_s_combine 参数允许模型对来自冻结语言模型不同层的表示进行最佳加权。
+</cgt_tip>
+
+## 输入要求对比
+
+这两个系列之间最实际的区别在于它们的输入要求，这会影响设置时间、计算成本以及在不同场景下的适用性。
+
+| 要求 | AlphaFlow | ESMFlow |
+|-------------|-----------|---------|
+| **主要输入** | 序列 + MSA（.a3m 文件） | 仅序列 |
+| **可选输入** | 模板结构（PDB 文件） | 模板结构（仅限 MD+Templates 模型） |
+| **MSA 生成** | 必需（MMseqs2 搜索或 ColabFold 服务器） | 不需要 |
+| **序列限制** | ~700-1000 个残基（使用分块处理） | ~700-1000 个残基（使用分块处理） |
+| **设置复杂度** | 高（需要 MSA 数据库和搜索） | 低（仅需序列输入） |
+
+### AlphaFlow 数据流水线
+
+运行 AlphaFlow 需要预先计算好的 A3M 格式 MSA 比对结果。模型期望 MSA 组织在目录结构中，路径类似于 `{alignment_dir}/{name}/a3m/{name}.a3m`。对于没有现有 MSA 的用户，AlphaFlow 提供了两种选择：通过 mmseqs_query 脚本查询 ColabFold 服务器，或针对 UniRef30 和 ColabDB 数据库运行本地 MMseqs2 搜索 [README.md#L73-L81](README.md#L73-L81)。
+
+对于 MD+Templates 变体，还必须提供模板 PDB 文件，其中包含无残基缺口单链。这些模板提供结构指导，可以显著提高准确性，特别是对于远缘同源序列 [README.md#L82-L84](README.md#L82-L84)。
+
+### ESMFlow 数据流水线
+
+ESMFlow 仅需要氨基酸序列，极大地简化了工作流程。该模型提供了方便的推理方法（`infer_pdb`、`infer_pdbs`），可以直接接受原始序列，使其成为快速原型设计和大规模生成任务的理想选择 [esmfold.py#L422-L424](alphaflow/model/esmfold.py#L422-L424)。
+
+该模型在内部处理分词，将 AF2 氨基酸索引转换为 ESM 的编码方案。可以提供可选的掩码模式以探索不同的构象样本，尽管这通常仅用于研究而非标准推理 [esmfold.py#L133-L136](alphaflow/model/esmfold.py#L133-L136)。
+
+## 模型变体和版本
+
+AlphaFlow 和 ESMFlow 系列共享相同的变体命名方案，其中模型针对特定系综类型在不同数据集上进行了训练：
+
+### 特定数据集变体
+
+| 模型类型 | 训练数据 | 目标应用 |
+|------------|---------------|-------------------|
+| **PDB** | 来自 PDB 的实验结构 | 建模实验系综（不同条件下的 X 射线/冷冻电镜） |
+| **MD** | 300K 下的全原子显式溶剂 MD 轨迹 | 建模生理温度下的热力学系综 |
+| **MD+Templates** | 带有 PDB 参考结构的 MD 轨迹 | 建模由已知结构指导的 MD 系综 |
+
+### 大小和速度配置
+
+在每个数据集类型中，提供了针对不同用例优化的不同配置的模型：
+
+| 配置 | 描述 | 速度 | 准确性 |
+|--------------|-------------|-------|----------|
+| **Base** | 完整的 48 层 Evoformer (AlphaFlow) 或完整的 ESM-2 (ESMFlow) | 基准 | 最高准确性 |
+| **Distilled** | 降低精度、更小的网络 | 比基础版快 2-3 倍 | 准确性略有降低 |
+| **12l-base**（仅 AlphaFlow） | 12 层 Evoformer 而非 48 层 | 比 48 层基础版快 2.5 倍 | 性能小幅下降 |
+
+蒸馏版本使用较低精度权重和减少参数数量等技术来加速推理，使其适用于在可接受一定准确性损失的高通量生成任务。12 层 AlphaFlow 变体提供了一个折中方案，在最小准确性损失的情况下提供了显著的加速（快 2.5 倍）[README.md#L24-L26](README.md#L24-L26)。
+
+## 性能和权衡
+
+在模型系列和变体之间进行选择时，请考虑以下关键权衡：
+
+### AlphaFlow 与 ESMFlow 的权衡
+
+**AlphaFlow 优势：**
+- 当丰富的 MSA 信息可用时，准确性更高
+- 在具有许多同源物的蛋白质上表现更好
+- 更具可解释性（MSA 注意力模式提供进化见解）
+- 模板集成更成熟且经过充分测试
+
+**AlphaFlow 劣势：**
+- 需要 MSA 生成（缓慢、计算成本高）
+- 对于同源物很少的孤儿蛋白质性能下降
+- 设置复杂度和基础设施要求更高
+- 由于 MSA 处理开销，推理速度较慢
+
+**ESMFlow 优势：**
+- 仅序列输入（无需 MSA）
+- 更快的推理（无需 MSA 搜索或处理）
+- 在同源物很少的孤儿蛋白质上表现更好
+- 设置复杂度和基础设施要求更低
+- 在所有蛋白质家族中表现一致
+
+**ESMFlow 劣势：**
+- 当丰富的 MSA 可用时，通常准确性较低
+- 模型尺寸较大（ESM-2 约有 650M 参数）
+- 可解释性较差（LM 表示更难分析）
+- 模板集成不太成熟
+
+### 实际考虑
+
+对于涉及具有可用同源物的经过充分研究的蛋白质家族的大多数用例，AlphaFlow-PDB 或 AlphaFlow-MD 模型将提供最佳结果。MSA 生成的额外计算成本是合理的，特别是当建模实验系综或高精度应用时。
+
+对于孤儿蛋白质、快速探索许多序列或 MSA 基础设施不可用的情况，ESMFlow 模型以更简单的设置提供出色的结果。ESMFlow 对于大规模筛选任务或处理没有进化亲属的新型蛋白质设计特别有价值。
+
+## 模型选择指南
+
+根据你的特定用例，遵循以下决策流程：
+
+```mermaid
+flowchart TD
+    A[开始：你需要什么？] --> B{"你的主要<br/>目标是什么？"}
+    
+    B -->|针对已知家族的<br/>最高准确性| C["AlphaFlow Base"]
+    B -->|针对已知家族的<br/>平衡速度与准确性| D["AlphaFlow Distilled"]
+    B -->|孤儿蛋白质上的<br/>快速推理| E["ESMFlow Base"]
+    B -->|针对新序列的<br/>最大吞吐量| F["ESMFlow Distilled"]
+    
+    C --> G{"需要在最小损失<br/>的情况下获得 2.5 倍加速吗？"}
+    D --> G
+    G -->|是| H["AlphaFlow 12l-base"]
+    G -->|否| I["使用原始 48 层模型"]
+    
+    H --> J{"有模板结构吗？"}
+    I --> J
+    C --> J
+    D --> J
+    E --> J
+    F --> J
+    
+    J -->|是| K["使用 MD+Templates 变体"]
+    J -->|否| L{"什么系综类型？"}
+    
+    K --> M["生成结构"]
+    L -->|实验条件| N["使用 PDB 变体"]
+    L -->|生理温度| O["使用 MD 变体"]
+```
+
+### 快速参考表
+
+| 用例 | 推荐模型 | 基本原理 |
+|----------|-------------------|-----------|
+| 高精度实验系综（丰富 MSA） | AlphaFlow-PDB base | 利用进化信息获得最佳准确性 |
+| 具有参考结构的热力学系综 | AlphaFlow-MD+Templates base | 模板指导 + MD 训练 |
+| 新型蛋白质的大规模筛选 | ESMFlow-PDB distilled | 无需 MSA 的快速推理 |
+| 新序列的快速原型设计 | ESMFlow-MD base | 良好的准确性，仅序列输入 |
+| 计算预算紧张的生产部署 | AlphaFlow 12l-distilled 或 ESMFlow distilled | 针对速度优化 |
+| 孤儿蛋白质构象采样 | ESMFlow-MD base | 比使用糟糕 MSA 的 AlphaFlow 更好 |
+
+## 推理入门
+
+这两个系列的推理接口略有不同。对于 AlphaFlow 模型，请使用带有 MSA 目录的 `--mode alphafold` 标志：
+
+```bash
+python predict.py --mode alphafold \
+  --input_csv splits/atlas_test.csv \
+  --msa_dir ./alignment_dir \
+  --weights params/alphaflow_pdb_base_202402.pt \
+  --samples 10 \
+  --outpdb ./output
+```
+
+对于 ESMFlow 模型，使用 `--mode esmfold` 并省略 MSA 目录：
+
+```bash
+python predict.py --mode esmfold \
+  --input_csv splits/atlas_test.csv \
+  --weights params/esmflow_pdb_base_202402.pt \
+  --samples 10 \
+  --outpdb ./output
+```
+
+predict.py 脚本根据模式标志自动配置适当的模型并加载指定的权重 [predict.py#L6-L7](predict.py#L6-L7)，[predict.py#L42-L46](predict.py#L42-L46)。
+
+## 后续步骤
+
+既然你了解了 AlphaFlow 和 ESMFlow 系列之间的差异，请探索更多详细方面：
+
+- 在 [模型版本：Base、Distilled 和 12 层配置](4-model-versions-base-distilled-and-12-layer-configurations) 中了解特定模型配置及其权衡
+- 在 [为你的用例选择合适的模型](5-choosing-the-right-model-for-your-use-case) 中获取针对你的特定场景选择最佳模型的指导
+- 在 [Evoformer 和折叠主干架构](8-evoformer-and-folding-trunk-architecture) 中深入了解架构基础
+
+---
+
+- [入门/模型变体与选择/模型版本：Base、Distilled 和 12 层配置](https://zread.ai/bjing2016/alphaflow/4-model-versions-base-distilled-and-12-layer-configurations)
+
+---
+slug:4-model-versions-base-distilled-and-12-layer-configurations
+blog_type:normal
+---
+
+
+AlphaFlow 提供了多种模型配置，旨在平衡准确性、计算效率和特定的应用需求。本页面详细介绍了可用的模型版本、它们的架构差异、性能特征，以及为你的用例选择合适模型的指导。
+
+## 模型版本概述
+
+AlphaFlow 在其模型系列中提供了三个主要配置维度：
+
+1. **基础模型**：具有 48 个 Evoformer 层的全精度模型
+2. **蒸馏模型**：通过知识蒸馏训练的压缩版本，以实现更快的推理
+3. **12 层模型**：具有 12 个 Evoformer 层的浅层架构变体，以实现最大效率
+
+这些配置在三个模型系列中可用：**AlphaFlow-PDB**（在实验结构上训练）、**AlphaFlow-MD**（在 MD 轨迹上训练）和 **AlphaFlow-MD+Templates**（带有模板输入的 MD 模型）。同样，ESMFlow 模型也提供了基于 ESMFold 架构的相应配置。
+
+来源：[README.md](README.md#L47-L56)，[alphaflow/config.py](alphaflow/config.py#L400-L419)
+
+## 基础模型架构
+
+基础模型代表了 AlphaFlow 架构的全容量实现，紧密遵循 AlphaFold2 的设计，同时结合了用于生成式建模的流匹配修改。
+
+### 核心架构组件
+
+基础模型利用包含 48 个处理块的深层 Evoformer 堆栈，从而能够从序列和结构信息中进行复杂的表征学习。该架构包含几个关键模块：
+
+- **输入嵌入**：使用 InputEmbedder 将原始序列和 MSA 特征转换为初始表征，MSA 特征的维度为 c_m=256，成对特征的维度为 c_z=128
+- **Evoformer 堆栈**：48 个迭代细化块，通过注意力操作和成对池化更新 MSA 和成对表征，捕获复杂的生物模式
+- **结构模块**：通过 8 个不变点注意力块将最终表征转换为原子坐标，生成全原子蛋白质结构
+- **辅助头**：预测距离图、LDDT 分数和其他辅助输出，用于训练和评估
+
+流匹配目标通过高斯傅里叶投影集成，该投影将噪声时间步 t 嵌入到成对表征中，从而实现对构象集合的生成式建模。训练过程以 `noise_prob` 的概率随机采样噪声水平，并可选择性地以 `self_cond_prob` 的概率应用自条件化。
+
+来源：[alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L59-L100)，[alphaflow/config.py](alphaflow/config.py#L469-L485)，[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L88-L113)
+
+### 训练配置
+
+基础模型经历多阶段训练：
+
+1. **初始训练**：在 PDB 结构上进行预训练，并使用流匹配进行微调，使用诸如 crop_size=256、max_msa_clusters=128 等参数和标准数据增强
+2. **微调**：通过调整超参数并可能使用更大的上下文窗口（crop_size=384，max_msa_clusters=512）来适应特定领域（PDB 集合或 MD 轨迹）
+3. **模板集成**：对于 MD+Templates 模型，额外的训练通过 `extra_input` 机制以 `extra_input_prob` 的概率整合模板结构
+
+训练流水线采用具有衰减参数的指数移动平均（EMA）来稳定模型权重，推理期间使用 EMA 权重以提高泛化能力。
+
+来源：[alphaflow/config.py](alphaflow/config.py#L23-L58)，[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L243-L249)
+
+## 蒸馏模型
+
+蒸馏模型通过知识蒸馏提供速度与精度的权衡，其中学生模型学习近似较大的教师模型的行为。这种方法在最小性能下降的情况下显著减少了推理时间。
+
+### 蒸馏过程
+
+蒸馏训练利用师生框架，其中教师（通常是基础模型）生成轨迹预测，学生模型学习复现这些预测。该过程的关键组件包括：
+
+- **教师轨迹生成**：教师模型使用 11 个时间步（np.linspace(1, 0, 11)）进行带调度的去噪过程执行完整的流匹配，在每个时间步生成中间构象
+- **直接学生学习**：学生模型仅接收教师的最终预测作为目标，学习在单次前向传播中预测完整轨迹，推理设置使用 `no_diffusion=True` 和 `noisy_first=True`
+- **自条件化选项**：当启用 `distill_self_cond` 时，学生可以使用教师的中间输出作为条件信号
+
+这种方法有效地将迭代去噪过程压缩为单个预测，极大地降低了推理成本。学生模型保持相同的架构，但学习直接从噪声扰动的结构预测最终构象。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L62-L101)，[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L115-L124)，[alphaflow/utils/parsing.py](alphaflow/utils/parsing.py#L46-L49)
+
+### 性能特征
+
+蒸馏模型提供了显著的速度提升，并伴随适度的精度权衡：
+
+| 指标 | 基础模型 | 蒸馏模型 | 变化 |
+|--------|-----------|-----------------|---------|
+| 运行时间 | 38.0 | 3.8 | **快 10 倍** |
+| 成对 RMSD | 2.18 | 1.73 | -20.6% |
+| 全原子 RMSF | 1.31 | 1.00 | -23.7% |
+| 全局 RMSF 相关性 | 0.91 | 0.89 | -2.2% |
+| 弱接触 J | 0.62 | 0.51 | -17.7% |
+
+对于 ESMFlow 模型，蒸馏版本提供了类似的加速比，使它们特别适用于可以接受适度精度的高通量应用。
+
+来源：[assets/12l_md_templates.md](assets/12l_md_templates.md#L1-L17)，[README.md](README.md#L61-L74)
+
+### 推理配置
+
+使用蒸馏模型时，需要特定的推理参数：
+
+```bash
+# 蒸馏模型的基本参数
+python predict.py --mode alphafold --input_csv [PATH] --msa_dir [DIR] \
+    --weights [DISTILLED_WEIGHTS] --samples [N] --outpdb [DIR] \
+    --noisy_first --no_diffusion
+```
+
+`--noisy_first` 参数确保模型生成初始噪声结构，而 `--no_diffusion` 禁用迭代去噪过程，因为蒸馏模型是直接进行预测的。这些设置对于实现预期的性能特征至关重要。
+
+来源：[README.md](README.md#L117-L123)
+
+## 12 层配置
+
+12 层（12l）模型代表了针对 AlphaFlow-MD+Templates 模型系列的架构优化，将模型深度从 48 个 Evoformer 块减少到 12 个，同时保持必要的建模能力。当有参考结构（PDB 或 AlphaFold 预测）可用时，这种配置特别有价值。
+
+### 架构修改
+
+12 层配置实施了几个关键的架构更改：
+
+- **减少的 Evoformer 深度**：从 48 个块减少到 12 个（`no_blocks: 12`），将计算复杂度降低了大约 4 倍
+- **保持的维度**：保持相同的特征维度（c_z=128，c_m=256）以保持表征能力
+- **优化的结构模块**：结构模块参数保持一致（8 个块，c_s=384），确保最终结构生成质量
+
+深度的减少主要影响迭代细化过程，模型更新表征的机会减少。然而，剩余的块经过优化以捕获最关键的模式，特别是当模板信息指导预测时。
+
+来源：[alphaflow/config.py](alphaflow/config.py#L469-L485)，[alphaflow/model/trunk.py](alphaflow/model/trunk.py#L72-L88)
+
+### 性能比较
+
+12 层配置为模板引导的建模提供了卓越的速度和精度平衡：
+
+| 指标 | 48l-Base | 12l-Base | 48l-Distilled | 12l-Distilled |
+|--------|----------|---------|---------------|---------------|
+| 运行时间 | 38.0 | 15.2 | 3.8 | **1.56** |
+| 成对 RMSD | 2.18 | 1.94 | 1.73 | 1.40 |
+| 成对 RMSD 相关性 | 0.94 | 0.81 | 0.92 | 0.76 |
+| 全原子 RMSF | 1.31 | 1.01 | 1.00 | 0.76 |
+| 全局 RMSF 相关性 | 0.91 | 0.78 | 0.89 | 0.74 |
+| 均方根 W₂ 距离 | 1.95 | 2.26 | 2.18 | 2.43 |
+| 瞬时接触 J | 0.47 | 0.36 | 0.42 | 0.24 |
+
+值得注意的是，12l-base 模型在某些指标上实际上优于 48l-base（更低的成对 RMSD 和全原子 RMSF），这表明当有模板可用时，减少深度可能会减少过拟合。然而，相关性指标显示了预期的权衡，12 层模型在模式复现保真度方面较低。
+
+来源：[assets/12l_md_templates.md](assets/12l_md_templates.md#L1-L17)，[README.md](README.md#L57-L60)
+
+<CgxTip>12l-distilled 模型比 48l-base 模型实现了显著的 24.4 倍加速（38.0s → 1.56s），同时保持了许多应用可接受的性能，使其成为大规模模板引导预测的理想选择。</CgxTip>
+
+## 模型系列变体
+
+除了架构配置（基础/蒸馏/12l）外，AlphaFlow 模型还根据训练数据和能力进行分类：
+
+### AlphaFlow-PDB 模型
+
+这些模型在 PDB 的实验结构上训练，旨在捕获在不同实验条件（X 射线晶体学、冷冻电镜、NMR）下观察到的构象异质性。它们擅长建模：
+
+- 晶体结构中存在的替代构象
+- 不同实验条件下的集合变化
+- 实验数据中捕获的自然结构灵活性
+
+当使用具有实验结构可用作参考点的蛋白质时，PDB 模型特别适用。
+
+### AlphaFlow-MD 模型
+
+这些模型在 300K 生理温度下的全原子显式溶剂分子动力学轨迹上训练，学习蛋白质运动的物理动力学。它们针对以下方面进行了优化：
+
+- 预测生理条件下的热力学集合
+- 建模现实的构象路径
+- 捕获随时间变化的结构波动
+
+MD 模型在推理期间不需要模板输入，仅依赖序列和 MSA 信息。
+
+### AlphaFlow-MD+Templates 模型
+
+这些模型结合了 MD 训练数据和模板集成，将 PDB 结构作为额外输入。这种混合方法提供了：
+
+- 当有参考结构可用时提高准确性
+- 更好地建模相对于已知状态的构象变化
+- 提高同源序列的性能
+
+MD+Templates 系列是目前唯一提供 12 层配置的系列，因为模板信息有助于补偿减少的模型容量。
+
+### ESMFlow 模型
+
+ESMFlow 变体使用 ESMFold 架构（ESM-2 3B 参数语言模型）作为主干，而不是 AlphaFold2 架构。它们提供了：
+
+- 更快的无 MSA 推理（无需生成 MSA）
+- 来自语言模型的不同表征偏差
+- 在许多应用中与 AlphaFlow 相当的性能
+
+ESMFlow 模型遵循相同的基础/蒸馏配置模式，但目前没有 12 层变体。
+
+来源：[README.md](README.md#L18-L24)，[README.md](README.md#L47-L74)
+
+## 模型选择指南
+
+选择合适的模型版本取决于你的具体要求和约束：
+
+### 优先考虑准确性
+
+- **AlphaFlow-MD+Templates (48l-base)**：当有模板可用时，MD 应用程序的最佳整体准确性
+- **AlphaFlow-MD (48l-base)**：无模板的 MD 预测的最佳选择
+- **AlphaFlow-PDB (48l-base)**：实验集合建模的最佳选择
+
+这些模型提供最高保真度的预测，但需要最多的计算资源。
+
+### 优先考虑速度
+
+- **AlphaFlow-MD+Templates (12l-distilled)**：最快的模板引导预测（比 48l-base 快 24.4 倍）
+- **AlphaFlow-MD+Templates (distilled)**：比 48l-base 快 10 倍，适度精度损失
+- **ESMFlow-PDB (distilled)**：最快的无 MSA 预测
+
+在处理大量蛋白质或推理时间至关重要时，使用蒸馏或 12 层模型。
+
+### 内存受限环境
+
+- **12 层模型**：由于深度减少，内存占用显著降低
+- **蒸馏模型**：单次推理带来的适度内存节省
+- 在配置中启用 `--use_lma` 或 `--offload_inference` 标志以获得额外的内存节省
+
+### 模板可用性
+
+- **有模板**：AlphaFlow-MD+Templates（任何配置）以获得最佳结果
+- **无模板**：AlphaFlow-MD 或 AlphaFlow-PDB 模型
+- **有模板但想要速度**：AlphaFlow-MD+Templates 12l-distilled 以获得最佳权衡
+
+### 特定应用程序建议
+
+| 应用程序 | 推荐模型 | 基本原理 |
+|-------------|-------------------|-----------|
+| 药物设计流水线 | AlphaFlow-MD+Templates 48l-base | 结合位点建模的最大准确性 |
+| 大规模蛋白质组分析 | AlphaFlow-MD+Templates 12l-distilled | 处理数千个蛋白质的速度至关重要 |
+| 冷冻电镜图谱解释 | AlphaFlow-PDB 48l-base | 匹配实验条件 |
+| MD 轨迹初始化 | AlphaFlow-MD 48l-base | 物理动力学建模 |
+| 实时预测 | ESMFlow-PDB distilled | 无 MSA 推理以提高速度 |
+
+来源：[README.md](README.md#L57-L60)，[README.md](README.md#L117-L127)，[alphaflow/config.py](alphaflow/config.py#L251-L278)
+
+## 性能比较总结
+
+以下全面比较总结了所有模型版本的关键特征：
+
+```mermaid
+graph TD
+    A[AlphaFlow 模型版本] --> B[AlphaFlow-PDB]
+    A --> C[AlphaFlow-MD]
+    A --> D[AlphaFlow-MD+Templates]
+    
+    B --> B1[48l-base: 全精度]
+    B --> B2[48l-distilled: 快 10 倍]
+    
+    C --> C1[48l-base: 全精度]
+    C --> C2[48l-distilled: 快 10 倍]
+    
+    D --> D1[48l-base: 全精度, 38s]
+    D --> D2[48l-distilled: 快 10 倍, 3.8s]
+    D --> D3[12l-base: 快 2.5 倍, 15.2s]
+    D --> D4[12l-distilled: 快 24 倍, 1.56s]
+    
+    E[ESMFlow 模型版本] --> F[ESMFlow-PDB]
+    E --> G[ESMFlow-MD]
+    E --> H[ESMFlow-MD+Templates]
+    
+    F --> F1[48l-base: 全精度]
+    F --> F2[48l-distilled: 快 10 倍]
+    
+    G --> G1[48l-base: 全精度]
+    G --> G2[48l-distilled: 快 10 倍]
+    
+    H --> H1[48l-base: 全精度]
+    H --> H2[48l-distilled: 快 10 倍]
+```
+
+**关键性能指标**（针对标准推理上的 AlphaFlow-MD+Templates）：
+
+| 配置 | 准确性 | 速度 | 最适用于 |
+|---------------|----------|-------|----------|
+| 48l-base | ★★★★★ | ★☆☆☆☆ | 最大准确性，研究应用 |
+| 48l-distilled | ★★★★☆ | ★★★☆☆ | 平衡性能，生产使用 |
+| 12l-base | ★★★☆☆ | ★★★★☆ | 具有良好准确性的模板引导预测 |
+| 12l-distilled | ★★☆☆☆ | ★★★★★ | 带模板的高通量应用 |
+
+来源：[assets/12l_md_templates.md](assets/12l_md_templates.md#L1-L17)，[README.md](README.md#L61-L74)
+
+## 可用的模型权重
+
+所有模型权重均公开可用，可下载用于推理或微调：
+
+### AlphaFlow 模型权重
+
+| 模型 | 版本 | 权重 URL |
+|-------|---------|-------------|
+| AlphaFlow-PDB | base | https://storage.googleapis.com/alphaflow/params/alphaflow_pdb_base_202402.pt |
+| AlphaFlow-PDB | distilled | https://storage.googleapis.com/alphaflow/params/alphaflow_pdb_distilled_202402.pt |
+| AlphaFlow-MD | base | https://storage.googleapis.com/alphaflow/params/alphaflow_md_base_202402.pt |
+| AlphaFlow-MD | distilled | https://storage.googleapis.com/alphaflow/params/alphaflow_md_distilled_202402.pt |
+| AlphaFlow-MD+Templates | base | https://storage.googleapis.com/alphaflow/params/alphaflow_md_templates_base_202402.pt |
+| AlphaFlow-MD+Templates | distilled | https://storage.googleapis.com/alphaflow/params/alphaflow_md_templates_distilled_202402.pt |
+| AlphaFlow-MD+Templates | 12l-base | https://storage.googleapis.com/alphaflow/params/alphaflow_12l_md_templates_base_202406.pt |
+| AlphaFlow-MD+Templates | 12l-distilled | https://storage.googleapis.com/alphaflow/params/alphaflow_12l_md_templates_distilled_202406.pt |
+
+### ESMFlow 模型权重
+
+| 模型 | 版本 | 权重 URL |
+|-------|---------|-------------|
+| ESMFlow-PDB | base | https://storage.googleapis.com/alphaflow/params/esmflow_pdb_base_202402.pt |
+| ESMFlow-PDB | distilled | https://storage.googleapis.com/alphaflow/params/esmflow_pdb_distilled_202402.pt |
+| ESMFlow-MD | base | https://storage.googleapis.com/alphaflow/params/esmflow_md_base_202402.pt |
+| ESMFlow-MD | distilled | https://storage.googleapis.com/alphaflow/params/esmflow_md_distilled_202402.pt |
+| ESMFlow-MD+Templates | base | https://storage.googleapis.com/alphaflow/params/esmflow_md_templates_base_202402.pt |
+| ESMFlow-MD+Templates | distilled | https://storage.googleapis.com/alphaflow/params/esmflow_md_templates_distilled_202402.pt |
+
+<CgxTip>所有模型的训练检查点可根据要求提供用于研究合作， enabling 专门应用的微调或持续训练。</CgxTip>
+
+来源：[README.md](README.md#L61-L84)
+
+## 后续步骤
+
+既然你了解了可用的模型版本及其特征，你可能想要探索：
+
+- **[为你的用例选择合适的模型](5-choosing-the-right-model-for-your-use-case)** - 基于特定应用程序要求和约束的模型选择详细指导
+- **[AlphaFlow 与 ESMFlow 模型系列](3-alphaflow-vs-esmflow-model-families)** - 两种主要模型架构的比较分析
+- **[推理流水线和采样过程](14-inference-pipeline-and-sampling-process)** - 使用不同模型配置运行推理的技术细节
+
+如需动手实践，请参阅 [快速入门](2-quick-start) 指南来设置你的环境，并使用最适合你需求的模型运行你的第一次预测。
+
+---
+
+- [入门/模型变体与选择/为你的用例选择合适的模型](https://zread.ai/bjing2016/alphaflow/5-choosing-the-right-model-for-your-use-case)
+
+---
+slug:5-choosing-the-right-model-for-your-use-case
+blog_type:normal
+---
+
+
+本页面提供了一个系统化的框架，用于根据你的具体用例、性能要求和可用的计算资源，选择合适的 AlphaFlow 或 ESMFlow 模型变体。理解这些权衡对于在蛋白质构象系综生成中获得最佳结果至关重要。
+
+## 模型系列：AlphaFlow 与 ESMFlow
+
+第一个决策点涉及在两个架构系列之间进行选择，每个系列都具有适合不同场景的独特特征。
+
+![Protein Animation Example](https://github.com/bjing2016/alphaflow/blob/master/assets/6uof_A_animation.gif?raw=true)
+
+*展示流匹配方法的蛋白质构象系综生成动画*
+
+**AlphaFlow 模型**利用 AlphaFold 架构，使用多序列比对（MSA）来获取进化信息。这些模型通常在具有深度 MSA 和保守序列良好的靶标上实现更高的精度，因为进化上下文提供了强大的结构约束 [predict.py](/predict.py#L3-L22)。预先计算 MSA 的要求增加了预处理开销，但在许多实验结构建模任务中能够实现卓越的性能 [predict.py](/predict.py#L5-L6)。
+
+**ESMFlow 模型**基于 ESMFold 构建，后者使用蛋白质语言模型嵌入而不是 MSA。这完全消除了 MSA 生成的需求，显著减少了预处理时间。ESMFlow 对于同源物有限的新颖序列或需要快速迭代的情况特别有利 [predict.py](/predict.py#L6-L22)。对于孤儿蛋白或具有浅层 MSA 的序列，ESMFlow 由于从大规模无监督预训练中学习到的鲁棒表示，通常优于 AlphaFlow。
+
+<CgxTip>
+根本的架构差异决定了你的数据管道：AlphaFlow 需要一个包含 `.a3m` 格式文件的 MSA 目录，位于 `{alignment_dir}/{name}/a3m/{name}.a3m`，而 ESMFlow 直接从序列输入运行。
+</CgxTip>
+
+## 训练目标：PDB vs MD vs MD+Templates
+
+一旦你选择了一个架构系列，接下来就要选择与你的应用领域一致的训练目标。这个选择决定了模型生成的构象系综的类型。
+
+| 模型类型 | 训练数据 | 最佳用例 | 系综特征 |
+|------------|---------------|---------------|--------------------------|
+| **AlphaFlow-PDB** | PDB 实验结构（X-ray，cryo-EM） | 从实验数据建模构象异质性 | 捕获不同实验条件下的静态快照 |
+| **AlphaFlow-MD** | 300K 下的全原子显式溶剂 MD 轨迹 | 生成与生理学相关的构象景观 | 产生反映生理温度下热波动的动态系综 |
+| **AlphaFlow-MD+Templates** | 带有参考结构条件化的 MD 轨迹 | 当存在高质量参考结构时的系综生成 | 利用模板信息引导围绕已知构象的系综多样性 |
+
+[README.md](/README.md#L40-L52)
+
+**PDB 模型**专为那些想要理解在实验环境中观察到的结构变异性的场景而设计。这些系综反映了不同晶体形式、cryo-EM 重建或实验条件之间的构象差异，使其成为研究 PDB 中捕获的功能性构象变化的理想选择。
+
+**MD 模型**针对不同的目标：生成与在 300K 下进行的分子动力学模拟中观察到的热波动相匹配的系综。这些模型学习蛋白质构象在生理温度下的玻尔兹曼分布，使其适用于研究内在动力学、变构机制，或为下游计算任务生成训练数据。
+
+**MD+Templates 模型**代表了一种混合方法。通过条件化于参考 PDB 结构（templates_dir 参数），这些模型生成锚定于已知构象的类 MD 系综 [predict.py](/predict.py#L4-L14)。当你拥有高质量的实验或预测结构，并想要探索围绕该参考状态的可访问构象空间时，这特别有价值，其应用包括柔性对接、基于系综的药物设计，或在保持全局折叠完整性的同时研究局部动力学。
+
+## 性能与速度：Base、Distilled 和 12-Layer 配置
+
+最后一个维度涉及通过模型大小和训练方法来平衡准确性和计算成本。
+
+### Base 与 Distilled 模型
+
+**Distilled 模型**使用师生蒸馏进行训练，其中较大的基础模型作为教师指导较小的学生模型。这个过程显著减少了模型大小和推理时间，同时保持了大部分性能 [alphaflow/model/wrapper.py](/alphaflow/model/wrapper.py#L72-L125)。蒸馏变体使用减少的层数和隐藏维度，在一些基准测试中以适度的精度代价实现了 10 倍的加速 [assets/12l_md_templates.md](/assets/12l_md_templates.md#L1-L17)。
+
+这种权衡在基准测试结果中得到了量化：对于 MD+Templates 模型，蒸馏版本将每个系综的运行时间从 38s 减少到 3.8s，同时 RMSF 指标的相关系数保持在 0.88 以上 [assets/12l_md_templates.md](/assets/12l_md_templates.md#L1-L17)。对于需要高通量生成或实时应用的生产环境，蒸馏模型通常代表了最佳平衡。
+
+<CgxTip>
+使用蒸馏模型时，你必须在推理期间附加 `--noisy_first --no_diffusion` 参数，因为这些模型是使用这种优化策略训练的 [predict.py](/predict.py#L17-L19)。
+</CgxTip>
+
+### 48-Layer 与 12-Layer 配置
+
+一项较新的优化专门针对 MD+Templates 模型引入了 **12 层版本**，取代了标准的 48 层 Evoformer 层。这些模型实现了 2.5 倍的加速（Base 从 38s 降至 15.2s，Distilled 从 3.8s 降至 1.56s），且性能下降最小 [assets/12l_md_templates.md](/assets/12l_md_templates.md#L1-L17)。性能指标显示，12 层模型保持了大部分系综质量，RMSF 相关系数仍然具有竞争力（0.78-0.89 vs 48 层版本的 0.89-0.91）[assets/12l_md_templates.md](/assets/12l_md_templates.md#L1-L17)。
+
+对于需要大量采样或批量处理大型蛋白质数据集的场景，12 层配置通常能提供最佳的计算投资回报，尤其是在与模板条件化结合使用时。
+
+## 决策框架
+
+```mermaid
+flowchart TD
+    A[Start: Protein Ensemble Generation] --> B{MSA Available?}
+    B -->|Yes| C{High Accuracy Priority?}
+    B -->|No or Limited| D{Speed Priority?}
+    
+    C -->|Yes| E[AlphaFlow Base]
+    C -->|No| F[AlphaFlow Distilled]
+    
+    D -->|Yes| G[ESMFlow Distilled]
+    D -->|No| H[ESMFlow Base]
+    
+    E --> I{Target Ensemble Type}
+    F --> I
+    G --> I
+    H --> I
+    
+    I -->|Experimental Heterogeneity| J[PDB Model]
+    I -->|Physiological Dynamics| K[MD Model]
+    I -->|Anchored Dynamics| L{Reference Structure?}
+    
+    L -->|Yes| M[MD+Templates Model]
+    L -->|No| K
+    
+    J --> N{Throughput Requirements?}
+    K --> N
+    M --> N
+    
+    N -->|High Throughput| O[Use 12l + Distilled]
+    N -->|Balanced| P[Use 12l + Base or 48l + Distilled]
+    N -->|Maximum Accuracy| Q[Use 48l + Base]
+    
+    O --> R[Final Model Selection]
+    P --> R
+    Q --> R
+```
+
+此流程图引导你完成关键的决策点。在确定你的模型系列和训练目标后，请考虑 12 层变体是否能为你的需求提供足够的性能。对于大多数高通量应用，12 层蒸馏配置提供了卓越的性价比，而基准质量的结果则保证了 48 层基础模型。
+
+## 按模型类型分类的配置要求
+
+每个模型变体都有特定的推理要求，必须满足这些要求才能正确运行。
+
+### AlphaFlow 模型
+
+所有 AlphaFlow 模型都需要 MSA 并支持高级推理选项：
+
+**必需参数：**
+- `--mode alphafold`
+- `--input_csv [PATH]` - 包含 name 和 seqres 列的 CSV 文件
+- `--msa_dir [DIR]` - 包含 `.a3m` 格式 MSA 文件的目录
+- `--weights [PATH]` - 模型权重的路径
+- `--samples [N]` - 要生成的系综成员数量
+- `--outpdb [DIR]` - PDB 文件的输出目录
+
+[predict.py](/predict.py#L3-L12)
+
+**PDB 模型的推荐选项：**
+- `--self_cond --resample` - 通过启用自条件化和 MSA 重采样显著提高性能 [predict.py](/predict.py#L15-L16)
+
+**蒸馏模型所必需：**
+- `--noisy_first --no_diffusion` - 对于正确的蒸馏模型推理至关重要 [predict.py](/predict.py#L17-L18)
+
+**其他选项：**
+- `--pdb_id [ID]` - 从输入 CSV 中选择特定条目
+- `--tmax [VALUE]` - 最大扩散时间（默认 1.0）
+- `--steps [N]` - 扩散步数（默认 10）
+- 较低的值（例如 `--tmax 0.2 --steps 2`）会提高精度但降低多样性 [predict.py](/predict.py#L16-L20)
+
+### ESMFlow 模型
+
+由于没有 MSA 处理，ESMFlow 模型的要求更简单：
+
+**必需参数：**
+- `--mode esmfold`
+- `--input_csv [PATH]`
+- `--weights [PATH]`
+- `--samples [N]`
+- `--outpdb [DIR]`
+
+[predict.py](/predict.py#L3-L12)
+
+**蒸馏模型所必需：**
+- `--noisy_first --no_diffusion` [predict.py](/predict.py#L17-L18)
+
+### MD+Templates 模型
+
+这些模型需要额外的模板结构输入：
+
+**额外必需参数：**
+- `--templates_dir [DIR]` - 包含与 CSV 名称匹配的模板 PDB 文件的目录 [predict.py](/predict.py#L14)
+
+模板 PDB 文件应仅包含单条链且没有残基间隙 [README.md](/README.md#L89-L92)。
+
+## 用例推荐
+
+基于架构维度和配置要求，以下是针对常见场景的具体推荐：
+
+### 场景 1：高通量筛选
+
+**推荐：** ESMFlow-PDB Distilled 或 AlphaFlow-PDB 12l-Distilled
+
+对于筛选大量序列且速度至关重要、中等精度即可的情况，蒸馏的 ESMFlow 变体完全消除了 MSA 预处理开销。当进化信息至关重要且 MSA 可用时，AlphaFlow-PDB 12l-distilled 提供了速度和精度的最佳组合，可在标准 GPU 硬件上每分钟生成 10-20 个系综 [assets/12l_md_templates.md](/assets/12l_md_templates.md#L1-L17)。
+
+### 场景 2：精确的 MD 系综生成
+
+**推荐：** AlphaFlow-MD+Templates 48l-Base
+
+当生成系综以与实际 MD 轨迹进行基准测试或研究细微动力学时，请使用带有模板条件化的基础 48 层模型。模板提供了强大的结构锚点，而完整的架构捕捉了细微的热波动。预计每个系综的运行时间约为 38 秒 [assets/12l_md_templates.md](/assets/12l_md_templates.md#L1-L17)。
+
+### 场景 3：具有有限同源物的新颖蛋白质
+
+**推荐：** ESMFlow-MD 或 ESMFlow-MD+Templates Base
+
+对于孤儿蛋白或具有浅层 MSA 的序列，ESMFlow 架构利用了比依赖 MSA 的方法泛化能力更强的语言模型表示。使用基础模型以获得最大精度，如果存在任何结构同源物，请考虑模板条件化 [predict.py](/predict.py#L6-L22)。
+
+### 场景 4：柔性对接准备
+
+**推荐：** AlphaFlow-MD+Templates 12l-Distilled
+
+在制备系综对接库时，12 层蒸馏模型提供了卓越的吞吐量，同时保持了足够的系综质量，以采样围绕参考结构的相关构象空间。每个系综约 1.56 秒的运行时间使得能够为每个靶标生成数千个构象 [assets/12l_md_templates.md](/assets/12l_md_templates.md#L1-L17)。
+
+### 场景 5：基准测试和发表
+
+**推荐：** AlphaFlow-PDB 或 AlphaFlow-MD 48l-Base
+
+为了生成旨在发表或与实验数据进行严格基准测试的结果，请使用完整的 48 层基础模型并采用适当的采样设置。确保为 PDB 模型使用 `--self_cond --resample` 以获得最佳报告性能 [predict.py](/predict.py#L15-L16)。
+
+## 与训练管道的集成
+
+对于计划微调或扩展这些模型的用户，请理解不同的起始检查点服务于不同的目的：
+
+- **AlphaFlow-PDB base** 是所有其他变体的基础，在 PDB 结构上使用标准流匹配微调进行训练 [train.py](/train.py#L21-L30)
+- **MD 变体** 在 ATLAS 轨迹数据上继续训练，并带有额外的采样配置 [train.py](/train.py#L42-L52)
+- **蒸馏** 使用带有教师模型检查点的 `--distillation` 标志 [train.py](/train.py#L53-L60)
+- **12 层模型** 涉及对 Evoformer 堆栈深度的架构修改
+
+在扩展这些模型时，请考虑你的计算资源：蒸馏训练所需的轮数减少 5 倍（`--train_epoch_len 16000` vs `80000`），并且可以省略梯度累积 [train.py](/train.py#L53-L60)。
+
+## 下一步
+
+选择你的模型后，请继续查看实现细节：
+
+- 关于流匹配集成的理论基础，请参阅 [Flow Matching Objective Integration with AlphaFold](6-flow-matching-objective-integration-with-alphafold)
+- 要了解推理机制和采样策略，请查看 [Inference Pipeline and Sampling Process](14-inference-pipeline-and-sampling-process)
+- 要准备你的数据管道，请查阅 [MSA Generation with MMseqs2](18-msa-generation-with-mmseqs2) 和 [Template Processing and Feature Extraction](19-template-processing-and-feature-extraction)
+- 要评估你生成的系综，请参考 [Ensemble Evaluation Metrics on ATLAS Dataset](22-ensemble-evaluation-metrics-on-atlas-dataset)
+
+---
+
+# 深度解析
+
+## 核心架构
+
+- [深度解析/核心架构/Flow Matching 目标与 AlphaFold 的集成](https://zread.ai/bjing2016/alphaflow/6-flow-matching-objective-integration-with-alphafold)
+
+---
+slug:6-flow-matching-objective-integration-with-alphafold
+blog_type:normal
+---
+
+
+本页文档介绍了 AlphaFlow 如何将流匹配目标集成到 AlphaFold 架构中，从而通过迭代去噪实现蛋白质结构生成。该实现调整了确定性流匹配范式，使其能够与 AlphaFold 的成对表示嵌入和主干预测能力协同工作。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L52-L70), [alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L220-L235)
+
+## 概念基础
+
+AlphaFlow 实现了一个**连续时间流匹配目标**，旨在学习将简单的噪声分布（谐波先验）转化为天然蛋白质结构的复杂分布。与传统迭代添加和移除高斯噪声的扩散模型不同，该方法采用确定性插值方案，在整个去噪过程中保持结构的真实感。
+
+其核心思想在训练过程中非常直观：根据时间参数 t ∈ [0,1]，在干净的主干结构和噪声样本之间进行插值，然后训练模型预测去噪方向。在推理阶段，这一过程被逆转，即沿着预定义的时间表迭代应用学习到的去噪步骤。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L52-L70), [alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L40-L58)
+
+## 谐波先验分布
+
+噪声分布由 `HarmonicPrior` 类建模，该类生成满足基本蛋白质几何约束的合理主干构型：
+
+```python
+class HarmonicPrior:
+    def __init__(self, N=256, a=3/(3.8**2)):
+        # N: 序列长度
+        # a: 近似肽键刚度的弹簧常数
+```
+
+该先验从势能景观中采样结构，其中：
+- 残基间距离遵循基于序列分离度的谐波约束
+- 弹簧常数（a ≈ 3/3.8²）编码了预期的键长统计信息
+- 采样的结构作为流匹配的“噪声”起始点
+
+来源：[alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L40-L58)
+
+## 训练流程集成
+
+### 噪声注入策略
+
+在训练期间，根据可配置的概率（`noise_prob`）随机注入噪声。`_add_noise` 方法执行插值操作：
+
+1. 从谐波先验采样噪声主干
+2. 使用 RMSD 对齐将噪声样本与真实主干对齐
+3. 采样随机时间参数 t ~ Uniform(0,1)
+4. 线性插值：`noisy_beta = (1-t) * ground_truth + t * noisy_sample`
+5. 从插值后的主干计算成对距离矩阵
+6. 将距离矩阵和时间参数存储在批次中
+
+这构建了一种课程学习机制：早期训练（高 t）侧重于学习大规模结构，而后期训练（低 t）则细化原子细节。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L52-L70)
+
+### 前向传播修改
+
+AlphaFold 的前向传播经过修改，以融入噪声距离信息：
+
+```mermaid
+flowchart LR
+    A[包含特征的批次] --> B{是否存在<br/>噪声距离?}
+    B -->|是| C[编码距离直方图]
+    B -->|否| D[使用零嵌入]
+    C --> E[添加时间嵌入]
+    D --> E
+    E --> F[初始化成对表示]
+    F --> G[Evoformer 处理]
+    G --> H[Fold 主干]
+    H --> I[输出结构]
+```
+
+当批次中存在 `noised_pseudo_beta_dists` 时：
+
+1. 将距离矩阵分箱为距离直方图（默认 39 个分箱，范围 3.25-20.75Å）
+2. 将距离直方图嵌入到成对表示通道中
+3. 根据时间参数 t 计算时间嵌入（256 维）并将其加到成对嵌入中
+4. 然后将修改后的成对表示集成到标准的 AlphaFold 处理流程中
+
+来源：[alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L220-L235), [alphaflow/config.py](alphaflow/config.py#L396-L403)
+
+### 自条件
+
+模型在训练期间可选择使用自条件（`self_cond_prob`）：运行一次无梯度的前序预测过程，并将其输出作为 `prev_outputs` 传递给主前向传播。这为模型提供了其自身的结构信念作为额外指导，类似于扩散模型中的无分类器引导。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L156-L160)
+
+## 推理过程
+
+### 迭代去噪时间表
+
+推理遵循一个时间值递减的确定性时间表，通常为：[1.0, 0.75, 0.5, 0.25, 0.1, 0]。对于每一对：
+
+1. 使用当前的噪声距离和时间 t 运行模型
+2. 从预测结构中提取 pseudo_beta（Cα 位置）
+3. 将先前的噪声主干与当前预测对齐
+4. 插值：`noisy = (s/t) * noisy + (1 - s/t) * prediction`
+5. 更新下一次迭代的距离矩阵和时间
+6. 可选择通过输入先前的输出使用自条件
+
+这创建了一条从随机噪声到类天然结构的平滑轨迹，每一步都逐步减少噪声的影响。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L350-L391)
+
+### 推理期间的架构流程
+
+```mermaid
+sequenceDiagram
+    participant Prior as 谐波先验
+    participant Model as AlphaFold 模型
+    participant Output as 结构输出
+    
+    Prior->>Model: 采样初始噪声结构
+    Model->>Model: 初始化距离矩阵
+    loop 对于每个时间步 (t→s)
+        Model->>Model: 使用 t 运行前向传播
+        Model->>Output: 生成结构预测
+        Output->>Model: 对齐并插值主干
+        Model->>Model: 更新距离并设置时间=s
+    end
+    Output-->>Prior: 最终去噪结构
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L350-L391)
+
+## 关键实现细节
+
+### 距离分箱配置
+
+距离直方图编码使用 39 个分箱，跨度为 3.25-20.75Å，并为掩码位置设置一个无限大分箱。这提供了足够的分辨率来捕获局部二级结构（短距离）和三级接触（长距离）。
+
+来源：[alphaflow/config.py](alphaflow/config.py#L396-L403), [alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L117-L129)
+
+### 时间嵌入架构
+
+时间嵌入的计算方式如下：
+1. 标量时间参数通过线性层进行投影
+2. 将结果嵌入到成对表示空间
+3. 广播到所有残基对
+
+这为模型提供了一个关于去噪过程“进度”的连续信号，使其能够相应地调整预测。
+
+来源：[alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L225), [alphaflow/config.py](alphaflow/config.py#L401-L402)
+
+### 集成点
+
+流匹配的修改集成在**成对表示层**，而不是修改核心架构。这是一个战略性的设计选择：
+
+- 对 AlphaFold 成熟的架构干扰最小
+- 允许预训练权重的迁移
+- 成对表示自然地编码 3D 结构信息
+- 与现有的训练流程和损失函数兼容
+
+来源：[alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L235)
+
+## 训练配置
+
+流匹配训练引入了几个超参数：
+
+| 参数 | 描述 | 典型值 |
+|-----------|-------------|---------------|
+| `noise_prob` | 每批次添加噪声的概率 | 0.5-1.0 |
+| `self_cond_prob` | 自条件的概率 | 0.1-0.5 |
+| `distillation` | 启用师生蒸馏 | False/True |
+| `extra_input_prob` | 使用额外位置输入的概率 | 0.0-1.0 |
+
+在蒸馏过程中，教师模型生成去噪目标，学生模型学习匹配这些目标。这使得知识能够从更大的教师模型转移到更小、更快的学生模型。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L139-L154), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L72-L124)
+
+## 与标准 AlphaFold 损失的关系
+
+流匹配目标与标准 AlphaFold 损失**正交**运行：
+
+- **FAPE 损失**：优化预测结构与目标结构之间的帧对齐点误差
+- **扭转角损失**：确保合理的主干二面角
+- **违例损失**：防止空间位阻冲突和几何违例
+- **流匹配**：引导从噪声到结构的去噪轨迹
+
+在带噪声的训练期间，模型在满足这些结构约束的同时学习去噪。损失函数在配置文件中定义的加权和进行组合。
+
+来源：[alphaflow/utils/loss.py](alphaflow/utils/loss.py#L1522-L1538)
+
+<CgxTip>
+时间嵌入对于成功的流匹配至关重要——它允许模型知道应该预测大规模的结构变化（早期时间）还是细粒度的细化（晚期时间）。如果没有这种条件约束，模型将难以连贯地导航去噪轨迹。
+</CgxTip>
+
+<CgxTip>
+`_add_noise` 中的 RMSD 对齐是一个微妙但关键的细节。通过在插值前将噪声样本与真实对齐，我们确保噪声结构保持大致正确的方向。这从学习问题中消除了旋转自由度，使模型能够专注于构象变化而不是刚体变换。
+</CgxTip>
+
+## 后续步骤
+
+要了解流匹配系统的互补组件，请探索：
+
+- **[谐波先验与噪声调度](7-harmonic-prior-and-noise-scheduling)**：关于谐波先验实现和调度策略的详细信息
+- **[推理流程与采样过程](14-inference-pipeline-and-sampling-process)**：完整的推理工作流程和采样变体
+- **[损失函数：FAPE、扭转角损失与流匹配损失](12-loss-functions-fape-torsion-angle-loss-and-flow-matching-loss)**：全面的损失公式和加权策略
+
+---
+
+- [深度解析/核心架构/谐波先验与噪声调度](https://zread.ai/bjing2016/alphaflow/7-harmonic-prior-and-noise-scheduling)
+
+---
+slug:7-harmonic-prior-and-noise-scheduling
+blog_type:normal
+---
+
+
+AlphaFlow 的生成能力源于物理先验模型（HarmonicPrior）与策略性噪声调度机制的精妙结合。这些组件协同工作，将 AlphaFold2 从确定性预测器转变为能够探索构象多样性的生成采样器。
+
+## 调和先验：高斯链模型
+
+HarmonicPrior 基于简化的聚合物模型，实现了蛋白质主链构象的物理先验。它将蛋白质结构建模为由谐振弹簧连接的残基序列，其中相邻残基之间存在引力，平衡间距由参数 `a = 3/(3.8²)`（约 0.208 Å⁻²）决定，对应于蛋白质中典型的 Cα-Cα 键长。
+
+数学公式构建了一个 N×N 三对角耦合矩阵 J，其中对角元素代表自相互作用，非对角元素代表相邻残基间的相互作用。该矩阵对称，遵循 J[i,i] = a 且对于所有相邻残基对 J[i,i+1] = J[i+1,i] = -a 的模式。
+
+该耦合矩阵 J 经历特征值分解，产生正交特征向量 P 和相应的特征值 D。采样过程在特征基中生成随机高斯扰动，然后通过线性变换 P(√D⁻¹ × noise) 变换回坐标空间。采样过程中排除了零特征值模式以保持平移不变性，这对分子系统至关重要。
+
+来源：[alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L40-L58)
+
+## 训练期间的噪声注入
+
+在标准训练期间，噪声以可控概率注入到输入数据中，该概率由 `noise_prob` 参数控制。当触发时，`_add_noise()` 方法执行多步骤破坏过程。
+
+首先，HarmonicPrior 从其分布中采样一个随机构象，其批次维度与当前训练批次匹配。然后使用 RMSD 对齐（Kabsch 算法）将此随机结构与真实结构对齐，该算法通过最佳旋转和平移最小化对应原子之间的均方根偏差。对齐步骤确保噪声注入不会引入会干扰学习过程的任意旋转或平移。
+
+为批次中的每个样本从 [0,1] 范围内均匀采样随机噪声水平 t。通过凸插值生成破坏的伪 beta 坐标：noisy_beta = (1-t) × true_pseudo_beta + t × aligned_random_structure，其中 t 作为控制破坏程度的插值系数。然后从这些破坏的坐标计算所有残基对之间的成对距离，并作为 `noised_pseudo_beta_dists` 存储在批次字典中。
+
+这些带噪声的距离通过 `_get_input_pair_embeddings()` 方法作为网络的输入，该方法将连续距离离散化为直方图箱（可配置，默认 64 个箱，范围从 min_bin 到 max_bin）。生成的距离图表示通过嵌入层和 InputPairStack 处理，然后集成到主网络中。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L52-L71), [alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L113-L129)
+
+## 结构化噪声调度的蒸馏训练
+
+蒸馏训练采用独特的噪声调度策略，旨在将知识从教师模型转移到学生模型，同时教学生有效地去噪。该过程使用 11 步线性调度，范围从 t=1.0（最大噪声）到 t=0.0（无噪声）。
+
+教师模型首先通过前向传递生成预测，从最大噪声逐步去噪到零噪声。在每个调度步骤 s，教师接收具有噪声水平 s 的输入并产生预测，然后这些预测用于构建噪声水平为 s_next 的下一步的输入。从教师预测中提取的伪 beta 坐标与当前噪声构象对齐，并根据调度进行混合：new_noisy = (s_next/s) × current_noisy + (1 - s_next/s) × teacher_pseudo_beta。
+
+这创建了一种课程，学生从中学习从逐渐减少破坏的输入中预测更清晰的输出，遵循教师演示的反向扩散轨迹。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L72-L124)
+
+## 渐进式去噪推理
+
+在推理时，调度控制生成多样化构象的去噪过程。默认调度使用 6 个步骤：[1.0, 0.75, 0.50, 0.25, 0.10, 0.0]，尽管这可以通过命令行参数配置。该过程可根据应用需求以多种模式运行。
+
+在标准扩散模式下，该过程从随机噪声（t=1.0）迭代去噪到最终结构（t=0.0）。在从噪声水平 t 到 s 的每次过渡中，模型给定当前噪声水平预测结构，产生伪 beta 坐标，并将它们与当前噪声构象对齐。使用与蒸馏中相同的凸组合公式更新新的噪声构象。调度的 t 值作为批次元数据（`batch['t']`）传播，以启用时间感知条件化。
+
+自条件化选项使用模型的先前预测作为当前步骤的辅助输入，这可以通过为模型提供其自己的先前输出作为上下文来提高预测一致性。`noisy_first` 选项使用纯噪声初始化过程，而不是从 t=1.0 开始，这可以通过探索构象空间的不同区域来增强多样性。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L350-L391), [predict.py](predict.py#L47-L49)
+
+```mermaid
+graph TD
+    A[开始推理] --> B{noisy_first?}
+    B -->|是| C[使用纯 HarmonicPrior 样本初始化]
+    B -->|否| D[设置 t=1.0 并加入噪声]
+    C --> E{no_diffusion?}
+    D --> E
+    E -->|是| F[无需去噪直接预测]
+    E -->|否| G[遍历调度步骤]
+    F --> Z[返回蛋白质结构]
+    G --> H[使用当前 t 进行模型预测]
+    H --> I{self_cond?}
+    I -->|是| J[使用先前预测作为上下文]
+    I -->|否| K[不使用上下文继续]
+    J --> K
+    K --> L[从预测中提取伪 beta]
+    L --> M[与当前噪声构象对齐]
+    M --> N[混合: new_noisy = s/t × noisy + 1-s/t × pred]
+    N --> O{更多调度步骤?}
+    O -->|是| H
+    O -->|否| Z
+```
+
+<CgxTip>
+训练和推理中的 RMSD 对齐至关重要——它确保噪声注入保持与真实值的正确空间关系，防止模型学习处理任意旋转/平移的噪声。这保留了去噪过程的物理可解释性。
+</CgxTip>
+
+## 配置和调优参数
+
+几个关键参数控制噪声调度行为，可通过配置文件和命令行参数访问。`noise_prob` 参数控制接收噪声注入的训练批次比例，默认值通常在 0.5-0.7 左右。这控制模型练习去噪与学习预测清洁结构的频率。
+
+对于推理，`--steps` 设置去噪步骤数（默认 10），`--tmax` 设置初始噪声水平（默认 1.0）。调度使用指定步数从 tmax 到 0 进行线性插值，如果 tmax 与 1.0 不同，可选择插入 t=1.0。这些参数提供了对多样性-精度权衡的明确控制——更多步骤和更小的 t 值通常产生更高质量的结构，但多样性会降低。
+
+`--self_cond` 标志在推理时启用自条件化，其中每个去噪步骤接收模型自己的先前预测作为额外上下文。这通常提高预测一致性，但随着过程变得更加确定，可能会减少构象多样性。
+
+<CgxTip>
+调度选择从根本上影响多样性-精度权衡。较粗糙的调度（较少步骤）生成更多样化的结构，但精度可能较低；而较精细的调度（更多步骤）产生更精确的结构，但多样性减少。这种关系在 [Schedule Tuning for Diversity vs Precision Trade-off](16-schedule-tuning-for-diversity-vs-precision-trade-off) 中进一步讨论。
+</CgxTip>
+
+来源：[alphaflow/config.py](alphaflow/config.py#L51-L150), [predict.py](predict.py#L8-L19)
+
+## 时间嵌入和条件化
+
+噪声水平 t 不仅仅是插值的参数——它作为网络的信号条件。在训练和推理期间，t 存储在批次字典中并传播通过网络，启用时间感知预测。这允许模型学习不同噪声水平下的不同去噪行为，预期早期步骤（高 t）需要大规模结构校正，而后期步骤（低 t）专注于局部细化。
+
+时间条件化对于流匹配目标特别重要，这需要模型学习指向从噪声分布到数据分布的速度场。通过显式地对 t 进行条件化，模型可以学习预测每个噪声水平的适当去噪方向和幅度。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L70), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L380)
+
+## 与流匹配的集成
+
+调和先验和噪声调度组件与 [Flow Matching Objective Integration with AlphaFold](6-flow-matching-objective-integration-with-alphafold) 中描述的流匹配训练目标深度集成。噪声注入过程创建流匹配所需的扰动样本，而调度定义模型学习预测速度场的时间轨迹。
+
+在蒸馏训练期间，教师模型通过从 t=1.0 到 t=0.0 逐步减少噪声来演示去噪轨迹。学生模型通过在每个噪声水平匹配教师的输出来学习复制此轨迹，从而通过蒸馏而不是对流匹配目标的直接基于梯度的优化来有效地学习反向扩散过程。
+
+---
+
+- [深度解析/核心架构/Evoformer 与折叠主干架构](https://zread.ai/bjing2016/alphaflow/8-evoformer-and-folding-trunk-architecture)
+
+---
+slug:8-evoformer-and-folding-trunk-architecture
+blog_type:normal
+---
+
+
+AlphaFlow 架构实现了一个复杂的双轨表示系统，用于蛋白质结构预测，通过迭代变换结合序列级别和成对（残基-残基）信息。本文档将探讨实现准确结构推理的核心架构组件。
+
+## 架构概述
+
+主干架构采用双轨设计，其中序列表示 (s) 和成对表示 (z) 通过协同处理进行演化。序列轨道捕获每个残基的信息，而成对轨道对残基对之间的关系进行建模，使模型能够通过注意力机制推理 3D 几何结构。
+
+```mermaid
+graph TB
+    subgraph Input
+        S_in[序列特征<br/>B×L×C_s]
+        Z_in[成对特征<br/>B×L×L×C_z]
+        ResIdx[残基索引<br/>B×L]
+        Mask[序列掩码<br/>B×L]
+    end
+    
+    subgraph FoldingTrunk
+        PosEnc[相对位置<br/>编码]
+        Blocks[48× 三角形<br/>自注意力块]
+    end
+    
+    subgraph TriangularSelfAttentionBlock
+        SeqPath[序列路径]
+        PairPath[成对路径]
+        Seq2Pair[序列到成对]
+        Pair2Seq[成对到序列]
+    end
+    
+    subgraph StructureModule
+        SM[结构模块]
+    end
+    
+    S_in --> Blocks
+    Z_in --> PosEnc
+    ResIdx --> PosEnc
+    PosEnc --> Z_pos
+    Z_pos --> Blocks
+    Mask --> Blocks
+    
+    Blocks --> S_out[更新后的序列]
+    Blocks --> Z_out[更新后的成对表示]
+    
+    S_out --> SM
+    Z_out --> SM
+    
+    Blocks -.-> SeqPath
+    Blocks -.-> PairPath
+    SeqPath -.-> Seq2Pair
+    SeqPath -.-> Pair2Seq
+    PairPath -.-> Seq2Pair
+    PairPath -.-> Pair2Seq
+```
+
+来源: [trunk.py](alphaflow/model/trunk.py#L69-L175), [tri_self_attn_block.py](alphaflow/model/tri_self_attn_block.py#L25-L160)
+
+## FoldingTrunk 架构
+
+`FoldingTrunk` 类通过一系列三角形自注意力块来协调序列和成对表示的迭代优化。该组件作为核心推理引擎，逐步优化结构预测。
+
+### 核心配置参数
+
+主干架构由若干关键维度参数定义，这些参数在表示能力和计算效率之间取得了平衡：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------------|-------------|
+| `num_blocks` | 48 | TriangularSelfAttentionBlock 层数 |
+| `sequence_state_dim` (C_s) | 1024 | 序列表示的维度 |
+| `pairwise_state_dim` (C_z) | 128 | 成对表示的维度 |
+| `sequence_head_width` | 32 | 序列注意力的每头维度 |
+| `pairwise_head_width` | 32 | 成对注意力的每头维度 |
+| `position_bins` | 32 | 相对位置编码的 bin 数量 |
+
+来源: [config.py](alphaflow/config.py#L514-L521)
+
+### 位置编码策略
+
+该架构通过 `RelativePosition` 模块整合相对位置信息，该模块将残基索引差异编码为可学习的嵌入。这种机制提供了捕获序列顺序依赖性所必需的空间上下文。
+
+编码计算残基索引之间的成对差异，将其钳制到指定范围，并使用离散 bin 映射到嵌入。一个特殊的 bin（索引 0）为被掩码的残基对保留空间，从而能够稳健地处理可变长度序列。
+
+```mermaid
+flowchart LR
+    subgraph PositionEncoding
+        RIdx[残基索引<br/>B×L]
+        Mask[二进制掩码<br/>B×L]
+        
+        RIdx --> Diff[成对差异<br/>B×L×L]
+        Mask --> DiffMask[应用掩码]
+        
+        Diff --> Clamp[钳制到 ±bins]
+        Clamp --> Shift[偏移 + bins + 1]
+        DiffMask --> MaskZero[零化掩码对]
+        
+        Shift --> Embed[查表嵌入]
+        MaskZero --> Embed
+        
+        Embed --> Z_pos[位置嵌入<br/>B×L×L×C_z]
+    end
+```
+
+来源: [trunk.py](alphaflow/model/trunk.py#L34-L66)
+
+<CgxTip>
+位置编码使用 2*bins+2 个嵌入槽位来容纳正/负差异以及特殊的填充/掩码 Token。第 0 个索引保留给被掩码的成对，其余槽位编码离散化的相对位置范围 [-bins, bins]。
+</CgxTip>
+
+### 通过分块进行内存优化
+
+为了处理长序列，该架构通过 `chunk_size` 参数实现了分块注意力计算。这通过沿轴向维度在较小的分段中处理注意力操作，将内存复杂度从 O(L²) 降低到大约 O(L)。
+
+分块策略使得能够在否则会超过 GPU 内存限制的序列上进行推理，分块大小通常根据可用内存和序列长度设置为 128 或 256。
+
+来源: [trunk.py](alphaflow/model/trunk.py#L110-L115)
+
+## TriangularSelfAttentionBlock
+
+每个 `TriangularSelfAttentionBlock` 实现了一个复杂的变换模式，交替更新序列和成对表示，同时保持两条轨道之间的双向信息流。
+
+### 序列轨道处理
+
+序列轨道首先使用 `PairToSequence` 模块从成对表示生成注意力偏置。这些偏置引导自注意力机制将几何约束直接整合到序列更新中：
+
+1. **偏置生成**: `PairToSequence` 层对成对表示进行归一化，并将其投影到与注意力头数匹配的偏置张量，为序列注意力提供几何上下文。
+2. **门控自注意力**: 具有门控机制的多头注意力处理归一化的序列表示，并结合成对偏置来调制注意力模式。
+3. **残差 MLP**: 具有 4 倍扩展和残差连接的 MLP 进一步变换序列表示。
+
+```mermaid
+graph LR
+    subgraph SequenceTrack
+        S_in[序列状态<br/>B×L×C_s]
+        Z_in[成对状态<br/>B×L×L×C_z]
+        
+        S_in --> LN1[LayerNorm]
+        Z_in --> P2S[PairToSequence]
+        P2S --> Bias[偏置<br/>B×L×L×num_heads]
+        
+        LN1 --> Attn[自注意力]
+        Bias --> Attn
+        Attn --> Res1[残差 + Dropout]
+        S_in --> Res1
+        
+        Res1 --> MLP[残基 MLP]
+        MLP --> S_out[更新后的序列]
+    end
+```
+
+来源: [tri_self_attn_block.py](alphaflow/model/tri_self_attn_block.py#L130-L138), [layers.py](alphaflow/model/layers.py#L154-L172)
+
+### 成对轨道处理
+
+成对轨道接收更新后的序列信息，并执行三角形乘法更新和轴向注意力操作：
+
+1. **序列到成对投影**: `SequenceToPair` 模块使用外积操作（查询/键投影的乘积和差值）将序列表示变换为成对空间。
+2. **三角形乘法更新**: 两个方向的更新（`TriangleMultiplicationOutgoing` 和 `TriangleMultiplicationIncoming`）沿成对矩阵的三角形结构传播信息。
+3. **三角形轴向注意力**: 逐行和逐列注意力机制（`TriangleAttentionStartingNode` 和 `TriangleAttentionEndingNode`）在成对表示上执行轴向注意力。
+4. **残差 MLP**: 具有 4 倍扩展和残差连接的 MLP 优化成对表示。
+
+```mermaid
+graph TB
+    subgraph PairwiseTrack
+        Z_in[成对状态<br/>B×L×L×C_z]
+        S_out[更新后的序列<br/>B×L×C_s]
+        
+        Z_in --> ResSeq[残差]
+        S_out --> S2P[SequenceToPair]
+        S2P --> S2P_out[成对更新<br/>B×L×L×C_z]
+        
+        Z_in --> Res1[残差]
+        Res1 --> TriMulOut[TriangleMulOutgoing]
+        TriMulOut --> RowDrop1[行 Dropout]
+        RowDrop1 --> Z1
+        
+        Z1 --> Res2[残差]
+        Res2 --> TriMulIn[TriangleMulIncoming]
+        TriMulIn --> ColDrop1[列 Dropout]
+        ColDrop1 --> Z2
+        
+        Z2 --> Res3[残差]
+        Res3 --> TriAttStart[TriangleAttStart]
+        TriAttStart --> RowDrop2[行 Dropout]
+        RowDrop2 --> Z3
+        
+        Z3 --> Res4[残差]
+        Res4 --> TriAttEnd[TriangleAttEnd]
+        TriAttEnd --> ColDrop2[列 Dropout]
+        ColDrop2 --> Z4
+        
+        Z4 --> MLP[成对 MLP]
+        MLP --> Z_out[更新后的成对表示]
+    end
+```
+
+来源: [tri_self_attn_block.py](alphaflow/model/tri_self_attn_block.py#L139-L158), [layers.py](alphaflow/model/layers.py#L116-L151)
+
+### SequenceToPair 变换
+
+`SequenceToPair` 模块实现了序列和成对表示之间的关键桥梁。它通过外积分解从序列特征创建成对信息：
+
+```mermaid
+flowchart LR
+    subgraph SequenceToPairModule
+        S[序列状态<br/>B×L×C_s]
+        
+        S --> LN[LayerNorm]
+        LN --> Proj[线性投影<br/>C_s → 2×inner_dim]
+        Proj --> Split[拆分为 Q, K]
+        
+        Q[Query<br/>B×L×inner_dim]
+        K[Key<br/>B×L×inner_dim]
+        
+        Q --> OuterProd[外积]
+        K --> OuterProd
+        
+        Q --> OuterDiff[外差]
+        K --> OuterDiff
+        
+        OuterProd --> Concat[拼接]
+        OuterDiff --> Concat
+        
+        Concat --> OProj[输出投影<br/>2×inner_dim → C_z]
+        OProj --> Z_out[成对状态<br/>B×L×L×C_z]
+    end
+```
+
+这种变换保留了乘法交互 (q×k) 和差值信息 (q−k)，允许成对表示捕获残基对之间的相关性和相对特征关系。
+
+来源: [layers.py](alphaflow/model/layers.py#L116-L151)
+
+## 结构模块集成
+
+在最后的三角形自注意力块之后，主干通过学习的投影层将优化后的序列和成对表示传递给 `StructureModule`：
+
+- **序列投影**: `trunk2sm_s` 从主干序列维度 (C_s=1024) 投影到结构模块维度 (c_s=384)。
+- **成对投影**: `trunk2sm_z` 从主干成对维度 (C_z=128) 投影到结构模块维度 (c_z=128)。
+
+然后，StructureModule 生成最终的 3D 坐标和辅助预测，包括距离图、扭转角和置信度指标。
+
+来源: [trunk.py](alphaflow/model/trunk.py#L104-L107), [config.py](alphaflow/config.py#L526-L527)
+
+## 初始化和正则化
+
+该架构采用精心设计的初始化策略以确保稳定的训练：
+
+- **零初始化**: 关键投影（注意力输出投影、MLP 最终层、三角形更新）初始化为零，使网络能够进行残差学习，最初表现得像恒等变换。
+- **Dropout**: 行和列 Dropout（速率为 2×dropout_rate）应用于成对变换以防止过拟合。
+- **层归一化**: 在所有主要变换之前应用，以保持稳定的训练动态。
+
+来源: [tri_self_attn_block.py](alphaflow/model/tri_self_attn_block.py#L87-L104)
+
+## 计算考量
+
+| 方面 | 实现细节 |
+|--------|----------------------|
+| 梯度检查点 | 默认启用，`blocks_per_ckpt=1` |
+| 分块大小 | 可通过 `chunk_size` 参数调整（默认值：4） |
+| 内存优化 | 分块轴向注意力降低了 O(L²) 复杂度 |
+| 精度 | 通过 ESMFold 集成支持 fp16 训练 |
+
+<CgxTip>
+梯度检查点和分块注意力的结合使得能够在消费级 GPU 上处理包含 1000+ 个残基的序列，使该架构适用于各种蛋白质结构预测任务。
+</CgxTip>
+
+来源: [config.py](alphaflow/config.py#L192-L193), [trunk.py](alphaflow/model/trunk.py#L110-L115)
+
+## 模型变体配置
+
+该架构支持针对不同用例定制的多种配置：
+
+| 模型变体 | 块数量 | C_s | C_z | 用例 |
+|---------------|------------|-----|-----|----------|
+| Base | 48 | 1024 | 128 | 生产推理 |
+| 12-Layer | 12 | 384 | 128 | 快速推理，蒸馏 |
+| Distilled | 48 | 1024 | 128 | 学生模型训练 |
+
+12 层配置提供了一个轻量级选项，适用于快速原型设计和集成生成，同时保持了完整模型的核心架构原则。
+
+有关针对你的特定需求选择合适模型变体的详细指导，请参阅 [模型版本：Base、Distilled 和 12-Layer 配置](4-model-versions-base-distilled-and-12-layer-configurations)。
+
+---
+
+- [深度解析/核心架构/输入堆栈与特征表示](https://zread.ai/bjing2016/alphaflow/9-input-stack-and-feature-representations)
+
+---
+slug:9-input-stack-and-feature-representations
+blog_type:normal
+---
+
+
+输入处理流水线是 AlphaFlow 蛋白质结构生成能力的关键基础。该架构将原始蛋白质数据（包括序列、多重序列比对 (MSA)、模板和结构信息）转换为模型可以处理的复杂张量表示。该设计集成了 AlphaFold 经过验证的特征提取模式，并针对生成式建模进行了流匹配特定的适配。
+
+## 架构概览
+
+输入处理系统通过三个相互连接的层运行：数据预处理将原始生物数据转换为结构化的特征字典，特征流水线管理张量转换和依赖于配置的特征选择，输入堆栈应用复杂的三角注意力机制来处理成对关系。
+
+```mermaid
+flowchart TB
+    subgraph Input["原始数据来源"]
+        S[序列 FASTA]
+        M[MSA 比对]
+        T[模板结构]
+        A[原子坐标]
+    end
+    
+    subgraph DataPipeline["数据流水线"]
+        DP1[make_sequence_features]
+        DP2[make_msa_features] 
+        DP3[make_pdb_features]
+    end
+    
+    subgraph FeatureTransform["输入流水线转换"]
+        IT1[random_crop_to_size]
+        IT2[make_fixed_size]
+        IT3[MSA 采样与掩码]
+        IT4[模板处理]
+    end
+    
+    subgraph FeaturePipeline["特征流水线"]
+        FP1[np_to_tensor_dict]
+        FP2[特征选择]
+        FP3[概率截断]
+    end
+    
+    subgraph ModelInput["模型输入嵌入"]
+        MI1[InputEmbedder<br/>序列 + MSA]
+        MI2[InputPairStack<br/>成对特征]
+        MI3[时间投影<br/>高斯傅里叶]
+        MI4[距离编码<br/>直方图分箱]
+    end
+    
+    S --> DP1
+    M --> DP2
+    T --> DP3
+    A --> DP3
+    
+    DP1 --> FeatureTransform
+    DP2 --> FeatureTransform
+    DP3 --> FeatureTransform
+    
+    FeatureTransform --> FeaturePipeline
+    FeaturePipeline --> ModelInput
+    
+    MI1 --> Evoformer
+    MI2 --> Evoformer
+    MI3 --> Evoformer
+    MI4 --> Evoformer
+    
+    style Input fill:#e1f5fe
+    style ModelInput fill:#fff3e0
+    style Evoformer fill:#f3e5f5
+```
+
+## 输入对堆栈架构
+
+`InputPairStack` 实现了 AlphaFold 补充材料中的算法 16，通过三角注意力机制处理成对表示。该堆栈专注于通过关注残基对矩阵的行和列维度来理解蛋白质结构中的空间关系。
+
+### 核心组件
+
+`InputPairStackBlock` 在每一层中结合了四个不同的操作：起始和结束节点的三角注意力捕获沿矩阵边缘的方向关系，传出和传入的三角乘法通过乘法更新传播信息，对转换应用带有掩码的前馈转换。
+
+来源：[input_stack.py](alphaflow/model/input_stack.py#L40-L168)，[input_stack.py](alphaflow/model/input_stack.py#L171-L284)
+
+### 配置参数
+
+该堆栈通过几个关键的超参数进行配置：`c_t=64` 定义了模板嵌入通道维度，`c_hidden_tri_att=16` 指定了三角注意力的每头隐藏维度，`c_hidden_tri_mul=64` 设置了三角乘法的隐藏维度，`no_blocks=2` 确定了堆叠块的数量，`no_heads=4` 控制注意力头数。
+
+来源：[config.py](alphaflow/config.py#L187-L199)，[config.py](alphaflow/config.py#L427-L440)
+
+### 内存优化
+
+该实现包括复杂的内存管理：`tune_chunk_size` 能够为长序列自动调整分块大小，`blocks_per_ckpt` 支持激活检查点以减少内存使用，`use_lma`（低内存注意力）为资源受限的环境提供了替代的注意力算法。
+
+来源：[input_stack.py](alphaflow/model/input_stack.py#L226-L274)，[config.py](alphaflow/config.py#L158-L166)
+
+## 特征嵌入层
+
+嵌入层通过多个专用嵌入器将原始特征转换为学习到的表示：`InputEmbedder` 处理序列和 MSA 特征，`RecyclingEmbedder` 处理回收的结构信息，自定义距离编码将空间关系转换为直方图分箱。
+
+### 基于距离的成对嵌入
+
+模型使用直方图分箱对成对距离进行编码。`_get_input_pair_embeddings` 方法通过将距离离散化为跨越 3.25Å 到 50.75Å 的 39 个分箱，创建残基之间的距离直方图。这捕获了对蛋白质折叠至关重要的局部二级结构模式和长程三级接触。
+
+来源：[alphafold.py](alphaflow/model/alphafold.py#L113-L129)，[config.py](alphaflow/config.py#L397-L403)
+
+### 流匹配的时间嵌入
+
+AlphaFlow 使用 `GaussianFourierProjection` 为流匹配过程集成了时间维度。这通过具有 256 维嵌入大小的正弦特征嵌入扩散时间步，使模型能够根据去噪过程中的噪声水平来调节其预测。
+
+来源：[alphafold.py](alphaflow/model/alphafold.py#L93-L100)，[alphafold.py](alphaflow/model/alphafold.py#L220-L235)，[layers.py](alphaflow/model/layers.py#L13-L28)
+
+### 额外输入处理
+
+当 `extra_input=True` 时，模型通过并行的嵌入路径处理额外的结构信息。这实现了多条件生成，其中额外的结构提供额外的指导，适用于 MD 轨迹生成或结构优化等场景。
+
+来源：[alphafold.py](alphaflow/model/alphafold.py#L103-L109)，[alphafold.py](alphaflow/model/alphafold.py#L238-L254)
+
+## 特征流水线架构
+
+特征流水线通过三个主要阶段协调从原始数据到模型就绪张量的转换：从生物数据源中提取特征、依赖于配置的特征选择以及带填充的张量转换。
+
+### 特征类别
+
+配置定义了三个特征类别：`unsupervised_features` 包括始终可用的序列、MSA 和比对信息，`template_features` 包含启用时的结构模板信息，`supervised_features` 在训练期间提供真实的原子坐标。
+
+来源：[feature_pipeline.py](alphaflow/data/feature_pipeline.py#L51-L70)，[config.py](alphaflow/config.py#L292-L304)
+
+### 基于模式的数据配置
+
+流水线根据执行模式调整特征处理：训练模式应用随机裁剪和监督特征，评估模式使用带有监督标签的较大裁剪大小，预测模式使用没有监督的固定大小。
+
+来源：[feature_pipeline.py](alphaflow/data/feature_pipeline.py#L73-L112)，[config.py](alphaflow/config.py#L316-L360)
+
+### MSA 和模板处理
+
+多重序列比对特征经过采样、掩码和聚类转换。模板通过伪 beta 计算、扭转角提取和用于训练的可选子采样进行处理。`make_fixed_size` 操作将所有张量填充到配置参数定义的一致维度。
+
+来源：[input_pipeline.py](alphaflow/data/input_pipeline.py#L146-L283)，[data_pipeline.py](alphaflow/data/data_pipeline.py#L409-L730)
+
+## 通道维度和特征模式
+
+该架构为不同的表示类型使用不同的通道维度：`c_z=128` 用于成对嵌入 (N×N×c_z)，`c_m=256` 用于 MSA 嵌入 (S×N×c_m)，`c_t=64` 用于模板嵌入，`c_e=64` 用于额外 MSA 嵌入，`c_s=384` 用于单残基表示。
+
+### 特征形状模式
+
+每个特征都有使用占位符常量定义的形状：`NUM_RES` 标记序列长度维度，`NUM_MSA_SEQ` 标记主要 MSA 序列维度，`NUM_EXTRA_SEQ` 标记额外 MSA 维度，`NUM_TEMPLATES` 标记模板维度。
+
+来源：[config.py](alphaflow/config.py#L187-L204)，[config.py](alphaflow/config.py#L206-L276)
+
+### 转换规则
+
+`random_crop_to_size` 函数应用智能裁剪：序列被随机裁剪但可选择性地锚定用于 FAPE 截断，模板被随机排列然后裁剪，所有特征通过协调的切片操作保持维度一致性。
+
+来源：[input_pipeline.py](alphaflow/data/input_pipeline.py#L26-L106)，[input_pipeline.py](alphaflow/data/input_pipeline.py#L110-L145)
+
+## 与模型前向传播的集成
+
+在前向执行期间，特征流经三个嵌入阶段：通过 `InputEmbedder` 生成初始 MSA 和成对表示，通过具有时间条件的 `InputPairStack` 添加基于距离的输入嵌入，以及用于多条件场景的可选额外输入处理。
+
+### 嵌入流
+
+前向传播按顺序协调特征转换：输入特征被嵌入到 MSA 表示 m 和成对表示 z 中，添加来自先前迭代的回收结构信息，通过输入对堆栈合并噪声条件的距离嵌入，以及在可用时合并额外的结构输入。
+
+来源：[alphafold.py](alphaflow/model/alphafold.py#L149-L235)，[alphafold.py](alphaflow/model/alphafold.py#L183-L188)
+
+### 回收集成
+
+回收机制在迭代之间维护状态：`m_1_prev` 捕获上一个周期的第一个 MSA 行，`z_prev` 存储完整的成对表示，`x_prev` 保留预测的原子位置。这些通过 `RecyclingEmbedder` 与当前特征组合。
+
+来源：[alphafold.py](alphaflow/model/alphafold.py#L189-L217)
+
+<CgxTip>
+输入对堆栈的三角注意力机制计算成本高昂，但对于捕获长程蛋白质相互作用至关重要。对于长序列（>1000 个残基），请在配置中启用 `use_lma` 或 `tune_chunk_size` 以有效管理内存，代价是计算时间略有增加。
+</CgxTip>
+
+<CgxTip>
+使用额外输入进行多条件生成时，额外的结构信息通过具有相同架构的并行 InputPairStack 进行处理。这实现了无需架构修改的灵活调节，支持引导结构生成或集成预测等应用。
+</CgxTip>
+
+## 配置预设
+
+不同的模型变体根据用例调整输入处理：`finetuning` 模式使用 crop_size=384 以提高训练效率，`model_1` 和 `model_2` 启用具有完整功能的模板，`model_3`、`model_4`、`model_5` 禁用模板以进行无模板预测，长序列推断禁用分块大小调整并启用卸载。
+
+来源：[config.py](alphaflow/config.py#L51-L184)
+
+## 下一步
+
+要更深入地了解特征处理流水线，请参阅 [序列、结构和 MSA 的特征工程](21-feature-engineering-for-sequence-structure-and-msa)，其中详细说明了对原始数据应用的生物学转换。要了解这些嵌入如何在核心架构中使用，请继续阅读 [Evoformer 和折叠主干架构](8-evoformer-and-folding-trunk-architecture)。有关实际实现的指导，请参阅 [PDB 和 ATLAS 数据集的数据预处理](20-data-preprocessing-for-pdb-and-atlas-datasets)。
+
+---
+
+## 训练方法
+
+- [深度解析/训练方法/PDB 与 MD 数据集的训练流程](https://zread.ai/bjing2016/alphaflow/10-training-pipeline-for-pdb-and-md-datasets)
+
+---
+slug:10-training-pipeline-for-pdb-and-md-datasets
+blog_type:normal
+---
+
+
+本文档详细介绍了 AlphaFlow 模型在 PDB（静态）和 MD（动态/分子动力学）数据集上的完整训练架构。该流程实现了一个复杂的流匹配目标，并与 AlphaFold 的结构预测架构集成，支持标准结构预测训练和带噪声注入的生成式训练。
+
+## 流水线架构概述
+
+训练流水线遵循模块化架构，在数据加载、特征处理、模型训练和优化组件之间实现了清晰的关注点分离。该系统支持两种主要数据模态的训练：包含静态实验结构的 **PDB 数据集**，以及包含来自分子动力学模拟的多个构象快照的 **MD 数据集**。
+
+```mermaid
+flowchart TD
+    A[训练入口<br/>train.py] --> B[数据配置<br/>model_config]
+    A --> C[数据集初始化]
+    
+    C --> D[PDB 数据集<br/>OpenFoldSingleDataset]
+    C --> E[MD 数据集<br/>OpenFoldSingleDataset<br/>带 subsample_pos/num_confs]
+    
+    D --> F[特征流水线<br/>FeaturePipeline.process_features]
+    E --> F
+    
+    F --> G[数据变换<br/>random_crop_to_size<br/>make_fixed_size]
+    
+    G --> H[批次整理<br/>OpenFoldBatchCollator]
+    
+    H --> I[模型包装器<br/>ModelWrapper.training_step]
+    
+    I --> J{训练模式}
+    J -->|标准| K[噪声注入<br/>_add_noise]
+    J -->|蒸馏| L[师生模式<br/>disillation_training_step]
+    
+    K --> M[前向传播<br/>可选自条件]
+    L --> M
+    
+    M --> N[损失计算<br/>AlphaFoldLoss]
+    N --> O[EMA 更新<br/>ExponentialMovingAverage]
+    
+    I --> P[验证<br/>validation_step]
+    P --> Q[推理模式<br/>使用 EMA 权重]
+    
+    subgraph "数据流组件"
+        R[mmCIF 文件] --> S[DataPipeline<br/>process_mmcif]
+        T[MSA 文件] --> U[AlignmentRunner]
+        S --> F
+        U --> F
+    end
+```
+
+该流水线通过 **PyTorch Lightning** 框架（`trainer.py` L107-L123）运行，提供自动混合精度训练、梯度裁剪、检查点保存和分布式训练功能。训练循环由 `ModelWrapper` 类编排，该类实现了标准和蒸馏训练模式。
+
+来源：[train.py](train.py#L1-L163), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L51-L175)
+
+## 数据集配置和初始化
+
+### 数据源配置
+
+训练流水线从包含链元数据和训练参数配置的 CSV 文件指定的数据集开始。该系统支持 **PDB 数据集**（来自蛋白质数据库的实验结构）和 **MD 数据集**（来自分子动力学模拟的构象系综）。
+
+```python
+# PDB 训练的数据集初始化
+trainset = OpenFoldSingleDataset(
+    data_dir=args.train_data_dir,           # 包含 mmCIF/PDB 文件的目录
+    alignment_dir=args.train_msa_dir,         # 预计算的 MSA 比对
+    pdb_chains=pdb_chains,                   # 包含链元数据的 DataFrame
+    config=data_cfg,
+    mode='train',
+    subsample_pos=args.sample_train_confs,  # 对于 MD：随机构象选择
+    first_as_template=args.first_as_template,  # 使用第一个构象作为模板
+)
+```
+
+对于 **MD 数据集**，流水线引入了两个关键参数来处理多个构象：
+
+- **`subsample_pos`**：启用时（`True`），从每个训练样本的多个可用构象中随机采样单个构象（`data_modules.py` L178-L181）。这使模型能够从构象多样性中学习，同时保持恒定的输入维度。
+
+- **`num_confs`**：指定每条链使用的固定构象数量，实现跨周期的确定性采样（`data_modules.py` L162-L163, L182-L183）。这对于可重现性很重要的验证特别有用。
+
+来源：[train.py](train.py#L60-L68), [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L160-L198)
+
+### 随机数据过滤
+
+AlphaFlow 实现了 **随机过滤**（stochastic filtering）以模仿 AlphaFold 的训练策略，该策略创建了一个加权采样方案，将训练分布偏向于多样化和具有代表性的结构。
+
+过滤系统结合了 **硬确定性过滤器** 和 **软概率过滤器**：
+
+**确定性过滤器**（`data_modules.py` L201-L221）：
+- **分辨率截断**：排除分辨率差于 9.0 Å 的结构
+- **序列组成**：拒绝任何单个氨基酸超过序列 80% 的链（同聚物过滤器）
+
+**随机过滤器**（`data_modules.py` L224-L242）：
+- **基于聚类的采样**：概率与聚类大小成反比（1/cluster_size），减少序列家族的过度代表性
+- **基于长度的采样**：概率与 min(chain_length, 512) 成正比，在实际范围内偏向长序列
+
+总体概率计算为各个随机过滤器概率的乘积，确保在多样化的蛋白质结构空间中进行高效采样。
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L201-L242)
+
+### 数据集包装
+
+当启用随机过滤（`args.filter_chains`）时，基本的 `OpenFoldSingleDataset` 被包装在一个实现逐周期采样的 `OpenFoldDataset` 中（`train.py` L90）。此包装器创建一个 **固定周期长度** 的数据集（`train_epoch_len`，默认 50,000 个样本），根据计算的过滤器概率从底层数据集中随机采样，确保跨周期的训练工作量一致。
+
+来源：[train.py](train.py#L89-L90), [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L245-L321)
+
+## 特征处理流水线
+
+训练流水线通过多阶段特征提取和转换系统处理原始结构和序列数据。
+
+### 原始特征提取
+
+对于每个训练样本，流水线从预计算文件中提取原始特征：
+
+```python
+# 加载预计算的 mmCIF 特征（包括结构、MSA、模板）
+path = f"{self.data_dir}/{name}.npz"
+mmcif_feats = dict(np.load(path, allow_pickle=True))
+
+# 如果启用了 first_as_template，则添加额外的模板信息
+if self.first_as_template:
+    extra_all_atom_positions = mmcif_feats['all_atom_positions'][0]
+    mmcif_feats['extra_all_atom_positions'] = extra_all_atom_positions
+```
+
+原始特征包括：
+- **原子坐标**：标准原子排序中所有原子的 3D 位置
+- **序列信息**：氨基酸序列、残基索引
+- **MSA 特征**：多序列比对谱和删除矩阵
+- **模板信息**：启用模板时，来自相关蛋白质的结构模板
+- **元数据**：链标识符、序列长度、实验分辨率
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L167-L186)
+
+### 特征变换
+
+`FeaturePipeline` 应用一系列变换以准备模型输入的特征：
+
+1. **基于配置的特征选择**：根据训练模式和配置，从完整集合中选择相关特征（`feature_pipeline.py` L51-L70）
+
+2. **数据类型转换**：将 numpy 数组转换为 PyTorch 张量（`feature_pipeline.py` L30-L48）
+
+3. **特定模式的处理**：应用训练时增强，包括：
+   - **随机裁剪**：`random_crop_to_size` 将序列随机裁剪到训练窗口大小（默认 256 个残基），并正确处理模板裁剪（`input_pipeline.py` L26-L109）
+   - **固定大小填充**：`make_fixed_size` 将序列填充到固定维度以进行批处理（`input_pipeline.py` L110-L144）
+   - **MSA 子采样**：将 MSA 深度减少到训练限制（`max_extra_msa`，`max_msa_clusters`）
+   - **模板子采样**：随机选择可用模板的子集
+
+4. **FAPE 钳位配置**：在训练期间随机应用钳位的 FAPE 损失以提高定位精度（`feature_pipeline.py` L97-L104）
+
+变换系统是高度可配置的，针对初始训练、微调和推理有不同的预设。
+
+来源：[alphaflow/data/feature_pipeline.py](alphaflow/data/feature_pipeline.py#L73-L132), [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L25-L144)
+
+### 批次组合
+
+`OpenFoldBatchCollator`（`data_modules.py` L336-L342）通过以下方式为模型训练准备批次：
+- 将多个样本的特征整理为批次张量
+- 应用批次级增强（模板掩码、额外 MSA 掩码）
+- 通过适当的填充和掩码处理可变长度序列
+- 添加批次属性（残基掩码、链掩码）以进行损失计算
+
+整理器确保在需要时（例如，用于验证）批次组合是确定性的，而对于训练数据增强则是随机的。
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L336-L342)
+
+## 训练模式和目标
+
+流水线支持针对不同数据类型和训练目标优化的多种训练模式。
+
+### 标准训练模式
+
+标准训练应用带有噪声注入的 **流匹配目标**（flow matching objective）进行生成式结构预测：
+
+```python
+def training_step(self, batch, batch_idx, stage='train'):
+    # 1. 可选噪声注入
+    if torch.rand(1, generator=self.generator).item() < self.args.noise_prob:
+        self._add_noise(batch)  # 添加随机 t 的谐波先验噪声
+    
+    # 2. 可选额外模板输入
+    if torch.rand(1, generator=self.generator).item() < self.args.extra_input_prob:
+        pass  # 保留 extra_all_atom_positions
+    else:
+        del batch['extra_all_atom_positions']
+    
+    # 3. 可选自条件
+    if torch.rand(1, generator=self.generator).item() < self.args.self_cond_prob:
+        with torch.no_grad():
+            outputs = self.model(batch)
+    
+    # 4. 主前向传播
+    outputs = self.model(batch, prev_outputs=outputs)
+    
+    # 5. 损失计算
+    loss, loss_breakdown = self.loss(outputs, batch, _return_breakdown=True)
+    
+    return loss
+```
+
+**噪声注入机制**（`wrapper.py` L52-L70）对流匹配至关重要：
+1. 从 **谐波先验**（内部坐标上的高斯分布）中采样噪声
+2. 在真实结构和噪声之间应用 **基于 SVD 的对齐**，以确保正确的空间关系
+3. 均匀计算 **插值参数** t ∈ [0, 1]
+4. 创建 **噪声结构**：`noisy_beta = (1-t) * ground_truth + t * noise`
+5. 将 **噪声距离矩阵** 添加到批次中用于流匹配损失
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L52-L175)
+
+### 蒸馏训练模式
+
+蒸馏训练使用多步去噪计划将知识从 **教师模型**（通常是 AlphaFold 或 ESMFold）转移到 **学生模型**（AlphaFlow）：
+
+```python
+def disillation_training_step(self, batch):
+    schedule = np.linspace(1, 0, 11)  # 从 t=1 到 t=0 的 11 步计划
+    
+    # 通过去噪计划进行教师前向传播
+    prev_outputs = None
+    with torch.no_grad():
+        for t, s in zip(schedule[:-1], schedule[1:]):
+            output = self.teacher(batch, prev_outputs=prev_outputs)
+            pseudo_beta = pseudo_beta_fn(batch['aatype'], output['final_atom_positions'], None)
+            noisy = rmsdalign(pseudo_beta, noisy)
+            noisy = (s / t) * noisy + (1 - s / t) * pseudo_beta
+            batch['noised_pseudo_beta_dists'] = compute_distances(noisy)
+            batch['t'] = s
+            prev_outputs = output
+    
+    # 学生从教师生成的中间结构中学习
+    student_output = self.model(orig_batch)
+    loss = self.loss(student_output, orig_batch)
+```
+
+蒸馏过程创建了从噪声到结构的 **去噪轨迹**，学生模型学习预测沿此轨迹的中间结构。这使学生能够学习复杂的去噪行为，而无需对去噪过程进行显式监督。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L72-L124)
+
+### 自条件
+
+流水线实现了 **自条件**（self-conditioning）（训练期间的分类器自由指导），其中模型使用其自己的预测作为后续传递的条件：
+
+```python
+if torch.rand(1, generator=self.generator).item() < self.args.self_cond_prob:
+    with torch.no_grad():
+        outputs = self.model(batch)  # 无条件传递
+outputs = self.model(batch, prev_outputs=outputs)  # 有条件传递
+```
+
+这通过使模型暴露于有条件和无条件生成场景来提高训练稳定性，防止坍缩到确定性输出。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L155-L160)
+
+## 损失计算
+
+训练流水线采用 **多组件损失函数**，结合了针对结构预测精度和物理合理性优化的几个目标。
+
+### 损失组件
+
+`AlphaFoldLoss` 类（`loss.py` L1522-L1538）聚合了以下组件：
+
+| 损失组件 | 目的 | 权重（典型） |
+|----------------|---------|------------------|
+| **FAPE 损失** | 骨架和侧链位置的帧对齐点误差 | 1.0 |
+| **扭转角损失** | χ 和骨架角的监督 | 0.1-0.5 |
+| **距离图损失** | 残基间距离预测 | 0.1 |
+| **违例损失** | 空间位阻和键几何违例 | 1.0 |
+| **LDDT 损失** | 基于距离的置信度预测 | 0.01 |
+| **TM 损失** | 模板建模分数预测（PTM 模式） | 0.1 |
+| **掩码 MSA 损失** | MSA 重建（MSA 掩码语言模型） | 0.01 |
+
+**FAPE（帧对齐点误差）** 损失是主要的结构监督，通过以下方式计算：
+1. 将预测的帧与真实帧进行刚体对齐
+2. 计算骨架和侧链原子的逐点误差
+3. 将误差钳位到最大距离（通常为 10 Å）
+4. 按残基和原子掩码加权
+
+**流匹配损失** 通过噪声注入机制集成，其中模型学习预测来自谐波先验噪声的去噪方向。
+
+来源：[alphaflow/utils/loss.py](alphaflow/utils/loss.py#L1522-L1618), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L162)
+
+### 训练配置预设
+
+流水线在 `config.py` 中为不同训练阶段提供了几个 **训练预设**：
+
+| 预设 | 裁剪大小 | 最大额外 MSA | 模板 | 违例权重 | 用例 |
+|--------|-----------|---------------|-----------|------------------|----------|
+| **initial_training** | 256 | 1024 | 禁用 | 0.0 | 早期阶段训练 |
+| **finetuning** | 384 | 5120 | 启用 | 1.0 | 优化阶段 |
+| **finetuning_no_templ** | 384 | 5120 | 禁用 | 1.0 | 无模板优化 |
+| **finetuning_ptm** | 384 | 5120 | 启用 | 1.0 | 启用 PTM 的优化 |
+
+预设通过扩展序列长度、增加 MSA 深度和启用结构监督（违例损失）系统地增加了训练难度。
+
+来源：[alphaflow/config.py](alphaflow/config.py#L59-L94)
+
+## 优化和训练基础设施
+
+### EMA（指数移动平均）
+
+训练流水线维护 **指数移动平均** 权重以进行稳定推理：
+
+```python
+def on_before_zero_grad(self, *args, **kwargs):
+    if not self.args.no_ema:
+        self.ema.update(self.model)  # 在每个优化器步骤后更新 EMA
+
+def load_ema_weights(self):
+    # 缓存当前权重
+    self.cached_weights = tensor_tree_map(clone_param, self.model.state_dict())
+    # 加载 EMA 权重进行验证
+    self.model.load_state_dict(self.ema.state_dict()["params"])
+```
+
+EMA 权重在验证期间使用并保存到检查点，与振荡的训练权重相比，提供更稳定的模型参数。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L235-L246), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L271-L275)
+
+### 验证策略
+
+流水线实现了两种验证模式：
+
+**标准验证**（`normal_validate=True`）：
+- 在验证数据上运行相同的训练步骤
+- 计算验证集上的损失和指标
+- 用于监控训练进度
+
+**生成式验证**（`normal_validate=False`）：
+- 对每个验证样本运行多次采样的推理（`val_samples`，通常 5-10 次）
+- 计算将预测与参考结构进行比较的指标：
+  - **参考指标**：相对于真实的 RMSD、GDT-TS、GDT-HA、TM-score
+  - **自一致性指标**：来自同一序列的多个预测之间的多样性
+- 使用 EMA 权重进行更稳定的预测
+
+来源：[train.py](train.py#L69-L88), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L177-L228)
+
+### 训练配置
+
+通过命令行参数控制的关键训练参数：
+
+| 参数 | 描述 | 默认/典型值 |
+|-----------|-------------|----------------------|
+| `batch_size` | 训练批次大小 | 1-4（取决于 GPU） |
+| `epochs` | 训练周期数 | 100+ |
+| `accumulate_grad_batches` | 梯度累积步数 | 1-8 |
+| `grad_clip` | 梯度裁剪值 | 0.1-1.0 |
+| `ckpt_freq` | 检查点频率（周期） | 1-5 |
+| `val_freq` | 验证频率（周期） | 1-5 |
+| `noise_prob` | 噪声注入概率 | 0.5-1.0 |
+| `self_cond_prob` | 自条件概率 | 0.1-0.5 |
+| `train_epoch_len` | 每周期样本数（随机过滤） | 50,000 |
+
+来源：[train.py](train.py#L107-L123)
+
+## MD 数据集特定注意事项
+
+### 构象采样
+
+由于每个蛋白质序列存在多个构象，MD 数据集需要特殊处理：
+
+**随机子采样**（`subsample_pos=True`）：
+```python
+N = mmcif_feats['all_atom_positions'].shape[0]  # 构象数量
+conf_idx = np.random.randint(0, N)  # 随机选择
+mmcif_feats['all_atom_positions'] = mmcif_feats['all_atom_positions'][conf_idx]
+```
+
+这种方法使模型能够接触多样化的构象，同时保持计算效率。每个周期看到不同的构象，有效地增强了训练数据。
+
+**固定子采样**（`num_confs=N`）：
+```python
+idx, conf_idx = idx // self.num_confs, idx % self.num_confs
+mmcif_feats['all_atom_positions'] = mmcif_feats['all_atom_positions'][conf_idx]
+```
+
+确定性的选择对于验证和可重现的实验很有用。
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L178-L183)
+
+### MD 数据与模板集成
+
+当将 MD 数据集与模板一起使用时（`first_as_template=True`），流水线使用第一个构象作为结构模板：
+
+```python
+if self.first_as_template:
+    extra_all_atom_positions = mmcif_feats['all_atom_positions'][0]
+    mmcif_feats['extra_all_atom_positions'] = extra_all_atom_positions
+```
+
+即使模板来自不同的构象状态，这也为模型提供了构象背景，提高了模型捕获构象灵活性的能力。
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L174-L176)
+
+## 训练工作流摘要
+
+完整的训练工作流遵循以下顺序：
+
+1. **初始化**：加载配置，初始化模型包装器，设置 EMA
+2. **数据加载**：使用适当的随机过滤和构象采样创建数据集
+3. **周期循环**：对于每个周期，根据过滤器概率采样 50,000 个训练样本
+4. **批次处理**：对于每个批次：
+   - 应用特征变换（裁剪、填充、掩码）
+   - 以概率 `noise_prob` 注入谐波先验噪声
+   - 以概率 `self_cond_prob` 进行可选自条件传递
+   - 通过 AlphaFlow 模型前向传播
+   - 计算多组件损失
+   - 反向传播和优化器步骤
+   - 更新 EMA 权重
+5. **验证**：使用 EMA 权重进行定期评估，计算参考和多样性指标
+6. **检查点保存**：以指定间隔保存模型权重、EMA 状态和优化器状态
+
+来源：[train.py](train.py#L41-L160), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L126-L175)
+
+## 后续步骤
+
+要深入了解特定组件：
+
+- **流匹配目标**：请参阅 [流匹配目标与 AlphaFold 的集成](6-flow-matching-objective-integration-with-alphafold) 以了解生成式训练目标的数学基础
+
+- **损失函数**：请参阅 [损失函数：FAPE、扭转角损失和流匹配损失](12-loss-functions-fape-torsion-angle-loss-and-flow-matching-loss) 以详细分析每个损失组件
+
+- **蒸馏过程**：请参阅 [蒸馏过程和师生训练](11-distillation-process-and-teacher-student-training) 以了解知识转移方法
+
+- **数据预处理**：请参阅 [PDB 和 ATLAS 数据集的数据预处理](20-data-preprocessing-for-pdb-and-atlas-datasets) 以了解上游数据准备流水线
+
+- **推理流水线**：请参阅 [推理流水线和采样过程](14-inference-pipeline-and-sampling-process) 以了解如何使用训练好的模型进行结构生成
+
+---
+
+- [深度解析/训练方法/蒸馏过程与师生训练](https://zread.ai/bjing2016/alphaflow/11-distillation-process-and-teacher-student-training)
+
+---
+slug:11-distillation-process-and-teacher-student-training
+blog_type:normal
+---
+
+
+AlphaFlow 中的蒸馏（Distillation）代表一种**知识转移机制**，它将迭代的流匹配去噪过程压缩为单步预测。这种方法以轻微的精度降低换取了显著的推理速度提升，使其在大规模集成生成和资源受限的部署场景中特别有价值。
+
+## 蒸馏架构概述
+
+蒸馏框架建立了一种师生关系，其中教师模型——一个拥有完整流匹配去噪链的完全训练好的 AlphaFlow——为学生模型生成训练信号，学生模型学习直接从初始噪声分布预测最终结构。
+
+```mermaid
+flowchart TB
+    subgraph Teacher["Teacher Model (Frozen)"]
+        T1[Sample Noise<br/>from Harmonic Prior]
+        T2[Iterative Denoising<br/>t=1→0, 11 steps]
+        T3[Generate<br/>Target Structure]
+    end
+    
+    subgraph Student["Student Model (Trainable)"]
+        S1[Receive Same Noise]
+        S2[Single Forward Pass]
+        S3[Predict<br/>Structure Directly]
+    end
+    
+    subgraph Loss["Computation"]
+        L[Compare Teacher Output<br/>vs Student Prediction]
+    end
+    
+    T1 --> T2 --> T3 --> L
+    S1 --> S2 --> S3 --> L
+    
+    style T3 fill:#e1f5e1
+    style S3 fill:#e1f5e1
+    style L fill:#ffe1e1
+```
+
+师生训练范式利用了**知识蒸馏**原则：教师的多步推理轨迹作为软目标，引导学生学习从噪声分布到结构空间的直接映射。
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L72-L125), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L491-L515)
+
+## 教师模型初始化
+
+教师模型被实例化为完整的 AlphaFold 架构，配置与学生模型相同。当通过 `--distillation` 标志启用蒸馏时，`AlphaFoldWrapper` 会在主学生模型旁边创建一个独立的教师实例。
+
+教师模型在整个训练过程中处于**评估模式**，禁用梯度计算以保留其预训练知识。这种设计确保教师作为一个稳定的参考点，防止学生通过梯度反馈破坏教师的权重。
+
+```python
+# Teacher initialization occurs when distillation is enabled
+if args and 'distillation' in args.__dict__ and args.distillation:
+    self.teacher = AlphaFold(config, extra_input=...)
+```
+
+教师在整个蒸馏过程中保持冻结状态，在学生试图通过单次前向传播逼近教师的多步去噪轨迹时，维持其预训练的流匹配能力。
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L491-L515), [alphaflow/utils/parsing.py](alphaflow/utils/parsing.py#L49)
+
+## 蒸馏训练循环
+
+蒸馏训练步骤实现了一个**两阶段过程**：首先，教师通过迭代去噪生成目标结构；其次，学生尝试直接从初始噪声预测这些目标。
+
+### 教师前向传播
+
+教师接收一个批次，并在从 `t=1.0` 到 `t=0.0` 的 11 个时间步内执行完整的流匹配去噪过程。对于每个时间步转换 `(t, s)`：
+
+```mermaid
+sequenceDiagram
+    participant HP as Harmonic Prior
+    participant T as Teacher
+    participant Align as RMSD Align
+    participant Interp as Interpolation
+
+    HP->>T: Sample orig_noisy
+    T->>Align: Align with pseudo_beta
+    Align->>Interp: (s/t) * noisy + (1-s/t) * structure
+    Interp->>T: Update noised distances
+    T->>T: Forward pass at timestep s
+    
+    Note over T: Repeat for t=1→0 (11 steps)
+```
+
+教师通过当前噪声估计值与预测的 pseudo-beta 结构之间的**线性插值**逐步对结构进行去噪。在每个转换 `s/t` 处，算法计算：
+
+```
+noisy = (s/t) * noisy + (1 - s/t) * pseudo_beta
+```
+
+该公式逐步将表示从纯噪声（t=1）转移到最终结构（t=0），插值因子控制着噪声调度。
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L72-L125)
+
+### 学生训练步骤
+
+一旦教师完成其去噪轨迹，学生接收原始噪声样本并尝试直接预测教师的最终输出。关键的设计选择是，学生处理的是与教师处理过的**相同的初始噪声**，确保了公平比较并使学生能够学习压缩映射。
+
+学生的输入批次包含原始噪声特征：
+
+```python
+orig_batch['noised_pseudo_beta_dists'] = compute_distances(orig_noisy)
+orig_batch['t'] = torch.ones(batch_dims, device=device)  # t=1.0 (initial noise)
+```
+
+学生执行单次前向传播，并通过标准的 AlphaFlow 损失函数接收反馈，该损失函数将其预测与教师生成的结构进行比较。
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L72-L125), [alphaflow/utils/loss.py](alphaflow/utils/loss.py#L1522-L1538)
+
+## 谐波先验和噪声采样
+
+**HarmonicPrior** 类为教师和学生生成初始噪声分布。该先验实现了一个谐波链模型，即使在缺乏结构信息的情况下也能生成物理上合理的类似蛋白质的构象。
+
+谐波先验构建了一个代表相邻残基之间弹簧连接的**三对角雅可比矩阵**：
+
+```python
+J = torch.zeros(N, N)
+for i, j in zip(np.arange(N-1), np.arange(1, N)):
+    J[i,i] += a
+    J[j,j] += a
+    J[i,j] = J[j,i] = -a
+```
+
+特征值分解 `J = P @ D @ P^T` 实现了高效采样：
+
+```
+sample = P @ (sqrt(D_inv) * random_normal)
+```
+
+该公式生成的噪声尊重蛋白质结构固有的**局部连通性**约束，与各向同性高斯噪声相比，为流匹配过程提供了更具信息量的起点。参数 `a = 3/(3.8^2)` 近似模拟了典型键距离处 C-alpha 原子之间的弹簧常数。
+来源：[alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L40-L66)
+
+## 用于结构比较的 RMSD 对齐
+
+**rmsdalign** 函数实现了基于 Kabsch 算法的对齐，以实现教师和学生预测之间的有意义的比较。这至关重要，因为谐波先验以任意方向采样结构，需要在计算损失之前进行对齐。
+
+对齐过程：
+
+1. **中心化**：从两个结构中减去加权平均值
+2. **SVD**：计算互协方差矩阵 `B = W @ A^T @ B` 的奇异值分解
+3. **校正**：通过确保 `det(U @ V^T) ≥ 0` 来处理不当旋转
+4. **变换**：应用旋转矩阵 `C = U @ V^T` 将结构 B 对齐到结构 A
+
+在蒸馏期间，RMSD 对齐确保教师的去噪轨迹和学生的预测在**同一坐标系**中进行比较，使损失计算有意义。在更新噪声表示时，对齐应用于每个教师时间步：
+
+```python
+noisy = rmsdalign(pseudo_beta, noisy)
+noisy = (s/t) * noisy + (1 - s/t) * pseudo_beta
+```
+
+来源：[alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L5-L31), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L84-L87)
+
+## 自条件选项
+
+蒸馏支持由 `--distill_self_cond` 标志控制的可选**自条件**模式。启用后，教师将其最终时间步的输出作为条件信息提供给学生。
+
+启用自条件后：
+
+```python
+if self.args.distill_self_cond:
+    prev_outputs = output  # Teacher's final outputs become student condition
+```
+
+这为学生提供了来自教师回收机制的**中间表示**（`m_1_prev`、`z_prev`、`x_prev`），可能帮助学生学会模仿教师的内部推理过程。自条件信息通过回收嵌入器传递并集成到学生的输入表示中。
+
+如果没有自条件，学生必须纯粹从初始噪声学习解决去噪任务，这更具挑战性，但能产生更压缩的模型。
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L88-L91), [alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L179-L197)
+
+## 训练配置和性能权衡
+
+### 模型变体和特征
+
+| 模型类型 | 架构 | 训练模式 | 相对于基准的速度 | 相对于基准的精度 |
+|------------|--------------|---------------|---------------|------------------|
+| AlphaFlow-PDB Base | 48 Evoformer 层 | Flow matching | 1.0x | 1.0x |
+| AlphaFlow-PDB Distilled | 48 Evoformer 层 | Distillation | 快约 3 倍 | 低约 2-5% |
+| AlphaFlow-MD+Templates Base | 48 Evoformer 层 | Flow matching + Templates | 1.0x | 1.0x |
+| AlphaFlow-MD+Templates 12l-Base | 12 Evoformer 层 | Flow matching + Templates | 快 2.5 倍 | 轻微损失 |
+| AlphaFlow-MD+Templates 12l-Distilled | 12 Evoformer 层 | Distillation + Templates | 快约 7.5 倍 | 中等损失 |
+
+蒸馏模型通过消除迭代去噪过程实现了显著的速度增益。在推理过程中，蒸馏模型通过单次前向传播预测最终结构，而基准模型需要多个时间步（通常为 10-20 步）才能获得相当的质量。
+
+来源：[README.md](README.md#L23-L27), [README.md](README.md#L44-L66)
+
+### 蒸馏的训练参数
+
+蒸馏过程需要特定的训练配置调整：
+
+**PDB 训练配置：**
+```bash
+python train.py --distillation --ckpt [BASE_MODEL_PATH] \
+    --lr 5e-4 \
+    --train_epoch_len 16000 \  # Shorter than base (40000)
+    --train_data_dir [DIR] \
+    --train_msa_dir [DIR] \
+    --run_name distilled_pdb
+```
+
+**与基准训练的主要区别：**
+- **移除梯度累积**：蒸馏通常不使用 `--accumulate_grad`
+- **更短的训练周期**：从基准 PDB 训练的 40,000 减少到 16,000
+- **忽略的概率**：`--self_cond_prob` 和 `--noise_prob` 被蒸馏逻辑覆盖
+- **必需的检查点**：必须指定指向预训练教师模型的 `--ckpt`
+
+较短的训练持续时间反映了这样一个事实：学生从高质量的教师目标中学习，而不是探索完整的去噪轨迹，这降低了训练复杂度。
+来源：[README.md](README.md#L164-L167), [train.py](train.py#L21-L29)
+
+## 损失计算和指标
+
+在蒸馏训练期间，学生接收与标准 AlphaFlow 训练相同的**多组件损失**，该损失是针对教师的输出计算的：
+
+```python
+loss, loss_breakdown = self.loss(student_output, orig_batch, _return_breakdown=True)
+```
+
+损失分解通常包括：
+- **FAPE loss**：骨架位置的框架对齐点误差
+- **Sidechain loss**：侧链原子的旋转异构体和结构精度
+- **Torsion angle loss**：二面角预测精度
+- **Violation loss**：结构几何约束
+
+此外，还计算验证指标以监控蒸馏质量：
+
+```python
+metrics = self._compute_validation_metrics(orig_batch, student_output, 
+                                           superimposition_metrics=False)
+```
+
+这些指标包括 RMSD、GDT-TS 和其他结构相似性评分，是针对教师生成的结构而不是真实的 PDB 坐标计算的。
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L119-L125), [alphaflow/utils/loss.py](alphaflow/utils/loss.py#L1522-L1538)
+
+## 使用蒸馏模型进行推理
+
+当使用蒸馏模型运行推理时，需要进行特定的配置更改以适应单步预测的性质：
+
+```bash
+python predict.py --mode alphafold \
+    --input_csv [PATH] \
+    --msa_dir [DIR] \
+    --weights [DISTILLED_MODEL_PATH] \
+    --samples [N] \
+    --outpdb [DIR] \
+    --noisy_first \      # Required for distilled models
+    --no_diffusion       # Required for distilled models
+```
+
+`--noisy_first` 标志确保模型从初始噪声样本开始，而不是尝试迭代去噪，而 `--no_diffusion` 禁用采样循环。这些参数对于蒸馏模型的正确操作**至关重要**。
+
+对于具有 12 层的蒸馏 MD+Templates 模型，可能会应用额外的性能调整：
+
+```bash
+--tmax 0.2 --steps 2
+```
+
+这截断了推理过程以提高精度，但牺牲了多样性，反映了压缩模型架构的不同权衡空间。
+来源：[README.md](README.md#L97-L103), [predict.py](predict.py)
+
+## 与训练管道的集成
+
+蒸馏过程通过训练步骤路由逻辑无缝集成到更广泛的 AlphaFlow 训练管道中：
+
+```python
+def training_step(self, batch, batch_idx, stage='train'):
+    # ... initialization code ...
+    
+    if self.args.distillation:
+        return self.disillation_training_step(batch)
+    
+    # Standard flow matching training continues...
+```
+
+这种设计允许通过简单地切换 `--distillation` 标志在标准训练和蒸馏之间**无缝切换**，而所有其他训练组件（数据加载、日志记录、检查点保存）保持不变。蒸馏训练步骤自动处理师生协调、噪声采样和损失计算，而无需更改训练基础设施。
+
+模块化架构支持渐进式蒸馏：模型可以使用流匹配进行训练，然后进行蒸馏以创建更快的变体，蒸馏模型可选地可以作为教师进行进一步压缩。
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L126-L176)
+
+<CgxTip>
+蒸馏过程展示了生成建模中的一个基本权衡：将多步生成过程压缩为单次前向传播不可避免地会损失一些表达能力，但提供了巨大的计算优势。对于集成规模比单个预测精度更重要的高吞吐量应用，蒸馏模型提供了极好的价值。
+</CgxTip>
+
+## 后续步骤
+
+- 继续阅读 [损失函数：FAPE、扭转角损失和流匹配损失](12-loss-functions-fape-torsion-angle-loss-and-flow-matching-loss)，以了解蒸馏期间使用的详细损失计算
+- 查看 [推理管道和采样过程](14-inference-pipeline-and-sampling-process)，以比较蒸馏模型与基准模型的推理模式
+- 探索 [模型版本：基准、蒸馏和 12 层配置](4-model-versions-base-distilled-and-12-layer-configurations)，以获取比较模型规范
+
+---
+
+- [深度解析/训练方法/损失函数：FAPE、扭转角损失与 Flow Matching 损失](https://zread.ai/bjing2016/alphaflow/12-loss-functions-fape-torsion-angle-loss-and-flow-matching-loss)
+
+---
+slug:12-loss-functions-fape-torsion-angle-loss-and-flow-matching-loss
+blog_type:normal
+---
+
+
+本页面将探讨 AlphaFlow 的损失函数架构，该架构结合了 AlphaFold 2 的结构预测损失与条件流匹配训练策略。该框架整合了 FAPE（帧对齐点误差）以确保结构准确性，使用二面角损失保证双面体几何精度，并通过训练期间的条件噪声注入实现流匹配原则。
+
+## 损失函数架构概述
+
+AlphaFlow 采用了一种多组件损失函数，它在扩展 AlphaFold 2 原始损失的同时，集成了基于流的生成训练。主要的损失组件作用于蛋白质结构的不同方面：
+
+- **FAPE 损失**：使用刚性帧变换测量主链和侧链的结构对齐情况
+- **扭转角损失**：监督 χ 角预测以确保侧链旋转异构体准确性
+- **流匹配**：通过条件噪声注入实现，而非使用单独的损失函数
+
+`AlphaFoldLoss` 类通过 `alphaflow/utils/loss.py` [1522-1618](alphaflow/utils/loss.py#L1522-L1618) 中的加权聚合方案来协调这些组件。每个损失组件独立计算，按可配置权重缩放，并组合成最终目标。
+
+```mermaid
+graph TD
+    A[AlphaFoldLoss.forward] --> B{Loss Components}
+    B --> C[fape_loss]
+    B --> D[supervised_chi_loss]
+    B --> E[distogram_loss]
+    B --> F[plddt_loss]
+    B --> G[tm_loss - Optional]
+    
+    C --> H[backbone_loss]
+    C --> I[sidechain_loss]
+    
+    H --> J[compute_fape<br/>Backbone frames]
+    I --> K[compute_fape<br/>Sidechain frames]
+    
+    D --> L[Torsion angle prediction<br/>χ angles]
+    
+    J & K & L & E & F & G --> M[Weighted aggregation]
+    M --> N["Sequence length scaling<br/>√min(seq_len, crop_len)"]
+    N --> O[Final loss]
+```
+
+来源：[loss.py](alphaflow/utils/loss.py#L1522-L1618), [loss.py](alphaflow/utils/loss.py#L260-L285)
+
+## FAPE 损失：帧对齐点误差
+
+FAPE 损失是 AlphaFlow 中的主要结构目标，它通过不变坐标系评估预测蛋白质结构的准确性。该损失通过在局部定义的参考坐标系内比较预测结构和目标结构来运行，从而确保旋转和平移不变性。
+
+### 数学基础
+
+FAPE 计算首先建立预测帧与目标帧之间的对齐。`compute_fape` 函数实现了这一变换 [78-151](alphaflow/utils/loss.py#L78-L151)：
+
+```python
+def compute_fape(
+    pred_frames: Rigid,
+    target_frames: Rigid,
+    frames_mask: torch.Tensor,
+    pred_positions: torch.Tensor,
+    target_positions: torch.Tensor,
+    positions_mask: torch.Tensor,
+    length_scale: float,
+    l1_clamp_distance: Optional[float] = None,
+    eps=1e-8,
+) -> torch.Tensor:
+```
+
+该变换通过刚体变换将位置从预测帧映射到目标帧。该实现计算变换后位置之间的 L1 距离，并应用可选的截断以防止离群值主导。
+
+### 主链 FAPE 组件
+
+`backbone_loss` 函数将 FAPE 应用于主链结构 [152-188](alphaflow/utils/loss.py#L152-L188)：
+
+```python
+pred_aff = Rigid.from_tensor_7(traj)
+pred_aff = Rigid(
+    Rotation(rot_mats=pred_aff.get_rots().get_rot_mats(), quats=None),
+    pred_aff.get_trans(),
+)
+
+gt_aff = Rigid.from_tensor_4x4(backbone_rigid_tensor)
+
+fape_loss = compute_fape(
+    pred_aff,
+    gt_aff[None],
+    backbone_rigid_mask[None],
+    pred_aff.get_trans(),
+    gt_aff[None].get_trans(),
+    backbone_rigid_mask[None],
+    l1_clamp_distance=clamp_distance,
+    length_scale=loss_unit_distance,
+    eps=eps,
+)
+```
+
+值得注意的是，该实现包含了一个数值稳定性考虑：它直接使用旋转矩阵，而不是像原始 AlphaFold 实现那样将旋转矩阵转换为四元数再转换回来，从而避免了重复变换可能带来的数值不稳定性 [158-162](alphaflow/utils/loss.py#L158-L162)。
+
+### 侧链 FAPE 组件
+
+侧链结构通过 `sidechain_loss` 进行评估 [210-258](alphaflow/utils/loss.py#L210-L258)，该函数处理模糊侧链原子的一级和替代命名约定。该函数使用由 `compute_renamed_ground_truth` [1357-1464](alphaflow/utils/loss.py#L1357-L1464) 计算的重命名真实位置来处理对称侧链（例如，芳香环翻转）。
+
+侧链损失整合了来自多个来源的信息：
+
+- **侧链帧**：侧链坐标系的刚体变换
+- **刚性组**：模糊原子的替代帧配置
+- **Atom14 位置**：14 原子表示中的全原子位置
+- **Alt 命名**：指示替代命名约定的布尔标志
+
+### 截断策略
+
+FAPE 损失实现支持截断距离（默认 10.0Å），以防止大的离群值主导梯度。`backbone_loss` 函数可选地通过 `use_clamped_fape` 参数 [172-180](alphaflow/utils/loss.py#L172-L180) 使用动态截断策略，混合截断和未截断的 FAPE 计算：
+
+```python
+fape_loss = fape_loss * use_clamped_fape + unclamped_fape_loss * (
+    1 - use_clamped_fape
+)
+```
+
+这种自适应方法允许模型在不同的训练阶段从鲁棒性（截断）和敏感性（未截断）中受益。
+
+来源：[loss.py](alphaflow/utils/loss.py#L78-L151), [loss.py](alphaflow/utils/loss.py#L152-L188), [loss.py](alphaflow/utils/loss.py#L210-L258)
+
+## 扭转角损失：χ 角监督
+
+扭转角损失对侧链旋转异构体几何提供直接监督，用角度约束补充基于位置的 FAPE 损失。`supervised_chi_loss` 函数实现了 AlphaFold 2 的算法 27 用于扭转角损失 [285-370](alphaflow/utils/loss.py#L285-L370)。
+
+### 实现结构
+
+该函数处理具有以下签名的预测角度：
+
+```python
+def supervised_chi_loss(
+    angles_sin_cos: torch.Tensor,              # [*, N, 7, 2] predicted angles
+    unnormalized_angles_sin_cos: torch.Tensor, # Unnormalized version
+    aatype: torch.Tensor,                     # [*, N] residue indices
+    seq_mask: torch.Tensor,                   # [*, N] sequence mask
+    chi_mask: torch.Tensor,                   # [*, N, 7] angle mask
+    chi_angles_sin_cos: torch.Tensor,         # [*, N, 7, 2] ground truth
+    chi_weight: float,                        # Weight for angle component
+    angle_norm_weight: float,                 # Weight for normalization
+    eps=1e-6,
+    **kwargs,
+) -> torch.Tensor:
+```
+
+角度预测被分为主链角度（phi, psi, omega）和侧链 χ 角 [285-309](alphaflow/utils/loss.py#L285-L309)。损失计算两个组件：
+
+1. **角度偏差损失**：测量预测值与真实值的 sin/cos 表示之间的 L1 距离
+2. **归一化损失**：鼓励预测角度在 sin/cos 表示中具有单位幅度
+
+### 周期性处理
+
+损失通过 sin/cos 角度表示处理周期性，确保角度差在 2π 边界处正确回绕。这对于 0° 和 360° 代表等效构象的扭转角至关重要。
+
+该函数还通过 `aatype` 独热编码考虑残基特异性特征，允许根据每种氨基酸类型定义的 χ 角进行逐残基掩码 [298-304](alphaflow/utils/loss.py#L298-L304)。
+
+来源：[loss.py](alphaflow/utils/loss.py#L285-L370)
+
+## 流匹配集成
+
+AlphaFlow 通过训练期间的条件噪声注入实现流匹配原则，而不是通过单独的损失组件。这种方法使模型能够学习从谐先验分布到天然蛋白质结构的轨迹。
+
+### 谐先验
+
+流匹配框架始于 `alphaflow/utils/diffusion.py` [40-57](alphaflow/utils/diffusion.py#L40-L57) 中定义的谐先验：
+
+```python
+class HarmonicPrior:
+    def __init__(self, N = 256, a =3/(3.8**2)):
+        self.N = N
+        self.a = a
+        self.bins = torch.linspace(0, torch.pi, N + 1)
+        cbins = (self.bins[1:] + self.bins[:-1]) / 2
+        self.probs = a * torch.sin(cbins)
+        self.probs = self.probs / self.probs.sum()
+```
+
+谐先验表示基于几何约束的残基间距离的简单分布，参数 `a = 3/(3.8²)` 反映了典型的蛋白质键几何结构。
+
+### 条件噪声注入
+
+`ModelWrapper._add_noise` 方法实现了流匹配训练策略 [52-68](alphaflow/model/wrapper.py#L52-L68)：
+
+```python
+def _add_noise(self, batch):
+    device = batch['aatype'].device
+    batch_dims = batch['seq_length'].shape
+    
+    noisy = self.harmonic_prior.sample(batch_dims)
+    try:
+        noisy = rmsdalign(batch['pseudo_beta'], noisy, 
+                         weights=batch['pseudo_beta_mask']).detach()
+    except:
+        logger.warning('SVD failed to converge!')
+        batch['t'] = torch.ones(batch_dims, device=device)
+        return
+    
+    t = torch.rand(batch_dims, device=device)
+    noisy_beta = (1 - t[:,None,None]) * batch['pseudo_beta'] + \
+                 t[:,None,None] * noisy
+    
+    pseudo_beta_dists = torch.sum(
+        (noisy_beta.unsqueeze(-2) - noisy_beta.unsqueeze(-3)) ** 2, 
+        dim=-1)**0.5
+    batch['noised_pseudo_beta_dists'] = pseudo_beta_dists
+    batch['t'] = t
+```
+
+训练过程使用由 `noise_prob` 控制的概率沿流轨迹采样中间结构。流使用时间参数 `t ∈ [0, 1]` 在真实结构和谐先验样本之间进行插值，其中 t=0 对应于天然结构，t=1 对应于先验分布。
+
+<CgxTip>
+使用 Kabsch 算法的 RMSD 对齐步骤确保以旋转不变的方式添加噪声。这种对齐防止模型学习虚假的旋转依赖性，而这种依赖性无法推广到新的蛋白质方向。
+</cgtip>
+
+### 训练集成
+
+在训练期间，模型基于噪声输入有条件地生成结构。`ModelWrapper.training_step` 中的训练步骤将流匹配与标准监督损失集成 [126-165](alphaflow/model/wrapper.py#L126-L165)：
+
+```python
+if torch.rand(1, generator=self.generator).item() < self.args.noise_prob:
+    self._add_noise(batch)
+    self.log('time', [batch['t'].mean().item()])
+else:
+    self.log('time', [1])
+
+# ... (self-conditioning logic) ...
+
+outputs = self.model(batch, prev_outputs=outputs)
+loss, loss_breakdown = self.loss(outputs, batch, _return_breakdown=True)
+```
+
+模型在流匹配训练迭代期间接收噪声距离信息 (`noised_pseudo_beta_dists`) 和时间信息 (`t`)，学习将结构去噪至天然构象。
+
+来源：[diffusion.py](alphaflow/utils/diffusion.py#L40-L57), [wrapper.py](alphaflow/model/wrapper.py#L52-L68), [wrapper.py](alphaflow/model/wrapper.py#L126-L165)
+
+## 损失聚合与缩放
+
+`AlphaFoldLoss.forward` 方法实现了基于序列长度的最终损失聚合和缩放 [1529-1580](alphaflow/utils/loss.py#L1529-L1580)：
+
+```python
+loss_fns = {
+    "distogram": lambda: distogram_loss(...),
+    "fape": lambda: fape_loss(out, batch, self.config.fape) ** 2,
+    "supervised_chi": lambda: supervised_chi_loss(...),
+    # ... (other losses)
+}
+
+cum_loss = 0.
+for loss_name, loss_fn in loss_fns.items():
+    weight = self.config[loss_name].weight
+    loss = loss_fn()
+    if(torch.isnan(loss) or torch.isinf(loss)):
+        logging.warning(f"{loss_name} loss is NaN. Skipping...")
+        loss = loss.new_tensor(0., requires_grad=True)
+    cum_loss = cum_loss + weight * loss
+
+# Scale by sequence length
+seq_len = torch.mean(batch["seq_length"].float())
+crop_len = batch["aatype"].shape[-1]
+cum_loss = cum_loss * torch.sqrt(min(seq_len, crop_len))
+```
+
+### 损失组件权重
+
+`alphaflow/config.py` 中的配置系统定义了每个损失组件的默认权重。损失聚合包括：
+
+- **FAPE 损失**：平方和加权（默认权重可配置）
+- **监督 χ 损失**：直接扭转角监督
+- **Distogram 损失**：残基间距离预测（辅助损失）
+- **pLDDT 损失**：置信度预测监督
+- **TM 损失**：可选的模板建模损失（为 PTM 模型启用）
+
+<CgxTip>
+序列长度缩放因子 (√min(seq_len, crop_len)) 确保对不同长度的蛋白质进行公平比较。这种归一化防止在使用可变裁剪大小的混合批次训练中，较长序列主导损失。
+</cg-tip>
+
+### NaN 处理
+
+该实现包括强大的 NaN 处理，以防止个别损失组件中的数值问题导致训练不稳定 [1558-1562](alphaflow/utils/loss.py#L1558-L1562)。当损失组件产生 NaN 或 Inf 值时，它被替换为保持梯度流的零张量，允许训练继续进行，同时记录问题以便调试。
+
+来源：[loss.py](alphaflow/utils/loss.py#L1529-L1580), [config.py](alphaflow/config.py#L100-L250)
+
+## 训练流程集成
+
+`ModelWrapper.training_step` 中的完整训练循环将流匹配与标准监督损失集成 [126-165](alphaflow/model/wrapper.py#L126-L165)：
+
+```mermaid
+flowchart TD
+    A[training_step] --> B{Noise injection?}
+    B -->|prob = noise_prob| C[_add_noise<br/>Sample harmonic prior<br/>Interpolate to t]
+    B -->|else| D[Use clean structure<br/>t = 1]
+    C --> E[batch noised_pseudo_beta_dists<br/>batch t]
+    D --> F[No noise added]
+    
+    E --> G{Self-conditioning?}
+    F --> G
+    G -->|prob = self_cond_prob| H[Teacher model inference<br/>No gradient]
+    G -->|else| I[No self-conditioning]
+    
+    H --> J[Student model forward<br/>with prev_outputs]
+    I --> J
+    
+    J --> K[Compute losses<br/>FAPE + Torsion + ...]
+    K --> L[Aggregate and scale]
+    L --> M[Return loss]
+```
+
+### 自条件化
+
+AlphaFlow 在训练期间可选地采用自条件化 [146-148](alphaflow/model/wrapper.py#L146-L148)，其中模型自身的预测（教师输出）条件化后续的学生预测。这种类似分类器自由指导的条件化实现通过允许自一致性检查来提高推理期间的模型性能。
+
+### 训练模式变化
+
+系统通过 `config.py` 中的 `model_config` 函数支持多种训练配置：
+
+- **初始训练**：没有结构违规的基础配置
+- **微调**：减少的 MSA 大小，启用违规损失
+- **PTM 变体**：添加的模板建模头和损失
+- **无模板变体**：为消融研究禁用模板集成
+
+每个配置根据 AlphaFold 2 补充表 4 的规范修改损失权重和超参数。
+
+来源：[wrapper.py](alphaflow/model/wrapper.py#L126-L165), [config.py](alphaflow/config.py#L21-L100)
+
+## 总结
+
+AlphaFlow 的损失函数架构结合了成熟的结构预测损失（FAPE、扭转角）与现代流匹配原则。FAPE 损失提供主链和侧链结构监督，扭转角损失确保旋转异构体准确性，而通过条件噪声注入实现的流匹配使模型能够学习从简单先验到天然结构的生成轨迹。这种混合方法利用了监督和生成训练范式的优势。
+
+有关针对不同训练场景配置这些损失的实际实现细节，请参阅 [PDB 和 MD 数据集的训练流程](10-training-pipeline-for-pdb-and-md-datasets)。有关基于此流匹配基础的推理采样和计划调度的信息，请参阅 [推理流程和采样过程](14-inference-pipeline-and-sampling-process) 和 [针对多样性与精度权衡的调度调整](16-schedule-tuning-for-diversity-vs-precision-trade-off)。
+
+---
+
+- [深度解析/训练方法/MD+Templates 模型的模版集成](https://zread.ai/bjing2016/alphaflow/13-template-integration-for-md-templates-models)
+
+---
+slug:13-template-integration-for-md-templates-models
+blog_type:normal
+---
+
+
+模板集成是 AlphaFlow MD+Templates 模型系列中的关键架构组件，实现了分子动力学轨迹数据与结构模板约束的融合。本文档阐述了模板的处理方式、如何集成到模型架构中，以及在基于 MD 的蛋白质结构预测的训练和推理过程中如何利用这些模板。
+
+## 模板处理流程
+
+模板集成过程始于从 mmCIF 和 PDB 文件中系统地提取和处理结构模板。DataPipeline 类通过专门的模板命中解析和特征化工作流来协调模板特征的生成。
+
+通过针对结构数据库（通常是 PDB70）的序列比对搜索来识别模板，并根据序列相似性和比对置信度对顶部命中进行排序。`_parse_template_hits` 方法解析 HHR（隐马尔可夫模型）格式的比对文件以提取模板信息 [data_pipeline.py#L480-L518]。这些原始命中随后通过模板特征化管道转换为张量化的特征表示。
+
+### 模板特征架构
+
+模板特征遵循一种结构化的架构设计，旨在捕捉几何结构和序列-结构关系：
+
+| 特征类别 | 特征名称 | 形状 | 用途 |
+|-----------------|--------------|-------|---------|
+| 序列 | `template_aatype` | [NUM_TEMPLATES, NUM_RES] | 每个模板的氨基酸类型 |
+| 几何 | `template_all_atom_positions` | [NUM_TEMPLATES, NUM_RES, None, None] | 完整原子坐标 |
+| 几何 | `template_all_atom_mask` | [NUM_TEMPLATES, NUM_RES, None] | 有效原子位置指示符 |
+| 几何 | `template_pseudo_beta` | [NUM_TEMPLATES, NUM_RES, None] | Cβ（或 Gly 的 Cα）位置 |
+| 几何 | `template_pseudo_beta_mask` | [NUM_TEMPLATES, NUM_RES] | 伪 β 有效性掩码 |
+| 主链 | `template_backbone_rigid_tensor` | [NUM_TEMPLATES, NUM_RES, None, None] | 刚性框架表示 |
+| 主链 | `template_backbone_rigid_mask` | [NUM_TEMPLATES, NUM_RES] | 刚性框架有效性 |
+| 扭转角 | `template_torsion_angles_sin_cos` | [NUM_TEMPLATES, NUM_RES, None, None] | Sin/cos 编码的角度 |
+| 扭转角 | `template_torsion_angles_mask` | [NUM_TEMPLATES, NUM_RES, None] | 扭转角有效性 |
+| 元数据 | `template_sum_probs` | [NUM_TEMPLATES, None] | 模板命中概率总和 |
+| 元数据 | `template_mask` | [NUM_TEMPLATES] | 模板有效性掩码 |
+
+来源：[config.py#L252-L273]
+
+模板特征架构支持同时处理多个模板，其中 `NUM_TEMPLATES` 充当动态占位符，能够适应实际可用模板命中的数量。配置参数控制训练（`max_templates=4`）和推理（`max_templates=4`）期间的模板限制 [config.py#L350-L323]。
+
+## 模板集成架构
+
+模板特征通过专门的模板处理堆栈集成到 AlphaFlow 架构中，该堆栈与主要的 Evoformer 处理管道并行运行。集成遵循分层递进过程：原始模板特征 → 模板嵌入 → 模板对堆栈 → 基于注意力的融合 → 主干集成。
+
+### 模板堆栈架构
+
+模板处理堆栈由三个主要组件组成：
+
+1. **模板角度嵌入器**：将扭转角特征转换为序列嵌入。嵌入器将 57 维输入特征（表示 sin/cos 编码角度加上掩码信息）映射到序列嵌入维度 `c_m` [config.py#L418-L422]。
+
+2. **模板对嵌入器**：将几何和位置模板特征转换为成对表示。该模块接受 88 维输入（编码相对位置、方向和兼容性分数），并输出维度为 `c_t=64` 的模板对嵌入 [config.py#L423-L426]。
+
+3. **模板对堆栈**：在模板对嵌入上实现三角形自注意力。该堆栈通过多个三角形注意力和转换层块处理模板成对关系，使模型能够跨模板推理结构模式 [config.py#L427-L440]。
+
+```mermaid
+flowchart TB
+    subgraph Template_Features
+        T1[template_aatype<br/>[T, L]]
+        T2[template_all_atom_positions<br/>[T, L, A, 3]]
+        T3[template_torsion_angles_sin_cos<br/>[T, L, 7, 2]]
+        T4[template_mask<br/>[T]]
+    end
+    
+    subgraph Template_Embedding
+        AE[Template Angle Embedder<br/>c_in=57 → c_out=c_m=256]
+        PE[Template Pair Embedder<br/>c_in=88 → c_out=c_t=64]
+        TPS[Template Pair Stack<br/>2 blocks, triangular attention]
+    end
+    
+    subgraph Template_Pointwise_Attention
+        TPA[Template Pointwise Attention<br/>4 heads, c_hidden=16]
+    end
+    
+    subgraph Trunk_Integration
+        EVO[Evoformer Stack]
+        SM[Structure Module]
+    end
+    
+    T1 --> AE
+    T2 --> PE
+    T3 --> AE
+    T4 --> AE
+    T4 --> PE
+    
+    PE --> TPS
+    TPS --> TPA
+    
+    TPA -->|z_template + z_msa| EVO
+    EVO --> SM
+    
+    style TPS fill:#e1f5ff
+    style TPA fill:#fff4e1
+```
+
+模板逐点注意力机制充当关键的集成枢纽，其中模板衍生的成对表示关注 MSA 衍生的成对表示。该注意力块使用 4 个头和 16 的隐藏维度运行，计算模板和查询成对特征的加权组合 [config.py#L441-L449]。
+
+来源：[config.py#L412-L465]
+
+## MD+Templates 模型配置
+
+MD+Templates 模型代表了一种专门的模型变体，它结合了分子动力学轨迹数据和结构模板约束。这些模型的独特之处在于能够同时利用 MD 衍生的结构特征和基于同源性的模板信息。
+
+### 模板集成控制
+
+模板子系统提供了几个配置选项，用于控制模板如何集成到模型中：
+
+| 配置参数 | 类型 | 默认值 | 用途 |
+|-----------------------|------|---------|---------|
+| `model.template.enabled` | bool | True | 模板处理的主开关 |
+| `data.common.use_templates` | bool | True | 启用模板特征提取 |
+| `data.common.use_template_torsion_angles` | bool | True | 包含扭转角特征 |
+| `model.template.average_templates` | bool | False | 平均模板嵌入以提高效率 |
+| `model.template.offload_templates` | bool | False | 卸载到 CPU 以节省内存 |
+| `data.train.max_templates` | int | 4 | 训练期间的最大模板数 |
+| `data.predict.max_templates` | int | 4 | 推理期间的最大模板数 |
+
+来源：[config.py#L302-L303], [config.py#L452-L465]
+
+### 模型预设配置
+
+不同的模型预设根据其预期用例启用或禁用模板：
+
+```python
+# 启用模板的模型（适用于 MD+Templates）
+"model_1":  # 带有模板的主要推理模型
+    c.data.common.use_templates = True
+    c.model.template.enabled = True
+
+"model_2":  # 带有模板的替代推理模型
+    c.data.common.use_templates = True
+    c.model.template.enabled = True
+
+# 禁用模板的模型（无模板变体）
+"model_3", "model_4", "model_5":
+    c.model.template.enabled = False
+```
+
+MD+Templates 模型专门利用启用模板的配置（model_1 和 model_2）来结合 MD 轨迹数据和模板约束 [config.py#L96-L154]。
+
+来源：[config.py#L96-L154]
+
+## 用于 MD 集成的额外输入处理
+
+MD+Templates 模型引入了超出标准模板处理的额外结构输入能力。`extra_input` 标志启用了辅助输入成对嵌入通路，可以合并额外的结构信息，例如 MD 衍生的构象。
+
+### 额外输入成对嵌入
+
+当在模型初始化期间启用 `extra_input=True` 时，AlphaFold 模型会实例化额外的嵌入组件以处理额外的结构输入：
+
+```python
+if extra_input:
+    self.extra_input_pair_embedding = Linear(
+        self.config.input_pair_embedder.no_bins, 
+        self.config.evoformer_stack.c_z,
+        init="final",
+    )   
+    self.extra_input_pair_stack = InputPairStack(**self.config.input_pair_stack)
+```
+
+在前向传播期间，如果批次中存在 `extra_all_atom_positions`，模型会根据这些额外坐标计算伪 β 距离，并通过额外输入成对堆栈进行处理 [alphafold.py#L238-L250]。
+
+来源：[alphafold.py#L103-L109], [alphafold.py#L238-L250]
+
+这种额外输入通路允许 MD+Templates 模型同时合并：
+1. **模板特征**：来自已知结构的基于同源性的结构约束
+2. **MD 轨迹特征**：来自分子动力学模拟的构象样本
+3. **流匹配目标**：用于扩散训练的噪声结构表示
+
+### 集成点
+
+模板衍生的特征和额外输入特征在模型的前向传播中汇聚于成对表示 `z`：
+
+```python
+# 模板集成（如果启用）
+if self.template_config.enabled:
+    z_template = self.template_pair_stack(t, template_mask, ...)
+    z = z + self.template_pointwise_attention(z_template, z, ...)
+
+# 额外输入集成（如果可用）
+if self.extra_input and 'extra_all_atom_positions' in batch:
+    extra_inp_z = self._get_extra_input_pair_embeddings(...)
+    z = z + extra_inp_z
+```
+
+这种加法集成允许模型合并多个结构信息源，同时保持在训练期间对每个贡献进行加权的能力 [alphafold.py#L150-L235]。
+
+来源：[alphafold.py#L150-L235]
+
+## 训练期间的模板处理
+
+训练 MD+Templates 模型需要仔细管理模板特征，特别是在数据增强期间裁剪和子采样序列及模板时。
+
+### 模板子采样和裁剪
+
+`random_crop_to_size` 变换函数实现了感知模板的裁剪，该裁剪在集成成员之间维护模板一致性：
+
+```python
+def random_crop_to_size(
+    protein,
+    crop_size,
+    max_templates,
+    shape_schema,
+    subsample_templates=False,
+    seed=None,
+):
+    # 特定于模板的处理
+    if "template_mask" in protein:
+        num_templates = protein["template_mask"].shape[-1]
+        subsample_templates = subsample_templates and num_templates
+    
+    if subsample_templates:
+        templates_crop_start = _randint(0, num_templates)
+        templates_select_indices = torch.randperm(
+            num_templates, device=protein["seq_length"].device, generator=g
+        )
+```
+
+该函数应用了特定的模板裁剪逻辑，在尊重模板维度的同时维持残基对应关系。模板特征在裁剪前被随机排列，以减少训练期间的位置偏差 [input_pipeline.py#L25-L106]。
+
+来源：[input_pipeline.py#L25-L106]
+
+### 固定大小模板填充
+
+`make_fixed_size` 函数将模板填充到一致的大小以便进行批次处理，类似于填充 MSA 和序列特征的方式：
+
+```python
+def make_fixed_size(
+    protein,
+    shape_schema,
+    num_res=0,
+    num_templates=0,
+):
+    pad_size_map = {
+        NUM_RES: num_res,
+        NUM_TEMPLATES: num_templates,
+    }
+    # 基于 shape_schema 对模板特征应用填充
+```
+
+这确保了训练期间可以高效处理具有不同模板计数的批次 [input_pipeline.py#L110-L120]。
+
+来源：[input_pipeline.py#L110-L120]
+
+## 内存优化策略
+
+模板处理可能会消耗大量内存，特别是对于具有多个模板的长序列。AlphaFlow 提供了几种优化策略：
+
+### 模板平均
+
+当 `average_templates=True` 时，模板嵌入在模板维度上进行平均，而不是单独处理。这将内存使用量从 O(T × L²) 减少到 O(L²)，其中 T 是模板数量，L 是序列长度 [config.py#L459]。
+
+### 模板卸载
+
+`offload_templates` 选项在模板嵌入未被主动使用时将其移动到 CPU 内存，从而以增加 CPU-GPU 传输为代价显著减少 GPU 内存消耗。当为长序列推理设置 `offload_inference` 时，这会自动启用 [config.py#L460-L465]。
+
+### 低内存注意力
+
+模板处理支持与其他模型组件相同的低内存注意力 (LMA) 和 FlashAttention 优化，通过 `globals.use_lma` 和 `globals.use_flash` 设置进行全局控制 [config.py#L375-L379]。
+
+<CgxTip>
+对于超过 1000 个残基的序列推理，同时启用 `offload_templates=True` 和 `use_lma=True`，与默认配置相比，可减少约 60-80% 的内存使用量。
+</CgxTip>
+
+来源：[config.py#L459-L465], [config.py#L375-L379]
+
+## MD 数据的模板特征提取
+
+处理用于模板集成的 MD 轨迹需要专门的特征提取，以考虑到 MD 构象与静态晶体学模板相比的动态性质。
+
+### 特定于 MD 的特征生成
+
+`make_pdb_features` 函数提供了一条专门为 MD 轨迹处理设计的模板特征生成通路：
+
+```python
+def make_pdb_features(
+    protein_object: protein.Protein,
+    description: str,
+    is_distillation: bool = True,
+    confidence_threshold: float = 50.,
+) -> FeatureDict:
+    # 从蛋白质对象生成特征
+    # 如果指定，应用置信度过滤
+    # 返回与模板管道兼容的特征字典
+```
+
+当 `is_distillation=True` 时，此函数应用额外的处理，适用于蒸馏训练场景，其中模型从教师模型或高质量的 MD 轨迹中学习 [data_pipeline.py#L125-L130]。
+
+来源：[data_pipeline.py#L125-L130]
+
+### MD 的模板命中生成
+
+基于 MD 的模板生成与基于同源性的模板生成不同。无需搜索结构数据库，MD 轨迹可以通过以下方式作为“合成模板”进行处理：
+
+1. 从 MD 轨迹中采样帧
+2. 计算伪 β 距离和扭转角
+3. 计算逐帧质量分数（相对于参考的 RMSD、能量等）
+4. 排序并选择帧作为模板命中
+5. 转换为模板特征格式
+
+此工作流允许 MD+Templates 模型同时利用外部同源模板和内部 MD 衍生的结构约束。
+
+来源：[data_pipeline.py#L480-L518]
+
+## 后续步骤
+
+要全面了解模板集成在更广泛的 AlphaFlow 架构中的作用：
+
+- **[Evoformer 和折叠主干架构](8-evoformer-and-folding-trunk-architecture)**：了解集成了模板的成对表示如何流经主干处理
+- **[PDB 和 MD 数据集的训练管道](10-training-pipeline-for-pdb-and-md-datasets)**：了解针对不同数据源训练期间如何配置模板特征
+- **[模板处理和特征提取](19-template-processing-and-feature-extraction)**：深入了解模板特征化算法和比对策略
+
+---
+
+## 推理与生成
+
+- [深度解析/推理与生成/推理流程与采样过程](https://zread.ai/bjing2016/alphaflow/14-inference-pipeline-and-sampling-process)
+
+---
+slug:14-inference-pipeline-and-sampling-process
+blog_type:normal
+---
+
+
+推理管道通过迭代流匹配过程，将初始噪声分布转化为蛋白质结构。本指南解释了从输入准备到结构生成的完整采样工作流程，涵盖了谐先验初始化、去噪计划以及能够实现多样化且准确的蛋白质结构预测的自条件机制。
+
+## 管道概述
+
+推理过程遵循确定性时间步轨迹，逐步将噪声坐标精炼为类似蛋白质的结构。该管道协调多个组件：谐先验采样、通过 AlphaFold 主干网络进行迭代去噪、可选的自条件，以及每个步骤的结构对齐。
+
+```mermaid
+flowchart TD
+    A[输入数据<br/>CSV + MSA + Templates] --> B[加载模型<br/>AlphaFoldWrapper/ESMFoldWrapper]
+    B --> C[初始化谐先验<br/>采样随机坐标]
+    C --> D{首个噪声模式?}
+    D -->|Yes| E[设置 t=1.0<br/>计算初始距离]
+    D -->|No| F[继续执行计划]
+    E --> F
+    F --> G[迭代执行计划<br/>tmax → 0]
+    G --> H[模型前向传播<br/>prev_outputs 用于自条件]
+    H --> I[提取 pseudo_beta<br/>计算新坐标]
+    I --> J[RMSD 对齐<br/>将预测与噪声对齐]
+    J --> K[线性插值<br/>x_noisy = s/t * noise + 1-s/t * pred]
+    K --> L[更新批次<br/>新距离 + 时间嵌入]
+    L --> M{还有更多时间步?}
+    M -->|Yes| G
+    M -->|No| N[转换为蛋白质对象<br/>保存 PDB 文件]
+```
+
+管道入口点是 `predict.py`，它处理包含蛋白质目标的输入序列或 CSV 文件，并使用可配置的采样计划为每个目标生成多个结构样本 [predict.py](predict.py#L60-L132)。
+
+## 输入数据准备
+
+推理管道通过包含蛋白质序列或 PDB 标识符的 CSV 文件接受输入。系统从指定目录加载预计算的 MSA 和可选模板，为模型创建批次输入。
+
+来源：[predict.py](predict.py#L62-L70)
+
+两个数据集类处理不同的模型架构：
+
+- **AlphaFoldCSVDataset**：专为具有完整 AlphaFold 风格输入的 AlphaFlow 模型设计
+- **CSVDataset**：专为具有简化输入要求的 ESMFlow 模型配置
+
+这两个数据集共享一个通用接口用于加载序列、MSA 和模板特征，确保跨模型变体的一致预处理 [alphaflow/data/inference.py](alphaflow/data/inference.py#L17-L91)。
+
+## 谐先验和噪声初始化
+
+推理过程从谐先验分布采样开始，该分布提供了尊重蛋白质链连接性的物理上合理的起始坐标。`HarmonicPrior` 类实现了一个弹簧-质量系统模型，其中相邻残基通过平衡间距为 3.8Å 的谐振弹簧连接。
+
+```python
+class HarmonicPrior:
+    def __init__(self, N=256, a=3/(3.8**2)):
+        # 构造具有最近邻弹簧的耦合矩阵 J
+        J = torch.zeros(N, N)
+        for i, j in zip(np.arange(N-1), np.arange(1, N)):
+            J[i,i] += a
+            J[j,j] += a
+            J[i,j] = J[j,i] = -a
+        # 用于采样的特征值分解
+        D, P = torch.linalg.eigh(J)
+```
+
+来源：[alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L40-L51)
+
+采样过程在耦合矩阵的特征基中生成高斯噪声，然后变换回坐标空间。这确保了随机起点具有天然的类似蛋白质的构象，而不是完全随机的噪声：
+
+```python
+def sample(self, batch_dims=()):
+    return self.P @ (torch.sqrt(self.D_inv)[:,None] * 
+                     torch.randn(*batch_dims, self.N, 3))
+```
+
+来源：[alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L57-L58)
+
+在推理期间，根据序列长度实例化谐先验并进行采样以生成初始噪声坐标 [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L354-L356)。
+
+## 采样计划配置
+
+去噪过程遵循从最大噪声 (tmax) 到干净结构 (t=0) 的线性计划。每个计划步骤代表一个流匹配时间步，其中模型预测指向更干净结构的方向。
+
+### 计划参数
+
+| 参数 | 描述 | 默认值 | 影响 |
+|-----------|-------------|---------|--------|
+| `--steps` | 去噪步数 | 10 | 更多步骤 = 更高质量，推理更慢 |
+| `--tmax` | 最大噪声水平 | 1.0 | 较高值需要更多步骤才能收敛 |
+| `--schedule` | 自定义时间步数组 | `[1.0, 0.75, 0.5, 0.25, 0.1, 0]` | 非线性计划可以平衡速度/质量 |
+
+来源：[predict.py](predict.py#L8-L9), [predict.py](predict.py#L47-L49), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L369-L371)
+
+计划构造如下：
+
+```python
+schedule = np.linspace(args.tmax, 0, args.steps+1)
+if args.tmax != 1.0:
+    schedule = np.array([1.0] + list(schedule))  # 包含纯噪声起始
+```
+
+每次迭代处理一个时间步 `t`（当前噪声水平）和 `s`（目标噪声水平），根据比率 `s/t` 在噪声和模型预测之间进行插值。
+
+## 迭代去噪循环
+
+核心推理循环遍历计划，通过模型预测和坐标混合逐步精炼坐标：
+
+```mermaid
+sequenceDiagram
+    participant B as 批次
+    participant M as 模型
+    participant P as 先验
+    participant A as 对齐
+    
+    loop 每个时间步 t → s
+        B->>M: 带有 prev_outputs 的前向传播
+        M->>B: 输出结构 (pseudo_beta)
+        B->>A: RMSD 将噪声对齐到预测
+        A->>B: 对齐后的噪声坐标
+        B->>B: 线性插值:<br/>noisy = (s/t)*noise + (1-s/t)*pred
+        B->>B: 计算距离矩阵
+        B->>B: 更新时间嵌入为 s
+        B->>B: 存储以供自条件 (如果启用)
+    end
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L373-L383)
+
+### 步骤 1：模型前向传播
+
+模型处理批次，可选择使用先前时间步的自条件：
+
+```python
+output = self.model(batch, prev_outputs=prev_outputs)
+```
+
+AlphaFold 模型将噪声距离矩阵整合到成对表示中：
+
+```python
+if 'noised_pseudo_beta_dists' in batch:
+    inp_z = self._get_input_pair_embeddings(
+        batch['noised_pseudo_beta_dists'], 
+        batch['pseudo_beta_mask'],
+    )
+    inp_z = inp_z + self.input_time_embedding(
+        self.input_time_projection(batch['t'])
+    )[:,None,None]
+z = add(z, inp_z, inplace=inplace_safe)
+```
+
+来源：[alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L220-L235)
+
+时间嵌入允许模型在去噪过程中区分不同的噪声水平。
+
+### 步骤 2：坐标提取与对齐
+
+模型输出原子位置，从中提取 Cα/Cβ 伪 beta 坐标用于下一次迭代：
+
+```python
+pseudo_beta = pseudo_beta_fn(batch['aatype'], 
+                             output['final_atom_positions'], None)
+```
+
+使用 Kabsch 算法将噪声坐标与预测结构对齐：
+
+```python
+noisy = rmsdalign(pseudo_beta, noisy)
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L375-L377)
+
+`rmsdalign` 函数计算最佳旋转矩阵以最小化两个坐标集之间的 RMSD [alphaflow/utils/diffusion.py](alphaflow/utils/diffusion.py#L5-L28)。
+
+### 步骤 3：线性插值 (流匹配步骤)
+
+核心流匹配操作根据计划比率在对齐的噪声和模型预测之间进行插值：
+
+```python
+noisy = (s / t) * noisy + (1 - s / t) * pseudo_beta
+```
+
+这实现了条件流路径，其中在每个时间步，坐标向更干净的预测移动。比率 `s/t` 决定了保留多少噪声先验与融入多少模型预测。
+
+<CgxTip>
+插值公式遵循整流流 (RF) 公式，其中从噪声到数据的轨迹是线性的。这等同于使用最优传输路径的流匹配，确保推理期间的高效收敛。插值前的对齐步骤至关重要——它确保混合发生在一致的参考系中，防止模型在旋转不变性学习上浪费容量。
+</CgxTip>
+
+### 步骤 4：批次更新与自条件
+
+插值坐标被转换回距离矩阵，并更新时间嵌入：
+
+```python
+batch['noised_pseudo_beta_dists'] = torch.sum(
+    (noisy.unsqueeze(-2) - noisy.unsqueeze(-3)) ** 2, dim=-1
+)**0.5
+batch['t'] = torch.ones(1, device=noisy.device) * s
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L379-L380)
+
+如果启用了自条件，当前模型输出将存储以供下一个时间步使用：
+
+```python
+if self_cond:
+    prev_outputs = output
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L381-L382)
+
+## 自条件机制
+
+自条件允许模型访问其来自先前时间步的预测，创建一个反馈循环，从而提高结构一致性和准确性。
+
+### 实现
+
+AlphaFold 模型通过回收嵌入器接收先前时间步的输出 (`m_1_prev`, `z_prev`, `x_prev`)：
+
+```python
+m_1_prev, z_prev, x_prev = prev_outputs['m_1_prev'], 
+                           prev_outputs['z_prev'], 
+                           prev_outputs['x_prev']
+m_1_prev_emb, z_prev_emb = self.recycling_embedder(
+    m_1_prev, z_prev, x_prev, inplace_safe=inplace_safe,
+)
+m[..., 0, :, :] += m_1_prev_emb
+z = add(z, z_prev_emb, inplace=inplace_safe)
+```
+
+来源：[alphaflow/model/alphafold.py](alphaflow/model/alphafold.py#L196-L216)
+
+这些嵌入为模型提供关于以下方面的信息：
+- **m_1_prev**：序列位置上的先前 MSA 表示
+- **z_prev**：先前的成对表示
+- **x_prev**：先前的坐标预测（转换为 pseudo_beta 距离）
+
+### 对采样的影响
+
+| 配置 | 描述 | 用例 |
+|--------------|-------------|----------|
+| `--self_cond` (默认) | 使用先前时间步的预测 | 用于最佳质量的标准推理 |
+| `--no_self_cond` | 禁用自条件 | 更快的推理，质量略低 |
+| `--noisy_first` | 在 t=1.0 时使用完整噪声初始化 | 更适合探索构象多样性 |
+
+来源：[predict.py](predict.py#L18-L19), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L358-L361)
+
+自条件对于在时间步之间维持全局折叠一致性特别重要，因为它允许后期的去噪步骤纠正早期步骤引入的局部误差。
+
+## 特殊推理模式
+
+### 无扩散模式
+
+`--no_diffusion` 标志完全绕过采样过程，运行没有任何噪声的单次前向传播：
+
+```python
+if no_diffusion:
+    output = self.model(batch)
+    if as_protein:
+        return protein.output_to_protein({**output, **batch})
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L362-L367)
+
+此模式适用于：
+- 测试模型前向传播
+- 将流匹配输出与标准 AlphaFold 预测进行比较
+- 在没有采样复杂性的情况下调试管道问题
+
+### 噪声优先模式
+
+`--noisy_first` 标志在第一次去噪步骤之前使用最大噪声 (t=1.0) 初始化批次：
+
+```python
+if noisy_first:
+    batch['noised_pseudo_beta_dists'] = torch.sum(
+        (noisy.unsqueeze(-2) - noisy.unsqueeze(-3)) ** 2, dim=-1
+    )**0.5
+    batch['t'] = torch.ones(1, device=noisy.device)
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L358-L361)
+
+这确保模型在第一次迭代中处理纯噪声，当从同一起始点采样多个结构时，可以提高一致性。
+
+## 输出生成与保存
+
+完成所有时间步后，管道将模型输出转换为蛋白质对象并将其保存为 PDB 文件：
+
+```python
+if as_protein:
+    prots = []
+    for output in outputs:
+        prots.extend(protein.output_to_protein(output))
+    return prots
+```
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L385-L389)
+
+在 `predict.py` 中，每个目标生成多个样本（由 `--samples` 控制），每个样本保存为单独的 PDB 文件：
+
+```python
+for j in tqdm.trange(args.samples):
+    prots = model.inference(batch, as_protein=True, 
+                           noisy_first=args.noisy_first,
+                           no_diffusion=args.no_diffusion, 
+                           schedule=schedule, 
+                           self_cond=args.self_cond)
+    result.append(prots[-1])  # 获取最终时间步输出
+
+# 将所有样本保存为单个 PDB 文件
+with open(f'{args.outpdb}/{item["name"]}.pdb', 'w') as f:
+    f.write(protein.prots_to_pdb(result))
+```
+
+来源：[predict.py](predict.py#L112-L127)
+
+最终输出 (`prots[-1]`) 包含来自最后一个时间步 (t=0) 的最干净结构，该结构具有最小的噪声内容。
+
+## 运行时与性能优化
+
+推理管道包括运行时跟踪并支持各种优化标志：
+
+| 优化功能 | 实现 | 性能影响 |
+|---------------------|----------------|-------------------|
+| **EMA 权重** | `model.load_ema_weights()` | 更好的泛化能力，轻微的内存开销 |
+| **无覆盖** | 跳过现有的 PDB 文件 | 适用于恢复中断的任务 |
+| **运行时 JSON** | 跟踪每个样本的计时 | 性能分析 |
+| **高精度矩阵乘** | `torch.set_float32_matmul_precision("high")` | 在兼容的 GPU 上获得更好的精度 |
+
+来源：[predict.py](predict.py#L40), [predict.py](predict.py#L97-L98), [predict.py](predict.py#L109-L110), [predict.py](predict.py#L129-L131)
+
+对于批量处理多个目标，管道支持对 MSA 聚类进行子采样以减少内存使用：
+
+```python
+if args.subsample:
+    data_cfg.predict.max_msa_clusters = args.subsample // 2
+    data_cfg.predict.max_extra_msa = args.subsample
+```
+
+来源：[predict.py](predict.py#L55-L57)
+
+## 后续步骤
+
+要深入了解推理管道组件：
+
+- **自条件和噪声注入策略**：探索高级条件技术和噪声注入模式 [自条件和噪声注入策略](15-self-conditioning-and-noise-injection-strategies)
+- **多样性 vs 精度的计划调整**：了解如何调整采样计划以实现不同的权衡 [针对多样性与精度权衡的计划调整](16-schedule-tuning-for-diversity-vs-precision-trade-off)
+- **批处理与优化技术**：优化大规模结构生成的推理 [批处理与优化技术](17-batch-processing-and-optimization-techniques)
+
+对于理论基础：
+
+- **流匹配目标与 AlphaFold 的集成**：了解实现这种推理方法的训练目标 [流匹配目标与 AlphaFold 的集成](6-flow-matching-objective-integration-with-alphafold)
+- **谐先验与噪声计划**：深入研究噪声分布设计 [谐先验与噪声计划](7-harmonic-prior-and-noise-scheduling)
+
+---
+
+- [深度解析/推理与生成/自条件与噪声注入策略](https://zread.ai/bjing2016/alphaflow/15-self-conditioning-and-noise-injection-strategies)
+
+---
+slug:15-self-conditioning-and-noise-injection-strategies
+blog_type:normal
+---
+
+
+本页面记录了 AlphaFlow 在推理和训练过程中采用的双策略方法，通过受控的噪声注入和迭代自优化来生成多样化、高质量的蛋白质结构。
+
+## 扩散框架概述
+
+AlphaFlow 实现了基于流匹配（flow-matching）的扩散方法，该方法从先验分布中逐步对蛋白质结构进行去噪。该系统结合了两种互补的机制：自条件（利用之前的预测）和按照时间表进行的策略性噪声注入。这些策略在模型的前向传播过程中协同工作，AlphaFold 架构在此过程中接受当前输入和之前的输出作为条件信号。
+
+来源：[alphafold.py](/alphaflow/model/alphafold.py#L150-L210)、[wrapper.py](/alphaflow/model/wrapper.py#L350-L392)
+
+```mermaid
+flowchart TD
+    A[初始结构] --> B{噪声注入}
+    B --> C[噪声输入]
+    C --> D[AlphaFold 前向传播]
+    D --> E[伪 Beta 输出]
+    E --> F{自条件?}
+    F -->|是| G[存储为 prev_outputs]
+    F --> H[去噪步骤]
+    G --> H
+    H --> I[更新噪声结构]
+    I --> J{最后一步?}
+    J -->|否| D
+    J -->|是| K[最终结构]
+    
+    style B fill:#f9f,stroke:#333
+    style F fill:#9f9,stroke:#333
+    style H fill:#99f,stroke:#333
+```
+
+## 噪声注入机制
+
+### 训练时的噪声注入
+
+在训练期间，AlphaFlow 采用随机噪声注入来教导模型从受损的输入中恢复出清洁的结构。`_add_noise()` 方法通过从 HarmonicPrior 分布中采样，并基于从 [0, 1] 中均匀采样的时间参数 `t` 在清洁坐标和噪声坐标之间进行插值来实现这一点 [wrapper.py#L52-L70](/alphaflow/model/wrapper.py#L52-L70)。
+
+噪声注入过程遵循以下步骤：
+
+1. 从 HarmonicPrior 采样随机坐标
+2. 使用 RMSD 对齐将采样的噪声与真实结构对齐
+3. 采样时间参数 `t ~ Uniform(0, 1)`
+4. 线性插值：`noisy_beta = (1 - t) * pseudo_beta + t * sampled_noise`
+5. 根据噪声坐标计算成对距离矩阵
+
+这种方法在训练期间由 `noise_prob` 参数控制进行概率性应用，使模型能够学习整个扩散轨迹的去噪 [wrapper.py#L143-L145](/alphaflow/model/wrapper.py#L143-L145)。
+
+### 推理时的扩散时间表
+
+在推理时，噪声注入遵循确定性时间表，而不是随机采样。去噪过程通过一系列时间步 进行迭代，其中 `t > s`，逐步将噪声水平从纯先验（t=1.0）降低到清洁结构（t=0.0）[wrapper.py#L369-L382](/alphaflow/model/wrapper.py#L369-L382)。
+
+<CgxTip>关键创新在于线性插值公式：`noisy = (s/t) * noisy + (1 - s/t) * pseudo_beta`。这在保持扩散过程期望值的同时，逐步将影响力从先验转移到模型的预测。</CgxTip>
+
+**默认推理时间表**：`[1.0, 0.75, 0.5, 0.25, 0.1, 0.0]`
+
+可以通过 `--tmax` 和 `--steps` 命令行参数自定义时间表，从而控制起始噪声水平和去噪迭代次数 [predict.py#L47-L49](/predict.py#L47-L49)。
+
+### 时间嵌入架构
+
+为了使模型根据当前的噪声水平进行条件化，AlphaFlow 将时间嵌入注入到成对表示中。时间参数 `t` 首先通过学习到的线性层进行投影，然后通过嵌入层，最后广播到所有残基对 [alphafold.py#L220-L235](/alphaflow/model/alphafold.py#L220-L235)。
+
+该时间嵌入被添加到基于噪声距离的成对嵌入中，使网络能够理解其在去噪过程中的位置，并相应地调整其预测。
+
+## 自条件策略
+
+### 回收之前的输出
+
+自条件利用 AlphaFold 原生的回收机制来逐步完善预测。在每次推理步骤中，模型上一次迭代的输出作为当前迭代的条件信号反馈回来 [wrapper.py#L374-L382](/alphaflow/model/wrapper.py#L374-L382)。
+
+回收的输出由三个关键组件组成：
+
+- **m_1_prev**：上一次迭代的第一个 MSA 表示 [alphafold.py#L190-L194](/alphaflow/model/alphafold.py#L190-L194)
+- **z_prev**：上一次迭代的成对表示
+- **x_prev**：上一次迭代的 3D 原子坐标
+
+这些表示通过回收嵌入器进行变换，并添加到当前输入中，创建一个反馈循环，从而实现迭代优化 [alphafold.py#L205-L216](/alphaflow/model/alphafold.py#L205-L216)。
+
+### 训练时的自条件
+
+在训练期间，自条件由 `self_cond_prob` 控制随机应用。当被激活时，模型执行一个不带梯度的前向传播以生成初始预测，然后以这些预测为条件执行第二个前向传播 [wrapper.py#L156-L160](/alphaflow/model/wrapper.py#L156-L160)。
+
+这种训练期间的教师强迫方法有助于模型学习有效地利用其自身的预测作为条件信号，从而提高推理时的稳定性和收敛性。
+
+## 配置与使用
+
+### 命令行界面
+
+推理脚本提供了几个标志来控制噪声注入和自条件策略：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `--self_cond` | flag | False | 在推理期间启用自条件 |
+| `--noisy_first` | flag | False | 从纯噪声开始，而不是使用初始的 AlphaFold 预测 |
+| `--no_diffusion` | flag | False | 完全禁用扩散（单次前向传播） |
+| `--steps` | int | 10 | 时间表中的去噪步数 |
+| `--tmax` | float | 1.0 | 噪声注入的最大时间值 |
+
+来源：[predict.py#L16-L19](/predict.py#L16-L19)、[predict.py#L119-L120](/predict.py#L119-L120)
+
+### 特殊模式
+
+**Noisy First 模式**：启用后，直接从从 HarmonicPrior 采样的纯噪声初始化去噪过程，绕过任何初始结构预测。这对于生成完全新颖的结构而不依赖模型的单次预测能力非常有用 [wrapper.py#L358-L360](/alphaflow/model/wrapper.py#L358-L360)。
+
+**No Diffusion 模式**：完全禁用迭代去噪过程，对 AlphaFold 模型执行单次前向传播。此模式相当于标准 AlphaFold 推理，并作为比较的基线 [wrapper.py#L362-L367](/alphaflow/model/wrapper.py#L362-L367)。
+
+## 性能考虑
+
+### 计算权衡
+
+自条件和扩散采样会随着步数的增加线性增加计算成本。每次迭代都需要完整的 Evoformer 和结构模块前向传播。默认的 6 步时间表在质量和效率之间提供了良好的平衡，但可以根据可用的计算资源进行调整。
+
+<CgxTip>为了快速探索或处理大批量数据，请考虑减少步数或使用 `--no_diffusion`。为了在具有挑战性的目标上获得最大质量，请增加步数或使用更精细的时间表。</CgxTip>
+
+### 内存管理
+
+实现在推理期间累积所有中间输出（存储在 `outputs` 列表中），这对于具有多个步骤的长序列可能会消耗大量内存。对于内存受限的环境，请考虑修改代码以仅保留最终输出或实现梯度检查点。
+
+## 与训练流水线的集成
+
+噪声注入和自条件策略是训练方法不可或缺的一部分，而不仅仅是推理技术。在训练期间：
+
+1. 随机噪声注入（`noise_prob` 参数）教导去噪
+2. 随机自条件（`self_cond_prob` 参数）教导回收
+3. 蒸馏模式使用固定的时间表进行师生训练
+4. 教师模型遵循完整的去噪轨迹，而学生学习最终的清洁目标
+
+来源：[wrapper.py#L72-L120](/alphaflow/model/wrapper.py#L72-L120)、[wrapper.py#L143-L160](/alphaflow/model/wrapper.py#L143-L160)
+
+## 后续步骤
+
+要了解这些策略的理论基础，请参阅 [Flow Matching Objective Integration with AlphaFold](6-flow-matching-objective-integration-with-alphafold) 和 [Harmonic Prior and Noise Scheduling](7-harmonic-prior-and-noise-scheduling)。要了解如何针对特定用例调整这些策略，请参阅 [Schedule Tuning for Diversity vs Precision Trade-off](16-schedule-tuning-for-diversity-vs-precision-trade-off)。
+
+---
+
+- [深度解析/推理与生成/多样性 vs 精度权衡的调度调优](https://zread.ai/bjing2016/alphaflow/16-schedule-tuning-for-diversity-vs-precision-trade-off)
+
+---
+slug:16-schedule-tuning-for-diversity-vs-precision-trade-off
+blog_type:normal
+---
+
+
+理解和控制蛋白质结构生成中多样性与精确度之间的平衡，对于从构象采样到单结构预测等各种应用至关重要。本文档解释了 AlphaFlow 中的 schedule tuning 如何通过可配置的噪声 schedule 和采样策略，实现对这一权衡的精确控制。
+
+来源：[predict.py](predict.py#L16-L49), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L340-L384)
+
+## 理解 Schedule 参数
+
+AlphaFlow 中的 schedule 定义了去噪过程的时间进程，控制模型如何从高噪声状态过渡到干净的结构预测。在每一步中，模型通过在当前噪声结构和模型的干净预测之间进行插值来优化其预测，插值系数由 schedule 值确定。
+
+Schedule 实现为一个从 t_max（最大噪声）到 0（干净结构）的时间步数组。例如，在 `tmax=1.0` 且 `steps=10` 的情况下，默认 schedule 会创建 11 个等间距点：`[1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]`。
+
+```python
+schedule = np.linspace(args.tmax, 0, args.steps+1)
+if args.tmax != 1.0:
+    schedule = np.array([1.0] + list(schedule))
+```
+
+来源：[predict.py](predict.py#L47-L49)
+
+## 核心推理算法
+
+推理过程遍历 schedule，在每个转换处执行去噪步骤：
+
+```python
+for t, s in zip(schedule[:-1], schedule[1:]):
+    output = self.model(batch, prev_outputs=prev_outputs)
+    pseudo_beta = pseudo_beta_fn(batch['aatype'], output['final_atom_positions'], None)
+    noisy = rmsdalign(pseudo_beta, noisy)
+    noisy = (s / t) * noisy + (1 - s / t) * pseudo_beta
+    batch['noised_pseudo_beta_dists'] = torch.sum((noisy.unsqueeze(-2) - noisy.unsqueeze(-3)) ** 2, dim=-1)**0.5
+    batch['t'] = torch.ones(1, device=noisy.device) * s
+```
+
+关键插值公式 `noisy = (s / t) * noisy + (1 - s / t) * pseudo_beta` 决定了保留多少模型预测与先前的噪声状态。比率 `s/t` 控制每一步的去噪强度。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L364-L370)
+
+## 多样性与精确度的权衡
+
+Schedule 配置与多样性-精确度权衡之间的关系遵循以下基本原则：
+
+**更高精确度（更少结构，更高准确率）**：
+- 更多步骤 (`--steps 20+`) 提供更细粒度的去噪
+- 更低的 `tmax` 值减少初始噪声注入
+- 启用自条件 (`--self_cond`) 提高最终准确率
+- 使用场景：单一高置信度结构预测
+
+**更高多样性（更多构象，更广泛采样）**：
+- 更少步骤 (`--steps 5-10`) 创建更粗糙的去噪
+- 更高的 `tmax` 值（最高 2.0）增加初始噪声
+- `--noisy_first` 初始化从随机构象开始
+- 使用场景：构象集合生成、对接研究
+
+<CgxTip>
+插值系数 `(s/t)` 决定了去噪过程的“记忆”。接近 1.0 的值（早期步骤）保留了更多随机先验，而接近 0.0 的值（后期步骤）则严重依赖模型预测。这创建了一个自然的退火过程，平衡了探索和利用。
+</CgxTip>
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L366), [predict.py](predict.py#L16-L18)
+
+## 配置参数
+
+`predict.py` 中的以下命令行参数控制 schedule 和采样行为：
+
+| 参数 | 默认值 | 范围 | 对多样性/精确度的影响 |
+|-----------|---------|-------|------------------------------|
+| `--steps` | 10 | 1-100+ | 更多步骤 = 更高精确度，更低多样性 |
+| `--tmax` | 1.0 | 0.1-2.0+ | 更高 tmax = 更高多样性，更低精确度 |
+| `--samples` | 10 | 1-100+ | 独立轨迹的数量 |
+| `--self_cond` | False | Boolean | 启用模型自条件以获得更高精确度 |
+| `--noisy_first` | False | Boolean | 从随机先验初始化以获得更高多样性 |
+| `--no_diffusion` | False | Boolean | 绕过扩散过程（确定性，最高精确度） |
+
+来源：[predict.py](predict.py#L7-L19)
+
+## 推荐的 Schedule 配置
+
+### 高精确度配置
+
+对于准确性至关重要的单结构预测：
+
+```bash
+python predict.py \
+  --input_csv your_sequences.csv \
+  --weights path/to/checkpoint.ckpt \
+  --steps 20 \
+  --tmax 0.8 \
+  --self_cond \
+  --samples 1 \
+  --outpdb ./precision_output
+```
+
+**预期特性**：对于定义明确的蛋白质，RMSD 通常为 1.0-2.0Å，样本间变化极小。
+
+### 平衡配置
+
+对于需要适度多样性和合理准确性的应用：
+
+```bash
+python predict.py \
+  --input_csv your_sequences.csv \
+  --weights path/to/checkpoint.ckpt \
+  --steps 10 \
+  --tmax 1.0 \
+  --self_cond \
+  --samples 10 \
+  --outpdb ./balanced_output
+```
+
+**预期特性**：样本间成对 RMSD 约 2-4Å，平均准确性与高精确度模式相当。
+
+### 高多样性配置
+
+用于构象集合生成或采样柔性区域：
+
+```bash
+python predict.py \
+  --input_csv your_sequences.csv \
+  --weights path/to/checkpoint.ckpt \
+  --steps 5 \
+  --tmax 1.5 \
+  --noisy_first \
+  --samples 50 \
+  --outpdb ./diverse_output
+```
+
+**预期特性**：样本间成对 RMSD 约 4-8Å，对构象空间进行更广泛的探索，特别是在柔性区域。
+
+来源：[predict.py](predict.py#L8-L18), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L354-L359)
+
+## Schedule 可视化和分析
+
+下图说明了不同的 schedule 配置如何影响去噪过程：
+
+```mermaid
+graph TD
+    A[初始状态 t_max] -->|高精确度| B[步骤: 20+, t_max: 0.8]
+    A -->|平衡| C[步骤: 10, t_max: 1.0]
+    A -->|高多样性| D[步骤: 5, t_max: 1.5]
+    
+    B --> E[细粒度去噪]
+    C --> F[适度去噪]
+    D --> G[粗糙去噪]
+    
+    E --> H[低样本方差，高准确率]
+    F --> I[中等方差，良好准确率]
+    G --> J[高方差，广泛采样]
+    
+    subgraph 去噪过程
+        K[步骤 1: t→s₁] --> L[步骤 2: s₁→s₂]
+        L --> M[...]
+        M --> N[最终步骤: sₙ→0]
+    end
+    
+    H --> O[使用场景: 单结构预测]
+    I --> P[使用场景: 对接，MD 初始化]
+    J --> Q[使用场景: 集合分析，柔性区域]
+```
+
+去噪过程可以可视化为构象空间中的轨迹，每一步都向更低噪声移动。步长决定了轨迹可以偏离模型预测路径多远。
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L362-L375)
+
+## 分析生成的集合
+
+使用不同的 schedule 配置生成结构后，使用集合分析脚本来量化多样性和质量：
+
+```bash
+python scripts/analyze_ensembles.py \
+  --atlas_dir /path/to/reference_md \
+  --pdbdir ./diverse_output \
+  --num_workers 4
+```
+
+该脚本计算多个指标，包括：
+- **成对 RMSD**：测量生成样本之间的多样性
+- **方差分量**：通过 PCA 捕获构象分布
+- **推土机距离 (EMD)**：量化与 MD 参考的分布差异
+- **接触概率**：识别一致的相互作用模式
+
+更高多样性的配置应显示：
+- 增加的平均成对 RMSD (`af_mean_pairwise_rmsd`)
+- 主 PCA 成分解释的更大方差
+- 更高的 EMD 值，表明采样更广泛
+- 变化更多的接触图
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L210-L235)
+
+## 高级 Schedule 策略
+
+### 非线性 Schedule
+
+为了更精细的控制，修改 schedule 创建以使用非线性间距：
+
+```python
+# 对数间距：早期步骤精细，后期步骤粗糙
+import numpy as np
+schedule = np.logspace(np.log10(args.tmax), -10, args.steps)
+schedule = np.append(schedule, 0)
+```
+
+这在结构高度无序时提供激进的去噪，然后在结构接近收敛时进行更精细的优化。
+
+### 多尺度 Schedule
+
+对于具有有序和柔性区域的蛋白质，使用混合方法：
+
+```python
+# 早期：激进去噪（0.5 步骤）
+# 后期：保守优化（0.95 步骤）
+schedule = np.concatenate([
+    np.linspace(args.tmax, args.tmax * 0.5, 5),
+    np.linspace(args.tmax * 0.5, 0, args.steps - 4)
+])
+```
+
+来源：[predict.py](predict.py#L47-L49)
+
+## 性能考虑
+
+计算成本与步骤数成线性关系：
+
+| 步骤 | 推理时间（256 残基蛋白质） | 内存使用 |
+|-------|-------------------------------------|--------------|
+| 5 | ~5s | 基准 |
+| 10 | ~10s | 基准 |
+| 20 | ~20s | 基准 |
+| 50 | ~50s | 基准 |
+
+内存使用主要由序列长度和模型大小决定，而不是 schedule 配置。但是，自条件 (`--self_cond`) 需要额外的内存来存储中间激活。
+
+对于需要大量样本的高通量应用：
+1. 将步骤减少到 5-10 以进行专注于多样性的采样
+2. 使用包含适量样本的批处理
+3. 禁用自条件以加快推理速度
+
+来源：[alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L340-L345)
+
+## 实际示例工作流
+
+探索多样性-精确度权衡的完整工作流：
+
+```bash
+# 1. 生成高精确度结构
+python predict.py \
+  --input_csv targets.csv \
+  --weights checkpoint.ckpt \
+  --steps 20 --tmax 0.8 --self_cond \
+  --samples 1 --outpdb ./precision
+
+# 2. 生成多样化集合
+python predict.py \
+  --input_csv targets.csv \
+  --weights checkpoint.ckpt \
+  --steps 5 --tmax 1.5 --noisy_first \
+  --samples 50 --outpdb ./diverse
+
+# 3. 分析集合质量
+python scripts/analyze_ensembles.py \
+  --atlas_dir /path/to/md_references \
+  --pdbdir ./diverse
+
+# 4. 比较结果
+python scripts/print_analysis.py --input_dir ./diverse
+```
+
+这既提供了高置信度的预测，也提供了用于理解构象灵活性的集合。
+
+来源：[predict.py](predict.py#L90-L125), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L275-L283)
+
+## 与其他流水线组件的集成
+
+Schedule tuning 与其他几个流水线参数相互作用：
+- **MSA 子采样**：使用 `--subsample` 减少 MSA 深度，这会通过减少进化约束来增加多样性
+- **重采样**：启用 `--resample` 为每条轨迹采样不同的 MSA，进一步增加多样性
+- **模板集成**：模板通过提供结构约束显著降低多样性
+
+为了获得最大多样性，请结合使用高 `tmax`、少量步骤、`noisy_first`、MSA 重采样并禁用模板。为了获得最大精确度，请使用低 `tmax`、大量步骤、自条件、完整 MSA 并包含模板。
+
+来源：[predict.py](predict.py#L14-L15), [predict.py](predict.py#L52-L53)
+
+## 后续步骤
+
+掌握 schedule tuning 后，请探索：
+- [自条件和噪声注入策略](15-self-conditioning-and-noise-injection-strategies) 以了解高级采样技术
+- [批处理和优化技术](17-batch-processing-and-optimization-techniques) 以扩展生成规模
+- [ATLAS 数据集上的集合评估指标](22-ensemble-evaluation-metrics-on-atlas-dataset) 以深入分析生成的集合
+
+---
+
+- [深度解析/推理与生成/批处理与优化技术](https://zread.ai/bjing2016/alphaflow/17-batch-processing-and-optimization-techniques)
+
+---
+slug:17-batch-processing-and-optimization-techniques
+blog_type:normal
+---
+
+
+AlphaFlow 实现了一套全面的批处理机制和优化策略，旨在最大化计算效率的同时保持模型准确性。这些技术涵盖数据加载、训练优化、推理加速和内存管理，从而能够有效地从单序列分析扩展到大规模蛋白质结构生成。
+
+## 批处理架构
+
+批处理基础设施建立在分层设计之上，通过针对蛋白质的特定优化扩展了 PyTorch 的标准数据加载功能。核心是 `OpenFoldBatchCollator`，它通过堆叠张量条目同时保留非张量元数据，将异构蛋白质数据高效聚合成统一的批次张量。`OpenFoldDataLoader` 进一步通过动态批次属性管理扩展了此功能，包括随机回收迭代选择，使模型在训练期间经历不同数量的 Evoformer 循环。这种设计能够在保持流匹配目标所需的随机特性的同时，高效训练不同大小的蛋白质。
+
+```mermaid
+graph TB
+    A[Raw Protein Data] --> B[OpenFoldSingleDataset]
+    B --> C[Data Pipeline Processing]
+    C --> D[Feature Pipeline Transformation]
+    D --> E[OpenFoldBatchCollator]
+    E --> F[OpenFoldDataLoader]
+    F --> G[Training/Inference Loop]
+    
+    H[Batch Properties Config] --> F
+    I[MSA Sampling Strategy] --> C
+    J[Fixed Size Padding] --> D
+    K[Recycling Randomization] --> F
+    
+    style F fill:#e1f5ff
+    style E fill:#fff4e1
+```
+
+**来源**: [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L336-L342), [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L355-L434)
+
+### 训练批次组成
+
+训练批次通过多阶段过程动态组成。`OpenFoldBatchCollator` 采用张量堆叠策略，其中 `torch.stack(x, dim=0)` 应用于所有张量字段，而非张量字段则聚合为列表。`OpenFoldDataLoader` 通过从预计算的概率分布中进行多项式采样，利用随机属性增强每个批次。对于回收迭代，配置支持在允许值上的均匀分布或最大迭代次数的确定性选择。这些采样的属性随后被广播以匹配批次维度，然后注入到批次字典中，确保在批次中的所有样本上一致应用。
+
+**来源**: [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L336-L342), [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L367-L434)
+
+## 训练优化技术
+
+AlphaFlow 采用多种优化技术来加速训练，同时保持数值稳定性和模型性能。混合精度训练通过 `low_prec=True` 参数配置，以更少的内存占用实现更快的计算。矩阵乘法精度在训练和推理脚本中通过 `torch.set_float32_matmul_precision("high")` 设置为 "high"，在速度和准确性之间取得平衡。通过 PyTorch Lightning 的 `accumulate_grad_batches` 参数支持梯度累积，允许有效批次大小超过 GPU 内存限制所允许的范围。梯度裁剪通过训练器配置中的 `gradient_clip_val` 参数实现，防止训练期间的梯度爆炸。
+
+<CgxTip>混合精度训练与高精度矩阵乘法的结合提供了最佳平衡——减少了中间激活的内存使用，同时保持了注意力机制等关键操作的准确性。</CgxTip>
+
+**来源**: [train.py](train.py#L16), [train.py](train.py#L21-L24), [train.py](train.py#L96-L101)
+
+### 指数移动平均 (EMA)
+
+AlphaFlow 为模型权重稳定实现了 EMA，这对于基于流匹配的生成特别有益。EMA 权重与训练权重分开维护，并在验证和推理期间应用。EMA 衰减参数可通过 `config.ema.decay` 配置，典型值约为 0.999，用于缓慢更新。包装器类在加载 EMA 权重进行验证时缓存非 EMA 权重，确保无缝恢复以继续训练。EMA 更新在 `on_before_zero_grad` 回调中执行，与优化器步进周期同步。
+
+**来源**: [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L235-L244), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L244-L248)
+
+### 内存优化策略
+
+集成了多种内存优化技术以处理大型蛋白质结构和广泛的 MSA 数据。可以通过 `config.model.template.offload_templates` 启用模板卸载，当模板特征不主动需要时，将其移动到 CPU 内存。`chunk_size` 参数控制注意力计算的分块，在内存使用和计算效率之间进行权衡。对于长序列，`long_sequence_inference` 标志会调整配置参数以优化内存使用。此外，可以通过 `config.globals.use_flash` 启用 FlashAttention 集成以优化注意力计算，这需要安装 flash_attn 包。
+
+**来源**: [alphaflow/config.py](alphaflow/config.py#L14-L51), [alphaflow/config.py](alphaflow/model_config)
+
+## 数据流水线优化
+
+高效的数据处理对于批训练吞吐量至关重要。AlphaFlow 实现了多种策略来优化数据流水线，同时保持数据完整性和训练信号。
+
+### 固定大小填充和裁剪
+
+变长蛋白质序列通过两阶段过程转换为固定维度：随机裁剪后跟固定大小填充。`random_crop_to_size` 转换将序列随机裁剪为 `mode_cfg.crop_size` 个残基，并通过 `mode_cfg.subsample_templates` 控制可选的模板子采样。随后，`make_fixed_size` 转换根据 `pad_msa_clusters`（MSA 深度）、`mode_cfg.max_extra_msa`、`mode_cfg.crop_size`（残基数）和 `mode_cfg.max_templates` 将裁剪后的数据填充为一致的维度。此转换对于高效的 GPU 利用至关重要，因为它消除了每批次填充的需要，并允许预先分配内存缓冲区。
+
+**来源**: [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L26-L108), [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L229-L285)
+
+### MSA 采样策略
+
+多序列比对 (MSA) 数据可能计算成本很高，特别是对于有许多同系物的蛋白质。AlphaFlow 实现了自适应 MSA 采样策略来控制计算成本。`sample_msa` 转换从可用 MSA 中采样 `max_msa_clusters` 个序列，并通过 `keep_extra=True` 可选地保留额外的 MSA 数据。`sample_msa_distillation` 转换通过 `mode_cfg.max_distillation_msa_clusters` 为蒸馏训练提供了额外的控制。额外的 MSA 被裁剪为 `max_extra_msa` 个序列，如果不需要则完全删除。可以通过 `common_cfg.msa_cluster_features` 启用 MSA 聚类特征，以在保留系统发育信息的同时减少有效的 MSA 维度。
+
+**来源**: [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L195-L228)
+
+### 模板子采样
+
+启用模板时，AlphaFlow 实现了几种模板优化策略。`reduce_msa_clusters_by_max_templates` 配置会调整 MSA 聚类计数以考虑模板使用，保持一致的计算预算。训练期间的模板子采样通过在解析前从前 k 个模板命中中随机选择来近似 DeepMind 的训练方案，由 `shuffle_top_k_prefiltered` 控制。`max_template_hits` 参数限制了考虑的模板总数，并根据 `mode_cfg.max_templates` 应用进一步的子采样。
+
+**来源**: [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L191-L195), [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L36-L58)
+
+## 推理批处理
+
+推理期间的批处理能够高效生成多个蛋白质结构，这对于集成生成和探索构象多样性特别有用。
+
+### 多样本推理
+
+推理流水线支持通过可配置参数对每个序列的多个样本进行批处理。`--samples` 参数控制为每个输入生成的独立结构数量，每个样本都经过完整的流匹配调度处理。可以通过 `--resample` 标志启用 MSA 重采样，以为每个样本生成不同的 MSA 表示，由 `--subsample` 参数控制以减少 MSA 深度以加快推理速度。样本在结果字典中聚合并按顺序写入输出 PDB 文件，可以通过 `--no_overwrite` 防止覆盖。
+
+**来源**: [predict.py](predict.py#L3-L21), [predict.py](predict.py#L95-L112)
+
+### 基于调度的批处理推理
+
+可以通过 `--steps` 和 `--tmax` 参数为批处理推理自定义流匹配调度。调度计算为 `np.linspace(args.tmax, 0, args.steps+1)`，如果 `args.tmax != 1.0`，则在 t=1.0 处有一个可选的初始步骤。这允许在生成速度和多样性之间进行权衡——较少的步骤和较大的 t 增量产生更快但可能不太准确的结构，而更多的步骤和更细的梯度产生更高质量的结果，但计算成本增加。调度在批次中的所有样本上一致应用，每个样本在遍历调度之前独立地从噪声分布中采样。
+
+**来源**: [predict.py](predict.py#L47-L49), [predict.py](predict.py#L100-L112)
+
+## 性能优化配置
+
+配置系统提供了多种针对不同场景优化的预设配置，包括训练效率和推理速度。
+
+### 训练预设
+
+训练预设通过精心调整的参数在准确性和计算成本之间取得平衡。`initial_training` 预设提供适合初始训练周期的基准配置。`finetuning` 预设将裁剪大小增加到 384 个残基，max_extra_msa 增加到 5120，max_msa_clusters 增加到 512，以进行更细粒度的优化，并调整了违 规（1.0）和实验解析（0.01）项的损失权重。无模板变体（`finetuning_no_templ`）禁用模板处理，适用于模板不可用或不理想的情况。PTM（预测 TM-score）变体启用 pTM 头并增加额外的损失权重（0.1）以进行质量感知训练。
+
+**来源**: [alphaflow/config.py](alphaflow/config.py#L51-L119)
+
+### 推理预设
+
+推理预设针对保留数据上的最大预测性能进行了优化。模型变体（1-5）提供不同的模板配置：模型 1 和 2 使用带有扭转角的模板，模型 3 和 4 无模板，模型 5 是最小配置。模型 1 和 2 中的 `reduce_max_clusters_by_max_templates` 设置会调整 MSA 聚类计数以考虑模板使用。PTM 变体启用 pTM 头以进行置信度估计。可以通过 `long_sequence_inference` 参数启用长序列推理，它会调整配置以处理超过标准训练裁剪大小的序列。
+
+**来源**: [alphaflow/config.py](alphaflow/config.py#L120-L180)
+
+## 批处理权衡
+
+| 优化技术 | 优势 | 注意事项 | 配置 |
+|------------------------|----------|----------------|---------------|
+| 混合精度训练 | 训练速度提升 2 倍，内存减少 50% | 潜在的数值不稳定性 | model_config 中的 `low_prec=True` |
+| 固定大小填充 | 消除动态批处理开销 | 可能通过裁剪丢弃信息 | `mode_cfg.fixed_size=True` |
+| MSA 采样 | 降低计算成本 | 可能丢弃信息丰富的序列 | `max_msa_clusters`、`max_extra_msa` |
+| 模板卸载 | 减少内存占用 | CPU-GPU 传输开销 | `offload_templates=True` |
+| FlashAttention | 更快的注意力计算 | 需要安装特定的包 | `use_flash=True` |
+| EMA 权重 | 改进推理质量 | 需要 EMA 副本的额外内存 | `no_ema=False` |
+| 梯度累积 | 更大的有效批次大小 | 增加训练时间 | `accumulate_grad_batches` |
+
+<CgxTip>在优化长序列（2000+ 残基）时，请优先考虑模板卸载和减少 MSA 聚类。这些技术在保持大部分预测准确性的同时提供最大的内存节省，从而能够在 otherwise 不可行的硬件上进行推理。</CgxTip>
+
+**来源**: [alphaflow/config.py](alphaflow/config.py#L51-L180)
+
+## 实现模式
+
+### 批次属性广播
+
+`OpenFoldDataLoader` 为批次属性实现了复杂的广播机制。从多项式分布采样的属性（例如，回收迭代）最初是标量值。这些属性使用视图操作扩展以匹配批次维度：`sample_tensor.view((1,) * len(batch_dims) + sample_tensor.shape + (1,))`，然后扩展到 `batch_dims + orig_shape + (recycling_dim,)`。这允许无需每次迭代的逻辑即可进行每样本属性分配，保持矢量化优势。回收维度根据采样迭代计数通过 `resample_recycling = lambda t: t[..., :no_recycling + 1]` 动态截断，并通过 `tensor_tree_map` 递归应用。
+
+**来源**: [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L397-L432)
+
+### 高效批次整理
+
+`OpenFoldBatchCollator` 通过根据数据类型应用不同策略来实现高效的批次整理。使用 `torch.stack(x, dim=0)` 堆叠张量以创建带有添加批次维度的批次张量。非张量条目（例如，字符串、列表）作为 Python 列表聚合并不加转换。这种方法在优化张量操作的内存布局的同时，保留了复杂嵌套字典的结构。`dict_multimap` 函数递归地将整理逻辑应用于嵌套字典，处理蛋白质特征字典的分层结构。
+
+**来源**: [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L336-L349)
+
+## 后续步骤
+
+理解批处理和优化技术对于在生产环境中有效部署 AlphaFlow 至关重要。有关实现这些技术的实用指导，请参阅 [推理流水线和采样过程](14-inference-pipeline-and-sampling-process)，其中详细说明了批处理如何与流匹配采样调度集成。有关优化输入数据吞吐量的见解，请参阅 [PDB 和 ATLAS 数据集的数据预处理](20-data-preprocessing-for-pdb-and-atlas-datasets)，其中讨论了 MSA 生成策略和特征提取优化。要了解这些优化选择如何影响模型性能指标，请参阅 [ATLAS 数据集上的集成评估指标](22-ensemble-evaluation-metrics-on-atlas-dataset)。
+
+**来源**: [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L1-L680), [alphaflow/model/wrapper.py](alphaflow/model/wrapper.py#L350-L393), [train.py](train.py#L1-L163), [predict.py](predict.py#L1-L134)
+
+---
+
+## 数据流程
+
+- [深度解析/数据流程/使用 MMseqs2 生成 MSA](https://zread.ai/bjing2016/alphaflow/18-msa-generation-with-mmseqs2)
+
+---
+slug:18-msa-generation-with-mmseqs2
+blog_type:normal
+---
+
+
+多重序列比对 (MSA) 生成是 AlphaFlow 模型的一个关键预处理步骤，通过同源序列提供进化上下文。AlphaFlow 支持两种互补的 MSA 生成方法：一种基于远程 API 的服务，另一种是使用 MMseqs2 的本地数据库搜索。本文档涵盖了这两种方法、它们的配置选项以及与推理流程的集成。
+
+## MSA 生成方法
+
+AlphaFlow 通过两种不同的工作流提供了 MSA 生成的灵活性，每种方法都针对不同的用例和计算资源进行了优化。
+
+![AlphaFlow MSA Pipeline](https://github.com/bjing2016/alphaflow/blob/master/assets/6uof_A_animation.gif?raw=true)
+
+### 通过 ColabFold 服务器的远程 API
+
+远程 API 方法提供了获取 MSA 最简单的途径，利用 ColabFold 基础设施进行可扩展的、基于云端的序列搜索。这种方法非常适合没有本地数据库资源的用户，或者处理中等数量序列的用户。
+
+`scripts/mmseqs_query.py` 中基于 API 的实现处理了从提交到结果检索的完整工作流：
+
+来源：[scripts/mmseqs_query.py](/scripts/mmseqs_query.py#L20-L283)
+
+```python
+def run_mmseqs2(x, prefix, use_env=True, use_filter=True,
+                use_templates=False, filter=None, use_pairing=False, pairing_strategy="greedy",
+                host_url="https://api.colabfold.com",
+                user_agent: str = "") -> Tuple[List[str], List[str]]:
+```
+
+该函数协调三个关键操作：向 ColabFold API 端点提交作业、使用指数退避轮询状态以确保可靠性，以及检索压缩结果。对于从 CSV 文件批量处理序列：
+
+来源：[scripts/mmseqs_query.py](/scripts/mmseqs_query.py#L284-L295)
+
+```python
+df = pd.read_csv(args.split, index_col='name')
+os.makedirs(args.outdir, exist_ok=True)
+
+msas = run_mmseqs2(list(df.seqres), prefix='/tmp/', user_agent='bjing2016/alphaflow')
+os.system('rm -r /tmp/_env')
+
+for name, msa in zip(df.index, msas):
+    os.makedirs(f'{args.outdir}/{name}/a3m/', exist_ok=True)
+    with open(f'{args.outdir}/{name}/a3m/{name}.a3m', 'w') as f:
+        f.write(msa)
+```
+
+### 本地 MMseqs2 数据库搜索
+
+对于生产工作流或需要控制数据库版本和搜索参数的场景，本地搜索方法提供了完全的自定义能力。此方法需要在本地下载和配置 MMseqs2 数据库，但可以为大批量处理提供更高的吞吐量以及完整的参数控制。
+
+`scripts/mmseqs_search.py` 中的本地搜索实现提供了全面的单体和配对搜索功能：
+
+来源：[scripts/mmseqs_search.py](/scripts/mmseqs_search.py#L25-L147)
+
+```python
+def mmseqs_search_monomer(
+    dbbase: Path,
+    base: Path,
+    uniref_db: Path = Path("uniref30_2202_db"),
+    template_db: Path = Path(""),  # 默认不使用
+    metagenomic_db: Path = Path("colabfold_envdb_202108_db"),
+    mmseqs: Path = Path("mmseqs"),
+    use_env: bool = True,
+    use_templates: bool = False,
+    filter: bool = True,
+    expand_eval: float = math.inf,
+    align_eval: int = 10,
+    diff: int = 3000,
+    qsc: float = -20.0,
+    max_accept: int = 1000000,
+    s: float = 8,
+    db_load_mode: int = 2,
+    threads: int = 32,
+):
+```
+
+对于需要多个链之间进行配对比对的复杂结构，`mmseqs_search_pair` 函数实现了专门的比对逻辑：
+
+来源：[scripts/mmseqs_search.py](/scripts/mmseqs_search.py#L148-L327)
+
+```python
+def mmseqs_search_pair(
+    dbbase: Path,
+    base: Path,
+    uniref_db: Path = Path("uniref30_2202_db"),
+    mmseqs: Path = Path("mmseqs"),
+    s: float = 8,
+    threads: int = 64,
+    db_load_mode: int = 2,
+):
+```
+
+## MSA 生成流程
+
+完整的 MSA 生成工作流遵循从输入序列到模型就绪特征的结构化过程。
+
+```mermaid
+flowchart TD
+    A[Input CSV<br/>name, seqres] --> B{Generation Method}
+    B --> C[Remote API]
+    B --> D[Local MMseqs2]
+    C --> E[Submit to ColabFold API]
+    E --> F[Poll Status<br/>Retry on RATELIMIT]
+    F --> G[Download tar.gz]
+    G --> H[Extract A3M Files]
+    D --> I[Create Query Database]
+    I --> J[Search UniRef30<br/>3 iterations, s=8]
+    J --> K[Expand Alignments<br/>mode=0, max_seq_id=0.95]
+    K --> L[Optional: Template Search]
+    L --> M[Optional: Metagenomic DB]
+    M --> N[Merge Results<br/>uniref.a3m + mgnify.a3m]
+    N --> H
+    H --> O[Directory Structure<br/>{name}/a3m/{name}.a3m]
+    O --> P[Data Pipeline Parsing]
+    P --> Q[Feature Generation<br/>deletion_matrix_int, msa]
+    Q --> R[AlphaFlow Model Input]
+```
+
+## 数据库配置和参数
+
+MSA 的质量和深度直接影响模型性能。AlphaFlow 支持多个数据库源和全面的参数调整。
+
+### 数据库来源
+
+MMseqs2 搜索利用分层数据库方法，每个数据库提供独特的进化信息：
+
+| Database | Purpose | Default Path | Notes |
+|----------|---------|--------------|-------|
+| UniRef30 | Primary evolutionary signal | `uniref30_2202_db` | Clustered UniProtKB at 30% identity |
+| Metagenomic (ColabFold envdb) | Environmental diversity | `colabfold_envdb_202108_db` | BFD + Mgnify + MetaEuk + SMAG databases |
+| Template (PDB70) | Structural templates | Optional | Not used by default for AlphaFlow |
+
+来源：[scripts/mmseqs_search.py](/scripts/mmseqs_search.py#L44-L61)
+
+### 搜索参数
+
+关键参数控制同源检测的灵敏度和选择性：
+
+| Parameter | Default | Range | Effect |
+|-----------|---------|-------|--------|
+| `-s` (sensitivity) | 8.0 | 1.0-8.0 | Higher values find more distant homologs but increase runtime |
+| `--num-iterations` | 3 | 1-4 | Iterative search refinement |
+| `-e` (e-value) | 0.1 (search), 10 (align) | Variable | Statistical significance threshold |
+| `--max-seqs` | 10000 | 1000-50000 | Maximum sequences per search round |
+| `--diff` | 3000 | 0-10000 | Coverage score difference threshold |
+| `--qsc` | 0.8 (filtered) / -20.0 (unfiltered) | -20.0-1.0 | Sequence identity weighting |
+
+来源：[scripts/mmseqs_search.py](/scripts/mmseqs_search.py#L80-L94)
+
+当启用过滤时，过滤逻辑会自动调整参数：
+
+来源：[scripts/mmseqs_search.py](/scripts/mmseqs_search.py#L50-L56)
+
+```python
+if filter:
+    align_eval = 10
+    qsc = 0.8
+    max_accept = 100000
+```
+
+## 与数据流程的集成
+
+一旦生成 MSA，AlphaFlow 的数据流程会解析并将其转换为模型兼容的特征。`alphaflow/data/data_pipeline.py` 中的 `DataPipeline` 类处理来自 A3M 和 Stockholm 格式的 MSA 解析：
+
+来源：[alphaflow/data/data_pipeline.py](/alphaflow/data/data_pipeline.py#L418-L478)
+
+```python
+def _parse_msa_data(
+    self,
+    alignment_dir: str,
+    alignment_index: Optional[Any] = None,
+) -> Mapping[str, Any]:
+```
+
+解析函数支持直接文件系统访问和大规模数据集的索引二进制数据库。对于每个 MSA 文件，它提取序列和缺失矩阵，然后生成特征：
+
+来源：[alphaflow/data/data_pipeline.py](/alphaflow/data/data_pipeline.py#L143-L176)
+
+```python
+def make_msa_features(
+    msas: Sequence[Sequence[str]],
+    deletion_matrices: Sequence[parsers.DeletionMatrix],
+) -> FeatureDict:
+    """Constructs a feature dict of MSA features."""
+    # Deduplicate sequences across MSAs
+    # Convert to integer encoding using HHBLITS_AA_TO_ID
+    # Generate deletion_matrix_int, msa, num_alignments features
+```
+
+<CgxTip>
+数据流程会自动对多个 MSA 来源（UniRef30 和宏基因组数据库）的序列进行去重，以防止冗余，同时保留独特的进化信号。当处理包含数千个序列的深度 MSA 时，这种优化对于内存效率至关重要。
+</CgxTip>
+
+## 使用示例
+
+### 远程 API 生成
+
+使用 ColabFold API 为 CSV 文件中的序列生成 MSA：
+
+```bash
+python -m scripts.mmseqs_query --split splits/atlas_test.csv --outdir ./alignment_dir
+```
+
+此命令从 `atlas_test.csv` 读取序列，将其提交给 ColabFold API，并将生成的 A3M 文件保存为 `{alignment_dir}/{name}/a3m/{name}.a3m` 格式。
+
+来源：[README.md](/README.md#L91-L93)
+
+### 本地数据库搜索
+
+对于本地 MSA 生成，首先使用 ColabFold 设置脚本下载数据库，然后运行搜索：
+
+```bash
+# Download databases (one-time setup)
+bash scripts/download_atlas.sh
+
+# Run local search
+python -m scripts.mmseqs_search_helper \
+  --split splits/atlas_test.csv \
+  --db_dir /path/to/dbbase \
+  --outdir ./alignment_dir
+```
+
+辅助脚本会创建一个临时的 FASTA 文件，并调用完整的 MMseqs2 搜索流程：
+
+来源：[scripts/mmseqs_search_helper.py](/scripts/mmseqs_search_helper.py#L17-L18)
+
+```python
+cmd = f'python -m scripts.mmseqs_search /tmp/tmp.fasta {args.db_dir} {args.outdir}'
+os.system(cmd)
+```
+
+来源：[README.md](/README.md#L91-L94)
+
+### 高级本地配置
+
+对于需要自定义搜索参数的生产工作流，请直接调用本地搜索模块并使用微调参数：
+
+```bash
+python -m scripts.mmseqs_search \
+  query.fasta \
+  /path/to/dbbase \
+  ./output_dir \
+  -s 7.5 \
+  --use-env 1 \
+  --filter 1 \
+  --threads 32 \
+  --db1 uniref30_2202_db \
+  --db3 colabfold_envdb_202108_db
+```
+
+降低灵敏度 (`-s 7.5`) 可以将运行时间减少约 40%，同时为保守性较好的蛋白质家族保留大部分同源物。
+
+来源：[scripts/mmseqs_search.py](/scripts/mmseqs_search.py#L329-L446)
+
+## 性能考量
+
+### 计算要求
+
+| Method | Throughput | Hardware Requirements | Setup Complexity |
+|--------|------------|----------------------|------------------|
+| Remote API | ~2-5 分钟/序列 | Internet connection | Low |
+| Local (UniRef only) | ~30-60 秒/序列 | 32+ CPU cores, 64GB+ RAM | Medium |
+| Local (Full) | ~2-5 分钟/序列 | 64+ CPU cores, 128GB+ RAM | High |
+
+### 权衡
+
+方法的选择涉及在吞吐量、控制和资源可用性之间取得平衡：
+
+- **远程 API**：最适合探索性分析、中等批次大小（<100 个序列）以及没有数据库基础设施的用户。该 API 实现了自动重试逻辑和速率限制，以优雅地处理服务器负载。
+
+- **本地搜索**：对于大规模生产工作流（>100 个序列）、需要固定数据库版本的可重现研究或处理机密数据时必不可少。数据库下载和设置的前期投资会在更快的迭代时间上获得回报。
+
+来源：[scripts/mmseqs_query.py](/scripts/mmseqs_query.py#L145-L193)
+
+### MSA 深度与模型性能
+
+AlphaFlow 模型是使用默认参数生成的 MSA 进行训练的。修改灵敏度或过滤阈值可能会影响预测质量：
+
+- **更深的 MSA**（更高的 `-s`，更低的 e-value 阈值）：提供更强的进化约束，特别是对远缘同源物有益。然而，过度的深度会带来收益递减并增加计算成本。
+
+- **更浅的 MSA**（更低的 `-s`，更高的 e-value）：生成速度更快，但可能会遗漏关键的共进化信号。可以考虑用于具有丰富实验数据的已研究蛋白质家族。
+
+<CgxTip>
+对于 AlphaFlow-MD+Templates 模型，即使提供了模板结构，仍然需要 MSA。来自 MSA 的进化信息通过识别保守区域和指导参考结构周围的构象采样，补充了结构模板。
+</CgxTip>
+
+## 故障排除
+
+### 常见问题
+
+| Issue | Symptoms | Solution |
+|-------|----------|----------|
+| API rate limiting | "RATELIMIT" status, repeated retries | Add random delays between submissions, process in smaller batches |
+| Database not found | FileNotFoundError for database files | Verify database paths, download complete databases using setup script |
+| Empty MSA output | Zero sequences in A3M files | Check input sequence format (FASTA), verify database contains relevant homologs |
+| Memory errors | Process killed during local search | Reduce `--max-seqs`, increase swap space, or use remote API |
+
+### 验证
+
+通过检查以下内容来验证 MSA 生成质量：
+
+1. **序列覆盖率**：查询序列应作为第一条序列出现，且覆盖率为 100%
+2. **同源物数量**：典型范围：小家族 10-100，大家族 1000-10000
+3. **多样性**：确保并非所有序列都相同（表明过滤过于激进）
+4. **文件格式**：A3M 文件应使用小写字母表示插入，大写字母表示比对区域
+
+## 后续步骤
+
+生成 MSA 后，AlphaFlow 工作流程中的后续步骤包括：
+
+- [Template Processing and Feature Extraction](19-template-processing-and-feature-extraction) - 了解如何为 MD+Templates 模型准备模板结构
+- [Feature Engineering for Sequence, Structure, and MSA](21-feature-engineering-for-sequence-structure-and-msa) - 了解 MSA 如何转换为模型特征
+- [Inference Pipeline and Sampling Process](14-inference-pipeline-and-sampling-process) - 使用准备好的 MSA 运行 AlphaFlow 模型
+
+有关完整的推理命令和配置选项，请参阅主 README 中的 [Running Inference](#running-inference) 部分。
+
+---
+
+- [深度解析/数据流程/模版处理与特征提取](https://zread.ai/bjing2016/alphaflow/19-template-processing-and-feature-extraction)
+
+---
+slug:19-template-processing-and-feature-extraction
+blog_type:normal
+---
+
+
+模板处理是 AlphaFlow 架构中的关键组件，它使模型能够利用同源蛋白质的结构信息来提高预测准确性。本文档解释了如何发现、解析模板，将其转换为特征，并集成到模型的输入流程中。
+
+## 概述：模板处理架构
+
+模板处理流程采用多阶段架构，将原始模板搜索结果转换为模型可用的结构化特征。该流程在保持效率的同时，通过战略性子采样和裁剪操作整合了来自同源蛋白质的结构信息。
+
+```mermaid
+flowchart TD
+    A[模板搜索<br/>HHsearch .hhr 文件] --> B[模板命中解析]
+    B --> C[模板特征提取]
+    C --> D[模板子采样]
+    D --> E[模板掩码与过滤]
+    E --> F[模板特征转换]
+    F --> G[与模型输入集成]
+    
+    style A fill:#e3f2fd
+    style B fill:#bbdefb
+    style C fill:#90caf9
+    style D fill:#64b5f6
+    style E fill:#42a5f5
+    style F fill:#2196f3
+    style G fill:#1976d2
+```
+
+模板流程与 MSA 和序列处理并行运行，最终在将所有特征流输入模型输入堆栈之前进行合并。这种架构允许模型同时从进化信息（MSA）和结构信息（模板）中学习。
+
+## 模板发现与解析
+
+模板发现始于存储在 `.hhr` 文件中的 HHsearch 比对结果。DataPipeline 的 `_parse_template_hits` 方法从单个文件或索引数据库中提取这些命中结果，以实现高效的批处理 [alphaflow/data/data_pipeline.py](alphaflow/data/data_pipeline.py#L480-L518)。
+
+```python
+def _parse_template_hits(
+    self,
+    alignment_dir: str,
+    alignment_index: Optional[Any] = None
+) -> Mapping[str, Any]:
+    all_hits = {}
+    if(alignment_index is not None):
+        fp = open(os.path.join(alignment_dir, alignment_index["db"]), 'rb')
+        
+        def read_template(start, size):
+            fp.seek(start)
+            return fp.read(size).decode("utf-8")
+        
+        for (name, start, size) in alignment_index["files"]:
+            ext = os.path.splitext(name)[-1]
+            
+            if(ext == ".hhr"):
+                hits = parsers.parse_hhr(read_template(start, size))
+                all_hits[name] = hits
+```
+
+解析支持两种模式：用于单个比对的基于文件的模式，以及用于训练期间批处理的基于索引的模式。使用索引模式时，系统可以高效地定位到特定的字节偏移量以读取模板数据，而无需将整个数据库文件加载到内存中。
+
+## 模板特征提取
+
+模板特征通过 OpenFold 库的模板处理工具提取，这些工具将来自 mmCIF 文件的原始结构数据转换为标准化的特征张量。DataPipeline 接受一个 `template_featurizer` 参数，用于自定义模板处理逻辑 [alphaflow/data/data_pipeline.py](alphaflow/data/data_pipeline.py#L409-L416)。
+
+特征提取过程生成多种张量类型：
+
+| 特征张量 | 形状 | 描述 |
+|----------------|-------|-------------|
+| `template_aatype` | `[NUM_TEMPLATES, NUM_RES]` | 每个模板位置的氨基酸类型 |
+| `template_all_atom_positions` | `[NUM_TEMPLATES, NUM_RES, 37, 3]` | 37 种原子类型的笛卡尔坐标 |
+| `template_all_atom_mask` | `[NUM_TEMPLATES, NUM_RES, 37]` | 指示原子存在的二进制掩码 |
+| `template_sum_probs` | `[NUM_TEMPLATES, None]` | HHsearch 比对的概率总和 |
+| `template_mask` | `[NUM_TEMPLATES]` | 模板级别的有效性掩码 |
+| `template_torsion_angles_sin_cos` | `[NUM_TEMPLATES, NUM_RES, 14, 2]` | 14 个扭转角的正弦/余弦 |
+| `template_pseudo_beta` | `[NUM_TEMPLATES, NUM_RES, 3]` | 伪-beta Cβ 坐标 |
+
+这些特征既捕获了原子级别的几何结构，也捕获了主链扭转角，为模型提供了丰富的结构信息。
+
+## 模板子采样策略
+
+在训练期间，会对模板进行策略性子采样，以管理内存使用并提高泛化能力。OpenFoldSingleDataset 初始化时使用 `max_template_hits` 参数（默认值：4），该参数控制所考虑模板数量的上限 [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L44-L84)。
+
+```python
+def __init__(self,
+    ...
+    max_template_hits: int = 4,
+    shuffle_top_k_prefiltered: Optional[int] = None,
+    ...
+):
+    """
+    Args:
+        max_template_hits:
+            考虑的模板数量的上限。在训练期间，
+            最终使用的模板是从这个总量中子采样出来的。
+        shuffle_top_k_prefiltered:
+            在解析其中的 max_template_hits 之前，
+            是否对前 k 个模板命中进行均匀随机打乱。
+            这可用于更高效地近似 DeepMind 的训练时间
+            模板子采样方案。
+        """
+```
+
+输入流程中的 `random_crop_to_size` 函数执行实际的模板子采样，随机选择模板并对每个模板应用随空间裁剪 [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L26-L106)。这种随机方法防止模型过拟合于特定的模板顺序或位置。
+
+<CgxTip>
+训练期间的模板子采样有两个关键目的：(1) 它通过在每个 epoch 中向模型展示不同的模板子集来对模型进行正则化；(2) 它在处理具有大蛋白质结构的多个模板时减少内存占用。子采样通过随机排列执行，以确保在所有可用模板中进行无偏学习。
+</CgxTip>
+
+## 模板特征转换流程
+
+提取后，模板特征通过输入流程经历一系列转换。当配置中启用模板时，`nonensembled_transform_fns` 函数会协调这些转换 [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L146-L283)。
+
+```python
+def nonensembled_transform_fns(common_cfg, mode_cfg):
+    """输入流程中非集成的数据转换器。"""
+    transforms = [
+        data_transforms.cast_to_64bit_ints,
+        data_transforms.correct_msa_restypes,
+        data_transforms.squeeze_features,
+        data_transforms.randomly_replace_msa_with_unknown(0.0),
+        data_transforms.make_seq_mask,
+        data_transforms.make_msa_mask,
+        data_transforms.make_hhblits_profile,
+    ]
+    if common_cfg.use_templates:
+        transforms.extend(
+            [
+                data_transforms.fix_templates_aatype,
+                data_transforms.make_template_mask,
+                data_transforms.make_pseudo_beta("template_"),
+            ]
+        )
+        if common_cfg.use_template_torsion_angles:
+            transforms.extend(
+                [
+                    data_transforms.atom37_to_torsion_angles("template_"),
+                ]
+            )
+```
+
+转换序列包括：
+
+1. **模板 Aatype 修正**：确保氨基酸类型使用正确的索引方案
+2. **模板掩码生成**：为模板原子和残基创建有效性掩码
+3. **伪-Beta 计算**：从原子位置计算 Cβ 坐标以进行几何表示
+4. **扭转角转换**：将 37 原子表示转换为主链扭转角（启用时）
+
+`use_template_torsion_angles` 配置标志控制是否生成扭转角特征，使模型能够除了从笛卡尔坐标学习外，还能从主链二面角学习 [alphaflow/config.py](alphaflow/config.py#L102)。
+
+## 模板裁剪与填充
+
+模板特征经过空间裁剪和填充，以满足模型的序列处理要求。`random_crop_to_size` 函数在所有模板维度上应用同步裁剪 [alphaflow/data/input_pipeline.py](alphaflow/data/input_pipeline.py#L26-L106)。
+
+```python
+if subsample_templates:
+    templates_crop_start = _randint(0, num_templates)
+    templates_select_indices = torch.randperm(
+        num_templates, device=protein["seq_length"].device, generator=g
+    )
+
+for k, v in protein.items():
+    if k not in shape_schema or (
+        "template" not in k and NUM_RES not in shape_schema[k]
+    ):
+        continue
+    
+    # 在裁剪模板之前随机排列它们。
+    if k.startswith("template") and subsample_templates:
+        v = v[templates_select_indices]
+    
+    slices = []
+    for i, (dim_size, dim) in enumerate(zip(shape_schema[k], v.shape)):
+        is_num_res = dim_size == NUM_RES
+        if i == 0 and k.startswith("template"):
+            crop_size = num_templates_crop_size
+            crop_start = templates_crop_start
+        else:
+            crop_start = num_res_crop_start if is_num_res else 0
+            crop_size = num_res_crop_size if is_num_res else dim
+        slices.append(slice(crop_start, crop_start + crop_size))
+    protein[k] = v[slices]
+```
+
+裁剪操作在所有模板特征之间同步：对原子位置、掩码和扭转角应用相同的空间裁剪，以保持结构一致性。这确保裁剪后的模板仍然是蛋白质片段的结构连贯表示。
+
+## 模板配置变体
+
+AlphaFlow 支持在模型预设中定义的多种模板处理配置 [alphaflow/config.py](alphaflow/config.py#L96-L156)。
+
+| 模型变体 | 启用模板 | 扭转角 | 最大额外 MSA | 使用场景 |
+|---------------|------------------|----------------|---------------|----------|
+| `model_1`, `model_2` | True | True | 5120 | 具有完整模板信息的高精度推理 |
+| `model_1_ptm`, `model_2_ptm` | True | True | 5120 | 具有 pTM 置信度预测的高精度 |
+| `model_3`, `model_4`, `model_5` | False | N/A | 5120 | 无模板，用于提速或模板不可用时 |
+| `finetuning` | True | True | 5120 | 使用模板增强进行微调 |
+| `finetuning_no_templ` | False | N/A | 5120 | 不依赖模板进行微调 |
+
+`reduce_max_clusters_by_max_templates` 配置选项在存在模板时调整 MSA 聚类，防止模板和 MSA 信息之间的特征冗余 [alphaflow/config.py](alphaflow/config.py#L284)。
+
+<CgxTip>
+使用模板时，请考虑预测准确性与计算成本之间的权衡。启用模板的模型（model_1、model_2）对于具有良好同源物的蛋白质提供更高的准确性，但需要额外的 HHsearch 预处理和模板特征化开销。无模板模型（model_3、model_4、model_5）速度更快，适用于结构同源物有限的新颖折叠。
+</cgx-tip>
+
+## 内存优化技术
+
+对于长序列或在推理期间，可以使用配置中定义的两种内存高效方法来优化模板特征 [alphaflow/config.py](alphaflow/config.py#L158-L174)：
+
+1. **模板平均**：`model.template.average_templates` 将所有模板平均为单个表示，将内存占用从 O(NUM_TEMPLATES) 减少到 O(1)
+2. **模板卸载**：`model.template.offload_templates` 在处理期间增量加载模板特征，减少峰值内存使用
+
+这些优化对于长序列推理模式会自动启用：
+
+```python
+if long_sequence_inference:
+    assert(not train)
+    c.globals.offload_inference = True
+    c.globals.use_lma = True
+    c.globals.use_flash = False
+    c.model.template.offload_inference = True
+```
+
+模板处理中的 `chunk_size` 参数控制分块操作的粒度，在内存使用和计算效率之间进行权衡。
+
+## 与特征流程集成
+
+FeaturePipeline 协调模板特征与其他特征流的最终组装 [alphaflow/data/feature_pipeline.py](alphaflow/data/feature_pipeline.py#L115-L132)。
+
+```python
+class FeaturePipeline:
+    def __init__(
+        self,
+        config: ml_collections.ConfigDict,
+    ):
+        self.config = config
+    
+    def process_features(
+        self,
+        raw_features: FeatureDict,
+        mode: str = "train", 
+    ) -> FeatureDict:
+        return np_example_to_features(
+            np_example=raw_features,
+            config=self.config,
+            mode=mode,
+        )
+```
+
+该流程根据 `use_templates` 配置标志有选择地包含模板特征，将它们与序列、MSA 和结构特征连接到最终特征字典中 [alphaflow/data/feature_pipeline.py](alphaflow/data/feature_pipeline.py#L64-L66)。
+
+## 数据加载与批处理
+
+OpenFoldDataModule 管理训练、验证和预测阶段的模板特征加载 [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L443-L658)。
+
+```python
+class OpenFoldDataModule(pl.LightningDataModule):
+    def __init__(self,
+        config: mlc.ConfigDict,
+        template_mmcif_dir: str,
+        max_template_date: str,
+        train_data_dir: Optional[str] = None,
+        train_alignment_dir: Optional[str] = None,
+        ...
+    ):
+```
+
+数据模块需要：
+- `template_mmcif_dir`：包含用于特征提取的模板 mmCIF 文件的目录
+- `max_template_date`：模板选择的截止日期（确保时间拆分的完整性）
+- 包含模板命中 HHsearch 结果的比对目录
+
+模板特征在迭代期间按需加载，OpenFoldBatchCollator 处理具有不同数量有效命中的模板之间的批处理和填充 [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L336-L343)。
+
+## 后续步骤
+
+了解模板处理流程后，你可能需要探索：
+
+- [PDB 和 ATLAS 数据集的数据预处理](20-data-preprocessing-for-pdb-and-atlas-datasets) - 如何准备原始结构文件以进行模板搜索
+- [序列、结构和 MSA 的特征工程](21-feature-engineering-for-sequence-structure-and-msa) - 详细检查所有特征类型
+- [输入堆栈和特征表示](9-input-stack-and-feature-representations) - 处理后的特征如何在模型中嵌入和转换
+- [MD+Templates 模型的模板集成](13-template-integration-for-md-templates-models) - MD 增强训练的专用模板处理
+
+---
+
+- [深度解析/数据流程/PDB 与 ATLAS 数据集的数据预处理](https://zread.ai/bjing2016/alphaflow/20-data-preprocessing-for-pdb-and-atlas-datasets)
+
+---
+slug:20-data-preprocessing-for-pdb-and-atlas-datasets
+blog_type:normal
+---
+
+
+数据预处理构成了 AlphaFlow 训练和推理管道的基础。本页面详细介绍了用于准备两个关键数据集的架构模式和实现细节：蛋白质数据库 (PDB) 结构和 ATLAS 分子动力学轨迹集合。预处理管道将原始结构数据转化为 flow matching 模型可以高效消费的标准化特征表示。
+
+## 预处理架构概述
+
+预处理架构采用模块化设计，为不同的数据源提供不同的管道。PDB 和 ATLAS 数据集都汇聚于同一种特征表示格式（.npz 文件），但采用适合其各自源特性的专门提取策略。架构由三个核心层组成：数据摄取、特征提取和数据集准备。
+
+`DataPipeline` 类作为中央编排器，管理从原始结构格式到特征字典的转换。该管道独立于下游模型组件运行，通过多处理和并行处理策略实现高效预处理。
+
+来源：[alphaflow/data/data_pipeline.py](alphaflow/data/data_pipeline.py#L409-L415), [alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L36-L65)
+
+```mermaid
+graph TB
+    subgraph PDB [PDB 数据集管道]
+        A1[mmCIF 文件] --> B1[unpack_mmcif.py]
+        B1 --> C1[链提取]
+        C1 --> D1[DataPipeline.process_mmcif]
+        D1 --> E1[特征提取]
+        E1 --> F1[.npz 文件]
+    end
+    
+    subgraph ATLAS [ATLAS 数据集管道]
+        A2[MD 轨迹<br/>.xtc + .pdb] --> B2[prep_atlas.py]
+        B2 --> C2[副本合并]
+        C2 --> D2[逐帧处理]
+        D2 --> E2[make_protein_features]
+        E2 --> F2[多构象 .npz 文件]
+    end
+    
+    subgraph TRAINING [训练管道]
+        F1 --> G[OpenFoldSingleDataset]
+        F2 --> G
+        G --> H[OpenFoldDataset<br/>随机过滤]
+        H --> I[FeaturePipeline]
+        I --> J[模型输入]
+    end
+    
+    style PDB fill:#e3f2fd
+    style ATLAS fill:#fff3e0
+    style TRAINING fill:#f3e5f5
+```
+
+## PDB 数据集预处理
+
+PDB 数据集预处理将来自蛋白质数据库 (PDB) 的大分子结构转化为可用于训练的特征表示。该过程从 mmCIF（大分子晶体学信息文件）解析开始，提取每个蛋白质链的结构元数据、原子坐标和链序列。
+
+`unpack_mmcif.py` 脚本实现了批处理预处理工作流。对于每个 mmCIF 文件，脚本使用 `mmcif_parsing.parse()` 解析结构，遍历结构中的所有链，并提取链特定的信息，包括序列残基、发布日期和分辨率。然后，脚本通过 DataPipeline 处理每条链以生成结构特征，并将其保存为按 PDB ID 子目录组织的压缩 .npz 文件（例如，对于 PDB ID 1ABC 的 A 链，保存为 `data/ab/1abc_A.npz`）。这种组织方式实现了训练期间的高效查找，并符合标准 PDB 目录结构。
+
+特征提取过程创建包含原子位置、残基掩码、序列特征和元数据的综合表示。`make_mmcif_features` 函数构建包含 `all_atom_positions`（每个原子的 3D 坐标）、`all_atom_mask`（指示有效原子）、`resolution`（实验分辨率值）、`release_date`（结构沉积日期）和 `is_distillation` 标志（对于 PDB 结构设置为 0）的特征字典。这些特征随后与由 `make_sequence_features` 生成的序列衍生特征相结合，后者对氨基酸类型、残基位置和链标识符进行编码。
+
+来源：[scripts/unpack_mmcif.py](scripts/unpack_mmcif.py#L38-L67), [alphaflow/data/data_pipeline.py](alphaflow/data/data_pipeline.py#L52-L87), [alphaflow/data/data_pipeline.py](alphaflow/data/data_pipeline.py#L617-L646)
+
+## ATLAS 数据集预处理
+
+ATLAS 数据集预处理管道处理分子动力学轨迹数据，这与静态 PDB 结构有着根本的不同，因为每个蛋白质包含多个构象状态。ATLAS 数据库为每个蛋白质系统提供了三个独立的 MD 副本（R1, R2, R3），捕捉了训练蛋白质动力学生成模型所必需的构象多样性。
+
+`prep_atlas.py` 脚本通过首先使用 MDTraj 加载并连接所有三个副本轨迹来编排 ATLAS 预处理，从而创建一个统一的轨迹对象。对于每个轨迹帧，脚本保存一个临时 PDB 结构，使用 `protein.from_pdb_string` 对其进行解析，并通过 `make_protein_features` 提取特征。关键是，脚本不是独立处理每一帧，而是将所有帧位置堆叠到单个数组中，创建多构象特征表示，其中 `all_atom_positions` 的形状为 `(num_frames, num_residues, num_atoms, 3)`。这种堆叠使得训练管道能够在训练期间对构象进行采样，让模型接触多样化的结构状态。
+
+脚本以 100 帧为批次进行处理，以平衡内存效率与吞吐量，利用处理后被删除的临时文件。每个 ATLAS 条目生成一个包含所有构象的 .npz 文件，其中 `all_atom_positions` 张量维度代表时间轴。相应的 CSV 拆分文件（`splits/atlas.csv`）为 MSA 生成和比对提供序列信息。这种多构象表示对于学习蛋白质构象的分布（而不仅仅是静态结构）至关重要。
+
+来源：[scripts/prep_atlas.py](scripts/prep_atlas.py#L38-L61), [splits/atlas.csv](splits/atlas.csv#L1-L20), [scripts/download_atlas.sh](scripts/download_atlas.sh#L1-L6)
+
+<CgxTip>
+ATLAS 预处理将所有轨迹帧堆叠到形状为 `(num_frames, num_res, num_atoms, 3)` 的单个张量中。这种设计允许数据加载器使用 `num_confs` 参数随机选择帧，从而在训练期间实现高效的构象采样，模拟多样化的结构状态，而无需为每一帧提供单独的文件。
+</CgxTip>
+
+## 数据集加载和过滤
+
+`OpenFoldSingleDataset` 类提供了在训练期间加载预处理数据的主要接口。该类支持多种数据格式（.cif, .core, .pdb, .npz），并根据预处理阶段实现灵活的数据加载策略。对于预处理的 .npz 文件，加载器直接加载压缩的特征字典，避免了 mmCIF 文件昂贵的重新解析。该类通过 `data_pipeline._process_msa_feats` 方法整合来自比对目录的 MSA 特征，将结构特征与进化信息结合起来。
+
+加载过程通过 `subsample_pos` 和 `num_confs` 参数处理单构象（PDB）和多构象（ATLAS）情况。对于 ATLAS 数据，`subsample_pos=True` 从堆叠位置中随机采样单个构象，而 `num_confs=N` 允许对每个样本的 N 个构象进行系统迭代。这种灵活性允许从单结构学习到基于集成的构象采样的训练策略。`first_as_template` 标志提供了一种机制，可以将第一帧作为下游处理的模板特征。
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L160-L200)
+
+## 随机过滤策略
+
+`OpenFoldDataset` 类实现了 AlphaFold 的随机过滤策略，该策略动态选择训练样本以平衡数据集组成并强调代表性不足的数据。过滤结合了硬性确定性过滤器和概率性软过滤器，创建了防止大蛋白质家族过度表达或过度采样序列簇的训练分布。
+
+确定性过滤器应用硬性质量标准，包括分辨率阈值（拒绝分辨率 > 9.0 Å 的结构）和序列组成检查（拒绝任何单一氨基酸占残基 > 80% 的序列）。这些过滤器移除了可能对训练产生负面影响的低质量结构和退化序列。
+
+随机过滤器基于两个因素计算接受概率：簇大小和链长度。对于基于簇的过滤，接受概率为 `1/cluster_size`，确保大蛋白质家族根据其多样性而非丰富度做出贡献。对于基于长度的过滤，概率使用公式 `(1/512) * max(min(chain_length, 512), 256)` 随链长度缩放，为较长的链（256-512 个残基）赋予更高的概率，同时为较短的序列保持合理的概率。最终的接受概率是所有单个概率的乘积，从而实现乘法过滤。
+
+`reroll()` 方法实现了按周期重采样，为每个训练周期生成新的数据集选择。这种设计防止了对特定样本子集的过拟合，并确保了跨周期的多样化训练接触。
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L201-L322)
+
+| 过滤器类型 | 参数 | 条件 | 操作 |
+|-------------|-----------|-----------|--------|
+| 确定性 | 分辨率 | > 9.0 Å | 拒绝样本 |
+| 确定性 | 单个氨基酸比例 | > 80% | 拒绝样本 |
+| 随机 | 簇大小 | > 0 | 概率 = 1/cluster_size |
+| 随机 | 链长度 | 任意 | 概率 = (1/512) × max(min(len, 512), 256) |
+
+## 特征处理管道
+
+一旦加载了原始特征，`FeaturePipeline` 类就会通过基于配置的处理将它们转化为模型就绪的张量。`process_features` 方法调用 `np_example_to_features`，后者执行张量转换、删除矩阵转换和循环迭代设置。
+
+处理管道应用特定于模式的转换：对于训练模式，基于 `config.supervised.clamp_prob` 的随机概率决定是否使用 clamped FAPE（帧对齐点误差）损失，而评估模式禁用 clamping。管道添加了形状为 `[max_recycling_iters + 1]` 的 `use_clamped_fape` 张量，控制跨循环迭代的损失计算。
+
+`input_pipeline.process_tensors_from_config` 函数应用完整的 AlphaFold 特征处理管道，包括 MSA 处理、模板整合和基于配置参数的特征掩码。这确保了预处理数据接收到与推理时处理的数据相同的特征转换，从而保持训练-推理管道的一致性。
+
+来源：[alphaflow/data/feature_pipeline.py](alphaflow/data/feature_pipeline.py#L73-L132)
+
+<CgxTip>
+特征管道将删除矩阵从整数格式转换为 float32 格式，并应用循环特定的转换。`use_clamped_fape` 张量控制是否应用 clamped FAPE 损失，该损失在早期训练周期约束距离预测以稳定学习。这在训练期间以 `clamp_prob` 概率启用，并在评估期间始终禁用。
+</CgxTip>
+
+## 与训练管道的集成
+
+`OpenFoldDataModule` 将所有预处理组件集成到 PyTorch Lightning 数据模块中，管理数据集创建、数据加载器实例化以及训练/验证/预测拆分。数据模块支持三种不同的数据集类型：标准训练数据（通常是 PDB 结构）、蒸馏数据（自蒸馏或增强结构）和验证数据。
+
+`setup()` 方法为每个具有适当配置的数据源实例化 `OpenFoldSingleDataset` 对象。对于训练，数据模块在单个数据集周围创建 `OpenFoldDataset` 包装器，以应用随机过滤和样本平衡。`_gen_dataloader()` 方法根据训练阶段配置批次整理、属性增强和迭代设置。
+
+数据加载器实现通过 `OpenFoldBatchCollator` 处理批次组装，将特征字典堆叠到批次张量中。`OpenFoldDataLoader` 扩展了 PyTorch 的 DataLoader，以根据配置概率添加批次属性增强，从而在训练期间启用随机掩码和 MSA 子采样等技术。
+
+来源：[alphaflow/data/data_modules.py](alphaflow/data/data_modules.py#L443-L660)
+
+## 下一步
+
+随着数据预处理的完成，接下来的逻辑步骤是了解这些特征如何通过 MSA 生成得到丰富。[使用 MMseqs2 进行 MSA 生成](18-msa-generation-with-mmseqs2) 页面详细介绍了向结构特征添加关键协同进化信息的进化比对过程。或者，要全面了解特征是如何转换和整合的，请继续阅读 [序列、结构和 MSA 的特征工程](21-feature-engineering-for-sequence-structure-and-msa)。
+
+---
+
+- [深度解析/数据流程/序列、结构和 MSA 的特征工程](https://zread.ai/bjing2016/alphaflow/21-feature-engineering-for-sequence-structure-and-msa)
+
+---
+slug:21-feature-engineering-for-sequence-structure-and-msa
+blog_type:normal
+---
+
+
+本页面详细介绍了特征工程流水线，该流水线将原始蛋白质序列、结构和多序列比对（MSA）转换为 AlphaFlow 架构所需的丰富特征表示。理解此流水线对于有效使用模型至关重要，无论是训练新模型还是执行推理。
+
+## 特征流水线架构
+
+特征工程系统遵循分层设计，原始数据流经多个转换阶段。在顶层，`FeaturePipeline` 类协调从 numpy 数组到处理后的 PyTorch 张量的转换，准备模型输入。此流水线集成了基于配置的转换，以及针对训练、评估和预测场景的特定模式处理。
+
+架构流从包含序列信息、MSA 比对和可选结构数据的原始特征字典开始。这些数据经过基于配置的转换器，应用裁剪、掩码、MSA 采样和特征选择操作。最终输出由符合模型预期特征模式的适当形状的张量组成。
+
+来源：[feature_pipeline.py](alphaflow/data/feature_pipeline.py#L115-L132)
+
+## 序列特征工程
+
+### One-Hot 编码和序列级特征
+
+序列特征构成特征表示的基础。`make_sequence_features` 函数构建了一组全面的序列级属性，包括通过使用 22 种可能残基（20 种标准氨基酸加上 X 代表未知和间隙）的 one-hot 表示进行的氨基酸类型编码 [data_pipeline.py](alphaflow/data/data_pipeline.py#L30-L49)。每个残基位置接收一个表示其身份的 22 维向量。
+
+除了氨基酸编码外，序列特征还包括用于位置信息的残基索引、序列长度元数据，以及用于跟踪蛋白质来源的域标识符。这些特征支持模型对序列顺序的理解，并为残基特定预测提供上下文。
+
+### 结构特征集成
+
+当通过 PDB 或 mmCIF 文件提供结构信息时，流水线将原子坐标和掩码直接集成到特征字典中。`make_mmcif_features` 函数提取全原子位置及其相应的存在掩码，指示结构中实际存在哪些原子 [data_pipeline.py](alphaflow/data/data_pipeline.py#L52-L85)。这种集成使得对结构目标的监督训练成为可能，同时保持与仅序列输入的兼容性。
+
+对于基于蒸馏的训练，流水线结合置信度阈值以过滤低置信度结构区域。高置信度区域通过超过可配置阈值（默认 50.0）的 B 因子识别，并选择性应用原子掩码以将训练集中在可靠的结构数据上 [data_pipeline.py](alphaflow/data/data_pipeline.py#L125-L140)。
+
+## MSA 特征工程
+
+### MSA 编码和删除矩阵
+
+多序列比对提供了准确结构预测所需的进化信息。`make_msa_features` 函数处理比对序列集合及其相应的删除矩阵，将其转换为统一的特征表示 [data_pipeline.py](alphaflow/data/data_pipeline.py#L143-L176)。MSA 中的每个氨基酸使用 HHBLITS 氨基酸到 ID 的映射转换为整数标识符，实现紧凑表示。
+
+删除矩阵捕获相对于查询序列的插入和删除事件，提供关于插入缺失模式的进化上下文。这些矩阵存储为整数计数，并在特征处理期间转换为 float32 张量。流水线移除重复序列以避免冗余信息，同时保留比对多样性。
+
+### MSA 转换流水线
+
+输入流水线对 MSA 特征应用一系列复杂的转换，从残基类型修正和随机替换未知氨基酸进行正则化开始 [input_pipeline.py](alphaflow/data/input_pipeline.py#L146-L156)。掩码 MSA 操作在训练期间随机遮蔽比对的一部分，通过基于轮廓、同序列和均匀掩码策略的可配置概率实现。
+
+关键的 MSA 转换包括：
+- **MSA 采样**：基于特定于模式的簇限制的动态比对序列选择（预测为 512，训练/评估为 128）[config.py](alphaflow/config.py#L320-L348)
+- **额外 MSA 裁剪**：管理超出主簇的额外比对序列（默认 1024 个序列）[input_pipeline.py](alphaflow/data/input_pipeline.py#L234-L237)
+- **基于簇的特征**：启用时的最近邻聚类和汇总 [input_pipeline.py](alphaflow/data/input_pipeline.py#L229-L231)
+- **轮廓生成**：捕获每个位置氨基酸频率的 HHblits 轮廓构建 [input_pipeline.py](alphaflow/data/input_pipeline.py#L155)
+
+<CgxTip>MSA 重采样策略对于推理一致性至关重要。当禁用 `resample_msa_in_recycling` 时，固定种子确保在所有循环迭代中相同的 MSA 采样，而启用重采样会以一致性为代价引入多样性。</CgxTip>
+
+## 结构特征工程
+
+### 原子级表示
+
+对于监督训练和基于结构的输入，流水线生成全面的原子级特征。转换序列创建多个原子表示，包括 atom14（蛋白质建模中使用的每个残基标准 14 个原子）和 atom37（完整的 PDB 原子集）[input_pipeline.py](alphaflow/data/input_pipeline.py#L174-L176)。每个表示包括指示哪些原子存在的存在掩码。
+
+`make_atom14_positions` 函数将 atom37 坐标转换为 atom14 框架，将 PDB 原子映射到模型中使用的简化表示 [input_pipeline.py](alphaflow/data/input_pipeline.py#L181)。此转换包括处理多个 atom37 位置映射到同一 atom14 位置的歧义情况。
+
+### 扭转角和框架特征
+
+结构特征不仅限于笛卡尔坐标，还包括扭转角和刚体框架。转换流水线通过 `atom37_to_frames` 计算主链框架，为每个残基建立局部坐标系 [input_pipeline.py](alphaflow/data/input_pipeline.py#L182)。这些框架支持旋转不变的表示，并促进基于框架的注意力机制。
+
+扭转角通过 `atom37_to_torsion_angles` 提取，将主链和侧链二面角捕获为正弦和余弦对，以避免角度不连续性 [input_pipeline.py](alphaflow/data/input_pipeline.py#L183)。这些角度表示对于现实构象生成至关重要，并用于监督目标和模板特征。
+
+### 伪 Beta 特征
+
+流水线生成伪 beta 位置，表示所有残基的 Cβ 原子位置的近似值（对于甘氨酸使用 Cα）[input_pipeline.py](alphaflow/data/input_pipeline.py#L184)。这些特征提供适合成对距离预测的简化表示，并作为几何推理的锚点。查询和模板结构都接收带有相应存在掩码的伪 beta 特征。
+
+## 模板特征工程
+
+### 模板选择和处理
+
+当启用模板时，流水线通过多阶段处理集成结构模板。模板特征从 TemplateHitFeaturizer 的命中识别和特征化开始，该转换器将比对命中转换为结构特征字典 [data_pipeline.py](alphaflow/data/data_pipeline.py#L480-L517)。根据评分指标选择信息量最大的模板。
+
+模板特征反映了应用于查询序列的结构特征，包括：
+- 模板全原子位置和掩码 [config.py](alphaflow/config.py#L253-L263)
+- 模板伪 beta 表示 [config.py](alphaflow/config.py#L265-L266)
+- 用于结构上下文的模板主链刚体框架 [config.py](alphaflow/config.py#L260-L263)
+- 启用时的模板扭转角 [config.py](alphaflow/config.py#L267-L273)
+
+### 模板扭转角嵌入
+
+流水线支持可选的模板扭转角嵌入，由 `embed_template_torsion_angles` 配置控制 [config.py](alphaflow/config.py#L198)。启用时，模板二面角转换为正弦/余弦表示并集成到模板特征集中，提供来自同源结构的直接角度约束。
+
+模板特征经过特定转换，包括氨基酸类型修正（`fix_templates_aatype`）和掩码生成（`make_template_mask`），以处理模板结构中缺失或模糊的区域 [input_pipeline.py](alphaflow/data/input_pipeline.py#L158-L162)。
+
+## 特征模式和维度
+
+### 综合特征字典
+
+配置定义了一个完整的模式，指定所有特征的预期维度。关键维度占位符包括 `NUM_RES` 用于序列长度，`NUM_MSA_SEQ` 用于 MSA 序列计数，`NUM_EXTRA_SEQ` 用于额外比对序列，以及 `NUM_TEMPLATES` 用于模板计数 [config.py](alphaflow/config.py#L201-L204)。这些占位符在运行时根据实际输入维度解析。
+
+该模式包含 60 多个不同的特征键，组织为以下类别：
+- **序列特征**：aatype、residue_index、seq_length、seq_mask [config.py](alphaflow/config.py#L211-L250)
+- **MSA 特征**：msa、msa_feat、msa_mask、deletion_matrix、true_msa [config.py](alphaflow/config.py#L225-L274)
+- **结构特征**：all_atom_positions、atom14_positions、pseudo_beta、backbone_frames [config.py](alphaflow/config.py#L212-L248)
+- **模板特征**：template_aatype、template_all_atom_positions、template_torsion_angles [config.py](alphaflow/config.py#L252-L273)
+- **元数据特征**：resolution、is_distillation、no_recycling_iters、use_clamped_fape [config.py](alphaflow/config.py#L233-L275)
+
+### 特定于模式的特征选择
+
+不同的操作模式激活不同的特征子集。无监督特征形成在所有模式中使用的核心集，包括序列和 MSA 信息 [config.py](alphaflow/config.py#L292-L301)。监督特征在训练和评估期间添加，提供用于学习的结构目标 [config.py](alphaflow/config.py#L307-L314)。
+
+流水线根据配置有选择地启用模板特征，特定于模板的激活标志控制是否使用模板数据以及是否包含扭转角嵌入 [config.py](alphaflow/config.py#L302-L303)。
+
+## 数据增强和预处理
+
+### 随机裁剪和固定大小处理
+
+为了训练效率，流水线实现了复杂的裁剪策略。`random_crop_to_size` 函数对序列、MSA 和模板应用随机裁剪，同时保持维度一致性 [input_pipeline.py](alphaflow/data/input_pipeline.py#L24-L109)。这使得能够在可变长度蛋白质上进行训练，同时为 GPU 处理准备固定大小的批次。
+
+裁剪后，`make_fixed_size` 将特征填充到预定维度，确保样本间一致的张量形状 [input_pipeline.py](alphaflow/data/input_pipeline.py#L111-L145)。填充策略尊重特征语义，为不同特征类型使用适当的值（例如，位置特征使用零，掩码使用特定哨兵值）。
+
+### 循环和钳制特征
+
+流水线生成与循环相关的特征，包括 `no_recycling_iters` 和 `use_clamped_fape` [feature_pipeline.py](alphaflow/data/feature_pipeline.py#L97-L110)。钳制特征控制 FAPE（框架对齐点误差）损失使用钳制还是未钳制的距离，在训练期间随机激活，概率由 `clamp_prob` 配置控制 [config.py](alphaflow/config.py#L306)。
+
+<CgxTip>训练使用 90% 的钳制 FAPE 值概率（clamp_prob=0.9），通过限制大结构偏差的影响来稳定学习。推理始终使用未钳制值（概率 0.0）以允许生成期间完全的结构自由。</CgxTip>
+
+## 模型架构中的特征集成
+
+### 输入对堆栈处理
+
+特征表示通过专用输入处理器馈送到模型架构中。InputPairStack 实现了 AlphaFold 论文中的算法 16，通过三角形注意力和乘法更新块处理成对特征 [input_stack.py](alphaflow/model/input_stack.py#L171-L240)。每个块结合三角形注意力（起始和结束节点变体）与三角形乘法（传出和传入方向）以及对转换层。
+
+这种三角形处理使模型能够推理残基对之间的几何关系，注意力机制捕获距离和方向特征中的方向模式。堆栈配置了通道维度（`c_t` 用于对特征，`c_hidden_tri_att` 用于注意力，`c_hidden_tri_mul` 用于乘法更新）和多头注意力头数 [config.py](alphaflow/config.py#L189-L190, L398-L402)。
+
+### 配置驱动的架构
+
+模型架构维度通过可以全局修改的 FieldReferences 指定。关键通道维度包括 `c_z`（对表示，默认 128）、`c_m`（MSA 表示，默认 256）、`c_t`（模板表示，默认 64）、`c_e`（额外 MSA 表示，默认 64）和 `c_s`（单表示，默认 384）[config.py](alphaflow/config.py#L187-L191)。
+
+输入嵌入器配置转换维度，包括目标特征的 `tf_dim`（22）和 MSA 特征的 `msa_dim`（49），指定原始特征如何投影到模型的表示空间 [config.py](alphaflow/config.py#L390-L396)。
+
+## 流水线编排
+
+### 数据流水线集成
+
+DataPipeline 类编排来自不同输入源的特征组装 [data_pipeline.py](alphaflow/data/data_pipeline.py#L409-L730)。它支持多种输入格式，包括 FASTA 文件、PDB 结构、mmCIF 文件和 ProteinNet 核心文件，并为每种格式提供专门的处理方法。流水线在统一的工作流中处理 MSA 生成、模板识别和特征集成。
+
+对于多序列 FASTA 输入，流水线实现“AlphaFold-Gap”技术，允许以受控间隙大小（默认 200 个残基）处理连接序列 [data_pipeline.py](alphaflow/data/data_pipeline.py#L721-L730)。这使得能够高效处理多链或多域预测。
+
+### 比对运行器集成
+
+AlignmentRunner 处理 MSA 生成的外部工具执行，支持针对 Uniref90、Mgnify、BFD 和 PDB70 等数据库的 jackhmmer、hhblits 和 hhsearch 搜索 [data_pipeline.py](alphaflow/data/data_pipeline.py#L214-L360)。可配置的命中限制控制检索的比对数量，不同数据库有单独的设置（例如，uniref_max_hits=10000，mgnify_max_hits=5000）。
+
+比对过程将结果保存到输出目录，启用跨多次运行的缓存和重用。流水线通过专门的方法处理单链和多链蛋白质，将这些比对结果解析为 MSA 特征 [data_pipeline.py](alphaflow/data/data_pipeline.py#L418-L551)。
+
+## 后续步骤
+
+理解特征工程为有效使用 AlphaFlow 奠定了基础。为了实际应用，请继续：
+
+- [使用 MMseqs2 生成 MSA](18-msa-generation-with-mmseqs2) - 了解如何生成构成 MSA 特征核心的进化比对
+- [模板处理和特征提取](19-template-processing-and-feature-extraction) - 探索如何识别结构模板并将其集成到特征流水线中
+- [PDB 和 ATLAS 数据集的数据预处理](20-data-preprocessing-for-pdb-and-atlas-datasets) - 了解不同数据集的端到端数据准备工作流
+
+对于模型端处理，请参阅 [输入堆栈和特征表示](9-input-stack-and-feature-representations) 以了解这些特征如何被架构使用，以及 [Evoformer 和折叠主干架构](8-evoformer-and-folding-trunk-architecture) 了解下游特征转换层。
+
+---
+
+## 评估与分析
+
+- [深度解析/评估与分析/ATLAS 数据集上的集成评估指标](https://zread.ai/bjing2016/alphaflow/22-ensemble-evaluation-metrics-on-atlas-dataset)
+
+---
+slug:22-ensemble-evaluation-metrics-on-atlas-dataset
+blog_type:normal
+---
+
+
+ATLAS 数据集提供了一个全面的基准，用于通过将生成的蛋白质构象与生理温度下的显式溶剂分子动力学（MD）轨迹进行比较，来评估构象集合生成的质量。该评估框架量化了集合模型捕捉真实蛋白质动力学中存在的构象异质性的程度，超越了静态结构预测，评估了集合层面的保真度。
+
+## 指标计算框架
+
+集合评估流水线通过两个协调的脚本运行：`analyze_ensembles.py` 执行针对每个目标的指标计算，`print_analysis.py` 聚合多个目标的结果以进行统计分析。该工作流加载 MD 参考轨迹、生成的构象集合和晶体结构，然后计算一套全面的几何和统计指标。该流水线支持大规模评估的并行处理和灵活的原子选择（全原子、仅主干或仅 Cα），以专注于分析特定的结构方面。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L1-L100), [scripts/print_analysis.py](scripts/print_analysis.py#L1-L20)
+
+```mermaid
+flowchart TD
+    A[输入数据] --> B[加载结构]
+    B --> C{原子选择}
+    C --> D[全原子分析]
+    C --> E[仅主干]
+    C --> F[仅Cα]
+    
+    B --> G[预处理]
+    G --> H[去除氢原子]
+    G --> I[对齐拓扑]
+    G --> J[叠合至参考]
+    
+    D --> K[指标计算]
+    E --> K
+    F --> K
+    
+    K --> L[PCA分析]
+    K --> M[RMSD/RMSF指标]
+    K --> N[EMD/Wasserstein]
+    K --> O[SASA分析]
+    K --> P[接触分析]
+    
+    L --> Q[输出字典]
+    M --> Q
+    N --> Q
+    O --> Q
+    P --> Q
+    
+    Q --> R[Pickle序列化]
+    R --> S[聚合与统计]
+    
+    style A fill:#e3f2fd
+    style S fill:#f3e5f5
+    style K fill:#fff3e0
+```
+
+## 主成分分析 (PCA) 指标
+
+基于 PCA 的指标捕捉了构象方差的主要方向，并比较了集合模型与 MD 轨迹中观察到的主导运动模式的吻合程度。该分析对三个不同的坐标集执行 PCA：参考 MD 轨迹、生成的集合以及结合两者的联合分布。这种多维 PCA 方法使得能够比较不同空间中主成分所解释的方差，计算公式为 `explained_variance / n_atoms * 100` 以进行归一化。
+
+参考集合和生成集合的第一主成分之间的余弦相似度量化了主导运动方向的一致性，接近 1.0 的值表示在主要构象模式上具有极好的对应关系。该框架还计算了坐标在不同 PCA 子空间中的投影，允许在降维空间中计算参考分布与生成分布之间的 Wasserstein 距离。典型的实现使用 K=2 个主成分，以便在效率和信息量之间取得平衡，进行分布比较。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L19-L27), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L132-L148)
+
+<CgxTip>
+联合 PCA 空间对于公平的分布比较特别有价值，因为它消除了在仅源自单一来源的空间中比较集合时可能产生的偏差。K=2 的维度选择在计算效率与捕捉最显著构象差异的能力之间取得了平衡，因为前几个 PC 通常解释了蛋白质系统中大部分生物学相关的运动。</CgxTip>
+
+## RMSD 和 RMSF 指标
+
+均方根偏差（RMSD）和均方根涨落（RMSF）指标提供了集合相似性和灵活性模式的原子级别见解。成对 RMSD 分布评估构象多样性的广度：框架使用广播操作计算每个集合内部以及集合之间的平均 RMSD 值和均方根（RMS）成对 RMSD 值。平均成对 RMSD 反映了平均的结构离散度，而 RMS 指标则赋予较大偏差更大的权重，使其对可能代表罕见但重要状态的异常值构象敏感。
+
+RMSF 轮廓通过在将集合成员与参考结构对齐后计算原子位置的标准差，来量化每个残基的灵活性。评估计算 MD 参考轨迹和生成集合两者的 RMSF，然后计算这些轮廓之间的 Pearson、Spearman 和 Kendall 相关系数。高相关性表明集合模型准确地再现了 MD 模拟中观察到的相对灵活性模式，捕捉了哪些蛋白质区域是刚性的，哪些是柔性的。分析可以在全原子、仅主干或仅 Cα 表示上执行，以专注于构象动力学的特定方面。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L25-L32), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L149-L151), [scripts/print_analysis.py](scripts/print_analysis.py#L8-L13)
+
+| 指标 | 描述 | 解读 |
+|--------|-------------|----------------|
+| 平均成对 RMSD | 所有构象对之间的平均 RMSD | 较高的值表示更大的构象多样性 |
+| RMS 成对 RMSD | 成对 RMSD 分布的均方根 | 对大的构象异常值敏感 |
+| 每个目标的 RMSF 相关性 | 每个蛋白质的 RMSF 轮廓的 Pearson 相关性 | 衡量灵活性模式再现的准确性 |
+| 全局 RMSF 相关性 | 所有目标中所有残基的相关性 | 相对灵活性的整体一致性 |
+
+## Earth Mover's Distance (EMD) 指标
+
+Earth Mover's Distance，通过 Wasserstein 距离指标实现，提供了一种衡量构象集合之间分布不相似性的严格方法。该分析计算来自位置协方差矩阵的原子级 EMD 和来自坐标投影的 PCA 子空间 EMD。对于原子 EMD，框架计算两个集合的平均位置和协方差矩阵，然后应用矩阵平方根公式：`trace(Σ_ref + Σ_af - 2√(Σ_ref @ Σ_af))^0.5`，该公式量化了拟合到原子位置的多维高斯分布之间的最优传输成本。
+
+PCA 子空间 EMD 通过在应用最优传输公式之前降低维度，提供了更易于处理的计算。该实现使用匈牙利算法（通过 `scipy.optimize.linear_sum_assignment`）计算集合成员之间的最优匹配，然后计算 Wasserstein-2 距离为 `distmat[row_ind, col_ind].mean()^(1/p)`。该分析计算多种 EMD 变体：参考集合内部以建立基线变异性、参考集合和生成集合之间以评估分布相似性，以及集合到参考结构的距离以量化收敛性。这些指标在参考 PCA 空间、生成集合 PCA 空间和联合 PCA 空间中计算，以进行全面比较。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L70-L88), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L154-L175)
+
+```mermaid
+flowchart LR
+    subgraph Atomic_EMD
+        A1[平均位置] --> A2[协方差矩阵]
+        A2 --> A3[矩阵平方根]
+        A3 --> A4[迹公式]
+    end
+    
+    subgraph PCA_EMD
+        B1[坐标投影] --> B2[距离矩阵]
+        B2 --> B3[最优匹配]
+        B3 --> B4[Wasserstein距离]
+    end
+    
+    A4 --> C[分布相似性]
+    B4 --> C
+    
+    style C fill:#e8f5e9
+```
+
+<CgxTip>
+由于集合大小有限导致的数值问题，当协方差矩阵不是半正定时，原子 EMD 计算可能会失败。该实现会捕获此异常并回退到计算 `trace(covar)^0.5` 作为更简单的基于方差的距离指标，确保在不同集合大小和蛋白质系统中的鲁棒性。</CgxTip>
+
+## 溶剂可及表面积 (SASA) 分析
+
+SASA 指标评估集合模型再现 MD 模拟中观察到的残基溶剂暴露模式的程度。该框架使用 Shrake-Rupley 算法（探针半径为 0.28 nm）计算每个残基的 SASA 值，然后通过对每个残基内除主干原子（CA, C, N, O, OXT）以外的原子求和，来压缩侧链 SASA 值。该分析应用阈值（0.02）将连续的 SASA 值转换为二元暴露状态，然后计算每个残基在集合成员中被暴露的概率。
+
+互信息矩阵通过计算所有残基对的二元暴露状态之间的互信息，量化了协调的残基暴露模式。对于每个残基对（i, j），计算构建一个 2×2 联合概率矩阵，代表四种可能的暴露组合（暴露-暴露、暴露-埋藏、埋藏-暴露、埋藏-埋藏），然后使用公式 `MI = Σ p(x,y) log(p(x,y)/p(x)p(y))` 计算互信息。对角线元素设置为零以排除平凡的自信息。该分析计算参考集合和生成集合两者的互信息矩阵，然后计算这些矩阵之间的相关性，以评估协调的残基暴露网络的保留情况。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L34-L53), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L176-L189)
+
+## 接触图分析
+
+接触图分析通过比较参考 MD 轨迹和生成集合之间的接触概率，评估了残基间相互作用模式的保留情况。该框架计算每个集合中所有构象的成对距离矩阵，然后应用 0.8 nm 的阈值来定义接触。每个残基对的接触概率表示集合成员中存在该接触的比例，捕捉了相互作用在整个构象集合中的稳定性或短暂性。
+
+该分析根据晶体结构参考和集合行为对接触进行分类：弱接触定义为存在于晶体结构中（距离 < 0.8 nm）但在少于 90% 的集合成员中观察到的接触，表明相互作用不稳定。瞬时接触定义为在晶体结构中不存在但在超过 10% 的集合成员中观察到的接触，捕捉了动态的相互作用形成。交并比（IoU）分数，计算为 `(mask_ref & mask_af).sum() / (mask_ref | mask_af).sum()`，量化了弱接触和瞬时接触类别中接触识别的一致性。此外，该框架通过将 SASA 阈值应用于在晶体结构中被归类为埋藏的残基，评估了埋藏残基的暴露，量化了这些残基预测暴露模式的 IoU。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L190-L199), [scripts/print_analysis.py](scripts/print_analysis.py#L21-L46)
+
+| 接触类别 | 定义 | 评估指标 |
+|------------------|------------|-------------------|
+| 晶体接触 | 晶体结构中距离 < 0.8 nm | 二元比较 |
+| 弱接触 | 存在于晶体中但在集合中概率 < 0.9 | IoU 分数 |
+| 瞬时接触 | 在晶体中不存在但在集合中概率 > 0.1 | IoU 分数 |
+| 埋藏残基暴露 | 晶体 SASA < 阈值且集合概率 > 0.1 | IoU 分数 |
+
+## 统计聚合与报告
+
+`print_analysis.py` 脚本在多个目标之间执行统计聚合，以生成集合级别的性能摘要。对于在每个目标分析中计算的每个指标，框架计算所有目标的中位数值，提供对异常值具有鲁棒性的稳健中心趋势估计。该分析还报告 MD 和生成集合指标之间的相关系数，以评估模型是否一致地再现特定目标的模式。
+
+关键的聚合指标包括中位数值成对 RMSD（分别为 MD 和生成集合）、RMSF 相关性（全局每个残基和每个目标）、结合均值和方差分量的复合 RMWD（RMS Wasserstein 距离），以及在不同坐标空间中计算的 PCA Wasserstein 距离。该报告主成分余弦相似度超过 0.5 的目标百分比，量化了正确捕捉主导运动方向的频率。对于接触和 SASA 分析，脚本报告中位数 IoU 分数以及计算可行的目标比例（非 NaN 率），提供关于指标在不同系统中适用性的透明度。
+
+来源：[scripts/print_analysis.py](scripts/print_analysis.py#L74-L111)
+
+## 数据结构与输出格式
+
+分析流水线将结果存储在具有 PDB 标识符作为顶级键的分层字典结构中。每个目标条目包含针对每个残基的指标数组（RMSF、SASA 概率、互信息矩阵）、针对集合级别比较的标量指标（成对 RMSD 值、EMD 分量）以及接触概率矩阵数组。`cosine_sim` 字段存储第一主成分的点积，而 `ref_variance`、`af_variance` 和 `joint_variance` 数组包含每个主成分解释的归一化方差。
+
+所有目标的完整分析结果被序列化为路径为 `{pdbdir}/out.pkl` 的 pickle 文件，使得无需重新计算昂贵的轨迹指标即可进行后续的聚合和统计分析。聚合输出呈现一个为了可读性而转置的 DataFrame，行代表不同的指标，列代表不同的分析路径（通常是不同的模型配置或参数设置）。这种格式能够在全面的指标套件中快速比较集合生成方法。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L281-L286), [scripts/print_analysis.py](scripts/print_analysis.py#L110-L111)
+
+## 后续步骤
+
+有关集合评估的实际执行，请参阅 [运行集合分析脚本](23-running-ensemble-analysis-scripts)，其中提供了命令行用法详细信息和参数配置选项。要了解这些指标如何根据物理模拟进行验证，请参阅 [与 MD 轨迹的基准测试](24-benchmarking-against-md-trajectories)，其中讨论了解读指南和不同 AlphaFlow 模型变体的性能基准。
+
+---
+
+- [深度解析/评估与分析/运行集成分析脚本](https://zread.ai/bjing2016/alphaflow/23-running-ensemble-analysis-scripts)
+
+---
+slug:23-running-ensemble-analysis-scripts
+blog_type:normal
+---
+
+
+AlphaFlow 中的集成分析脚本提供了全面的评估指标，用于将生成的结构集成与分子动力学参考轨迹进行比较。这些脚本从多个维度量化集成多样性、结构准确性和构象采样质量，包括 RMSD 分布、主成分分析和基于接触的指标。
+
+## 分析流程概述
+
+集成分析工作流由三个相互关联的阶段组成：集成生成、比较分析和结果汇总。该流程能够系统性地评估 AlphaFlow 集成在多大程度上捕捉到了 MD 模拟中观察到的构象景观。
+
+```mermaid
+flowchart LR
+    A[生成阶段] --> B[分析阶段]
+    B --> C[汇总阶段]
+    
+    subgraph A [生成阶段]
+        A1[predict.py<br/>为每个目标<br/>生成 N 个样本]
+    end
+    
+    subgraph B [分析阶段]
+        B1[analyze_ensembles.py<br/>加载 MD 轨迹<br/>加载 AF2 集成<br/>计算指标]
+        B2[输出: out.pkl<br/>每个目标的指标<br/>Pickled 字典]
+    end
+    
+    subgraph C [汇总阶段]
+        C1[print_analysis.py<br/>加载多个 out.pkl 文件<br/>计算统计数据<br/>显示汇总表]
+    end
+    
+    A1 -- 创建 --> B1
+    B1 -- 生成 --> B2
+    B2 -- 被消费于 --> C1
+```
+
+## 使用 predict.py 生成集成
+
+在运行集成分析之前，你必须使用预测脚本生成结构集成。控制集成规模的关键参数是 `--samples`，它指定为每个目标序列生成的独立构象数量。
+
+**基本集成生成命令：**
+
+```bash
+python predict.py \
+  --input_csv splits/atlas.csv \
+  --mode alphafold \
+  --samples 50 \
+  --steps 50 \
+  --outpdb ./ensembles/atlas_ensemble \
+  --weights path/to/checkpoint.pt
+```
+
+集成生成的关键参数包括：
+- `--samples N`: 为每个序列生成 N 个独立构象（建议分析时使用 10-50 个）
+- `--steps K`: 影响结构多样性的去噪步数（较高的值可能会降低多样性）
+- `--tmax VALUE`: 控制探索范围的最大噪声调度值（默认 1.0）
+- `--self_cond`: 启用自条件化以改善结构连贯性
+- `--noisy_first`: 在第一步注入噪声以增强多样性
+
+来源：[predict.py](scripts/predict.py#L2-L22)
+
+## 使用 analyze_ensembles.py 运行集成分析
+
+`analyze_ensembles.py` 脚本在生成的集成与来自 ATLAS 数据集的参考 MD 轨迹之间执行全面比较。它需要访问 ATLAS 目录（包含 MD 轨迹）和包含生成的集成 PDB 文件的目录。
+
+**基本用法：**
+
+```bash
+python scripts/analyze_ensembles.py \
+  --atlas_dir path/to/atlas \
+  --pdbdir ./ensembles/atlas_ensemble \
+  --num_workers 4
+```
+
+**命令行参数：**
+
+| 参数 | 类型 | 必需 | 默认值 | 描述 |
+|----------|------|----------|---------|-------------|
+| `--atlas_dir` | str | 是 | - | 包含 ATLAS 数据集和 MD 轨迹的目录 |
+| `--pdbdir` | str | 是 | - | 包含生成的集成 PDB 文件的目录 |
+| `--pdb_id` | list | 否 | [] | 要分析的特定 PDB ID（如果为空则分析全部） |
+| `--bb_only` | flag | 否 | False | 仅分析骨架原子（CA, C, N, O, OXT） |
+| `--ca_only` | flag | 否 | False | 仅分析 C-alpha 原子 |
+| `--num_workers` | int | 否 | 1 | 用于分析的并行进程数 |
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L1-L10)
+
+<CgxTip>
+`--bb_only` 和 `--ca_only` 标志是互斥的，并提供不同级别的结构分辨率。使用 `--ca_only` 对大型集成进行快速筛选，使用 `--bb_only` 进行中等分辨率分析。全原子分析（默认）提供最全面的指标，但需要更多的计算时间。
+</CgxTip>
+
+## 计算的综合指标
+
+分析脚本计算一组多维度的指标，用于评估几何精度和集成多样性。这些指标分为结构类、构象类和功能类。
+
+### 结构指标
+
+**RMSD 分析：**
+- `ref_mean_pairwise_rmsd`: MD 帧之间的平均成对 RMSD（基线多样性）
+- `af_mean_pairwise_rmsd`: 集成预测之间的平均成对 RMSD
+- 使用 C-alpha 叠加测量每个集成内的结构多样性
+
+**RMSF (均方根波动):**
+- `ref_rmsf`: MD 轨迹中每个残基的波动
+- `af_rmsf`: 生成集成中每个残基的波动
+- 相对于晶体结构参考计算，能够识别柔性区域
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L219-L220), [analyze_ensembles.py](scripts/analyze_ensembles.py#L185-L186)
+
+### 构象景观指标
+
+**主成分分析 (PCA):**
+该脚本执行三种不同的 PCA 分析来比较构象空间：
+
+1. **参考 PCA**: 在 MD 轨迹上训练的 PCA，应用于两个集成
+2. **AF2 PCA**: 在 AF2 集成上训练的 PCA，应用于两个集成
+3. **联合 PCA**: 在拼接的 MD + AF2 集成上训练的 PCA
+
+对于每个 PCA，脚本计算：
+- 解释方差比 (`ref_variance`, `af_variance`, `joint_variance`)
+- 两个集成和晶体结构的坐标投影
+- 主主成分之间的余弦相似度 (`cosine_sim`)
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L166-L183), [analyze_ensembles.py](scripts/analyze_ensembles.py#L228)
+
+**Wasserstein 距离 (推土机距离 - EMD):**
+多个 EMD 指标量化集成之间的分布重叠：
+
+- **分布之间的 EMD**: `ref|af` - 集成到集成的完整距离
+- **均值到均值的距离**: `ref mean|af mean` - 集成质心之间的距离
+- **内部集成距离**: `ref|ref mean`, `af|af mean` - 内在集成分布
+- **参考到晶体的距离**: `ref|seed`, `af|seed` - 距晶体结构的距离
+
+这些指标在三个 PCA 空间中计算：参考、AF2 和联合，从而提供构象相似性的全面视图。
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L231-L266)
+
+### 表面和接触指标
+
+**溶剂可及表面积 (SASA) 分析：**
+- 使用 0.02 nm² 阈值进行二元 SASA 分类
+- `ref_sa_prob`: 每个残基在 MD 中溶剂可及的概率
+- `af_sa_prob`: 每个残基在集成中溶剂可及的概率
+- `crystal_sasa`: 晶体结构的静态 SASA
+
+**侧链 SASA 凝聚：**
+`condense_sidechain_sasas` 函数通过汇总所有非骨架原子（排除 CA, C, N, O, OXT）的贡献，将原子级 SASA 聚合为每个残基的值。
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L198-L210), [analyze_ensembles.py](scripts/analyze_ensembles.py#L34-L52)
+
+**接触概率分析：**
+- `ref_contact_prob`: MD 中残基间接触的频率 (<0.8 nm)
+- `af_contact_prob`: 生成集成中接触的频率
+- `crystal_distmat`: 来自晶体结构的静态接触距离
+
+接触分类识别三个类别：
+- **弱接触**: 存在于晶体中但概率 <0.9
+- **瞬时接触**: 晶体中不存在但动力学中概率 >0.1
+- **强接触**: 存在于晶体中且概率 >0.9
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L212-L217)
+
+**互信息 (暴露子分析):**
+`sasa_mi` 函数计算 SASA 状态之间的成对互信息，识别相关的表面暴露模式。这种“暴露子”分析揭示了残基可及性变化的协同性。
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L54-L67)
+
+## 数据处理流程
+
+分析遵循系统的数据处理序列，确保结构对齐和一致的原子选择。
+
+```mermaid
+flowchart TD
+    Start[加载数据] --> Align[原子对齐]
+    Align --> Filter[移除氢原子]
+    Filter --> Slice[可选 骨架/CA 切片]
+    Slice --> Superpose[叠合到参考]
+    Superpose --> Compute[计算指标]
+    
+    subgraph Load [数据加载]
+        L1[MD 轨迹<br/>R1+R2+R3 .xtc 文件]
+        L2[晶体结构<br/>.pdb 文件]
+        L3[AF2 集成<br/>.pdb 文件]
+    end
+    
+    subgraph Slice [可选过滤]
+        S1[--bb_only 标志]
+        S2[--ca_only 标志]
+    end
+    
+    subgraph Compute [指标计算]
+        M1[PCA & 方差]
+        M2[RMSD/RMSF]
+        M3[SASA & MI]
+        M4[接触概率]
+        M5[EMD/Wasserstein]
+    end
+    
+    L1 --> Align
+    L2 --> Align
+    L3 --> Align
+    Align --> Filter
+    Filter --> S1
+    S1 --> S2
+    S2 --> Superpose
+    Superpose --> Compute
+```
+
+`align_tops` 函数识别轨迹和集成之间的交叉原子，确保所有计算的一致索引。使用固定种子 (137) 的随机采样 (`RAND1`, `RAND2`, `RAND1K`) 确保 MD 帧的可重现子采样，以便与集成进行比较。
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L89-L97), [analyze_ensembles.py](scripts/analyze_ensembles.py#L146-L161)
+
+## 输出格式和存储
+
+`analyze_ensembles.py` 脚本输出一个单独的 pickled 字典 (`out.pkl`)，其中包含每个分析蛋白的所有计算指标。输出结构如下：
+
+```python
+{
+    'protein_id': {
+        'ca_mask': [...],                          # C-alpha 原子索引
+        'ref_variance': np.array,                  # 解释方差比
+        'af_variance': np.array,
+        'joint_variance': np.array,
+        'af_rmsf': np.array,                      # 每残基 RMSF
+        'ref_rmsf': np.array,
+        'emd_mean': np.array,                      # 每原子平均 EMD
+        'emd_var': np.array,                       # 每原子方差 EMD
+        'crystal_sasa': np.array,                  # 每残基晶体 SASA
+        'ref_sa_prob': np.array,                   # MD SASA 概率
+        'af_sa_prob': np.array,                    # 集成 SASA 概率
+        'ref_mi_mat': np.array,                    # MD SASA 互信息
+        'af_mi_mat': np.array,                     # 集成 SASA MI
+        'ref_contact_prob': np.array,              # MD 接触概率矩阵
+        'af_contact_prob': np.array,               # 集成接触概率
+        'crystal_distmat': np.array,               # 晶体距离矩阵
+        'ref_mean_pairwise_rmsd': float,           # MD 集成多样性
+        'af_mean_pairwise_rmsd': float,            # 集成多样性
+        'cosine_sim': float,                       # PC1 对齐
+        'EMD,ref': {...},                          # 参考 PCA EMD 指标
+        'EMD,af2': {...},                          # AF2 PCA EMD 指标
+        'EMD,joint': {...}                         # 联合 PCA EMD 指标
+    },
+    ...
+}
+```
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L285-L286)
+
+## 使用 print_analysis.py 汇总结果
+
+`print_analysis.py` 脚本汇总来自多个 `out.pkl` 文件的指标，并显示全面的汇总表。这使得能够比较不同模型、采样参数或实验条件。
+
+**用法：**
+
+```bash
+python scripts/print_analysis.py \
+  path/to/experiment1/out.pkl \
+  path/to/experiment2/out.pkl \
+  path/to/experiment3/out.pkl
+```
+
+**计算的汇总统计：**
+
+| 指标 | 描述 | 计算 |
+|--------|-------------|-------------|
+| MD pairwise RMSD | 中位数 MD 集成多样性 | `ref_mean_pairwise_rmsd` |
+| Pairwise RMSD | 中位数生成集成多样性 | `af_mean_pairwise_rmsd` |
+| Pairwise RMSD r | 多样性之间的相关性 | Pearson 相关 |
+| MD RMSF | 中位数 MD 每残基波动 | `ref_rmsf` |
+| RMSF | 中位数集成每残基波动 | `af_rmsf` |
+| Global RMSF r | 全局 RMSF 相关性 | 拼接 RMSF 上的 Pearson |
+| Per target RMSF r | 中位数每目标 RMSF 相关性 | 每目标 RMSF 上的 Pearson |
+| RMWD | 组合 平均+方差 EMD | √(emd_mean² + emd_var²) |
+| RMWD trans | 均值分量 EMD | `emd_mean` |
+| RMWD var | 方差分量 EMD | `emd_var` |
+| MD PCA W2 | 中位数参考 PCA Wasserstein | 来自联合 PCA 的 `refemd` |
+| Joint PCA W2 | 中位数联合 PCA Wasserstein | `jointemd` |
+| PC sim > 0.5 % | PC1 对齐 > 0.5 的百分比 | `(cosine_sim > 0.5).mean()` |
+| Weak contacts J | 中位数弱接触 IoU | Jaccard 指数 |
+| Transient contacts J | 中位数瞬时接触 IoU | Jaccard 指数 |
+| Exposed residue J | 中位数暴露 SASA IoU | Jaccard 指数 |
+| Exposed MI matrix ρ | 中位数暴露子 MI 相关性 | Spearman 相关 |
+
+来源：[print_analysis.py](scripts/print_analysis.py#L8-L108)
+
+**为 RMSF 和 SASA 互信息计算的相关性指标**：
+- Pearson 相关：线性关系
+- Spearman 相关：单调关系
+- Kendall tau：序数关联
+
+这些相关性量化了集成是否捕捉到了正确的残基柔性 (RMSF) 和协同表面暴露 (暴露子 MI) 模式。
+
+来源：[print_analysis.py](scripts/print_analysis.py#L8-L13)
+
+## 并行处理和性能
+
+两个分析脚本都支持并行执行，以高效处理大型数据集：
+
+**analyze_ensembles.py:**
+- 使用 Python 多进程 Pool 和 `--num_workers` 参数
+- 独立处理每个 PDB ID
+- 通过 tqdm 进度条跟踪进度
+- 建议：典型工作负载使用 4-8 个工作进程
+
+**并行执行示例：**
+
+```bash
+# 使用 8 个并行进程
+python scripts/analyze_ensembles.py \
+  --atlas_dir path/to/atlas \
+  --pdbdir ./ensembles/atlas_ensemble \
+  --num_workers 8
+```
+
+<CgxTip>
+对于 ATLAS 数据集分析（约 100 个蛋白质），在典型硬件上，并行处理可将分析时间从约 2 小时（单进程）减少到约 15 分钟（8 个进程）。请确保有足够的内存可用，因为每个工作进程会将完整轨迹加载到内存中。
+</CgxTip>
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L275-L283)
+
+## 解释关键指标
+
+理解输出指标能够对集成质量进行有依据的评估：
+
+**多样性指标：**
+- `Pairwise RMSD` 接近 `MD pairwise RMSD`：集成捕捉到了适当的构象多样性
+- `Pairwise RMSD >> MD pairwise RMSD`：过度多样化，可能是有噪声的集成
+- `Pairwise RMSD << MD pairwise RMSD`：多样性不足，探索不充分
+
+**精度指标：**
+- `RMWD trans` (均值 EMD)：低值表示集成质心接近 MD 平均值
+- `RMWD var` (方差 EMD)：低值表示集成分布匹配 MD 变异性
+- `Global RMSF r` > 0.7：每残基柔性模式有强相关性
+
+**构象指标：**
+- `PC sim > 0.5 %`：捕捉到主要运动方向的蛋白质百分比
+- `MD PCA W2` vs `Joint PCA W2`：较低的联合 PCA 距离表示构象子空间对齐更好
+
+**表面/接触指标：**
+- `Weak contacts J`：高 IoU 表示正确识别了边缘稳定的接触
+- `Transient contacts J`：高 IoU 表示正确采样了非晶体相互作用
+- `Exposed MI matrix ρ`：高相关性表示适当的协同表面动力学
+
+来源：[print_analysis.py](scripts/print_analysis.py#L83-L110)
+
+## 常见问题故障排除
+
+**问题：对齐后原子计数不匹配**
+
+```
+ValueError: The number of atoms in top (X) didn't match the number of SASAs provided (Y)
+```
+
+**解决方案**：确保使用原子级 SASA 计算模式（mdtraj 中的 `mode='atom'`）。`condense_sidechain_sasas` 函数在处理之前验证原子计数。
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L37-L43)
+
+**问题：EMD 计算中出现奇异矩阵错误**
+
+```
+LinAlgError: Matrix is singular
+```
+
+**解决方案**：脚本捕获此异常并回退到使用 `np.trace(ref_covar)` 的对角线方差计算。当集成协方差矩阵由于多样性不足而接近奇异时，会发生这种情况。
+
+来源：[analyze_ensembles.py](scripts/analyze_ensembles.py#L192-L195)
+
+**问题：缺少晶体接触或 SASA 指标**
+
+**解决方案**：这些指标要求 ATLAS 目录中存在晶体结构。验证所有分析蛋白的 `{name}.pdb` 文件是否存在。
+
+## 完整工作流示例
+
+```bash
+# 步骤 1：为 ATLAS 蛋白生成集成
+python predict.py \
+  --input_csv splits/atlas_train.csv \
+  --mode alphafold \
+  --samples 50 \
+  --steps 50 \
+  --tmax 1.0 \
+  --self_cond \
+  --outpdb ./ensembles/alphaflow_atlas \
+  --weights checkpoints/alphaflow_base.pt
+
+# 步骤 2：运行集成分析
+python scripts/analyze_ensembles.py \
+  --atlas_dir ./data/atlas \
+  --pdbdir ./ensembles/alphaflow_atlas \
+  --num_workers 8
+
+# 步骤 3：汇总并显示结果
+python scripts/print_analysis.py \
+  ./ensembles/alphaflow_atlas/out.pkl
+```
+
+此工作流程对 AlphaFlow 集成与 MD 轨迹进行综合评估，从而能够对生成模型在结构、构象和功能维度的性能进行定量评估。
+
+有关特定指标及其物理意义的详细解释，请参阅 [ATLAS 数据集上的集成评估指标](22-ensemble-evaluation-metrics-on-atlas-dataset)。有关基准测试方法和与其他方法的比较分析，请参阅 [与 MD 轨迹的基准测试](24-benchmarking-against-md-trajectories)。
+
+---
+
+- [深度解析/评估与分析/与 MD 轨迹的基准测试](https://zread.ai/bjing2016/alphaflow/24-benchmarking-against-md-trajectories)
+
+---
+slug:24-benchmarking-against-md-trajectories
+blog_type:normal
+---
+
+
+本页面详细介绍了用于评估 AlphaFlow 生成的构象系综与 ATLAS 数据集中的分子动力学（MD）轨迹相比的综合基准测试框架。该评估流程通过严格的统计指标，对结构相似性、系综多样性和动态行为进行了多方面的分析。
+
+来源：[README.md](README.md#L100-L111), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L1-L10)
+
+## 基准测试架构概述
+
+基准测试框架作为一个系统化的流程运行，用于将生成的系综与参考 MD 轨迹进行比较。该工作流程整合了轨迹比对、结构分析和统计评估，涵盖了蛋白质动力学的多个维度。
+
+```mermaid
+flowchart TD
+    A[ATLAS MD 轨迹] --> B[加载参考帧]
+    C[生成的系综 PDB] --> D[加载 AlphaFlow 构象]
+    
+    B --> E[预处理]
+    D --> E
+    
+    subgraph 预处理
+        E1[去除氢原子]
+        E2[拓扑比对]
+        E3[提取 CA 原子]
+        E4[叠加到晶体结构]
+    end
+    
+    E --> F[结构指标]
+    E --> G[系综指标]
+    E --> H[动态指标]
+    
+    subgraph 结构
+        F1[RMSD 计算]
+        F2[RMSF 分析]
+        F3[接触概率]
+    end
+    
+    subgraph 系综
+        G1[PCA 分析]
+        G2[Wasserstein 距离]
+        G3[成对比较]
+    end
+    
+    subgraph 动态
+        H1[SASA 计算]
+        H2[互信息]
+        H3[瞬时接触]
+    end
+    
+    F --> I[汇总结果]
+    G --> I
+    H --> I
+    
+    I --> J[out.pkl]
+    J --> K[print_analysis.py]
+    K --> L[对比表]
+```
+
+## 核心评估指标
+
+### 均方根偏差（RMSD）分析
+
+基准测试框架通过多次成对比较计算 RMSD，以评估系综多样性和对参考结构的保真度。该实现支持广播操作，利用 numpy 广播机制实现高效的全对全比较。RMSD 值以埃（Ångströms）为单位报告，并除以原子数的平方根进行归一化，以便在不同蛋白质大小之间进行公平比较。
+
+系统计算了参考轨迹（`ref_mean_pairwise_rmsd`）和生成系综（`af_mean_pairwise_rmsd`）的平均成对 RMSD，以及均方根成对 RMSD 值，以捕捉结构多样性的方差。随机采样策略（RAND1, RAND2）确保从大型轨迹集中进行稳健的统计估计。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L25-L33), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L220-L223)
+
+### 均方根涨落（RMSF）相关性
+
+RMSF 分析捕捉了整个系综中每个残基的柔性模式。该框架通过计算相对于晶体结构的涨落，为 MD 轨迹和生成的构象计算 RMSF。在参考和 AlphaFlow 的 RMSF 谱之间计算相关系数，包含三个聚合级别：所有残基的全局相关性、每个目标的相关性以及全原子 RMSF 值。
+
+高 RMSF 相关性表明 AlphaFlow 成功捕捉了 MD 模拟中观察到的构象动力学，包括识别柔性环区和刚性二级结构元件。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L178-L179), [scripts/print_analysis.py](scripts/print_analysis.py#L8-L14)
+
+### 主成分分析（PCA）
+
+在三个不同的坐标空间上执行 PCA，以全面评估系综重叠度：
+
+1. **参考 PCA**：在 MD 轨迹坐标上计算 PCA，并将 AlphaFlow 构象投影到该子空间中
+2. **AlphaFlow PCA**：在生成的系综坐标上计算 PCA，并将 MD 帧投影到该子空间中
+3. **联合 PCA**：在连接的 MD 和 AlphaFlow 轨迹上计算 PCA，以分析共享方差
+
+该框架计算第一主成分之间的余弦相似度（`cosine_sim`）以评估主要运动模式的对齐情况。每个主成分解释的方差除以原子数进行归一化，从而能够比较不同蛋白质大小的结果。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L154-L166), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L230)
+
+### Wasserstein 距离（Earth Mover's Distance）
+
+该框架计算 Wasserstein 距离（特别是 W₂）以量化 PCA 子空间中系综之间的分布差异。该实现使用通过 `linear_sum_assignment` 调用的匈牙利算法来高效解决最优传输问题。
+
+计算了三种类型的 Wasserstein 距离：
+- **参考空间**：在参考 PCA 坐标中 MD 帧与 AlphaFlow 构象之间的 W₂
+- **AlphaFlow 空间**：在 AlphaFlow PCA 坐标中计算的 W₂
+- **联合空间**：在联合 PCA 子空间中的 W₂
+
+基准测试还使用公式 `emd_int = sqrt(emd^2 - emd_tr^2)` 分离了平均位移和方差（内部）差异的贡献，其中 `emd_tr` 代表仅由均值差异产生的贡献。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L70-L83), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L193-L196)
+
+## 接触和溶剂可及性分析
+
+### 接触概率分析
+
+接触分析评估生成的系综是否捕捉到了在 MD 中观察到的残基-残基相互作用模式。该框架计算所有帧对的距离矩阵，并使用 8Å 截断阈值计算接触概率。
+
+计算了两种专门的接触指标：
+
+1. **弱接触**：存在于晶体结构中（< 8Å）但在系综中出现概率 < 0.9 的接触，捕捉边缘或瞬时天然相互作用
+2. **瞬时接触**：在晶体结构中不存在但在系综中出现概率 > 0.1 的接触，代表非天然或替代构象
+
+交并比（IoU）指标量化了参考和 AlphaFlow 接触模式之间关于弱接触和瞬时接触的一致性。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L205-L206), [scripts/print_analysis.py](scripts/print_analysis.py#L27-L41)
+
+### 溶剂可及表面积（SASA）和互信息
+
+SASA 分析评估表面暴露模式和相关的残基行为。该框架使用 Shrake-Rupley 算法配合 2.8Å 探针半径计算原子级 SASA，然后将侧链 SASA 聚合为每个残基的值。
+
+如果 SASA 超过 0.02 nm² 阈值，残基被分类为“暴露”。该框架使用以下公式计算所有暴露残基对之间的互信息矩阵：
+
+`MI(X,Y) = Σ P(x,y) log(P(x,y) / P(x)P(y))`
+
+该互信息矩阵捕捉相关的表面行为模式，这可能表明变构通信或协同折叠事件。参考和 AlphaFlow MI 矩阵展平值之间的相关性（`exposon_mi_pearsonr`）量化了这些高级动力学的保留程度。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L34-L53), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L200-L203), [scripts/print_analysis.py](scripts/print_analysis.py#L55-L64)
+
+## 运行基准测试流程
+
+### 先决条件和数据准备
+
+基准测试流程需要包含每个目标的 MD 轨迹和晶体结构的 ATLAS 数据集。在运行分析之前，必须下载并预处理数据集。
+
+步骤 1：下载 ATLAS 数据集，其中包含每个目标的 MD 轨迹（通常是三个副本模拟 `prod_R1`, `prod_R2`, `prod_R3`，格式为 `.xtc`）以及参考 PDB 结构。
+
+步骤 2：准备 PDB 格式的生成系综文件。每个目标应该有一个包含 250 个构象模型的 PDB 文件。构象的数量会影响某些指标，不同数量之间的比较不具有直接可比性。
+
+来源：[README.md](README.md#L100-L111), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L99-L110)
+
+### 执行命令
+
+分析分两个阶段进行：系综分析和结果汇总。
+
+**阶段 1：运行系综分析**
+
+```bash
+python -m scripts.analyze_ensembles \
+  --atlas_dir [ATLAS_路径] \
+  --pdbdir [系综_路径] \
+  --num_workers [N] \
+  [--pdb_id TARGET1 TARGET2 ...] \
+  [--bb_only] \
+  [--ca_only]
+```
+
+命令行参数提供了分析范围的灵活性：
+
+- `--atlas_dir`：包含 MD 轨迹和参考 PDB 的目标目录的 ATLAS 数据集路径
+- `--pdbdir`：包含生成的系综 PDB 文件的目录路径（每个目标一个）
+- `--num_workers`：用于多目标分析的并行进程数（默认：1）
+- `--pdb_id`：要分析的特定目标 ID 的可选列表；如果未指定，则处理 `--pdbdir` 中的所有目标
+- `--bb_only`：仅分析骨架原子（CA, C, N, O, OXT）的标志
+- `--ca_only`：仅分析 C-alpha 原子以进行更高级别比较的标志
+
+该脚本在 `--pdbdir` 中输出一个 `out.pkl` 文件，其中包含为每个分析的目标计算指标的字典。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L1-L10), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L275-L283)
+
+**阶段 2：汇总并打印结果**
+
+```bash
+python -m scripts.print_analysis [PATH1/out.pkl] [PATH2/out.pkl] ...
+```
+
+该脚本接受多个 `out.pkl` 路径，并生成一个格式化的对比表，其中包含所有目标的平均指标。输出包括 RMSF 和 MI 矩阵的 Pearson 相关系数、平均 EMD 值以及接触和 SASA 分析的 IoU 分数。
+
+来源：[scripts/print_analysis.py](scripts/print_analysis.py#L1-L7), [scripts/print_analysis.py](scripts/print_analysis.py#L110-L111)
+
+### 内部流程工作流
+
+对于每个目标，分析流程遵循以下顺序：
+
+1. **加载轨迹**：将三个 MD 副本轨迹（R1, R2, R3）连接成一个统一的参考轨迹，并从 PDB 加载 AlphaFlow 构象
+2. **预处理**：去除氢原子，使用原子表示的交集对齐参考和生成结构之间的拓扑，并提取 CA 原子用于 CA 侧重分析
+3. **叠加**：将参考轨迹和生成的构象都与晶体结构对齐，以确保一致的坐标系
+4. **计算指标**：执行上述描述的所有结构、系综和动态分析
+5. **存储结果**：返回一个包含该目标所有计算指标的字典
+
+随机种子（137）确保所有随机操作的可重复采样，包括选择用于成对比较的 MD 帧以及均值/协方差计算。
+
+来源：[scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L99-L120), [scripts/analyze_ensembles.py](scripts/analyze_ensembles.py#L137-L153)
+
+## 模型性能对比
+
+### 48 层 vs 12 层模型变体
+
+该框架已用于基准测试不同的模型配置，揭示了准确性和计算效率之间的权衡。以下对比总结了 ATLAS 数据集上不同模型变体的关键指标：
+
+| 指标 | 48l (base) | 48l (distilled) | 12l (base) | 12l (distilled) |
+|:---|:---:|:---:|:---:|:---:|
+| 成对 RMSD | 2.18 Å | 1.73 Å | 1.94 Å | 1.40 Å |
+| 成对 RMSD $r$ | 0.94 | 0.92 | 0.81 | 0.76 |
+| 全原子 RMSF | 1.31 Å | 1.00 Å | 1.01 Å | 0.76 Å |
+| 全局 RMSF $r$ | 0.91 | 0.89 | 0.78 | 0.74 |
+| 每个目标的 RMSF $r$ | 0.90 | 0.88 | 0.89 | 0.86 |
+| 均方根 $\mathcal{W}_2$-dist | 1.95 Å | 2.18 Å | 2.26 Å | 2.43 Å |
+| MD PCA $\mathcal{W}_2$-dist | 1.25 Å | 1.41 Å | 1.40 Å | 1.56 Å |
+| 联合 PCA $\mathcal{W}_2$-dist | 1.58 Å | 1.68 Å | 1.78 Å | 1.90 Å |
+| % PC-sim > 0.5 | 44% | 43% | 46% | 39% |
+| 弱接触 $J$ | 0.62 | 0.51 | 0.60 | 0.56 |
+| 瞬时接触 $J$ | 0.47 | 0.42 | 0.36 | 0.24 |
+| 暴露残基 $J$ | 0.50 | 0.47 | 0.47 | 0.44 |
+| 暴露 MI 矩阵 $\rho$ | 0.25 | 0.18 | 0.21 | 0.13 |
+| **运行时间** | **38 s** | **3.8 s** | **15.2 s** | **1.56 s** |
+
+<CgxTip>蒸馏模型实现了约 10 倍的加速，而 RMSF 相关性（0.89→0.88）和 PCA 相似性指标仅有适度下降，使其适用于高通量应用。</CgxTip>
+
+12 层变体比 48 层基础模型提供 2.5 倍的加速，同时在大多数指标上保持有竞争力的性能。蒸馏的 12 层模型提供最快的推理速度（1.56s），并且对于许多应用来说具有可接受的准确性。
+
+来源：[assets/12l_md_templates.md](assets/12l_md_templates.md), [README.md](README.md#L9-L10)
+
+### 指标解释指南
+
+使用此基准测试框架评估模型性能时，请考虑以下指标类别：
+
+**结构保真度指标**
+- **成对 RMSD**：较低的值表示构象多样性较少；接近 MD 参考值的值表示适当的系综广度
+- **成对 RMSD $r$**：成对 RMSD 矩阵之间的相关系数；值 > 0.8 表示对结构关系的强保留
+- **全原子 RMSF**：平均涨落幅度；较低的值可能表示结构过于刚性
+- **全局 RMSF $r$**：每个残基涨落的相关性；> 0.85 表示对柔性模式的准确捕捉
+
+**分布相似性指标**
+- **MD PCA $\mathcal{W}_2$-dist**：较低的值（1.2-1.6 Å）表示在 MD PCA 子空间中有更好的分布重叠
+- **联合 PCA $\mathcal{W}_2$-dist**：捕捉共享方差空间中的重叠；值 < 2.0 Å 被认为是好的
+- **% PC-sim > 0.5**：第一主成分余弦相似度 > 0.5 的目标百分比；> 40% 表示一致的主模式对齐
+
+**动态行为指标**
+- **弱接触 $J$**：边缘天然接触的 IoU；较高的值（> 0.5）表示对边缘相互作用的更好捕捉
+- **瞬时接触 $J$**：非天然接触的 IoU；值 0.2-0.5 表示对替代构象的适当探索
+- **暴露 MI 矩阵 $\rho$**：互信息模式的相关性；> 0.2 表示对相关表面行为的保留
+
+<CgxTip>一个平衡的模型应该实现高 RMSF 相关性（> 0.85）、良好的 Wasserstein 对齐（在 MD PCA 空间中 < 1.6 Å）和适中的瞬时接触 IoU（> 0.3），表明既保真又具有适当的系综多样性。</CgxTip>
+
+来源：[scripts/print_analysis.py](scripts/print_analysis.py#L16-L73), [assets/12l_md_templates.md](assets/12l_md_templates.md)
+
+## 与模型选择的集成
+
+基准测试结果根据应用需求指导模型选择：
+
+- **高精度应用**：当精度至关重要且计算资源可用时，使用 48 层基础模型
+- **平衡性能**：12 层基础模型提供 2.5 倍的加速，且准确性损失最小（大多数指标上 5-10%）
+- **高通量筛选**：蒸馏模型提供 10 倍的加速，且具有可接受的初步分析退化
+- **模板条件建模**：MD+Templates 模型利用已知结构在模板可用时提高准确性
+
+有关基于用例选择模型的详细指导，请参阅 [Choosing the Right Model for Your Use Case](5-choosing-the-right-model-for-your-use-case)。有关模板集成方法论，请参考 [Template Integration for MD+Templates Models](13-template-integration-for-md-templates-models)。
+
+---

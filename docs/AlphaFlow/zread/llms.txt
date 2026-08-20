@@ -1,0 +1,51 @@
+# bjing2016/alphaflow
+
+Source: https://zread.ai/bjing2016/alphaflow
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+### 模型变体与选择
+
+- [入门/模型变体与选择/AlphaFlow 与 ESMFlow 模型系列](3-alphaflow-vs-esmflow-model-families.md)
+- [入门/模型变体与选择/模型版本：Base、Distilled 和 12 层配置](4-model-versions-base-distilled-and-12-layer-configurations.md)
+- [入门/模型变体与选择/为你的用例选择合适的模型](5-choosing-the-right-model-for-your-use-case.md)
+
+
+## 深度解析
+
+### 核心架构
+
+- [深度解析/核心架构/Flow Matching 目标与 AlphaFold 的集成](6-flow-matching-objective-integration-with-alphafold.md)
+- [深度解析/核心架构/谐波先验与噪声调度](7-harmonic-prior-and-noise-scheduling.md)
+- [深度解析/核心架构/Evoformer 与折叠主干架构](8-evoformer-and-folding-trunk-architecture.md)
+- [深度解析/核心架构/输入堆栈与特征表示](9-input-stack-and-feature-representations.md)
+
+### 训练方法
+
+- [深度解析/训练方法/PDB 与 MD 数据集的训练流程](10-training-pipeline-for-pdb-and-md-datasets.md)
+- [深度解析/训练方法/蒸馏过程与师生训练](11-distillation-process-and-teacher-student-training.md)
+- [深度解析/训练方法/损失函数：FAPE、扭转角损失与 Flow Matching 损失](12-loss-functions-fape-torsion-angle-loss-and-flow-matching-loss.md)
+- [深度解析/训练方法/MD+Templates 模型的模版集成](13-template-integration-for-md-templates-models.md)
+
+### 推理与生成
+
+- [深度解析/推理与生成/推理流程与采样过程](14-inference-pipeline-and-sampling-process.md)
+- [深度解析/推理与生成/自条件与噪声注入策略](15-self-conditioning-and-noise-injection-strategies.md)
+- [深度解析/推理与生成/多样性 vs 精度权衡的调度调优](16-schedule-tuning-for-diversity-vs-precision-trade-off.md)
+- [深度解析/推理与生成/批处理与优化技术](17-batch-processing-and-optimization-techniques.md)
+
+### 数据流程
+
+- [深度解析/数据流程/使用 MMseqs2 生成 MSA](18-msa-generation-with-mmseqs2.md)
+- [深度解析/数据流程/模版处理与特征提取](19-template-processing-and-feature-extraction.md)
+- [深度解析/数据流程/PDB 与 ATLAS 数据集的数据预处理](20-data-preprocessing-for-pdb-and-atlas-datasets.md)
+- [深度解析/数据流程/序列、结构和 MSA 的特征工程](21-feature-engineering-for-sequence-structure-and-msa.md)
+
+### 评估与分析
+
+- [深度解析/评估与分析/ATLAS 数据集上的集成评估指标](22-ensemble-evaluation-metrics-on-atlas-dataset.md)
+- [深度解析/评估与分析/运行集成分析脚本](23-running-ensemble-analysis-scripts.md)
+- [深度解析/评估与分析/与 MD 轨迹的基准测试](24-benchmarking-against-md-trajectories.md)
+
