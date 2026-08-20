@@ -31,6 +31,14 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
+> ⚠️ `It should be noted that there exist some essential differences between the structure prediction task and the contact‑map prediction task, which need to be discussed here.`
+>
+> although we all know MDS(multi-dimensional scaling) can convert a distance matrix to a 3D structure, the reverse is not true. A 3D structure can be converted to a distance matrix, but it is not guaranteed that the distance matrix can be converted back to the original 3D structure. This is because the distance matrix may not contain enough information to uniquely determine the 3D structure, especially if there are multiple conformations or if the structure is flexible. Therefore, while contact-map prediction can provide valuable information about protein-protein interactions, it may not always be sufficient for accurate structure prediction.
+>
+> 🌟 `But in this repository, we will try to discuss what within contact-map is more fundamental and important than structure prediction.` 
+
+---
+
 ## Models & Tools
 
 > All tools are grouped by whether they can output a complete residue-pair interaction matrix (an L1×L2 map of contact probabilities / distances):
@@ -428,22 +436,10 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **For IDR**
 </details>
 
-#### <!-- PLACEHOLDER --> AlphaFold-IDR (dropout / multi-sequence augmented sampling)
-
-<details>
-<summary>Structure-based · ensemble</summary>
-
-- **Paper:** [TBD]
-- **Docs:** [Read more →](docs/alphafold-idr/) *to be written*
-- **Input:** [TBD]
-- **Output:** multiple conformations → integrated contact-probability map
-- **Code:** N/A
-</details>
-
 
 - https://www.nature.com/articles/s41586-026-10141-2/figures/10
 
-<!-- More idr_ensemble placeholders can be added here -->
+<!-- More idr ensemble placeholders can be added here -->
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
 <!-- PLACEHOLDER: enhanced-sampling MD post-processing ensemble tool -->
 
