@@ -1,0 +1,27 @@
+# microsoft/bioemu
+
+Source: https://zread.ai/microsoft/bioemu
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速开始](2-quick-start.md)
+- [入门指南/安装与配置](3-installation-and-setup.md)
+- [入门指南/蛋白质结构建模教程](4-protein-structure-modeling-tutorial.md)
+
+## 深入探索
+
+### 核心概念
+
+- [深入探索/核心概念/生物分子结构建模原理](5-biomolecular-structure-modeling-principles.md)
+- [深入探索/核心概念/3D蛋白质结构的扩散模型](6-diffusion-models-for-3d-protein-structures.md)
+
+### 关键工作流程
+
+- [深入探索/关键工作流程/序列处理与嵌入](7-sequence-processing-and-embedding.md)
+- [深入探索/关键工作流程/化学图操作](8-chemical-graph-operations.md)
+- [深入探索/关键工作流程/结构采样与优化](9-structure-sampling-and-refinement.md)
+
+- [深入探索/模型训练与定制](10-training-and-customizing-models.md)
+- [深入探索/分子动力学工具](11-molecular-dynamics-utilities.md)
+- [深入探索/外部工具集成](12-integration-with-external-tools.md)

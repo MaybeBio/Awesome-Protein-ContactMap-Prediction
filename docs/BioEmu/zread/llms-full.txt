@@ -1,0 +1,2681 @@
+# microsoft/bioemu
+
+Source: https://zread.ai/microsoft/bioemu
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/microsoft/bioemu/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+BioEmu（生物分子模拟器）是一种尖端的深度学习模型，旨在根据氨基酸序列从蛋白质结构的平衡分布中进行采样。该创新工具由微软研究院开发，利用扩散模型生成多样化且物理上合理的蛋白质构象，使研究人员能够以前所未有的效率探索蛋白质动态和折叠景观。
+
+## 什么是BioEmu？
+
+BioEmu通过提供蛋白质结构建模的生成方法，在计算结构生物学领域取得了突破性进展。与传统方法预测单一静态结构不同，BioEmu生成能够代表溶液中蛋白质自然构象多样性的结构集合。这种能力对于理解生物系统中的蛋白质功能、动态和相互作用至关重要。
+
+该模型基于**3D蛋白质结构扩散模型**的原理构建，通过学习逆转精心设计的噪声过程（该过程会逐渐破坏蛋白质结构）来实现功能。通过训练大量已知蛋白质结构数据集，BioEmu掌握了控制蛋白质折叠的潜在物理和统计原理，从而能够生成新颖且物理上真实的构象。
+
+## 核心功能
+
+### 蛋白质结构生成
+
+BioEmu的核心优势在于能够根据氨基酸序列生成多样化的蛋白质结构。该模型可以为给定序列生成多个结构样本，每个样本代表蛋白质在自然环境中可能采取的不同构象。这在以下方面特别有价值：
+
+- **研究蛋白质柔性**：生成揭示动态区域的构象集合
+- **药物发现**：探索用于虚拟筛选的多种结合口袋构象
+- **蛋白质工程**：评估序列修饰的结构影响
+
+采样过程非常高效，在A100 GPU上**仅需4分钟即可为100个残基的蛋白质生成1000个样本**，使其适用于高通量应用。`来源：[README.md#L53-L58](README.md#L53-L58)`
+
+### 与外部工具集成
+
+BioEmu与成熟的生物信息学工具无缝集成以增强其功能：
+
+- **ColabFold集成**：自动生成多重序列比对（MSA）和嵌入以提高结构预测质量
+- **侧链重建**：与HPacker接口，为生成的骨架结构添加原子细节
+- **分子动力学**：提供能量最小化和短时MD模拟的工具以优化生成的结构
+
+这种集成确保BioEmu能够利用互补方法的优势，同时保持其独特的生成能力。
+
+## 技术架构
+
+### 核心模型组件
+
+BioEmu的架构围绕几个关键模块构建，这些模块协同工作以实现结构生成：
+
+```python
+# 主要采样工作流程
+def main(sequence, num_samples, output_dir, ...):
+    # 加载预训练模型和配置
+    score_model = load_model(ckpt_path, model_config_path)
+    sdes = load_sdes(model_config_path=model_config_path)
+    
+    # 使用ColabFold生成嵌入
+    context_chemgraph = get_context_chemgraph(sequence, ...)
+    
+    # 使用扩散采样结构
+    sampled_batch = denoiser(sdes=sdes, batch=context_batch, score_model=score_model)
+    
+    # 转换为标准格式并保存
+    save_pdb_and_xtc(pos_nm=positions, node_orientations=node_orientations, ...)
+```
+
+该模型采用**DistributionalGraphormer**架构，将蛋白质序列处理为图，其中残基是节点，它们的相互作用是边。这种基于图的方法使BioEmu能够捕获对蛋白质折叠至关重要的局部和长程相互作用。`来源：[models.py#L148](src/bioemu/models.py#L148)`
+
+### 扩散过程
+
+BioEmu采用专门为3D蛋白质结构设计的复杂扩散过程：
+
+1. **前向过程**：逐渐向蛋白质坐标和方向添加噪声
+2. **反向过程**：学习去噪并恢复真实结构
+3. **专用SDE**：使用针对旋转（SO3）和平移自由度定制的随机微分方程
+
+该模型结合了**SinusoidalPositionEmbedder**来编码扩散时间步长，以及**RelativePositionBias**来捕获序列距离关系，这两者对于生成物理上真实的结构都至关重要。`来源：[models.py#L19](src/bioemu/models.py#L19), [models.py#L72](src/bioemu/models.py#L72)`
+
+<CgxTip>
+BioEmu会自动过滤掉存在空间位阻或链中断的非物理结构，确保生成的样本具有生物学意义。这种过滤可能会显著减少输出样本数量（与请求数量相比），特别是对于具有大无序区域的蛋白质。
+</CgxTip>
+
+## BioEmu入门指南
+
+### 快速开始示例
+
+您只需一个命令即可开始生成蛋白质结构：
+
+```bash
+python -m bioemu.sample --sequence GYDPETGTWG --num_samples 10 --output_dir ~/test-chignolin
+```
+
+或使用Python API以获得更多控制：
+
+```python
+from bioemu.sample import main as sample
+sample(sequence='GYDPETGTWG', num_samples=10, output_dir='~/test_chignolin')
+```
+
+这些命令将从Hugging Face下载预训练模型权重，为chignolin蛋白生成10个结构样本，并将它们保存为指定目录中的PDB和XTC文件。`来源：[README.md#L39-L49](README.md#L39-L49)`
+
+### 模型可用性
+
+BioEmu提供两个预训练模型：
+
+- **bioemu-v1.0**：预印本出版物中使用的原始模型
+- **bioemu-v1.1**：具有增强蛋白质稳定性能的改进版本
+
+两个模型在首次使用时都会自动下载，无需手动设置即可轻松开始。`来源：[README.md#L64-L67](README.md#L64-L67)`
+
+## 应用和用例
+
+BioEmu为计算生物学和药物发现开辟了众多可能性：
+
+1. **蛋白质动态研究**：生成构象集合以理解蛋白质柔性和功能运动
+2. **虚拟筛选**：探索多种受体构象以进行更全面的药物对接
+3. **蛋白质设计**：在实验验证前评估突变的结构后果
+4. **整合建模**：结合实验数据优化结构模型
+5. **教育目的**：可视化蛋白质折叠景观和构象多样性
+
+该模型高效生成物理真实结构的能力使其特别适用于传统方法成本过高的高通量应用。
+
+## 后续步骤
+
+本概述为理解BioEmu的功能和架构奠定了基础。要深入了解：
+
+- 遵循**快速开始**指南运行您的第一个蛋白质结构生成
+- 查看**安装和设置**说明以了解详细的环境配置
+- 完成**蛋白质结构建模教程**以获得实践经验
+- 在**生物分子结构建模原理**中学习核心概念
+- 在**3D蛋白质结构扩散模型**中了解技术细节
+
+BioEmu代表了计算结构生物学的重大进步，使先进的蛋白质结构建模能够被各领域的研究人员使用。其物理真实性、计算效率和易用性的结合使其成为学术研究和工业应用的宝贵工具。
+
+---
+
+- [入门指南/快速开始](https://zread.ai/microsoft/bioemu/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+欢迎使用 BioEmu！本指南将帮助您在几分钟内生成首批蛋白质结构样本。BioEmu 是一款强大工具，它采用扩散模型技术，根据氨基酸序列从蛋白质结构的平衡分布中进行采样。
+
+## 您将完成的任务
+
+完成本指南后，您将能够：
+- 安装 BioEmu 及其依赖项
+- 为给定氨基酸序列生成蛋白质结构样本
+- 了解基本工作流程和输出格式
+- 掌握查找生成结构的方法
+
+## 前置要求
+
+开始前，请确保您已具备：
+- 已安装 **Python 3.10 或更高版本**
+- **Linux 操作系统**（BioEmu 仅支持 Linux）
+- **GPU 访问权限**（推荐用于加速采样，CPU 也可用但速度较慢）
+- **8GB+ 内存**（小型蛋白质需求，大型蛋白质需要更多）
+
+## 安装
+
+使用 pip 安装 BioEmu 非常简单：
+
+```bash
+pip install bioemu
+```
+
+此命令将安装 BioEmu 及其所有核心依赖项，包括 PyTorch、生物信息学库和蛋白质结构生成所需的必要工具。
+来源：[pyproject.toml#L11-L25](pyproject.toml#L11-L25), [README.md#L27-L32](README.md#L27-L32)
+
+<CgxTip>
+首次使用 BioEmu 时，它会自动在独立虚拟环境中设置 ColabFold，用于 MSA（多序列比对）和嵌入生成。此一次性设置将在 `~/.bioemu_colabfold` 目录中完成。
+</CgxTip>
+
+## 您的首个蛋白质结构样本
+
+让我们为一个简单的测试序列生成蛋白质结构。我们将使用 chignolin 微型蛋白质序列（10 个氨基酸）作为示例。
+
+### 方法 1：命令行界面
+
+最快捷的入门方式是使用命令行界面：
+
+```bash
+python -m bioemu.sample --sequence GYDPETGTWG --num_samples 10 --output_dir ~/test-chignolin
+```
+
+此命令指示 BioEmu：
+- 使用氨基酸序列 `GYDPETGTWG`
+- 生成 **10 个不同的结构样本**
+- 将结果保存到 `~/test-chignolin` 目录
+来源：[README.md#L39-L42](README.md#L39-L42), [sample.py#L268-L275](src/bioemu/sample.py#L268-L275)
+
+### 方法 2：Python API
+
+如需程序化访问，可以使用 Python API：
+
+```python
+from bioemu.sample import main as sample
+
+sample(
+    sequence='GYDPETGTWG', 
+    num_samples=10, 
+    output_dir='~/test_chignolin'
+)
+```
+
+此方法与命令行版本效果相同，但为集成到更大工作流程中提供了更多灵活性。
+来源：[README.md#L44-L49](README.md#L44-L49), [sample.py#L39-L53](src/bioemu/sample.py#L39-L53)
+
+## 理解采样过程
+
+运行 BioEmu 时，后台会执行以下操作：
+
+1. **模型下载**：BioEmu 自动从 HuggingFace 下载预训练模型权重（默认：`bioemu-v1.1`）
+2. **序列处理**：验证并准备您的氨基酸序列
+3. **嵌入生成**：ColabFold 为您的序列生成 MSA 和嵌入
+4. **结构采样**：扩散模型生成蛋白质主链结构
+5. **输出转换**：将结果转换为标准 PDB 和 XTC 格式
+
+整个过程完全自动化，无需手动干预。BioEmu 会为您处理蛋白质结构生成的所有复杂步骤。
+来源：[sample.py#L82-L89](src/bioemu/sample.py#L82-L89), [sample.py#L95-L99](src/bioemu/sample.py#L95-L99)
+
+## 预期结果：输出文件
+
+采样完成后，您的输出目录（`~/test-chignolin`）将包含：
+
+| 文件 | 描述 | 用途 |
+|------|------|------|
+| `sequence.fasta` | 输入氨基酸序列 | 参考文件 |
+| `topology.pdb` | 蛋白质拓扑信息 | 结构模板 |
+| `samples.xtc` | 生成的结构轨迹 | 主要结果 |
+| `batch_*.npz` | 原始采样数据（临时） | 中间文件 |
+
+最重要的文件是 `topology.pdb` 和 `samples.xtc`，它们包含您生成的蛋白质结构。您可以使用 PyMOL、VMD 或 Chimera 等分子可视化工具查看这些文件。
+来源：[sample.py#L165-L172](src/bioemu/sample.py#L165-L172), [convert_chemgraph.py](src/bioemu/convert_chemgraph.py)
+
+<CgxTip>
+BioEmu 会自动过滤掉非物理结构（存在空间位阻或链断裂的结构），因此输出样本数量可能少于请求数量。这属于正常现象，可确保结果质量。
+</CgxTip>
+
+## 采样时间预期
+
+采样时间取决于蛋白质长度和硬件。以下是在 A100 GPU 上生成 1000 个样本的大致时间：
+
+| 序列长度 | 预计时间 |
+|----------|----------|
+| 100 个残基 | 4 分钟 |
+| 300 个残基 | 40 分钟 |
+| 600 个残基 | 150 分钟 |
+
+对于我们的 10 个残基示例，即使在 CPU 上采样也应在一分钟内完成。
+来源：[README.md#L53-L58](README.md#L53-L58), [sample.py#L124-L128](src/bioemu/sample.py#L124-L128)
+
+## 后续步骤
+
+恭喜！您已成功使用 BioEmu 生成了首批蛋白质结构。以下是继续探索的几种方式：
+
+- **尝试更长序列**：实验 100-300 个残基的蛋白质
+- **调整采样参数**：使用不同去噪器（`--denoiser_type heun`）或批处理大小
+- **可视化结果**：在您喜爱的分子查看器中加载 XTC 文件
+- **探索高级功能**：了解侧链重建和 MD 弛豫
+
+更详细的教程和高级用法，请参阅我们的[蛋白质结构建模教程](4-protein-structure-modeling-tutorial)。
+来源：[sample.py#L43-L47](src/bioemu/sample.py#L43-L47), [config/denoiser/](src/bioemu/config/denoiser/)
+
+## 常见问题排查
+
+如遇到问题：
+
+1. **安装失败**：确保您在 Linux 上使用 Python 3.10+
+2. **内存错误**：减小 `batch_size_100` 参数或使用更短序列
+3. **采样缓慢**：强烈建议使用 GPU 加速
+4. **无输出文件**：检查输出目录的写入权限
+
+如需更多帮助，请查阅[安装与设置](3-installation-and-setup)指南或在 GitHub 仓库创建问题。
+
+---
+
+- [入门指南/安装与配置](https://zread.ai/microsoft/bioemu/3-installation-and-setup)
+
+---
+slug:3-installation-and-setup
+blog_type:normal
+---
+
+
+BioEmu 是一款强大的生物分子模拟器，可根据蛋白质单体的氨基酸序列，从其近似平衡结构分布中进行采样。本指南将指导您完成安装过程和初始设置，帮助您开始蛋白质结构建模工作。
+
+## 前置要求
+
+在安装 BioEmu 之前，请确保满足以下前置条件：
+
+- **操作系统**：Linux（BioEmu 仅提供 Linux 版本）
+- **Python**：3.10 或更高版本
+- **硬件**：建议使用 GPU 以获得最佳性能（需兼容 CUDA 的驱动程序）
+- **包管理器**：用于安装 Python 包的 pip
+
+若要使用侧链重建和分子动力学松弛等高级功能，您还需要：
+- **Conda**：用于处理复杂依赖关系的 conda 包管理器
+- **CUDA 12 兼容驱动**：OpenMM 和 HPacker 功能的必需组件
+
+## 基础安装
+
+安装 BioEmu 的最简单方法是通过 pip：
+
+```bash
+pip install bioemu
+```
+
+此命令将安装 BioEmu 及其所有核心依赖项，包括：
+- `mdtraj>=1.9.9`：用于分子轨迹分析
+- `torch_geometric>=2.6.1` 和 `torch>=2.6.0`：用于深度学习功能
+- `bio>=1.5.9`：用于生物序列处理
+- `huggingface-hub`：用于模型权重管理
+- 以及其他核心功能所需的必要包
+
+来源：[pyproject.toml#L12-L25](pyproject.toml#L12-L25)、[README.md#L27-L32](README.md#L27-L32)
+
+## 首次设置与自动依赖项
+
+当您首次使用 BioEmu 进行结构采样时，它会在独立的虚拟环境中自动设置其他依赖项：
+
+### ColabFold 设置
+
+首次运行 BioEmu 时，它会自动设置 **ColabFold** 用于多序列比对（MSA）和嵌入生成。默认情况下，此设置使用 `~/.bioemu_colabfold` 目录。
+
+```bash
+# 首次使用时会自动执行
+python -m bioemu.sample --sequence GYDPETGTWG --num_samples 10 --output_dir ~/test-chignolin
+```
+
+<CgxTip>
+若要更改默认的 ColabFold 安装目录，请在首次使用前设置环境变量。设置过程是自动处理的，无需手动干预。
+</CgxTip>
+
+来源：[README.md#L34-L35](README.md#L34-L35)
+
+## 可选功能安装
+
+### 分子动力学和侧链重建
+
+若要使用侧链重建和分子动力学松弛等高级功能，请安装可选依赖项：
+
+```bash
+pip install bioemu[md]
+```
+
+这将安装 `openmm[cuda12]==8.2.0` 及其他 MD 模拟所需的包。
+
+首次使用侧链重建功能时，BioEmu 会在独立的 conda 环境中自动设置 **HPacker**：
+
+```bash
+# 侧链重建使用示例
+python -m bioemu.sidechain_relax --pdb-path path/to/topology.pdb --xtc-path path/to/samples.xtc
+```
+
+<CgxTip>
+HPacker 安装要求 conda 已添加到 PATH 环境变量中，并需要 CUDA 12 兼容驱动。首次调用此模块时，它会默认创建一个名为 "hpacker" 的独立 conda 环境。您可以通过在首次使用前设置 `HPACKER_ENV_NAME` 环境变量来自定义此名称。
+</CgxTip>
+
+来源：[pyproject.toml#L39-L41](pyproject.toml#L39-L41)、[README.md#L82-L98](README.md#L82-L98)、[sidechain_relax.py#L35-L36](src/bioemu/sidechain_relax.py#L35-L36)
+
+### 开发环境安装
+
+如果您计划为 BioEmu 做出贡献或修改代码，请安装开发依赖项：
+
+```bash
+pip install bioemu[dev]
+```
+
+这将安装用于测试、代码质量和开发工作流程的额外包：
+- `pytest` 和 `pytest-cov`：用于测试
+- `pre-commit`：用于代码质量检查
+
+来源：[pyproject.toml#L34-L38](pyproject.toml#L34-L38)
+
+## 安装验证
+
+安装完成后，通过运行简单测试来验证 BioEmu 是否正常工作：
+
+### 命令行界面测试
+
+```bash
+# 使用小型蛋白质序列进行测试
+python -m bioemu.sample --sequence GYDPETGTWG --num_samples 10 --output_dir ~/test-chignolin
+```
+
+这应在指定的输出目录中生成蛋白质结构样本。您应该看到如下文件：
+- `samples.xtc`：包含采样结构的轨迹文件
+- `topology.pdb`：拓扑信息
+- `sequence.fasta`：输入序列文件
+
+### Python API 测试
+
+```python
+from bioemu.sample import main as sample
+sample(sequence='GYDPETGTWG', num_samples=10, output_dir='~/test_chignolin')
+```
+
+如果安装成功，这些命令将无错误完成并生成预期的输出文件。
+
+来源：[README.md#L38-L49](README.md#L38-L49)
+
+## 替代安装方法
+
+### Azure AI Foundry
+
+对于偏好无需本地安装的云端解决方案的用户，BioEmu 已在 Azure AI Foundry 上提供：
+
+1. 访问 [Azure AI Foundry 中的 BioEmu](https://ai.azure.com/explore/models/BioEmu/version/1/registry/azureml)
+2. 使用您的 Azure 账户登录（如需要可免费创建）
+3. 点击"部署"并选择项目
+4. 选择"Standard_NC24ads_A100_v4"虚拟机实例
+5. 点击"部署"并等待端点就绪（约 30 分钟）
+6. 从"使用"选项卡复制端点 URL 和 API 密钥
+
+然后使用 Python API 与部署的模型交互：
+
+```python
+import base64
+import os
+import requests
+
+ENDPOINT_URL = "https://<ONLINE_ENDPOINT_NAME>.<REGION>.inference.ml.azure.com/score"
+ENDPOINT_API_KEY = "<ONLINE_ENDPOINT_API_KEY>"
+OUTPUT_DIR = os.path.expanduser("~/test-chignolin")
+
+headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Authorization": ("Bearer " + ENDPOINT_API_KEY),
+}
+data = {
+    "input_data": {
+        "sequence": "GYDPETGTWG",
+        "num_samples": 10,
+    }
+}
+
+response = requests.post(url=ENDPOINT_URL, headers=headers, json=data)
+result = response.json()
+# 处理并保存结果...
+```
+
+来源：[AZURE_AI_FOUNDRY.md#L5-L66](AZURE_AI_FOUNDRY.md#L5-L66)
+
+## 常见问题排查
+
+### 安装失败
+
+如果在安装过程中遇到问题：
+
+1. **Python 版本**：确保使用 Python 3.10 或更高版本
+   ```bash
+   python --version
+   ```
+
+2. **权限问题**：尝试使用用户权限安装
+   ```bash
+   pip install --user bioemu
+   ```
+
+3. **依赖冲突**：先创建虚拟环境
+   ```bash
+   python -m venv bioemu_env
+   source bioemu_env/bin/activate
+   pip install bioemu
+   ```
+
+### 运行时问题
+
+1. **CUDA 兼容性**：对于 MD 功能，确保拥有 CUDA 12 兼容驱动
+   ```bash
+   nvidia-smi  # 检查 CUDA 版本
+   ```
+
+2. **内存问题**：BioEmu 可能占用大量内存。对于大型蛋白质，请考虑：
+   - 减少采样数量（`--num_samples`）
+   - 使用更小的批次大小
+   - 确保足够的 GPU 内存（建议：80GB VRAM 以获得最佳性能）
+
+3. **ColabFold/HPacker 设置**：如果自动设置失败：
+   - 检查网络连接
+   - 验证 conda 是否正确安装并添加到 PATH
+   - 通过检查仓库中的设置脚本尝试手动设置
+
+来源：[README.md#L53-L61](README.md#L53-L61)、[setup_sidechain_relax.sh#L1-L17](src/bioemu/hpacker_setup/setup_sidechain_relax.sh#L1-L17)
+
+## 后续步骤
+
+恭喜！您现已成功安装 BioEmu 并可以开始使用。以下是一些建议的后续步骤：
+
+1. **尝试快速入门示例**：运行验证部分的示例来生成您的第一批蛋白质结构
+2. **探索教程**：查看[蛋白质结构建模教程](4-protein-structure-modeling-tutorial)获取全面指导
+3. **尝试不同序列**：为您感兴趣的蛋白质序列尝试结构采样
+4. **探索高级功能**：如果安装了可选依赖项，请尝试侧链重建和 MD 松弛功能
+
+请记住，BioEmu 专为蛋白质单体设计。对于多聚体结构，您可能需要探索替代方法或文档中提到的"连接子技巧"。
+
+---
+
+- [入门指南/蛋白质结构建模教程](https://zread.ai/microsoft/bioemu/4-protein-structure-modeling-tutorial)
+
+---
+slug:4-protein-structure-modeling-tutorial
+blog_type:normal
+---
+
+
+欢迎来到 BioEmu 蛋白质结构建模教程！在本指南中，您将学习如何使用 BioEmu 从氨基酸序列生成 3D 蛋白质结构。BioEmu 是一个强大的工具，它能够根据蛋白质单体的氨基酸序列，从近似平衡结构分布中进行采样。通过本教程的学习，您将能够生成自己的蛋白质结构模型，并理解这一过程背后的关键概念。
+
+## 理解蛋白质结构生成
+
+蛋白质结构预测是计算生物学中的一个基本问题。传统的分子动力学模拟等方法计算成本高昂，而像 AlphaFold2 这样的机器学习方法则提供单一结构预测。BioEmu 采用了一种不同的方法，通过生成代表蛋白质天然构象多样性的结构集合。
+
+BioEmu 使用**扩散模型**——一种通过逆转渐进加噪过程来学习创建样本的生成模型。可以将其理解为从随机噪声开始，逐步精修成生物学上合理形状的蛋白质结构雕刻过程。这种方法使 BioEmu 能够生成多样化、物理上真实的蛋白质结构，捕捉蛋白质天然的灵活性和动态特性。
+
+BioEmu 功能的核心围绕**ChemGraph**表示展开，它将蛋白质结构编码为图，其中节点代表氨基酸残基，边代表它们之间的相互作用。每个节点包含位置信息和方向数据，边则捕获残基之间的成对关系。
+
+来源：[README.md#L14-16](README.md#L14-16), [chemgraph.py#L12-18](src/bioemu/chemgraph.py#L12-18)
+
+## 设置环境
+
+在开始生成蛋白质结构之前，让我们确保您的环境已正确设置。BioEmu 设计用于 Linux 系统，需要 Python 3.10 或更高版本。
+
+```bash
+# 安装 BioEmu
+pip install bioemu
+```
+
+<CgxTip>
+首次使用 BioEmu 采样结构时，它会自动在单独的虚拟环境中设置 ColabFold，用于 MSA（多序列比对）和嵌入生成。此设置默认使用 `~/.bioemu_colabfold` 目录。
+</CgxTip>
+
+在本教程中，我们将使用一个名为 chignolin 的小型测试蛋白质，这是一个 10 个残基的微型蛋白质，常被用作蛋白质结构预测的基准。其小巧的尺寸使其非常适合快速实验和学习。
+
+来源：[README.md#L27-35](README.md#L27-35)
+
+## 首次蛋白质结构生成
+
+让我们生成您的第一个蛋白质结构！我们将使用 BioEmu 的命令行界面为 chignolin 蛋白质序列创建 10 个样本结构。
+
+```bash
+python -m bioemu.sample --sequence GYDPETGTWG --num_samples 10 --output_dir ~/test-chignolin
+```
+
+此命令告诉 BioEmu：
+- 使用氨基酸序列 "GYDPETGTWG"（chignolin）
+- 生成 10 个不同的结构样本
+- 将结果保存在 `~/test-chignolin` 目录中
+
+或者，您可以使用 Python API 以获得更大的灵活性：
+
+```python
+from bioemu.sample import main as sample
+sample(sequence='GYDPETGTWG', num_samples=10, output_dir='~/test_chignolin')
+```
+
+首次运行此命令时，模型参数将自动从 Hugging Face 下载。BioEmu 支持两个模型版本：
+- `bioemu-v1.0`：原始预印本中使用的检查点
+- `bioemu-v1.1`：改进版本，具有更好的蛋白质稳定性性能
+
+默认情况下，BioEmu 使用 `bioemu-v1.1`，它在大多数用例中提供最佳结果。
+
+来源：[README.md#L38-51](README.md#L38-51), [sample.py#L44-47](src/bioemu/sample.py#L44-47)
+
+## 理解采样过程
+
+让我们深入了解 BioEmu 如何生成蛋白质结构。采样过程涉及几个关键步骤，它们协同工作以将随机噪声分布转化为真实的蛋白质结构。
+
+### 步骤 1：序列处理和嵌入生成
+
+首先，BioEmu 处理您的氨基酸序列并生成捕获进化和结构信息的嵌入。这是使用 ColabFold 完成的，它会创建：
+
+1. **单残基嵌入**：捕获每个氨基酸信息的残基级特征
+2. **成对嵌入**：捕获残基对之间关系的特征
+
+这些嵌入至关重要，因为它们为模型提供了关于蛋白质序列的生物学背景，包括进化约束和潜在的相互作用模式。
+
+```python
+# 这会在后台自动发生
+single_embeds, pair_embeds = get_colabfold_embeds(
+    seq=sequence,
+    cache_embeds_dir=cache_embeds_dir,
+    msa_file=msa_file,
+    msa_host_url=msa_host_url,
+)
+```
+
+来源：[sample.py#L184-189](src/bioemu/sample.py#L184-189), [sample.py#L176-216](src/bioemu/sample.py#L176-216)
+
+### 步骤 2：图表示
+
+BioEmu 将蛋白质表示为**ChemGraph**，这是一种特殊的图结构，包含：
+
+- `pos`：每个残基的 3D 坐标（以纳米为单位）
+- `node_orientations`：表示每个残基方向的 3×3 旋转矩阵
+- `edge_index`：残基之间的连接信息
+- `single_embeds` 和 `pair_embeds`：来自步骤 1 的进化嵌入
+- `sequence`：原始氨基酸序列
+
+这种图表示使 BioEmu 能够使用几何深度学习技术高效处理蛋白质结构。
+
+来源：[chemgraph.py#L12-18](src/bioemu/chemgraph.py#L12-18)
+
+### 步骤 3：基于扩散的结构生成
+
+BioEmu 功能的核心是基于扩散的采样过程。这包括：
+
+1. **从噪声开始**：过程从随机的 3D 坐标和方向开始
+2. **渐进去噪**：使用训练好的神经网络逐步精修结构
+3. **基于分数的指导**：在每一步，模型预测如何修改结构使其更像蛋白质
+
+BioEmu 提供两种主要的去噪算法：
+
+- **DPM（扩散概率模型）**：一种快速高效的采样器，适用于大多数蛋白质
+- **Heun**：一种更准确但稍慢的采样器，可以产生更高质量的结果
+
+```python
+# 去噪过程
+sampled_chemgraph_batch = denoiser(
+    sdes=sdes,
+    device=device,
+    batch=context_batch,
+    score_model=score_model,
+)
+```
+
+去噪过程处理两种类型的数据：
+- **位置**：每个残基的 3D 坐标
+- **节点方向**：每个残基局部坐标系的旋转方向
+
+来源：[denoiser.py#L143-154](src/bioemu/denoiser.py#L143-154), [denoiser.py#L259-269](src/bioemu/denoiser.py#L259-269)
+
+### 步骤 4：结构过滤和输出
+
+生成结构后，BioEmu 会自动过滤掉不合理的样本，这些样本可能具有：
+- 空间冲突（原子过于接近）
+- 链不连续（主链断裂）
+- 其他几何不一致性
+
+剩余的结构以两种格式保存：
+- **PDB 文件**：用于可视化的标准蛋白质结构格式
+- **XTC 文件**：包含所有生成结构的轨迹格式
+
+```python
+# 将样本转换为 PDB 和 XTC 格式
+save_pdb_and_xtc(
+    pos_nm=positions,
+    node_orientations=node_orientations,
+    topology_path=output_dir / "topology.pdb",
+    xtc_path=output_dir / "samples.xtc",
+    sequence=sequence,
+    filter_samples=filter_samples,
+)
+```
+
+来源：[sample.py#L165-172](src/bioemu/sample.py#L165-172), [README.md#L60-61](README.md#L60-61)
+
+## 高级配置选项
+
+虽然默认设置适用于许多蛋白质，但 BioEmu 提供了几个高级选项用于微调采样过程：
+
+### 批量大小优化
+
+BioEmu 根据蛋白质长度自动调整批量大小以优化内存使用。`batch_size_100` 参数控制 100 个残基蛋白质的批量大小，实际批量大小计算如下：
+
+```python
+batch_size = int(batch_size_100 * (100 / len(sequence)) ** 2)
+```
+
+这种二次方缩放考虑了较长蛋白质增加的计算复杂性。
+
+### 去噪器配置
+
+您可以通过提供自己的配置文件或选择不同的去噪器类型来自定义去噪过程：
+
+```python
+# 使用 Heun 去噪器代替 DPM
+sample(
+    sequence='GYDPETGTWG', 
+    num_samples=10, 
+    output_dir='~/test_chignolin',
+    denoiser_type='heun'
+)
+```
+
+### 使用自定义 MSA 文件
+
+如果您有自己的多序列比对（MSA）数据，可以将其作为 A3M 文件提供，而不是依赖 ColabFold 的自动 MSA 生成：
+
+```python
+# 使用自定义 MSA 文件
+sample(
+    sequence='path/to/your/msa.a3m',
+    num_samples=10,
+    output_dir='~/test_chignolin'
+)
+```
+
+来源：[sample.py#L42-52](src/bioemu/sample.py#L42-52), [sample.py#L124-128](src/bioemu/sample.py#L124-128)
+
+## 性能考虑
+
+生成蛋白质结构所需的时间取决于几个因素：
+
+| 序列长度 | 时间（分钟） | 说明 |
+|----------------|----------------|-------|
+| 100 个残基 | ~4 分钟 | 在 A100 GPU 上快速生成 |
+| 300 个残基 | ~40 分钟 | 中等计算时间 |
+| 600 个残基 | ~150 分钟 | 需要大量计算资源 |
+
+这些时间是在使用 `batch_size_100=20` 设置的 80 GB VRAM A100 GPU 上测量的。您的实际时间可能因硬件配置而异。
+
+<CgxTip>
+对于较长的蛋白质（>300 个残基），考虑减少批量大小或使用更多内存的 GPU 以避免内存不足错误。
+</CgxTip>
+
+来源：[README.md#L53-58](README.md#L53-58)
+
+## 可视化结果
+
+BioEmu 完成采样过程后，您会在输出目录中找到几个文件：
+
+- `topology.pdb`：显示蛋白质序列的参考结构
+- `samples.xtc`：包含所有生成结构的轨迹文件
+- `batch_*.npz`：原始样本数据文件（中间格式）
+
+要可视化这些结构，您可以使用分子可视化工具，如：
+- **PyMOL**：强大的分子可视化程序
+- **VMD**：可视化分子动力学
+- **ChimeraX**：高级分子可视化和分析
+
+例如，在 PyMOL 中加载您的结构：
+```bash
+pymol ~/test-chignolin/topology.pdb ~/test-chignolin/samples.xtc
+```
+
+这将加载参考结构和轨迹，让您能够播放不同的生成构象并分析样本的结构多样性。
+
+## 后续步骤
+
+恭喜！您已成功使用 BioEmu 生成了第一批蛋白质结构。以下是继续探索的一些方法：
+
+1. **尝试不同的蛋白质**：尝试为不同长度和复杂性的蛋白质生成结构
+2. **与实验结构比较**：如果您可以访问实验结构（例如来自 PDB），将它们与 BioEmu 的预测进行比较
+3. **探索侧链重建**：使用 BioEmu 的侧链松弛工具为您的骨架结构添加原子细节
+4. **分析结构多样性**：检查生成的结构集合以理解蛋白质的灵活性和动态特性
+
+BioEmu 为蛋白质结构建模和分析开辟了令人兴奋的可能性。通过生成多样化的结构集合而非单一预测，它提供了更全面的蛋白质行为视图，这对于药物发现、蛋白质工程和基础生物学研究都具有重要价值。
+
+---
+
+# 深入探索
+
+## 核心概念
+
+- [深入探索/核心概念/生物分子结构建模原理](https://zread.ai/microsoft/bioemu/5-biomolecular-structure-modeling-principles)
+
+---
+slug:5-biomolecular-structure-modeling-principles
+blog_type:normal
+---
+
+
+<text>
+
+生物分子结构建模是计算生物学中的一个基本挑战，旨在根据蛋白质和其他生物分子的序列预测其三维排列方式。BioEmu采用基于**扩散模型**和**随机微分方程**的精密框架来解决这个问题，该框架专门针对分子结构的独特几何特性进行了设计。
+
+## 生物分子结构建模的核心原理
+
+BioEmu的核心原理是：通过学习天然蛋白质构象的平衡分布来生成蛋白质结构。与传统专注于寻找单一最低能量结构的预测方法不同，BioEmu从可能结构的**完整分布**中进行采样，从而捕捉生物分子固有的灵活性和动态特性。
+
+该方法建立在几个关键原则之上：
+
+1. **几何适宜性**：蛋白质结构存在于具有特定几何约束的三维空间中。键长、键角和扭转角必须符合物理上合理的范围。
+
+2. **旋转自由度**：蛋白质主链和侧链的旋转自然地使用**SO(3)旋转群**来描述，这需要专门的数学处理。
+
+3. **层次组织**：蛋白质结构从一级（序列）到二级（α-螺旋、β-折叠）再到三级（整体折叠）结构表现出层次性组织。
+
+4. **能量景观**：天然蛋白质结构占据复杂能量景观中的低能区域，可能存在多种稳定构象。
+
+## 用于三维结构生成的扩散模型
+
+BioEmu采用**扩散模型**方法，逐步将随机噪声转化为真实的蛋白质结构。这个过程由随机微分方程（SDE）控制，定义了结构随时间的演化方式。
+
+```python
+# 核心SDE框架定义了结构的演化方式
+class SDE:
+    def sde(self, x: torch.Tensor, t: torch.Tensor, batch_idx: torch.LongTensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回漂移项f和扩散系数g，使得dx = f * dt + g * sqrt(dt) * 标准高斯分布"""
+        pass
+```
+
+扩散过程反向进行：从随机噪声开始，模型逐步学习**去噪**，直到获得真实的蛋白质结构。这类似于蛋白质折叠的物理过程，其中无序链逐渐组织成特定的三维结构。
+
+<CgxTip>
+扩散方法之所以特别强大，是因为它能生成多种物理上合理的结构，而不仅仅是单一预测。这对于理解蛋白质动力学和设计柔性分子系统至关重要。
+</CgxTip>
+
+## SO(3)随机微分方程
+
+BioEmu的一个关键创新是使用**SO(3)专用SDE**来处理蛋白质结构中的旋转自由度。与在欧几里得空间中操作的标准扩散模型不同，蛋白质旋转需要特殊的数学处理。
+
+```python
+class SO3SDE(SDE, torch.nn.Module):
+    def __init__(self, eps_t: float = 1e-4, num_sigma: int = 1000, num_omega: int = 1000, 
+                 omega_exponent: int = 3, l_max: int = 1000, tol: float = 1e-6):
+        """
+        用于SO(3)采样的基本SDE类。实现以下旋转R的SDE：
+        
+        dR^(t) = g(t) * dB_SO(3)^(t)
+        
+        其中B_SO(3)是SO(3)上的布朗运动，g(t)是扩散系数。
+        """
+```
+
+SO(3) SDE使用**IGSO(3)分布**（逆高斯SO(3)）来建模旋转不确定性。这种分布特别适合蛋白质结构，因为：
+
+- 它自然地尊重三维旋转的几何特性
+- 它可以表示小扰动（局部灵活性）和大旋转（全局重排）
+- 它通过预计算的查找表提供高效的采样
+
+## 化学图表示
+
+BioEmu将蛋白质结构表示为**化学图**，其中节点对应氨基酸残基，边表示空间或序列关系。这种基于图的方法使模型能够捕捉蛋白质中的局部和长程相互作用。
+
+```python
+class ChemGraph(Data):
+    node_orientations: torch.Tensor  # [num_nodes, 3, 3] 每个残基的旋转矩阵
+    pos: torch.Tensor  # [num_nodes, 3] 以纳米为单位的位置
+    edge_index: torch.Tensor  # [2, num_edges] 连接信息
+    single_embeds: torch.Tensor  # [num_nodes, EVOFORMER_NODE_DIM] 序列嵌入
+    pair_embeds: torch.Tensor  # [num_nodes**2, EVOFORMER_EDGE_DIM] 成对嵌入
+    sequence: str  # 氨基酸序列
+```
+
+这种表示优雅地结合了：
+- **几何信息**（位置和方向）
+- **化学信息**（序列和嵌入）
+- **拓扑信息**（通过边的连接性）
+
+图结构使模型能够处理任意长度的蛋白质，并捕捉决定蛋白质折叠的复杂、非局部相互作用。
+
+## 结构模块和不变点注意力
+
+**结构模块**负责处理三维坐标并生成关于结构在扩散过程中应如何演化的预测。它使用**不变点注意力**（IPA），这是一种尊重蛋白质结构三维几何特性的复杂注意力机制。
+
+```python
+class SAAttention(nn.Module):
+    """DiG版本的不变点注意力模块。参见AF2补充材料算法22。"""
+    
+    def __init__(self, d_model: int, d_pair: int, n_head: int, dropout: float = 0.1):
+        # 为标量和点特征初始化注意力机制
+        self.scalar_query = nn.Linear(d_model, d_model, bias=False)
+        self.scalar_key = nn.Linear(d_model, d_model, bias=False)
+        self.point_query = nn.Linear(d_model, n_head * 3 * 4, bias=False)
+        self.point_key = nn.Linear(d_model, n_head * 3 * 4, bias=False)
+```
+
+不变点注意力至关重要，因为它：
+- 保持**旋转和平移不变性** - 如果旋转或移动整个蛋白质，预测不会改变
+- 处理**局部坐标系** - 每个残基都有自己的局部参考系
+- 结合**序列和结构信息** - 注意力由进化模式和三维几何共同引导
+
+## 采样过程和结构生成
+
+BioEmu中的完整采样过程遵循精心设计的流程，将氨基酸序列转化为三维结构：
+
+```mermaid
+flowchart TD
+    A[输入序列] --> B[生成MSA和嵌入]
+    B --> C[初始化随机结构]
+    C --> D[应用SO3扩散过程]
+    D --> E[使用评分模型去噪]
+    E --> F{更多步骤？}
+    F -->|是| D
+    F -->|否| G[过滤物理结构]
+    G --> H[输出PDB/XTC文件]
+```
+
+该过程从使用ColabFold生成**多序列比对（MSA）**和进化嵌入开始。这些嵌入提供了关于保守模式和约束的关键信息，指导结构生成。
+
+然后扩散过程迭代优化随机初始结构，评分模型预测每一步如何去除噪声。SO(3) SDE确保所有中间和最终结构都符合蛋白质构象的几何约束。
+
+最后，生成的结构经过过滤，去除具有空间冲突或不合理键几何的**非物理构象**，确保只返回生物学上合理的结构。
+
+## 物理真实性和约束
+
+BioEmu中的一个基本原则是在整个结构生成过程中保持**物理真实性**。这涉及几种类型的约束：
+
+1. **几何约束**：键长、键角和扭转角必须保持在物理合理的范围内。
+
+2. **空间约束**：原子不能占据相同空间，防止不合理的重叠。
+
+3. **链连续性**：蛋白质主链必须保持连接不断裂。
+
+4. **能量景观**：生成的结构应占据与天然蛋白质折叠一致的低能区域。
+
+这些约束通过SO(3) SDE的数学公式和去除不合理结构的后处理过滤器来强制执行。
+
+```python
+def check_protein_valid(sequence: str) -> None:
+    """检查输入序列是否有效"""
+    # 验证氨基酸序列并检测潜在问题
+    
+def filter_samples(samples: list) -> list:
+    """过滤掉具有例如长键距离或空间冲突的非物理样本"""
+    # 移除违反物理约束的结构
+```
+
+## 与外部工具的集成和后处理
+
+BioEmu认识到生成的骨架结构通常需要额外处理才能创建完整的全原子模型。该系统与外部工具集成用于：
+
+- **侧链重建**：使用HPacker向生成的骨架添加侧链原子
+- **分子动力学松弛**：短时间MD模拟以优化局部几何并消除轻微冲突
+- **结构验证**：根据已知质量指标检查生成的结构
+
+```python
+# 侧链重建和MD松弛
+python -m bioemu.sidechain_relax --pdb-path path/to/topology.pdb --xtc-path path/to/samples.xtc
+```
+
+这种集成确保BioEmu不仅能生成骨架预测，还能产生适合药物发现、蛋白质设计和结构生物学下游应用的完整高质量原子模型。
+
+## 结论
+
+BioEmu的生物分子结构建模方法代表了该领域的重大进步，结合了精密的数学框架和深度学习来生成多样化、物理上合理的蛋白质结构。通过利用SO(3)扩散模型、不变点注意力和仔细的约束执行，该系统能够捕捉氨基酸序列与其三维结构之间的复杂关系。
+
+这里概述的原则——几何适宜性、旋转自由度、层次组织和能量景观考虑——为理解现代深度学习方法如何转变我们建模和预测生物分子结构的能力提供了基础。
+
+</text>
+
+---
+
+- [深入探索/核心概念/3D蛋白质结构的扩散模型](https://zread.ai/microsoft/bioemu/6-diffusion-models-for-3d-protein-structures)
+
+---
+slug:6-diffusion-models-for-3d-protein-structures
+blog_type:normal
+---
+
+
+扩散模型已在多个领域彻底改变了生成建模技术，而其在3D蛋白质结构中的应用代表了计算生物学领域的重大进步。在bioemu中，扩散模型通过学习精心设计的噪声添加过程的逆过程来生成逼真的蛋白质结构。本文将探讨bioemu如何实现专门针对蛋白质结构生成独特挑战的扩散模型。
+
+## 理解蛋白质扩散模型
+
+扩散模型的核心原理是通过逐渐向数据添加噪声（前向过程），然后学习逆转这一过程（逆向过程）来生成新样本。对于蛋白质结构而言，这带来了独特挑战，因为蛋白质存在于**SO(3)旋转空间**而非简单的欧几里得空间。
+
+Bioemu通过精密的双组件方法处理这种复杂性：
+
+1. **位置扩散**：在欧几里得空间中对原子三维坐标建模
+2. **方向扩散**：在SO(3)空间中对氨基酸残基的旋转框架建模
+
+这种双重方法使模型能够同时捕获原子的空间排列以及对蛋白质稳定性和功能至关重要的局部几何约束。
+
+来源：[sde_lib.py#L51-L73](src/bioemu/sde_lib.py#L51-L73), [so3_sde.py#L20-L52](src/bioemu/so3_sde.py#L20-L52)
+
+## 蛋白质扩散的随机微分方程（SDE）
+
+Bioemu使用随机微分方程（SDE）实现扩散过程，SDE为扩散过程提供了连续时间公式化表达。该框架包含多个专门的SDE类：
+
+### 基础SDE框架
+
+`SDE`基类定义了所有扩散过程的接口：
+
+```python
+class SDE:
+    @abc.abstractmethod
+    def sde(self, x: torch.Tensor, t: torch.Tensor, batch_idx: torch.LongTensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回漂移项f和扩散系数g，满足dx = f * dt + g * sqrt(dt) * 标准高斯分布"""
+        pass
+```
+
+这个抽象方法定义了扩散过程的核心，其中`漂移项`代表确定性分量，`扩散项`代表SDE的随机分量。
+
+来源：[sde_lib.py#L51-L59](src/bioemu/sde_lib.py#L51-L59)
+
+### 用于旋转的SO(3)扩散
+
+蛋白质结构需要对旋转分量进行特殊处理。Bioemu实现了`SO3SDE`，一个专门用于3D空间旋转的SDE：
+
+```python
+class SO3SDE(SDE, torch.nn.Module):
+    def __init__(self, eps_t: float = 1e-4, num_sigma: int = 1000, 
+                 num_omega: int = 1000, omega_exponent: int = 3, 
+                 l_max: int = 1000, tol: float = 1e-6, ...):
+```
+
+这里的关键创新是使用**IGSO(3)分布**（SO(3)上的不变高斯分布），它为3D旋转添加噪声提供了数学上合理的方法。IGSO(3)分布基于级数展开：
+
+```math
+f(ω) = ∑_{l=0}^∞ (2l+1) exp(-l(l+1)σ²/2) * sin((l+½)ω) / sin(ω/2)
+```
+
+这使模型能够采样符合3D旋转群几何特性的旋转。
+
+来源：[so3_sde.py#L20-L49](src/bioemu/so3_sde.py#L20-L49), [so3_sde.py#L44-L46](src/bioemu/so3_sde.py#L44-L46)
+
+### 用于位置的方差保持SDE
+
+对于原子位置，bioemu使用方差保持SDE（VPSDE），在整个扩散过程中保持稳定的噪声水平：
+
+```python
+class CosineVPSDE(BaseVPSDE):
+    """具有余弦噪声调度表的方差保持SDE"""
+    
+    def __init__(self, s: float = 0.008):
+        self.s = s
+        self.c = np.cos(s / (1 + s) * np.pi / 2)
+```
+
+余弦调度表提供了平滑的噪声过渡，非常适合蛋白质结构生成。
+
+来源：[sde_lib.py#L156-L162](src/bioemu/sde_lib.py#L156-L162)
+
+## 逆向过程：蛋白质结构去噪
+
+扩散模型的真正威力在于其逆转噪声添加过程的能力。Bioemu实现了精密的去噪算法，可以从随机噪声生成蛋白质结构。
+
+### 欧拉-丸山预测器
+
+逆向过程的核心在`EulerMaruyamaPredictor`类中实现：
+
+```python
+class EulerMaruyamaPredictor:
+    def __init__(self, *, corruption: SDE, noise_weight: float = 1.0, 
+                 marginal_concentration_factor: float = 1.0):
+```
+
+该预测器处理标准欧几里得更新和特殊的SO(3)更新：
+
+```python
+def update_given_drift_and_diffusion(self, *, x: torch.Tensor, dt: torch.Tensor, 
+                                   drift: torch.Tensor, diffusion: torch.Tensor):
+    # 使用SO(3)上SDE的特殊更新或标准更新到下一步
+    if isinstance(self.corruption, SO3SDE):
+        mean = apply_rotvec_to_rotmat(x, drift * dt, tol=self.corruption.tol)
+        sample = apply_rotvec_to_rotmat(mean, self.noise_weight * diffusion * 
+                                       torch.sqrt(dt.abs()) * z, tol=self.corruption.tol)
+    else:
+        mean = x + drift * dt
+        sample = mean + self.noise_weight * diffusion * torch.sqrt(dt.abs()) * z
+    return sample, mean
+```
+
+关键区别在于SO(3)更新使用旋转组合而非简单加法，尊重旋转群的几何特性。
+
+来源：[denoiser.py#L16-L31](src/bioemu/denoiser.py#L16-L31), [denoiser.py#L59-70](src/bioemu/denoiser.py#L59-70)
+
+### 高级去噪算法
+
+Bioemu为不同用例提供多种去噪算法：
+
+1. **Heun方法**：二阶求解器，提供更精确的采样
+2. **DPM求解器**：专门用于VPSDE的求解器，具有改进的稳定性
+
+`heun_denoiser`函数实现了具有自适应噪声水平和二阶修正的精密采样方案：
+
+```python
+def heun_denoiser(*, sdes: dict[str, SDE], N: int, eps_t: float, max_t: float, 
+                 device: torch.device, batch: Batch, score_model: torch.nn.Module, 
+                 noise: float) -> ChemGraph:
+```
+
+该函数协调整个去噪过程，管理位置扩散和方向扩散之间的相互作用。
+
+来源：[denoiser.py#L143-154](src/bioemu/denoiser.py#L143-154)
+
+## 评分模型：学习逆转扩散
+
+扩散模型中的"评分"指的是数据分布对数概率的梯度。Bioemu的评分模型学习预测该评分，该评分指导逆向扩散过程。
+
+### 架构概述
+
+主要评分模型架构围绕`DistributionalGraphormer`构建：
+
+```python
+class DistributionalGraphormer(nn.Module):
+    def __init__(self, dim_model: int = 512, dim_pair: int = 256, 
+                 num_layers: int = 8, num_heads: int = 32, ...):
+```
+
+该架构设计为对旋转和平移**等变**，意味着旋转或平移输入蛋白质结构会导致相应旋转或变换的输出。这一特性对于学习蛋白质结构的有意义表示至关重要。
+
+来源：[models.py#L148-185](src/bioemu/models.py#L148-185)
+
+### 时间嵌入
+
+评分模型的一个关键组件是时间嵌入，它对扩散时间步进行编码：
+
+```python
+class SinusoidalPositionEmbedder(nn.Module):
+    def forward(self, time: torch.Tensor) -> torch.Tensor:
+        # 重新缩放输入标量，使其在[0, 1000.]范围内
+        time = (time - self.min_input) * 1000.0 / (self.max_input - self.min_input)
+        embeddings = torch.exp(torch.arange(self.half_dim, device=device) * self.embedding_factor)
+        embeddings = time[:, None] * embeddings[None, :]
+        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
+        return embeddings
+```
+
+这种正弦嵌入使模型能够根据扩散过程中的当前噪声水平调整其行为。
+
+来源：[models.py#L19-69](src/bioemu/models.py#L19-69)
+
+## 整合所有组件：采样流程
+
+Bioemu中完整的蛋白质结构生成过程遵循以下步骤：
+
+### 1. 序列到嵌入
+
+首先，使用ColabFold将氨基酸序列转换为数值嵌入：
+
+```python
+def get_context_chemgraph(sequence: str, cache_embeds_dir: str | Path | None = None, 
+                         msa_file: str | Path | None = None, 
+                         msa_host_url: str | None = None) -> ChemGraph:
+    single_embeds_file, pair_embeds_file = get_colabfold_embeds(
+        seq=sequence, cache_embeds_dir=cache_embeds_dir, 
+        msa_file=msa_file, msa_host_url=msa_host_url)
+```
+
+这些嵌入捕获蛋白质序列的进化信息和结构约束。
+
+来源：[sample.py#L176-189](src/bioemu/sample.py#L176-189)
+
+### 2. 扩散采样
+
+核心采样过程从随机噪声生成蛋白质结构：
+
+```python
+def generate_batch(score_model: torch.nn.Module, sequence: str, 
+                  sdes: dict[str, SDE], batch_size: int, seed: int, 
+                  denoiser: Callable, ...) -> dict[str, torch.Tensor]:
+    context_chemgraph = get_context_chemgraph(...)
+    context_batch = Batch.from_data_list([context_chemgraph] * batch_size)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    sampled_chemgraph_batch = denoiser(
+        sdes=sdes, device=device, batch=context_batch, score_model=score_model)
+```
+
+该函数协调整个生成过程，从序列嵌入到最终3D坐标。
+
+来源：[sample.py#L219-259](src/bioemu/sample.py#L219-259)
+
+### 3. 后处理和输出
+
+最后，生成的结构转换为标准格式（PDB和XTC）进行分析和可视化：
+
+```python
+save_pdb_and_xtc(pos_nm=positions, node_orientations=node_orientations,
+                 topology_path=output_dir / "topology.pdb",
+                 xtc_path=output_dir / "samples.xtc",
+                 sequence=sequence, filter_samples=filter_samples)
+```
+
+<CgxTip>
+生成的蛋白质结构可以被过滤，以去除具有长键距离或空间冲突的非物理样本，确保只保留生物学上合理的结构。
+</CgxTip>
+
+来源：[sample.py#L165-172](src/bioemu/sample.py#L165-172)
+
+## 关键创新和优势
+
+Bioemu的扩散模型实现包含几项关键创新：
+
+### 1. 几何感知
+
+通过将蛋白质结构视为SE(3)（3D空间中刚性变换群）的元素，bioemu尊重分子结构的基本几何特性。这种几何感知导致生成更逼真且物理上合理的结构。
+
+### 2. 双重扩散过程
+
+位置和方向的分别处理使模型能够在适当的粒度级别捕获蛋白质结构的不同方面。位置捕获整体折叠，而方向捕获局部几何约束。
+
+### 3. 高效采样
+
+实现包含多种采样算法（Heun、DPM），在准确性和计算效率之间取得平衡，使生成多样化蛋白质结构变得实用。
+
+### 4. 与进化信息整合
+
+通过利用ColabFold嵌入，模型整合了自然蛋白质中观察到的进化约束和结构模式，导致生成生物学上更相关的结构。
+
+## 实际应用
+
+Bioemu中的扩散模型实现了几项重要应用：
+
+1. **蛋白质设计**：生成具有所需特性的新颖蛋白质结构
+2. **结构预测**：从给定序列的可能结构分布中采样
+3. **构象采样**：探索柔性蛋白质的构象景观
+4. **药物发现**：生成用于虚拟筛选和结合位点分析的蛋白质结构
+
+## 结论
+
+扩散模型代表了3D蛋白质结构生成的强大方法，而bioemu的实现提供了一个尊重分子结构几何约束的精密框架。通过结合微分几何的高级数学概念与深度学习技术，bioemu能够生成多样化、物理上合理的蛋白质结构，加速结构生物学和药物发现研究。
+
+成功的关键在于数学严谨性与实际实现之间的谨慎平衡，确保生成的结构既在理论上合理又在生物学上相关。随着该领域的不断发展，我们可以期待更复杂的扩散模型，进一步缩小计算预测与实验现实之间的差距。
+
+---
+
+## 关键工作流程
+
+- [深入探索/关键工作流程/序列处理与嵌入](https://zread.ai/microsoft/bioemu/7-sequence-processing-and-embedding)
+
+---
+slug:7-sequence-processing-and-embedding
+blog_type:normal
+---
+
+
+在蛋白质结构建模领域，将氨基酸序列转化为有意义的数值表示是至关重要的第一步。BioEmu利用强大的序列处理和嵌入技术，将原始蛋白质序列转化为丰富的特征表示，从而驱动其结构生成能力。本指南将详细介绍BioEmu如何处理序列并生成嵌入，为准确的三维蛋白质结构预测奠定基础。
+
+## 理解序列处理流程
+
+在生成蛋白质结构之前，BioEmu需要理解蛋白质的语言。其序列处理流程负责从读取蛋白质序列到验证序列完整性，再到为嵌入生成做好准备的全过程。
+
+整个过程始于基本的序列输入输出操作。BioEmu支持从FASTA文件读取序列，这是存储蛋白质序列的标准格式。`seq_io.py`模块为此提供了核心功能：
+
+```python
+from bioemu.seq_io import read_fasta, write_fasta, check_protein_valid
+
+# 从FASTA文件读取序列
+sequences = read_fasta("protein_sequences.fasta")
+
+# 将序列写入FASTA文件
+write_fasta(["ACDEFGHIKLMNPQRSTVWY"], "output.fasta")
+
+# 验证序列是否仅包含标准氨基酸
+check_protein_valid("ACDEFGHIKLMNPQRSTVWY")
+```
+
+这些函数确保序列格式正确且仅包含有效的氨基酸字符。BioEmu严格遵守20种常见氨基酸的IUPAC标准，拒绝任何包含无效字符的序列，以确保下游处理的一致性。
+
+<CgxTip>处理前务必验证蛋白质序列。无效字符会导致嵌入生成失败，并可能在结构预测中产生意外结果。</CgxTip>
+
+## 使用ColabFold生成序列嵌入
+
+BioEmu序列处理的核心在于其能够生成同时捕获局部和全局序列特征的丰富嵌入。这些嵌入通过ColabFold创建，这是一个结合了多序列比对(MSA)信息和深度学习表示的强大工具。
+
+BioEmu的嵌入生成过程由`get_embeds.py`中的`get_colabfold_embeds`函数处理。该函数接收蛋白质序列并返回两种类型的嵌入：
+
+1. **单一表示**：捕获局部特征的每个残基嵌入
+2. **配对表示**：捕获长程相互作用的残基对嵌入
+
+以下是生成蛋白质序列嵌入的方法：
+
+```python
+from bioemu.get_embeds import get_colabfold_embeds
+
+# 为蛋白质序列生成嵌入
+single_embeds_file, pair_embeds_file = get_colabfold_embeds(
+    seq="ACDEFGHIKLMNPQRSTVWY",
+    cache_embeds_dir="./embeddings_cache"
+)
+```
+
+嵌入生成过程智能且高效：
+
+1. **缓存机制**：BioEmu首先检查给定序列的嵌入是否已存在于缓存目录中。如果找到，立即返回缓存的嵌入，节省计算时间。
+
+2. **哈希标识**：每个序列被分配唯一的SHA256哈希值，用于标识和检索缓存的嵌入。
+
+3. **自动ColabFold设置**：如果未安装ColabFold，BioEmu会自动在专用环境中下载并配置它。
+
+4. **MSA生成**：对于每个序列，ColabFold搜索同源序列以构建多序列比对，为嵌入生成提供进化背景。
+
+## 将嵌入集成到ChemGraph结构中
+
+生成嵌入后，需要将其集成到BioEmu的数据结构中进行处理。这时就需要用到`ChemGraph`类。`ChemGraph`是一种专门的数据结构，包含蛋白质结构生成所需的所有信息：
+
+- 序列嵌入（单一和配对表示）
+- 位置信息（初始设置为NaN）
+- 节点方向（初始设置为NaN）
+- 表示残基连接的边索引
+- 原始氨基酸序列
+
+`sample.py`中的`get_context_chemgraph`函数展示了如何加载和集成嵌入：
+
+```python
+from bioemu.sample import get_context_chemgraph
+
+# 创建包含嵌入的ChemGraph
+chemgraph = get_context_chemgraph(
+    sequence="ACDEFGHIKLMNPQRSTVWY",
+    cache_embeds_dir="./embeddings_cache"
+)
+```
+
+该函数执行几个关键步骤：
+
+1. **加载嵌入**：从各自文件中加载预计算的单一和配对嵌入。
+
+2. **重塑配对嵌入**：将配对嵌入从方阵(L×L×F)重塑为平面格式(L²×F)，以兼容图神经网络。
+
+3. **创建边索引**：生成表示残基全连接图的边索引，其中每个残基与其他所有残基相连。
+
+4. **初始化位置和方向**：三维坐标和方向初始化为NaN值，它们将在结构预测过程中生成。
+
+## 嵌入如何驱动结构生成
+
+通过此过程生成的嵌入不仅仅是静态表示——它们主动指导结构生成过程。在BioEmu的扩散模型架构中，这些嵌入作为条件信息，帮助模型生成物理上合理的蛋白质结构。
+
+`models.py`中的`DistributionalGraphormer`模型展示了嵌入的处理方式：
+
+```python
+# 在模型的前向传播中：
+single_repr = context.single_embeds  # [B, L, 384] - 单一表示
+pair_repr = context.pair_embeds    # [B, L, L, 128] - 配对表示
+
+# 将嵌入投影到模型维度
+x1d = self.x1d_proj(single_repr)  # 投影单一表示
+x2d = self.x2d_proj(pair_repr)    # 投影配对表示
+
+# 添加相对位置信息
+x2d = x2d + self.rp_proj(pos_sequence)[None]
+```
+
+单一表示捕获每个残基的特征，如氨基酸类型、局部二级结构倾向和进化保守性。配对表示捕获残基间的相互作用，包括接触概率、距离偏好和角度关系。
+
+## 高级功能和自定义
+
+BioEmu为序列处理和嵌入生成提供了多种高级功能：
+
+### 自定义MSA文件
+
+您可以提供自己的A3M格式MSA文件，而不是依赖自动MSA生成：
+
+```python
+single_embeds_file, pair_embeds_file = get_colabfold_embeds(
+    seq="ACDEFGHIKLMNPQRSTVWY",
+    msa_file="custom_msa.a3m"
+)
+```
+
+当您具有领域特定知识或想使用专门的MSA生成工具时，这特别有用。
+
+### 自定义MSA服务器
+
+如果您可以访问专用数据库或想使用本地MSA服务器，可以指定自定义MSA服务器URL：
+
+```python
+single_embeds_file, pair_embeds_file = get_colabfold_embeds(
+    seq="ACDEFGHIKLMNPQRSTVWY",
+    msa_host_url="https://your-custom-msa-server.com"
+)
+```
+
+### 嵌入缓存策略
+
+BioEmu的缓存系统设计得既高效又灵活。默认情况下，嵌入存储在`~/.bioemu_embeds_cache`中，但您可以自定义此位置：
+
+```python
+single_embeds_file, pair_embeds_file = get_colabfold_embeds(
+    seq="ACDEFGHIKLMNPQRSTVWY",
+    cache_embeds_dir="/path/to/custom/cache"
+)
+```
+
+缓存系统使用SHA256哈希确保每个唯一序列获得自己的嵌入文件，防止冲突并实现高效重用。
+
+## 性能考虑
+
+序列处理和嵌入生成可能计算密集，特别是对于长蛋白质。以下是一些关键考虑因素：
+
+1. **序列长度**：由于配对表示的存在，嵌入生成的计算复杂度大致随序列长度二次方增长。
+
+2. **MSA生成时间**：对于新序列，MSA生成可能需要几分钟，因为它涉及搜索大型数据库。
+
+3. **缓存利用**：始终使用缓存系统避免冗余计算，特别是在多次处理相同序列时。
+
+4. **批处理**：为多个序列生成结构时，以批处理方式进行以最大化计算效率。
+
+## 常见问题故障排除
+
+### 无效氨基酸字符
+
+如果遇到关于无效氨基酸字符的错误，使用`check_protein_valid`函数识别有问题的序列：
+
+```python
+from bioemu.seq_io import check_protein_valid
+
+try:
+    check_protein_valid("ACDXFGHIKLMNPQRSTVWY")  # 包含无效的'X'
+except AssertionError as e:
+    print(f"无效序列: {e}")
+```
+
+### ColabFold安装问题
+
+如果ColabFold自动安装失败，请检查`~/.bioemu_colabfold/install_log.txt`中的安装日志以获取详细错误信息。
+
+### 嵌入缓存冲突
+
+如果怀疑嵌入缓存有问题，可以清除缓存目录或指定新的缓存位置以强制重新生成嵌入。
+
+## 结论
+
+序列处理和嵌入生成构成了BioEmu蛋白质结构建模能力的基础。通过利用ColabFold强大的基于MSA的嵌入和BioEmu高效的处理流程，用户可以将原始氨基酸序列转化为同时捕获局部和全局蛋白质特征的丰富数值表示。
+
+理解这一过程对于任何希望有效使用BioEmu的人都至关重要，无论是用于基础结构预测还是更高级的应用，如蛋白质设计和工程。您旅程的下一步将是探索这些嵌入如何在化学图操作和结构采样中使用，这将在后续指南中介绍。
+
+---
+
+- [深入探索/关键工作流程/化学图操作](https://zread.ai/microsoft/bioemu/8-chemical-graph-operations)
+
+---
+slug:8-chemical-graph-operations
+blog_type:normal
+---
+
+
+化学图是bioemu框架中表示生物分子结构的基础数据结构。它提供了一种统一的表示方式，弥合了序列信息、3D坐标和进化特征之间的差距，使深度学习模型能够高效处理蛋白质结构预测和设计任务。
+
+## Bioemu中的化学图理解
+
+bioemu中的化学图不仅仅是简单的图表示——它是一种综合性的数据结构，封装了蛋白质结构建模所需的所有关键信息。其核心在于，`ChemGraph`类扩展了PyTorch Geometric的`Data`类，提供了专为生物分子结构定制的专业表示。`来源：[chemgraph.py#L12-L19](src/bioemu/chemgraph.py#L12-L19)`
+
+`ChemGraph`包含几个关键组成部分：
+- **节点朝向**：表示每个残基方向的3D旋转矩阵
+- **位置**：每个残基的3D坐标（纳米单位）
+- **边索引**：残基之间的连接信息
+- **单残基嵌入**：来自进化分析的每个残基特征
+- **残基对嵌入**：残基之间的成对特征
+- **序列**：作为字符串的氨基酸序列
+- **系统ID**：蛋白质的可选标识符
+
+这种丰富的表示方式使框架能够以统一的方式同时处理序列信息、结构约束和进化背景。
+
+## 创建化学图
+
+化学图通常通过多步骤过程从蛋白质序列创建，涉及生成嵌入和建立图结构。`get_context_chemgraph`函数展示了这一过程：`来源：[sample.py#L176-L216](src/bioemu/sample.py#L176-L216)`
+
+```python
+def get_context_chemgraph(
+    sequence: str,
+    cache_embeds_dir: str | Path | None = None,
+    msa_file: str | Path | None = None,
+    msa_host_url: str | None = None,
+) -> ChemGraph:
+    n = len(sequence)
+    
+    # 使用ColabFold生成嵌入
+    single_embeds_file, pair_embeds_file = get_colabfold_embeds(
+        seq=sequence,
+        cache_embeds_dir=cache_embeds_dir,
+        msa_file=msa_file,
+        msa_host_url=msa_host_url,
+    )
+    
+    # 将嵌入加载为张量
+    single_embeds = torch.from_numpy(np.load(single_embeds_file))
+    pair_embeds = torch.from_numpy(np.load(pair_embeds_file))
+    
+    # 创建全连接边索引
+    edge_index = torch.cat([
+        [
+            torch.arange(n).repeat_interleave(n).view(1, n**2),
+            torch.arange(n).repeat(n).view(1, n**2),
+        ],
+        dim=0,
+    ])
+    
+    # 初始化位置和朝向（将在采样过程中填充）
+    pos = torch.full((n, 3), float("nan"))
+    node_orientations = torch.full((n, 3, 3), float("nan"))
+    
+    return ChemGraph(
+        edge_index=edge_index,
+        pos=pos,
+        node_orientations=node_orientations,
+        single_embeds=single_embeds,
+        pair_embeds=pair_embeds,
+        sequence=sequence,
+    )
+```
+
+此函数创建了一个包含结构生成所需所有必要组件的化学图。注意位置和朝向最初设置为NaN值——它们将在结构采样过程中被填充。
+
+## 不同表示之间的转换
+
+bioemu中化学图操作最强大的方面之一是能够在不同结构表示之间进行转换。`convert_chemgraph.py`模块提供了几个关键函数用于这些转换：`来源：[convert_chemgraph.py](src/bioemu/convert_chemgraph.py)`
+
+### 从框架到全原子位置
+
+`get_atom37_from_frames`函数将粗粒度的框架信息（位置和朝向）转换为详细的全原子位置，遵循蛋白质结构建模中使用的标准atom37表示：
+
+```python
+def get_atom37_from_frames(
+    pos: torch.Tensor,           # (num_residues, 3) 单位：nm
+    node_orientations: torch.Tensor,  # (num_residues, 3, 3)
+    sequence: str
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # 转换为刚体表示
+    positions = pos.view(1, -1, 3)
+    orientations = node_orientations.view(1, -1, 3, 3)
+    rots = Rotation(rot_mats=orientations)
+    rigids = Rigid(rots=rots, trans=positions)
+    
+    # 获取残基类型
+    aatype = torch.tensor([
+        residue_constants.restype_order.get(x, 0) 
+        for x in sequence
+    ], device=device)
+    
+    # 计算主链原子
+    atom_37, atom_37_mask = compute_backbone(
+        bb_rigids=rigids,
+        psi_torsions=torch.zeros(1, positions.shape[1], 2, device=device),
+        aatype=aatype,
+    )
+    
+    # 调整氧原子位置
+    atom_37 = _adjust_oxygen_pos(atom_37, pos_is_known=None)
+    
+    return atom_37, atom_37_mask, aatype
+```
+
+这种转换对于从扩散过程中使用的粗粒度表示生成详细蛋白质结构至关重要。
+
+### 氧原子位置推算
+
+转换过程中一个特别有趣的方面是氧原子位置的智能推算。`_adjust_oxygen_pos`函数使用几何推理将氧原子放置在物理上合理的位置：`来源：[convert_chemgraph.py#L214-L293](src/bioemu/convert_chemgraph.py#L214-L293)`
+
+```python
+def _adjust_oxygen_pos(atom_37: torch.Tensor) -> torch.Tensor:
+    # 获取从Cα和下一个残基的氮原子到羰基的向量
+    calpha_to_carbonyl = (atom_37[:-1, 2, :] - atom_37[:-1, 1, :])
+    nitrogen_to_carbonyl = (atom_37[:-1, 2, :] - atom_37[1:, 0, :])
+    
+    # 归一化向量
+    calpha_to_carbonyl = calpha_to_carbonyl / (
+        torch.norm(calpha_to_carbonyl, keepdim=True, dim=1) + 1e-7
+    )
+    nitrogen_to_carbonyl = nitrogen_to_carbonyl / (
+        torch.norm(nitrogen_to_carbonyl, keepdim=True, dim=1) + 1e-7
+    )
+    
+    # 计算氧原子位置
+    carbonyl_to_oxygen = calpha_to_carbonyl + nitrogen_to_carbonyl
+    carbonyl_to_oxygen = carbonyl_to_oxygen / (
+        torch.norm(carbonyl_to_oxygen, dim=1, keepdim=True) + 1e-7
+    )
+    
+    # 将氧原子放置在正确的键长位置
+    atom_37[:-1, 4, :] = atom_37[:-1, 2, :] + carbonyl_to_oxygen * C_O_BOND_LENGTH
+```
+
+此函数展示了框架对化学真实性的关注，确保生成的结构保持适当的键长和键角。
+
+## 将结构保存为标准格式
+
+化学图操作还包括将生成的结构保存为标准分子文件格式的实用工具。`save_pdb_and_xtc`函数将采样的结构批次转换为PDB和XTC文件，用于可视化和进一步分析：`来源：[convert_chemgraph.py#L398-L461](src/bioemu/convert_chemgraph.py#L398-L461)`
+
+```python
+def save_pdb_and_xtc(
+    pos_nm: torch.Tensor,           # (batch_size, N, 3) 单位：nm
+    node_orientations: torch.Tensor,  # (batch_size, N, 3, 3)
+    sequence: str,
+    topology_path: str | Path,
+    xtc_path: str | Path,
+    filter_samples: bool = True,
+) -> None:
+    # 转换为埃单位并居中
+    pos_angstrom = pos_nm * 10.0
+    pos_angstrom = pos_angstrom - pos_angstrom.mean(axis=1, keepdims=True)
+    
+    # 将第一帧写入为PDB拓扑
+    _write_pdb(
+        pos=pos_angstrom[0],
+        node_orientations=node_orientations[0],
+        sequence=sequence,
+        filename=topology_path,
+    )
+    
+    # 将所有帧转换为atom37表示
+    xyz_angstrom = []
+    for i in range(batch_size):
+        atom_37, atom_37_mask, _ = get_atom37_from_frames(
+            pos=pos_angstrom[i], 
+            node_orientations=node_orientations[i], 
+            sequence=sequence
+        )
+        xyz_angstrom.append(atom_37.view(-1, 3)[atom_37_mask.flatten()].cpu().numpy())
+    
+    # 创建轨迹并保存为XTC
+    topology = mdtraj.load_topology(topology_path)
+    traj = mdtraj.Trajectory(xyz=np.stack(xyz_angstrom) * 0.1, topology=topology)
+    
+    if filter_samples:
+        traj = filter_unphysical_traj(traj)
+    
+    traj.save_xtc(xtc_path)
+```
+
+<CgxTip>
+`save_pdb_and_xtc`中的过滤步骤特别重要，因为它移除了可能具有不合理键长或空间位阻的非物理结构。这确保只有物理上合理的结构才会保存到输出文件中。
+</CgxTip>
+
+## 与采样流程的集成
+
+化学图是bioemu中结构生成流程的核心。采样过程使用化学图作为输入和输出表示，模型迭代地预测位置和朝向的更新：`来源：[sample.py#L219-L265](src/bioemu/sample.py#L219-L265)`
+
+```python
+def generate_batch(
+    score_model: torch.nn.Module,
+    sequence: str,
+    sdes: dict[str, SDE],
+    batch_size: int,
+    seed: int,
+    denoiser: Callable,
+    cache_embeds_dir: str | Path | None,
+    msa_file: str | Path | None = None,
+    msa_host_url: str | None = None,
+) -> dict[str, torch.Tensor]:
+    # 创建上下文化学图
+    context_chemgraph = get_context_chemgraph(
+        sequence=sequence,
+        cache_embeds_dir=cache_embeds_dir,
+        msa_file=msa_file,
+        msa_host_url=msa_host_url,
+    )
+    
+    # 创建用于处理的批次
+    context_batch = Batch.from_data_list([context_chemgraph] * batch_size)
+    
+    # 使用去噪过程采样结构
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    sampled_chemgraph_batch = denoiser(
+        sdes=sdes,
+        device=device,
+        batch=context_batch,
+        score_model=score_model,
+    )
+    
+    # 提取位置和朝向
+    sampled_chemgraphs = sampled_chemgraph_batch.to_data_list()
+    pos = torch.stack([x.pos for x in sampled_chemgraphs])
+    node_orientations = torch.stack([x.node_orientations for x in sampled_chemgraphs])
+    
+    return {"pos": pos, "node_orientations": node_orientations}
+```
+
+这种集成展示了化学图如何作为框架不同组件之间的接口，实现从序列处理到结构生成和输出的信息无缝流动。
+
+## 最佳实践和注意事项
+
+在bioemu中使用化学图时，有几个重要考虑因素需要牢记：
+
+1. **单位很重要**：框架内部计算使用纳米单位，但转换为埃单位用于PDB输出。处理位置数据时始终要注意单位。
+
+2. **内存效率**：对于大型蛋白质，化学图可能占用大量内存。框架会根据序列长度自动调整批次大小以管理内存使用。
+
+3. **验证**：框架包含验证函数来检查生成的结构是否物理合理，包括键长和空间位阻检查。
+
+4. **灵活性**：化学图表示设计为灵活的，允许轻松集成不同类型的结构模型和采样算法。
+
+bioemu中的化学图操作代表了蛋白质结构建模的一种复杂方法，结合了图神经网络的强大功能与蛋白质化学和几何学的领域特定知识。通过提供捕获序列和结构信息的统一表示，这些操作能够生成高质量的蛋白质结构，既尊重进化约束又符合物理现实。
+
+---
+
+- [深入探索/关键工作流程/结构采样与优化](https://zread.ai/microsoft/bioemu/9-structure-sampling-and-refinement)
+
+---
+slug:9-structure-sampling-and-refinement
+blog_type:normal
+---
+
+
+在蛋白质结构建模领域，从氨基酸序列生成准确的三维结构是一项复杂的挑战。BioEmu采用基于扩散模型的精密方法来解决这一问题，该方法逐步将随机噪声细化为逼真的蛋白质结构。本文将详细介绍使BioEmu成为生物分子结构建模强大工具的结构采样和优化过程。
+
+## 理解采样过程
+
+BioEmu中的结构采样是为给定蛋白质序列生成多个候选三维结构的过程。这就像艺术家从空白画布开始，逐步添加细节创作杰作——只不过这里的"艺术家"是一个精密的数学模型，能将随机噪声转化为物理上合理的蛋白质结构。
+
+采样过程首先从蛋白质序列生成嵌入表示，这些嵌入包含进化和结构信息。这些嵌入作为指导结构生成过程的"上下文"。系统随后使用**去噪扩散概率模型(DDPM)**，通过迭代方式将随机三维坐标细化为有意义的蛋白质结构。
+
+```python
+# 主采样函数
+def main(
+    sequence: str | Path,
+    num_samples: int,
+    output_dir: str | Path,
+    batch_size_100: int = 10,
+    model_name: Literal["bioemu-v1.0", "bioemu-v1.1"] | None = "bioemu-v1.1",
+    denoiser_type: SupportedDenoisersLiteral | None = "dpm",
+    filter_samples: bool = True,
+) -> None:
+```
+来源：[sample.py#L39-L53](src/bioemu/sample.py#L39-L53)
+
+### 采样流程的关键组件
+
+采样流程由多个协同工作的关键组件组成：
+
+1. **序列处理**：输入的蛋白质序列经过处理，使用ColabFold生成嵌入表示，该过程从多序列比对(MSAs)中捕获进化信息。
+
+2. **上下文创建**：这些嵌入被转换为化学图表示，作为结构生成的基础。
+
+3. **去噪过程**：使用DPM(扩散概率模型)或Heun求解器，系统通过迭代方式将随机三维坐标细化为逼真的蛋白质结构。
+
+4. **批处理**：为提高效率，多个样本以批处理方式生成，批大小根据序列长度自动调整。
+
+```python
+# 生成一批样本
+def generate_batch(
+    score_model: torch.nn.Module,
+    sequence: str,
+    sdes: dict[str, SDE],
+    batch_size: int,
+    seed: int,
+    denoiser: Callable,
+    cache_embeds_dir: str | Path | None,
+    msa_file: str | Path | None = None,
+    msa_host_url: str | None = None,
+) -> dict[str, torch.Tensor]:
+```
+来源：[sample.py#L219-L229](src/bioemu/sample.py#L219-L229)
+
+## 去噪过程
+
+BioEmu采样过程的核心是去噪机制，它将随机噪声转化为结构化的蛋白质构象。该过程基于**随机微分方程(SDEs)**，描述如何逐步从生成的结构中去除噪声。
+
+BioEmu提供两种主要的去噪算法：
+
+### 1. DPM求解器(扩散概率模型)
+
+DPM求解器是一种高效算法，使用二阶方法求解反向时间SDE。它特别适合BioEmu中使用的余弦噪声调度，在速度和质量之间提供了良好的平衡。
+
+```python
+def dpm_solver(
+    sdes: dict[str, SDE],
+    batch: Batch,
+    N: int,
+    score_model: torch.nn.Module,
+    max_t: float,
+    eps_t: float,
+    device: torch.device,
+    record_grad_steps: set[int] = set(),
+    noise: float = 0.0,
+) -> ChemGraph:
+```
+来源：[denoiser.py#L259-L269](src/bioemu/denoiser.py#L259-L269)
+
+### 2. Heun求解器
+
+Heun求解器是另一种可用于去噪的二阶方法。当需要对采样过程进行更多控制时，它特别有用，并能有效处理不同的噪声调度。
+
+```python
+def heun_denoiser(
+    *,
+    sdes: dict[str, SDE],
+    N: int,
+    eps_t: float,
+    max_t: float,
+    device: torch.device,
+    batch: Batch,
+    score_model: torch.nn.Module,
+    noise: float,
+) -> ChemGraph:
+```
+来源：[denoiser.py#L143-L153](src/bioemu/denoiser.py#L143-L153)
+
+### 理解BioEmu中的SDE
+
+随机微分方程(SDEs)构成了扩散过程的数学基础。BioEmu对位置使用**CosineVPSDE**(带余弦噪声调度的方差保持SDE)，对旋转使用专门的SDE(SO3SDE)。
+
+```python
+class CosineVPSDE(BaseVPSDE):
+    """带余弦噪声调度的方差保持SDE"""
+    
+    def __init__(self, s: float = 0.008):
+        self.s = s
+        self.c = np.cos(s / (1 + s) * np.pi / 2)
+    
+    def beta(self, t) -> torch.Tensor:
+        # 使用Song等人论文中的公式(29)从_marginal_mean_coeff推导
+        return torch.tan((t + self.s) / (1 + s) * np.pi / 2) * np.pi / (1 + self.s)
+```
+来源：[sde_lib.py#L156-L166](src/bioemu/sde_lib.py#L156-L166)
+
+余弦噪声调度提供了从噪声到结构的平滑过渡，有助于生成高质量的蛋白质构象。
+
+## 结构优化过程
+
+初始结构采样完成后，它们会经过优化过程以提高物理真实性并解决任何结构问题。该优化分为两个主要阶段：
+
+### 1. 侧链重建
+
+初始采样过程生成主链结构。侧链重建使用**HPacker**添加缺失的侧链原子，这是一个专门用于预测侧链构象的工具。
+
+```python
+def reconstruct_sidechains(traj: mdtraj.Trajectory) -> mdtraj.Trajectory:
+    """使用hpacker从仅主链样本重建侧链(丢弃CB原子)
+    
+    参考 https://github.com/gvisani/hpacker
+    
+    参数:
+        traj: 轨迹(多帧)
+    
+    返回:
+        重建侧链后的轨迹
+    """
+```
+来源：[sidechain_relax.py#L71-L81](src/bioemu/sidechain_relax.py#L71-L81)
+
+### 2. 分子动力学优化
+
+侧链重建后，结构经过分子动力学(MD)优化以解决空间位阻并提高整体结构质量。BioEmu提供两种MD协议：
+
+#### 局部最小化
+该协议仅执行局部能量最小化，速度快但只能解决原子碰撞等局部问题。
+
+```python
+class MDProtocol(str, Enum):
+    LOCAL_MINIMIZATION = "local_minimization"
+    MD_EQUIL = "md_equil"
+```
+来源：[sidechain_relax.py#L39-L42](src/bioemu/sidechain_relax.py#L39-L42)
+
+#### MD平衡
+这个更全面的协议包括能量最小化和约束MD平衡，可以解决更严重的结构问题。
+
+```python
+def run_one_md(
+    frame: mdtraj.Trajectory,
+    only_energy_minimization: bool = False,
+    simtime_ns_nvt_equil: float = 0.1,
+    simtime_ns_npt_equil: float = 0.4,
+    simtime_ns: float = 0.0,
+    outpath: str = ".",
+    file_prefix: str = "",
+) -> mdtraj.Trajectory:
+```
+来源：[sidechain_relax.py#L116-L124](src/bioemu/sidechain_relax.py#L116-L124)
+
+## 实用示例
+
+让我们通过一个实际示例来演示如何使用BioEmu的结构采样和优化功能：
+
+```python
+from bioemu.sample import main
+
+# 为蛋白质序列生成10个样本
+main(
+    sequence="ACDEFGHIKLMNPQRSTVWY",  # 您的蛋白质序列
+    num_samples=10,
+    output_dir="./output_samples",
+    model_name="bioemu-v1.1",
+    denoiser_type="dpm",
+    filter_samples=True
+)
+```
+
+这将：
+1. 使用ColabFold为序列生成嵌入表示
+2. 创建化学图表示
+3. 使用DPM求解器采样10个结构
+4. 将样本转换为PDB和XTC格式
+5. 过滤掉任何物理上不合理的样本
+
+<CgxTip>
+批大小根据序列长度自动调整以优化内存使用。对于较长序列，批大小会平方级减小以保持高效的GPU内存利用率。
+</CgxTip>
+
+## 理解输出
+
+采样完成后，BioEmu会生成几个输出文件：
+
+- **topology.pdb**：包含蛋白质拓扑信息
+- **samples.xtc**：包含所有采样结构的轨迹
+- **batch_*.npz**：包含原始采样坐标的中间文件
+- **sequence.fasta**：用于采样的输入序列
+
+优化过程还会生成：
+- **samples_sidechain_rec.pdb/xtc**：重建侧链后的结构
+- **samples_md_equil.pdb/xtc**：MD优化后的结构(如果启用)
+
+## 性能考虑
+
+使用结构采样和优化时，请牢记以下性能考虑因素：
+
+1. **序列长度**：较长序列需要更多计算资源。批大小自动按`(100/序列长度)^2`缩放。
+
+2. **GPU内存**：采样过程使用GPU加速。确保有足够的GPU内存处理您的序列。
+
+3. **去噪器选择**：DPM通常更快，而Heun在某些情况下可能提供稍好的质量。
+
+4. **优化**：侧链重建和MD优化可能耗时，特别是对于大量样本。
+
+```mermaid
+flowchart TD
+    A[蛋白质序列] --> B[生成MSA嵌入]
+    B --> C[创建化学图]
+    C --> D[初始化随机坐标]
+    D --> E[去噪过程]
+    E --> F{去噪器类型?}
+    F -->|DPM| G[DPM求解器]
+    F -->|Heun| H[Heun求解器]
+    G --> I[采样结构]
+    H --> I
+    I --> J[侧链重建]
+    J --> K[MD优化]
+    K --> L[最终结构]
+```
+
+## 常见问题排查
+
+使用结构采样和优化时，可能会遇到一些常见问题：
+
+### 内存问题
+如果遇到GPU内存问题，尝试减小`batch_size_100`参数或使用较短序列。
+
+### 采样质量
+如果采样结构看起来不真实，确保使用最新模型版本(`bioemu-v1.1`)，并考虑增加采样数量。
+
+### 优化失败
+某些结构可能因严重空间位阻而在MD优化过程中失败。这是正常现象——系统会跳过有问题的样本并继续处理其余样本。
+
+## 结论
+
+BioEmu中的结构采样和优化代表了蛋白质结构建模的强大方法。通过结合先进的扩散模型和精密的优化技术，BioEmu能够从氨基酸序列生成高质量的蛋白质结构。无论您是探索蛋白质折叠的研究人员，还是构建结构预测工具的开发人员，理解这一采样和优化流程对于充分发挥BioEmu的潜力都至关重要。
+
+采样过程的模块化设计提供了灵活性和可定制性，而自动优化确保最终结构物理真实，适用于药物发现或蛋白质工程等下游应用。
+
+---
+
+- [深入探索/模型训练与定制](https://zread.ai/microsoft/bioemu/10-training-and-customizing-models)
+
+---
+slug:10-training-and-customizing-models
+blog_type:normal
+---
+
+
+在BioEmu中训练和定制蛋白质结构模型需要理解该框架的架构、损失函数和配置选项。本指南将带您了解核心组件，并提供训练自定义模型的实用示例。
+
+## 理解训练框架
+
+BioEmu实现了基于3D蛋白质结构扩散模型的复杂训练流程。训练过程的核心是最小化一个专门评估蛋白质折叠度的损失函数——该指标衡量蛋白质结构与其天然构象的匹配程度。
+
+核心训练基础设施围绕两个主要组件构建：
+
+1. **损失计算**（`src/bioemu/training/loss.py`）：实现指导模型训练的PPFT（蛋白质折叠分数目标）损失函数
+2. **折叠度评估**（`src/bioemu/training/foldedness.py`）：计算预测结构与参考接触的匹配程度
+
+来源：[loss.py#L18-L64](src/bioemu/training/loss.py#L18-L64), [foldedness.py#L24-L40](src/bioemu/training/foldedness.py#L24-L40)
+
+## PPFT损失函数
+
+PPFT损失是BioEmu训练的基石。它通过比较蛋白质结构的折叠度与目标值来优化结构。其工作原理如下：
+
+```python
+def calc_ppft_loss(
+    *,
+    score_model: torch.nn.Module,
+    sdes: dict[str, SDE],
+    batch: list[ChemGraph],
+    n_replications: int,
+    mid_t: float,
+    N_rollout: int,
+    record_grad_steps: set[int],
+    reference_info_lookup: dict[str, ReferenceInfo],
+    target_info_lookup: dict[str, TargetInfo],
+) -> torch.Tensor:
+```
+
+该损失函数执行以下关键步骤：
+1. 通过快速展开过程生成多个结构样本
+2. 通过与参考接触对比计算每个样本的折叠度
+3. 估算平均折叠度与目标折叠度之间的平方误差
+
+<CgxTip>
+PPFT损失采用巧妙的数学技巧计算平方误差的无偏估计，无需显式计算均值，从而提高训练效率。
+</CgxTip>
+
+来源：[loss.py#L18-L64](src/bioemu/training/loss.py#L18-L64), [loss.py#L130-L167](src/bioemu/training/loss.py#L130-L167)
+
+## 模型架构
+
+BioEmu采用名为`DistributionalGraphormer`的复杂神经网络架构预测蛋白质结构。该模型设计为对旋转和平移具有等变性——这是3D结构预测的关键特性。
+
+主要模型组件包括：
+
+1. **SinusoidalPositionEmbedder**：将扩散时间步编码为嵌入向量
+2. **RelativePositionBias**：捕获残基间的序列距离信息
+3. **StructureModule**：使用注意力机制处理3D结构信息
+
+```python
+class DistributionalGraphormer(nn.Module):
+    def __init__(
+        self,
+        dim_model: int = 512,
+        dim_pair: int = 256,
+        num_layers: int = 8,
+        num_heads: int = 32,
+        dim_single_rep: int = 64,
+        dim_hidden: int = 1024,
+        num_buckets: int = 64,
+        max_distance_relative: int = 128,
+        dropout: float = 0.1,
+    ):
+```
+
+该模型接收含噪蛋白质结构并预测"分数"——本质上是调整每个原子位置以趋向更接近天然构象的方向和幅度。
+
+来源：[models.py#L148-L185](src/bioemu/models.py#L148-L185), [models.py#L326-L346](src/bioemu/models.py#L326-L346)
+
+## 训练配置
+
+训练通过YAML配置文件控制，这些文件指定去噪过程的参数。框架支持不同的采样策略：
+
+```yaml
+# DPM求解器配置
+_target_: bioemu.shortcuts.dpm_solver
+_partial_: true
+eps_t: 0.001
+max_t: 0.99
+N: 50
+noise: 0.0
+```
+
+关键参数包括：
+- `eps_t`：最小噪声水平（去噪起点）
+- `max_t`：最大噪声水平（去噪终点）
+- `N`：去噪步数
+- `noise`：采样过程中添加的额外噪声
+
+来源：[dpm.yaml](src/bioemu/config/denoiser/dpm.yaml)
+
+## 自定义模型训练
+
+要训练自定义模型，您需要：
+
+1. **准备数据**：将蛋白质结构转换为带序列嵌入的ChemGraph格式
+2. **设置参考信息**：定义接触图和目标折叠度值
+3. **配置训练参数**：调整损失函数参数和模型超参数
+
+以下是设置训练的简化示例：
+
+```python
+from bioemu.training.loss import calc_ppft_loss
+from bioemu.models import DiGConditionalScoreModel
+from bioemu.training.foldedness import ReferenceInfo, TargetInfo
+
+# 初始化模型
+model = DiGConditionalScoreModel(
+    dim_model=512,
+    num_layers=8,
+    num_heads=32
+)
+
+# 设置参考和目标信息
+reference_info = ReferenceInfo(
+    contact_indices=contact_indices,
+    contact_distances_angstrom=contact_distances,
+    sequence=protein_sequence
+)
+
+target_info = TargetInfo(
+    p_fold_thr=0.7,  # 折叠度=0.5时的FNC阈值
+    steepness=10.0,   # sigmoid函数的陡峭度
+    p_fold_target=0.8 # 目标折叠度
+)
+
+# 计算损失
+loss = calc_ppft_loss(
+    score_model=model,
+    sdes=sde_dict,
+    batch=protein_batch,
+    n_replications=4,
+    mid_t=0.5,
+    N_rollout=20,
+    record_grad_steps={10, 15},
+    reference_info_lookup={"protein1": reference_info},
+    target_info_lookup={"protein1": target_info}
+)
+```
+
+来源：[loss.py#L18-L29](src/bioemu/training/loss.py#L18-L29), [foldedness.py#L24-L40](src/bioemu/training/foldedness.py#L24-L40)
+
+## 高级定制
+
+进行更高级的定制时，您可以修改：
+
+1. **损失函数组件**：调整折叠度计算方式或接触评分方式
+2. **模型架构**：更改层数、注意力头数或嵌入维度
+3. **训练计划**：修改噪声计划或展开过程
+
+折叠度计算使用sigmoid函数将天然接触比例（FNC）转换为折叠度分数：
+
+```python
+def foldedness_from_fnc(fnc: torch.Tensor, p_fold_thr: float, steepness: float) -> torch.Tensor:
+    return torch.sigmoid(2 * steepness * (fnc - p_fold_thr))
+```
+
+您可以调整`p_fold_thr`和`steepness`参数来控制模型评估蛋白质结构的严格程度。
+
+来源：[foldedness.py#L58-L70](src/bioemu/training/foldedness.py#L58-L70), [foldedness.py#L143-L167](src/bioemu/training/foldedness.py#L143-L167)
+
+## 训练最佳实践
+
+训练自定义模型时，请牢记以下最佳实践：
+
+1. **从预训练模型开始**：对现有模型进行微调而非从头训练
+2. **监控折叠度指标**：训练期间同时跟踪FNC和折叠度
+3. **使用适当的批次大小**：平衡内存使用与训练稳定性
+4. **调整学习率**：蛋白质结构训练通常需要仔细的学习率调度
+5. **在多样化结构上验证**：确保模型在不同蛋白质折叠类型上具有泛化能力
+
+该训练框架在保持蛋白质结构预测所需数学严谨性的同时，兼顾了灵活性。通过理解核心组件并遵循这些指南，您可以有效地训练和定制模型，以满足特定的蛋白质结构预测需求。
+
+---
+
+- [深入探索/分子动力学工具](https://zread.ai/microsoft/bioemu/11-molecular-dynamics-utilities)
+
+---
+slug:11-molecular-dynamics-utilities
+blog_type:normal
+---
+
+
+分子动力学（MD）模拟在优化和验证BioEmu等AI模型生成的蛋白质结构方面发挥着关键作用。BioEmu中的MD工具包为预测蛋白质结构的能量最小化、平衡和自由动力学模拟提供了全面的工具集。这些工具有助于确保生成的结构在现实条件下具有物理合理性和稳定性。
+
+## 分子动力学在蛋白质结构预测中的重要性
+
+AI模型预测的蛋白质结构可能存在细微的物理不一致性，如原子碰撞、扭曲的键角或能量不利的构象。**MD模拟**通过以下方式解决这些问题：
+
+1. 通过能量最小化松弛紧张的几何结构
+2. 在含有显式水分子的溶剂化环境中平衡结构
+3. 提供物理上现实的途径来优化侧链和主链构象
+4. 通过自由动力学模拟评估结构稳定性
+
+BioEmu的MD工具包专门设计用于处理从头蛋白质结构预测的独特挑战，这些预测可能与实验确定的结构相差甚远。
+
+## 核心MD组件
+
+BioEmu中的分子动力学工具包建立在几个关键组件之上，这些组件协同工作以创建完整的优化流程。
+
+### 系统准备
+
+在运行任何MD模拟之前，必须正确准备蛋白质结构。`md_utils.py`中的`_prepare_system`函数处理这个关键的准备阶段：
+
+```python
+def _prepare_system(
+    frame: mdtraj.Trajectory, padding_nm: float = 1.0
+) -> tuple[mm.System, app.Modeller]:
+    # 如果缺少OXT原子，将其添加到C端
+    topology, positions = _add_oxt_to_terminus(frame.top.to_openmm(), frame.xyz[0] * u.nanometers)
+    
+    # 添加氢原子并创建建模器
+    modeller = app.Modeller(topology, positions)
+    modeller.addHydrogens()
+    
+    # 添加溶剂和离子
+    forcefield = app.ForceField("amber99sb.xml", "tip3p.xml")
+    modeller.addSolvent(forcefield, padding=padding_nm * u.nanometers, ionicStrength=0.1 * u.molar)
+```
+
+此函数执行几个基本准备步骤：
+- 使用启发式方法向蛋白质C端添加缺失的OXT原子
+- 向结构添加氢原子（预测中通常缺失）
+- 在具有适当填充的水盒中溶剂化蛋白质
+- 添加离子以中和系统并达到生理离子强度
+
+该系统使用**amber99sb**蛋白质力场和**TIP3P**水模型，这些都是以其准确性和稳定性而闻名的成熟生物分子力场。
+
+来源：[md_utils.py#L78-L114](src/bioemu/md_utils.py#L78-L114), [md_utils.py#L16-L59](repos/microsoft/bicrosoft/bioemu/src/bioemu/md_utils.py#L16-L59)
+
+### 平衡方案
+
+MD工具包中最复杂的组件之一是在`_do_equilibration`中实现的平衡方案。此函数专门设计用于处理可能远离平衡的结构：
+
+```python
+def _do_equilibration(
+    simulation: app.Simulation,
+    integrator: mm.Integrator,
+    init_timesteps_ps: list[float],
+    integrator_timestep_ps: float,
+    simtime_ns_nvt_equil: float,
+    simtime_ns_npt_equil: float,
+    temperature_K: u.Quantity,
+) -> None:
+```
+
+平衡方案采用**多阶段方法**：
+
+1. **时间步长递增**：从非常小的时间步长（飞秒）开始，逐渐增加到目标时间步长
+2. **NVT平衡**：在恒定体积和温度下平衡系统，具有高摩擦力
+3. **NPT平衡**：在恒定压力和温度下平衡系统，具有正常摩擦力
+
+以下Mermaid图表说明了平衡工作流程：
+
+```mermaid
+flowchart TD
+    A[初始结构] --> B[添加OXT原子]
+    B --> C[添加氢原子]
+    C --> D[溶剂化蛋白质]
+    D --> E[设置约束]
+    E --> F[时间步长递增]
+    F --> G[NVT平衡<br/>恒定体积和温度]
+    G --> H[NPT平衡<br/>恒定压力和温度]
+    H --> I[平衡结构]
+```
+
+这种方法对BioEmu生成的结构特别有价值，这些结构可能包含显著的空间位阻或能量不利的构象，这些构象会导致传统MD设置失败。
+
+来源：[md_utils.py#L143-L196](src/bioemu/md_utils.py#L143-L196)
+
+### 主链约束
+
+BioEmu MD工具包中的一个关键创新是在优化过程中使用**主链约束**。`_add_constraint_force`函数在主链原子上实现谐波约束：
+
+```python
+def _add_constraint_force(system: mm.System, modeller: app.Modeller, k: float) -> int:
+    force = mm.CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
+    force.addGlobalParameter("k", k)
+    
+    for atom in modeller.topology.atoms():
+        if atom.name in ("C", "CA", "N", "O"):
+            force.addParticle(atom.index, modeller.positions[atom.index])
+    
+    return system.addForce(force)
+```
+
+这些约束具有关键作用：它们在允许侧链和局部主链段松弛的同时保持蛋白质的整体折叠。这很重要，因为BioEmu的预测通常代表有意义的蛋白质折叠，在优化过程中不应被根本改变。
+
+约束力使用具有可调力常数（k）的**谐波势**，允许受控松弛。在初始平衡后，这些约束可以逐渐减少并移除，以允许自由MD模拟。
+
+来源：[md_utils.py#L117-L140](src/bioemu/md_utils.py#L117-L140), [md_utils.py#L198-L219](src/bioemu/md_utils.py#L198-L219)
+
+## MD优化工作流程
+
+BioEmu通过`sidechain_relax.py`模块提供两种主要的MD优化工作流程，该模块将MD工具编排成实用的工作流程。
+
+### 侧链重建
+
+在MD优化开始之前，预测的主链结构需要完整的侧链。`reconstruct_sidechains`函数与**HPacker**集成，这是一个专门用于侧链重建的工具：
+
+```python
+def reconstruct_sidechains(traj: mdtraj.Trajectory) -> mdtraj.Trajectory:
+    # 提取主链原子
+    traj_bb = traj.atom_slice(traj.top.select("backbone"))
+    
+    # 逐帧重建侧链
+    for n, frame in enumerate(traj_bb):
+        protein_pdb_in = os.path.join(tmp, f"frame_{n}_bb.pdb")
+        protein_pdb_out = os.path.join(tmp, f"frame_{n}_heavyatom.pdb")
+        frame.save_pdb(protein_pdb_in)
+        _run_hpacker(protein_pdb_in, protein_pdb_out)
+```
+
+这个过程至关重要，因为BioEmu与许多结构预测模型一样，可能生成侧链不完整或缺失的结构。HPacker预测适合主链结构的最佳侧链构象（旋转异构体）。
+
+<CgxTip>
+侧链重建必须在MD模拟之前执行。MD工具要求输入结构具有完整的侧链，以正确评估能量和空间位阻。
+</CgxTip>
+
+来源：[sidechain_relax.py#L71-L113](src/bioemu/sidechain_relax.py#L71-L113)
+
+### MD优化选项
+
+BioEmu提供在`run_one_md`中实现的两种主要优化方案：
+
+#### 1. 局部最小化（快速）
+
+```python
+equil_frame = run_one_md(
+    frame,
+    only_energy_minimization=True,  # 仅执行能量最小化
+    simtime_ns_nvt_equil=0.0,
+    simtime_ns_npt_equil=0.0,
+    simtime_ns=0.0
+)
+```
+
+此方案：
+- 仅运行局部能量最小化
+- 需要几秒钟完成
+- 主要解决原子碰撞和明显的空间位阻问题
+- 保持整体主链结构，变化最小
+
+#### 2. 完全平衡（全面）
+
+```python
+equil_frame = run_one_md(
+    frame,
+    only_energy_minimization=False,
+    simtime_ns_nvt_equil=0.1,  # 0.1 ns NVT平衡
+    simtime_ns_npt_equil=0.4,  # 0.4 ns NPT平衡
+    simtime_ns=10.0             # 10 ns自由MD（可选）
+)
+```
+
+这个全面方案：
+- 执行能量最小化，然后进行真正的MD平衡
+- 模拟溶剂效应和热运动
+- 可以在初始平衡后包括无约束MD
+- 根据系统大小和模拟时间，需要几分钟到几小时
+
+全面方案的**标准参数**经过精心调整：
+- 时间步长：0.001 ps（1 fs）
+- 温度：300 K
+- 约束力常数：1000 kJ/mol/nm²
+- NVT平衡：0.1 ns
+- NPT平衡：0.4 ns
+
+来源：[sidechain_relax.py#L116-L208](src/bioemu/sidechain_relax.py#L116-L208), [sidechain_relax.py#L252-L306](src/bioemu/sidechain_relax.py#L252-L306)
+
+## 实际使用
+
+### 命令行界面
+
+MD工具包可以通过命令行界面访问：
+
+```bash
+python -m bioemu.sidechain_relax \
+    --xtc-path samples.xtc \
+    --pdb-path topology.pdb \
+    --md-equil \
+    --md-protocol md_equil \
+    --simtime-ns 10.0 \
+    --outpath results \
+    --prefix refined
+```
+
+此命令：
+- 接受输入轨迹和拓扑
+- 重建侧链
+- 运行MD平衡
+- 如果需要，执行自由MD模拟
+- 输出优化后的结构
+
+### Python API集成
+
+为了集成到分析流程中，可以直接调用MD工具：
+
+```python
+from bioemu.sidechain_relax import reconstruct_sidechains, run_one_md
+import mdtraj
+
+# 加载预测结构
+traj = mdtraj.load('prediction.xtc', top='topology.pdb')
+
+# 重建侧链
+with_sidechains = reconstruct_sidechains(traj)
+
+# 在每一帧上运行MD优化
+refined_trajs = []
+for frame in with_sidechains:
+    refined_frame = run_one_md(
+        frame,
+        only_energy_minimization=False,
+        simtime_ns_nvt_equil=0.1,
+        simtime_ns_npt_equil=0.4
+    )
+    refined_trajs.append(refined_frame)
+
+# 合并结果
+final_result = mdtraj.join(refined_trajs)
+```
+
+来源：[sidechain_relax.py#L252-L306](src/bioemu/sidechain_relax.py#L252-L306)
+
+## 性能考虑
+
+MD工具包的设计兼顾了准确性和性能：
+
+### 硬件加速
+
+代码在可用时自动检测并使用CUDA加速：
+
+```python
+try:
+    platform = mm.Platform.getPlatformByName("CUDA")
+    logger.debug("simulation uses CUDA platform")
+except Exception:
+    # 回退到默认
+    platform = None
+    logger.warning("Cannot find CUDA platform. Simulation might be slow.")
+```
+
+**GPU加速**可以为典型蛋白质系统提供10-100倍的加速，使其成为实际工作流程的必需品。
+
+### 内存和时间要求
+
+| 方案 | 典型运行时间 | 用例 |
+|----------|-----------------|----------|
+| 局部最小化 | 秒 | 快速去除碰撞 |
+| 短时平衡 | 1-5分钟 | 基本优化 |
+| 完全平衡+自由MD | 5-60分钟 | 全面优化 |
+| 长时自由MD | 数小时+ | 稳定性评估 |
+
+<CgxTip>
+对于大规模处理多个结构，考虑首先使用局部最小化方案。它能快速解决最严重的问题，并在投入更长的MD模拟之前筛选出有问题的结构。
+</CgxTip>
+
+来源：[sidechain_relax.py#L158-L165](src/bioemu/sidechain_relax.py#L158-L165), [sidechain_relax.py#L142-L148](src/bioemu/sidechain_relax.py#L142-L148)
+
+## 与BioEmu工作流程的集成
+
+MD工具包设计为无缝融入BioEmu的结构预测和优化流程：
+
+1. **结构生成**：BioEmu生成蛋白质主链结构
+2. **侧链重建**：HPacker添加完整侧链
+3. **MD优化**：MD工具松弛和优化结构
+4. **质量评估**：可以评估优化后结构的稳定性和质量
+
+这种集成方法确保预测的结构不仅根据AI模型是合理的，而且在分子动力学模拟下也是**物理现实**和稳定的。
+
+MD工具作为纯统计预测和物理现实模型之间的关键桥梁，能够生成既具有生物学意义又化学合理的蛋白质结构。
+
+---
+
+- [深入探索/外部工具集成](https://zread.ai/microsoft/bioemu/12-integration-with-external-tools)
+
+---
+slug:12-integration-with-external-tools
+blog_type:normal
+---
+
+
+BioEmu 并非独立运行——它利用了多个强大的外部工具来增强其生物分子结构建模能力。这些集成功能从序列嵌入生成到侧链重建和分子动力学精修，为蛋白质结构分析创建了一个完整的流程。
+
+## 集成理念
+
+BioEmu 被设计为一个模块化框架，它**无缝集成专业工具**而非重新开发现有解决方案。这种方法使 BioEmu 能够专注于其核心优势——生成多样化的蛋白质构象，同时依赖成熟的外部工具来处理补充任务。这些集成经过精心管理，既最小化了用户开销，又为高级用例保持了灵活性。
+
+<CgxTip>
+BioEmu 中的所有外部工具集成都设计为开箱即用，并提供合理的默认设置，同时也为有特定需求或专业硬件配置的用户提供了配置选项。
+</CgxTip>
+
+## 与 ColabFold 集成生成序列嵌入
+
+BioEmu 与 **ColabFold** 集成以生成多序列比对（MSA）和序列嵌入，这些是准确结构预测的关键输入。当您首次使用 BioEmu 进行结构采样时，此集成会自动进行。
+
+```python
+# BioEmu 自动处理 ColabFold 设置
+from bioemu.sample import main as sample
+sample(sequence='GYDPETGTWG', num_samples=10, output_dir='./results')
+```
+
+集成过程遵循以下步骤：
+
+1. **环境设置**：BioEmu 创建一个独立的虚拟环境（默认：`~/.bioemu_colabfold`）来隔离 ColabFold 依赖项
+2. **依赖安装**：安装特定 CUDA 兼容版本的 ColabFold 以确保 GPU 加速
+3. **补丁应用**：对 ColabFold 模块应用针对性补丁以确保与 BioEmu 要求的兼容性
+4. **嵌入生成**：使用 ColabFold 的 MSA 生成功能创建序列嵌入
+
+设置脚本处理复杂的依赖管理，包括 ColabFold 所需的特定 CUDA 库版本。此自动设置在首次使用时进行，无需用户手动干预。
+
+来源：[get_embeds.py#L19-L21](src/bioemu/get_embeds.py#L19-L21), [colabfold_setup/setup.sh](src/bioemu/colabfold_setup/setup.sh)
+
+## 与 HPacker 集成进行侧链重建
+
+由于 BioEmu 生成主链结构，它需要一种机制来添加侧链。该框架与 **HPacker**（一个专门用于侧链重建的工具）集成，将仅含主链的结构转换为完整的原子模型。
+
+HPacker 集成涉及两个主要组件：
+
+### 设置和安装
+
+BioEmu 为 HPacker 提供了专门的设置过程，处理 conda 环境管理：
+
+```python
+from bioemu.hpacker_setup.setup_hpacker import ensure_hpacker_install
+
+# 确保 HPacker 在独立的 conda 环境中正确安装
+ensure_hpacker_install(envname="hpacker", repo_dir="~/.hpacker")
+```
+
+设置过程：
+1. 从 GitHub 克隆 HPacker 仓库
+2. 创建专用的 conda 环境
+3. 根据 HPacker 的环境规范安装依赖项
+4. 执行可编辑安装以确保顺利集成
+
+### 侧链重建执行
+
+对于实际的重建过程，BioEmu 在其隔离环境中执行 HPacker：
+
+```python
+from bioemu.sidechain_relax import reconstruct_sidechains
+import mdtraj
+
+# 加载仅含主链的轨迹
+backbone_traj = mdtraj.load('samples.xtc', top='topology.pdb')
+
+# 重建侧链
+full_atom_traj = reconstruct_sidechains(backbone_traj)
+```
+
+重建过程高效处理多个轨迹帧，使用临时目录进行中间处理，并提供强大的错误处理来管理拓扑变化。
+
+来源：[setup_hpacker.py](src/bioemu/hpacker_setup/setup_hpacker.py), [run_hpacker.py](src/bioemu/run_hpacker.py), [sidechain_relax.py#L71-L113](src/bioemu/sidechain_relax.py#L71-L113)
+
+## 与 OpenMM 集成进行分子动力学精修
+
+BioEmu 与 **OpenMM**（一个高性能分子模拟工具包）集成，为生成的结构提供能量最小化和分子动力学精修。此集成有助于确保预测的结构在物理上是合理的且能量上有利的。
+
+BioEmu 中的分子动力学工具提供几个关键功能：
+
+```python
+from bioemu.sidechain_relax import run_one_md
+import mdtraj
+
+# 加载用于 MD 精修的结构
+structure = mdtraj.load('reconstructed.pdb')
+
+# 运行包含能量最小化和平衡的 MD 协议
+refined_structure = run_one_md(
+    frame=structure,
+    only_energy_minimization=False,
+    simtime_ns_nvt_equil=0.1,
+    simtime_ns_npt_equil=0.4,
+    simtime_ns=1.0
+)
+```
+
+MD 集成包括：
+
+1. **系统准备**：添加缺失原子、溶剂化系统并设置力场（AMBER99sb 配合 TIP3P 水）
+2. **约束管理**：应用主链约束以保持整体结构，同时允许局部松弛
+3. **渐进式平衡**：使用分阶段方法，逐步增加时间步长并采用不同的系综条件（先 NVT 后 NPT）
+4. **硬件加速**：在可用时自动检测并使用 CUDA 平台
+
+该集成特别设计用于处理可能远离平衡的结构，使用专门协议温和地松弛系统而不会引起大的结构偏差。
+
+来源：[md_utils.py](src/bioemu/md_utils.py), [sidechain_relax.py#L116-L200](src/bioemu/sidechain_relax.py#L116-L200)
+
+## OpenFold 工具集成
+
+BioEmu 融合了 **OpenFold**（AlphaFold 的开源实现）中的精选工具来处理几何变换和刚体操作。BioEmu 直接包含特定的实用函数，而非要求完整的 OpenFold 安装：
+
+```python
+from bioemu.openfold.utils.rigid_utils import quat_to_rot, rot_vec_mul
+
+# 将四元数转换为旋转矩阵
+rotation_matrix = quat_to_rot(quaternion)
+
+# 对坐标应用旋转
+rotated_coords = rot_vec_mul(rotation_matrix, coordinates)
+```
+
+集成包括：
+- **旋转操作**：高效的四元数到旋转矩阵转换
+- **向量变换**：坐标向量的刚体变换
+- **恒等操作**：为参考系生成恒等变换
+
+这种选择性集成方法避免了安装复杂性，同时提供了 BioEmu 进行结构操作所需的基本几何运算。
+
+来源：[openfold/utils/rigid_utils.py](src/bioemu/openfold/utils/rigid_utils.py)
+
+## 集成架构和工作流程
+
+BioEmu 中的外部工具集成遵循精心设计的架构，确保顺畅的互操作性：
+
+```mermaid
+flowchart TD
+    A[BioEmu 核心] --> B[ColabFold 集成]
+    A --> C[HPacker 集成]
+    A --> D[OpenMM 集成]
+    A --> E[OpenFold 工具]
+    
+    B --> F[MSA 生成]
+    B --> G[嵌入创建]
+    
+    C --> H[侧链重建]
+    
+    D --> I[系统准备]
+    D --> J[能量最小化]
+    D --> K[MD 平衡]
+    
+    E --> L[刚体变换]
+    
+    F --> M[结构采样]
+    G --> M
+    H --> N[结构精修]
+    I --> N
+    J --> N
+    K --> N
+    L --> M
+```
+
+该架构实现了从序列到精修结构的完整工作流程：
+
+1. **输入处理**：ColabFold 从输入序列生成 MSA 和嵌入
+2. **结构生成**：BioEmu 使用嵌入采样主链构象
+3. **侧链重建**：HPacker 向主链结构添加原子细节
+4. **精修**：OpenMM 执行能量最小化和 MD 平衡
+
+在整个工作流程中，OpenFold 工具提供坐标操作所需的几何变换。
+
+<CgxTip>
+集成架构设计为模块化——如果您不需要完整流程，可以独立使用各个组件。例如，您可以使用 BioEmu 进行采样，但提供自己的侧链重建方法。
+</CgxTip>
+
+## 配置和自定义
+
+BioEmu 提供了多种自定义外部工具集成的方法：
+
+### 环境配置
+大多数工具可以通过环境变量配置：
+
+```bash
+# 自定义 ColabFold 安装位置
+export BIOEMU_COLABFOLD_DIR="/custom/colabfold/path"
+
+# 自定义 HPacker 环境
+export HPACKER_ENV_NAME="custom_hpacker_env"
+export HPACKER_REPO_DIR="/custom/hpacker/repo"
+export HPACKER_PYTHONBIN="/custom/python/path"
+```
+
+### 协议参数
+MD 和重建协议暴露了众多参数：
+
+```python
+# 自定义 MD 协议
+refined_structure = run_one_md(
+    frame=structure,
+    simtime_ns_nvt_equil=0.2,  # 更长的 NVT 平衡
+    simtime_ns_npt_equil=0.8,  # 更长的 NPT 平衡
+    temperature_K=310.0,       # 更高温度
+    simtime_ns=5.0             # 更长的生产 MD
+)
+```
+
+### 工具版本
+BioEmu 固定了外部工具的特定版本以确保可重复性，但高级用户可以在需要时修改设置脚本中的版本。
+
+来源：[sidechain_relax.py#L35-L36](src/bioemu/sidechain_relax.py#L35-L36), [hpacker_setup/setup_hpacker.py#L10-L11](src/bioemu/hpacker_setup/setup_hpacker.py#L10-L11)
+
+## 集成使用的最佳实践
+
+使用 BioEmu 的外部工具集成时，请考虑这些最佳实践：
+
+1. **首次设置**：为初始设置分配充足时间，特别是对于 ColabFold 和 HPacker，它们需要下载和安装大型依赖项
+2. **资源管理**：某些集成（特别是 MD 模拟）可能消耗大量资源——监控内存使用情况，并考虑对大型数据集进行批处理
+3. **错误处理**：集成包含了强大的错误处理，但网络问题或缺失依赖项仍可能导致问题——检查日志以获取详细诊断信息
+4. **版本一致性**：除非有特定升级理由，否则保持与外部工具固定版本的一致性
+
+## 常见问题故障排除
+
+### 安装失败
+如果外部工具设置失败：
+
+```bash
+# 检查 conda 是否正确安装且可访问
+conda --version
+
+# 验证 CUDA 驱动程序（如果使用 GPU 加速）
+nvidia-smi
+
+# 检查可用磁盘空间（ColabFold 需要几个 GB）
+df -h
+```
+
+### 运行时错误
+针对特定集成的错误：
+
+1. **ColabFold**：确保 MSA 生成时的网络连接
+2. **HPacker**：验证 conda 环境是否存在且正确激活
+3. **OpenMM**：检查 GPU 兼容性和 CUDA 加速的驱动程序版本
+4. **OpenFold**：这些是包含的工具，不需要单独设置
+
+### 性能优化
+要提高集成性能：
+
+1. 在可用时使用 GPU 加速（特别是 OpenMM 和 ColabFold）
+2. 调整批量大小以处理多个结构
+3. 在不需要高精度时考虑使用更快的 MD 协议
+4. 监控内存使用情况并相应调整参数
+
+外部工具集成使 BioEmu 成为蛋白质结构建模的综合解决方案，将最先进的生成能力与成熟的精修和分析工具相结合。通过理解这些集成，您可以充分利用 BioEmu 生态系统进行生物分子研究。
+
+---
