@@ -12,7 +12,7 @@
 > The figure above was adapted from paper [StructureDistiller: Structural relevance scoring identifies the most informative entries of a contact map](https://www.nature.com/articles/s41598-019-55047-4)
 
 
-A curated collection of computational tools for `intermolecular interaction prediction`. For any input number of polypeptide chains(≥2), each method outputs a `two-dimensional inter-chain residue-residue interaction matrix` encoding pairwise contact probabilities or predicted inter-residue distances. Methods are organized by their capability to generate full residue-pair interaction/contact maps, rather than by domain labels (e.g., PPI prediction vs. structure prediction).
+A curated collection of computational tools for `intermolecular interaction prediction`. For any input number of polypeptide chains(≥2), each method outputs a `two-dimensional inter-chain residue-residue interaction matrix` encoding pairwise contact probabilities or predicted inter-residue distances. Methods are organized by their capability to generate full residue-pair interaction/contact maps, rather than by domain labels (e.g., PPI prediction vs. structure prediction, DL vs docking/physics).
 
 > **⚠️ Admission criteria:** A tool must produce `a complete 2D matrix across all residue pairs`, with values corresponding to contact probabilities or predicted inter-residue distances. Tools that output only per-residue binding-site scalar scores — without explicit residue-pair coupling information — are excluded from the main track and may only be presented as low-resolution baselines.
 
@@ -34,9 +34,9 @@ A curated collection of computational tools for `intermolecular interaction pred
 ## Models & Tools
 
 > All tools are grouped by whether they can output a complete residue-pair interaction matrix (an L1×L2 map of contact probabilities / distances):
-> - **A · Structure-based** — predicts a structure / conformational ensemble, then extracts the map.
+> - **A · Structure-based** — predicts a structure / conformational ensemble (via deep-learning prediction, docking, or MD simulation), then extracts the map.
 > - **B · Sequence-based** — sequence (+ optional MSA / embeddings) → L1×L2 contact map directly; no 3D structure needed.
-> - **C · IDR-specific** — designed for IDRs / fuzzy complexes.
+> - **C · IDR-specific** — methods designed for IDRs / fuzzy complexes that don't output a full structure/ensemble-based map (e.g. binding-site baselines).
 
 ### A. Structure-based 
 
