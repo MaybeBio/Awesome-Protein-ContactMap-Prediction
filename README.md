@@ -357,7 +357,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 > Extraction: ensemble contact frequency — how often residue pair (i, j) falls within the threshold across the ensemble.
 >
-> Primarily designed for IDR tasks.
+> Primarily designed for IDR tasks. 
 
 --- 
 
@@ -449,6 +449,18 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **For IDR**
 </details>
 
+---
+
+
+<details>
+<summary>IDPForge</summary>
+
+- **Paper:** [IDPForge: Deep Learning of Proteins with Global and Local Regions of Disorder](https://www.biorxiv.org/content/10.64898/2026.03.25.714313v2) (bioRxiv, 2026)
+- **Docs:** [Read more →](docs/IDPForge/) *to be written*
+- **Code:** https://github.com/THGLab/IDPForge
+- **Approach:** DL
+- **For IDR**
+</details>
 
 <!-- More idr ensemble placeholders can be added here -->
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
@@ -659,7 +671,7 @@ Type tags used in this repo:
 
 Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to flag "known but not yet filled" entries and "empty niches to be added".
 
-- [ ] Add TIMELINE graph for each category
+- [ ] Add TIMELINE graph for each category so we can see the trend
 - [ ] Update the wiki in docs/, and manually refresh it in sync with the original repository commit date
 - [ ] extract the model architecture for those tools tagged `Approach: DL`, e.g., attention, GNN, flow-matching 
 

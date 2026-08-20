@@ -1,0 +1,46 @@
+# THGLab/IDPForge
+
+Source: https://zread.ai/THGLab/IDPForge
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/Docker 与 HPC 配置](3-docker-and-hpc-setup.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/ESM2 集成与嵌入](21-esm2-integration-and-embeddings.md)
+- [深入解析/配置参考](22-configuration-reference.md)
+### 核心模型
+
+- [深入解析/核心模型/IDPForge Transformer 网络](5-idpforge-transformer-network.md)
+- [深入解析/核心模型/SE(3) 骨架扩散](6-se-3-backbone-diffusion.md)
+- [深入解析/核心模型/SO(3) 旋转扩散](7-so-3-rotational-diffusion.md)
+- [深入解析/核心模型/扭转角扩散](8-torsion-angle-diffusion.md)
+
+### 训练流程
+
+- [深入解析/训练流程/训练工作流与配置](9-training-workflow-and-configuration.md)
+- [深入解析/训练流程/损失函数](10-loss-functions.md)
+- [深入解析/训练流程/数据加载与加噪](11-data-loading-and-noising.md)
+
+### 采样与推理
+
+- [深入解析/采样与推理/IDP 采样（完全无序）](12-idp-sampling-fully-disordered.md)
+- [深入解析/采样与推理/带折叠模板的 IDR 采样](13-idr-sampling-with-folded-templates.md)
+- [深入解析/采样与推理/实验引导势](14-experimental-guidance-potentials.md)
+
+### 后处理
+
+- [深入解析/后处理/AMBER 弛豫与修复](15-amber-relaxation-and-repair.md)
+- [深入解析/后处理/结构验证流程](16-structure-validation-pipeline.md)
+- [深入解析/后处理/X-EISD 集成评分](17-x-eisd-ensemble-scoring.md)
+
+### AlphaFlex 流程
+
+- [深入解析/AlphaFlex 流程/AlphaFlex 工作流概述](18-alphaflex-workflow-overview.md)
+- [深入解析/AlphaFlex 流程/案例标注与 IDR 分类](19-case-labeling-and-idr-classification.md)
+- [深入解析/AlphaFlex 流程/蒙特卡洛拼接与组装](20-monte-carlo-stitching-and-assembly.md)
+
