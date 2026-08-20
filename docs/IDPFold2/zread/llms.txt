@@ -1,0 +1,38 @@
+# Junjie-Zhu/IDPFold2
+
+Source: https://zread.ai/Junjie-Zhu/IDPFold2
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/单体与多聚体推理](3-inference-for-monomers-and-multimers.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/配置参考](16-configuration-reference.md)
+- [深入解析/Docker 与昇腾部署](17-docker-and-ascend-deployment.md)
+### 生成式框架
+
+- [深入解析/生成式框架/R³上的流匹配](5-flow-matching-on-r3.md)
+- [深入解析/生成式框架/混合专家过渡层](6-mixture-of-experts-transition-layers.md)
+- [深入解析/生成式框架/蛋白质 Transformer 网络](7-protein-transformer-network.md)
+
+### 模型组件
+
+- [深入解析/模型组件/自适应层归一化与对偏置注意力](8-adaptive-layer-norm-and-pair-biased-attention.md)
+- [深入解析/模型组件/特征工厂与输入编码](9-feature-factory-and-input-encoding.md)
+- [深入解析/模型组件/采样与引导策略](10-sampling-and-guidance-strategies.md)
+
+### 训练流水线
+
+- [深入解析/训练流水线/数据预处理与 PDB 筛选](11-data-preprocessing-and-pdb-selection.md)
+- [深入解析/训练流水线/训练与微调工作流](12-training-and-fine-tuning-workflow.md)
+- [深入解析/训练流水线/负载均衡与 MoE 损失](13-load-balancing-and-moe-loss.md)
+
+### 评估与基准测试
+
+- [深入解析/评估与基准测试/快速集成分析](14-quick-ensemble-analysis.md)
+- [深入解析/评估与基准测试/BioEmu 与 PeptoneBench 集成](15-bioemu-and-peptonebench-integration.md)
+

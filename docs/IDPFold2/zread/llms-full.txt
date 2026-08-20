@@ -1,0 +1,3989 @@
+# Junjie-Zhu/IDPFold2
+
+Source: https://zread.ai/Junjie-Zhu/IDPFold2
+
+# 入门
+
+- [入门/概述](https://zread.ai/Junjie-Zhu/IDPFold2/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**IDPFold2** 是一个生成式深度学习框架，用于预测单体、多结构域蛋白质及蛋白质复合物的构象系综。它将 **Mixture-of-Experts (MoE)** 架构集成到 **R³上的流匹配** 框架中，对蛋白质在溶液中探索的异质热力学景观进行建模。该模型在混合数据集上进行训练，该数据集结合了 PDB 结构、mdCATH 分子动力学轨迹以及 IDRome-o 内在无序蛋白质数据，使其能够通过单一统一的模型同时捕捉有序和无序的构象状态。
+
+来源: [README.md](/README.md#L1-L30), [setup.py](/setup.py#L1-L42)
+
+## IDPFold2 的功能
+
+传统结构预测方法（如 AlphaFold）只能生成单一的静态结构。然而，真实的蛋白质是动态的——它们会占据由热力学决定的**构象系综**。IDPFold2 通过为给定序列生成多个合理的 3D 结构来填补这一空白，反映出蛋白质实际采样的状态多样性。这对于以下情况至关重要：
+
+- 缺乏单一稳定折叠的**内在无序蛋白质**
+- 结构域间灵活性会产生多种构型的**多结构域蛋白质**
+- 具有可选结合取向的**蛋白质复合物**
+- 需要结构异质性的**功能研究**（例如，NMR、SAXS、FRET 验证）
+
+该框架接受指定目标名称和氨基酸序列的简单 CSV 输入，并输出一组代表预测构象系综的 PDB 结构。
+
+来源: [README.md](/README.md#L14-L30), [data/monomer_example.csv](/data/monomer_example.csv#L1-L4)
+
+## 核心架构一览
+
+IDPFold2 的架构建立在三大支柱之上，它们在训练和推理过程中协同工作：
+
+```mermaid
+graph TD
+    subgraph Input["输入层"]
+        A["蛋白质序列"] --> B["ESM-2 PLM 嵌入<br/>(650M 参数)"]
+        A --> C["残基特征<br/>(类型, 索引, 链)"]
+    end
+
+    subgraph Core["蛋白质 Transformer 网络"]
+        D["特征工厂"] --> E["序列 + 对<br/>表示"]
+        E --> F["自适应 LayerNorm<br/>(AdaLN)"]
+        F --> G["对偏置多头<br/>注意力"]
+        F --> H["MoE 转换层<br/>(5 个专家, top-2 门控)"]
+        G --> I["主干<br/>(10 层)"]
+        H --> I
+    end
+
+    subgraph Generative["R³ 上的流匹配"]
+        J["噪声 x₀ ~ N(0,I)"] --> K["ODE 积分<br/>x₀ → x₁"]
+        K --> L["构象<br/>样本 x₁"]
+    end
+
+    B --> D
+    C --> D
+    I --> M["3D 坐标解码器"]
+    M --> K
+    K -.->|"反馈: xₜ, t"| D
+
+    style Input fill:#e8f4f8,stroke:#2196F3
+    style Core fill:#fff3e0,stroke:#FF9800
+    style Generative fill:#e8f5e9,stroke:#4CAF50
+```
+
+| 组件 | 作用 | 关键细节 |
+|---|---|---|
+| **R³ 上的流匹配** | 生成框架 | 通过线性插值学习从高斯噪声到蛋白质结构的 ODE 轨迹 |
+| **蛋白质 Transformer** | 分数/速度网络 | 具有对表示和寄存器 Token 的 10 层 SE(3)-等变 Transformer |
+| **Mixture-of-Experts** | 容量与特化 | 每个转换层 5 个专家，通过学习到的路由器激活 top-2 + 1 个共享专家 |
+| **自适应 LayerNorm** | 时间条件化 | 基于流时间 *t* 对表示进行缩放和偏移 |
+| **ESM-2 嵌入** | 序列编码 | 预训练的 650M 参数语言模型提供逐残基特征 |
+
+<CgxTip>MoE 路由使用一个**共享专家**加上具有归一化权重的 **top-k 路由专家**，这意味着每个 Token 总是经过共享专家，并选择性地经过剩余 4 个专家中的 2 个。这种设计在允许跨构象模式特化的同时，确保了训练的稳定性。</CgxTip>
+
+来源: [src/model/protein_transformer.py](/src/model/protein_transformer.py#L258-L529), [src/model/flow_matching/r3flow.py](/src/model/flow_matching/r3flow.py#L1-L50), [src/model/components/moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L74-L130), [configs/inference.yaml](/configs/inference.yaml#L56-L103)
+
+## 推理与训练模式
+
+IDPFold2 通过 CLI 入口点（`idpfold2-infer` 和 `idpfold2-train`）支持两个主要工作流：
+
+**推理** — 给定一个包含序列的 CSV，模型通过将学习到的 ODE 从噪声积分到干净坐标，为每个目标生成 *N* 个结构样本。如果未预先计算，该过程会自动提取 ESM-2 嵌入，通过 DDP 支持多 GPU，并提供包括普通速度场积分、基于分数的校正，以及用于增强样本质量的无分类器/自动引导在内的采样策略。
+
+**训练** — 模型学习预测流匹配 ODE 的速度场。损失函数结合了流匹配 MSE 损失（由 `1/(1-t)²` 加权）和 MoE 负载均衡辅助损失。训练在混合数据（PDB + mdCATH + IDRome-o）上进行，采用集群感知采样、随机裁剪和全局旋转增强。
+
+| 参数 | 推理默认值 | 训练默认值 |
+|---|---|---|
+| Token 维度 | 768 | 768 |
+| Transformer 层数 | 10 | 10 |
+| 注意力头数 | 12 | 12 |
+| MoE 专家数 / 激活数 | 5 / 2 | 5 / 2 |
+| 对表示维度 | 512 | 512 |
+| 条件维度 | 512 | 512 |
+| EMA 衰减 | — | 0.999 |
+| 噪声调度 | — | mix_up02_beta (1.9, 1.0) |
+| 最大批次长度 | 3500 | crop_size: 256 |
+
+来源: [src/inference.py](/src/inference.py#L1-L60), [src/train.py](/src/train.py#L1-L50), [configs/inference.yaml](/configs/inference.yaml#L1-L103), [configs/train.yaml](/configs/train.yaml#L1-L124)
+
+## 项目结构
+
+```
+IDPFold2/
+├── configs/                    # Hydra 配置文件
+│   ├── inference.yaml          # 推理参数 & 模型配置
+│   └── train.yaml              # 训练参数、优化器、数据配置
+├── data/                       # 示例输入 CSV
+│   ├── monomer_example.csv     # 单链蛋白质序列
+│   └── multimer_example.csv    # 多链复合物（链以 : 分隔）
+├── src/                        # 核心源代码
+│   ├── inference.py            # 推理入口点 & 数据加载
+│   ├── train.py                # 带 DDP & EMA 的训练循环
+│   ├── model/
+│   │   ├── protein_transformer.py  # 主 ProteinTransformerAF3 网络
+│   │   ├── integral.py             # ODE 积分、损失计算、预测
+│   │   ├── flow_matching/
+│   │   │   └── r3flow.py           # R³ 流匹配：插值、模拟
+│   │   ├── components/
+│   │   │   ├── af3_modules.py      # AdaptiveLayerNorm, SwiGLU, Transition
+│   │   │   ├── pair_bias_attn.py   # 对偏置多头注意力
+│   │   │   ├── feature_factory.py  # 特征提取（时间, PLM, 索引, 对）
+│   │   │   ├── moe_modules_torch.py # MoE 路由器、专家分派、负载均衡
+│   │   │   └── motif_factory.py    # 部分结构的模体条件化
+│   │   ├── ema.py                  # 指数移动平均包装器
+│   │   └── optimizer.py           # 学习率调度器（AF3 风格）
+│   ├── data/
+│   │   ├── dataset.py             # PDB 选择、划分、PyG 数据加载器
+│   │   └── transforms.py          # 增强（旋转、链断裂）
+│   ├── common/                    # 残基 & atom37 常量
+│   └── utils/                     # PDB I/O、聚类、DDP、比对
+├── benchmarks/                 # 评估脚本
+│   ├── bioemu-benchmark/       # BioEmu 基准分析
+│   └── peptonebench/           # NMR/SAXS 综合验证
+├── scripts/                    # 实用脚本（ESM 嵌入、分析）
+├── megablocks/                 # 可选的加速 MoE (CUDA 内核)
+├── notebooks/                  # 用于单体预览的 Colab 笔记本
+├── docker/                     # Docker & 昇腾部署文件
+└── test/                       # Pytest 套件
+```
+
+来源: [setup.py](/setup.py#L1-L42), [src/model/protein_transformer.py](/src/model/protein_transformer.py#L1-L30), [src/model/integral.py](/src/model/integral.py#L1-L50)
+
+## 技术要求
+
+IDPFold2 基于 **Python 3.11+** 和 **PyTorch 2.0+** 构建，具有以下关键依赖项：
+
+- **fair-esm** — 用于序列嵌入的 ESM-2 蛋白质语言模型
+- **hydra-core** — 所有实验的分层配置管理
+- **einops** — 用于注意力和 MoE 重塑的张量操作
+- **biotite / biopython / biopandas** — 结构生物学 I/O 与操作
+- **torch-geometric** — 用于 PDB 结构的基于图的数据加载
+
+该框架支持 **NVIDIA GPU**（带有可选的 MegaBlocks CUDA 加速 MoE），通过带有 CANN 工具包的专用 Docker 镜像支持 **昇腾 910B NPU**，以及**多设备 DDP** 训练/推理。
+
+<CgxTip>对于在内存受限的 GPU 上进行推理，请调整 `max_batch_length`（默认 3500，在 V100-32GB 上测试过）——这控制了每个批次的总残基数，并直接决定峰值内存使用量。</CgxTip>
+
+来源: [setup.py](/setup.py#L10-L32), [configs/inference.yaml](/configs/inference.yaml#L10-L11), [Dockerfile.ascend](/Dockerfile.ascend#L1-L1)
+
+## 接下来去哪
+
+从实际设置开始，然后深入探索架构：
+
+1. **[快速开始](2-quick-start)** — 安装、下载检查点并运行你的首次推理
+2. **[单体与多聚体推理](3-inference-for-monomers-and-multimers)** — 详细的 CSV 格式、多聚体链规范和采样选项
+3. **[架构概览](4-architecture-overview)** — 完整的数据流图以及三大支柱如何连接
+4. **[R³ 上的流匹配](5-flow-matching-on-r3)** — 生成式 ODE 的数学基础
+5. **[Mixture-of-Experts 转换层](6-mixture-of-experts-transition-layers)** — 路由器设计、专家分派和负载均衡
+6. **[蛋白质 Transformer 网络](7-protein-transformer-network)** — 包含寄存器 Token 和对表示的完整前向传播解析
+
+---
+
+- [入门/快速开始](https://zread.ai/Junjie-Zhu/IDPFold2/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+安装 IDPFold2，获取预训练检查点，并在 15 分钟内生成你的首个蛋白质构象系综。本页将带你从零开始，以最简路径完成首次预测——涵盖环境配置、输入准备、单体与多聚体推理，以及对输出的快速完整性检查。如需了解架构背景，请参阅[概述](1-overview)；如需查看完整的推理参数参考，请参阅[单体与多聚体推理](3-inference-for-monomers-and-multimers)。
+
+来源: [README.md](/README.md#L1-L369), [setup.py](/setup.py#L1-L42)
+
+## 先决条件
+
+IDPFold2 要求 **Python 3.11** 以及一块 **支持 CUDA 的 GPU**（或 Ascend 910B——参见 [Docker 与 Ascend 部署](17-docker-and-ascend-deployment)）。该模型使用混合专家 Transformer 执行基于流匹配的生成，因此 GPU 显存直接决定了你能够处理的最大批次长度。下表汇总了已测试的配置：
+
+| GPU | 显存 | `max_batch_length` | 备注 |
+|-----|------|---------------------|-------|
+| V100 | 32 GB | 3 500 | `inference.yaml` 中的默认值 |
+| A100 | 40–80 GB | 6 000+ | 适用于大多数蛋白质 |
+| Ascend 910B | 64 GB | 6 000 | 已由作者验证 |
+
+<CgxTip>起初应保守设置 `max_batch_length`——它控制每轮批次生成的样本数量。OOM（显存溢出）错误几乎总是由于该值相对于你的显存设置过高所致。</CgxTip>
+
+来源: [configs/inference.yaml](/configs/inference.yaml#L8-L9), [README.md](/README.md#L209-L213)
+
+## 安装
+
+以下流程图概述了三步安装过程：
+
+```mermaid
+flowchart LR
+    A["1. 克隆仓库并\n创建 conda 环境"] --> B["2. pip install\nfair-esm & ."]
+    B --> C["3. 获取\n检查点"]
+    C --> D["✓ 就绪"]
+```
+
+**步骤 1 — 克隆仓库并创建 conda 环境：**
+
+```bash
+git clone https://github.com/Junjie-Zhu/IDPFold2
+cd IDPFold2
+
+conda env create -f environment.yaml
+conda activate idpfold2
+```
+
+此步骤将安装 PyTorch 2.4.1、PyG 2.6.1 以及环境文件中锁定的所有核心依赖。
+
+**步骤 2 — 安装 ESM 和 IDPFold2 包：**
+
+```bash
+pip install fair-esm
+pip install .
+```
+
+`pip install .` 步骤会注册两个控制台入口点——`idpfold2-infer` 和 `idpfold2-train`——以便你可以在系统路径中的任何位置调用推理。
+
+**步骤 3 — 从 Zenodo 下载推理检查点：**
+
+从 [Zenodo](https://zenodo.org/records/18239596) 下载 `IDPFold2_ema_0.999_260114.pth`，并将其放置在你选择的目录中（例如 `./checkpoints/`）。这是用于推理的 **EMA 检查点**。单独的非 EMA 检查点（`IDPFold2_260114.pth`）仅在训练或微调时需要。
+
+来源: [environment.yaml](/environment.yaml#L1-L30), [setup.py](/setup.py#L28-L36), [README.md](/README.md#L40-L63)
+
+### 验证安装
+
+运行内置测试套件以确认所有组件均已正确连接：
+
+```bash
+python -m pytest
+```
+
+此操作将验证包元数据、控制台入口点、核心导入项（`src.common.residue_constants`、`src.common.atom37_constants`），以及 `idpfold2-infer` 和 `idpfold2-train` 是否均位于你的 `PATH` 中。
+
+来源: [README.md](/README.md#L164-L166), [test/test_installation.py](/test/test_installation.py#L1-L96)
+
+### 可选：MegaBlocks 加速
+
+默认情况下，IDPFold2 使用纯 PyTorch 的混合专家实现。若要获得可能更快的 MoE 路由速度，你可以安装本仓库内附带的简化版 MegaBlocks 后端：
+
+```bash
+cd megablocks
+pip install .
+```
+
+> **注意：** MegaBlocks 在 IDPFold2 上的加速效果尚未经过正式基准测试。使用任一后端均会生成完全相同的结构——它们仅在吞吐量上有所差异。
+
+来源: [README.md](/README.md#L65-L75)
+
+## 准备输入
+
+IDPFold2 从 **CSV 文件** 中读取蛋白质目标，该文件需包含两个必需列：`test_case`（名称/标识符）和 `sequence`（氨基酸字符串）。示例文件可在 `data/` 目录中找到。
+
+### 单体输入格式
+
+```csv
+test_case,sequence
+THB_C2,GPGSEDVWEILRQAPPSEYERIAFQYGVTDLRGMLKRLKGMRRDEKKSTAFQKKLEPAYQVSKGHKIRLTVELADHDAEVKWLKNGQEIQMSGSKYIFESIGAKRTLTISQCSLADDAAYQCVVGGEKCSTELFVKE
+```
+
+### 多聚体输入格式
+
+对于复合物，链在 `sequence` 列中由 `:` 分隔，并用 `chain_ids` 列指定链标识符：
+
+```csv
+test_case,chain_ids,sequence
+4mvl,A:B,QDSTSDLIPAPPLSKVPLQQ...:DAEFRHDSGYEVHHQKLVFF...
+```
+
+<CgxTip>PLM 嵌入会在首次运行时自动生成并缓存到磁盘。如果 `plm_emb_dir` 为空或缺失，IDPFold2 将提取 ESM-2 650M 嵌入并保存为 `.pt` 文件——因此你只需为每个序列支付一次性的计算开销。</CgxTip>
+
+来源: [data/monomer_example.csv](/data/monomer_example.csv#L1-L4), [data/multimer_example.csv](/data/multimer_example.csv#L1-L6), [README.md](/README.md#L168-L176)
+
+## 运行单体推理
+
+下载检查点并准备好输入 CSV 后，即可生成构象系综：
+
+```bash
+python src/inference.py \
+    prefix=MONOMER \
+    ckpt_dir=./checkpoints/IDPFold2_ema_0.999_260114.pth \
+    plm_emb_dir=./embeddings \
+    csv_dir=./data/monomer_example.csv \
+    nsamples=100 \
+    max_batch_length=6000
+```
+
+或者，使用已安装的入口点：
+
+```bash
+idpfold2-infer \
+    prefix=MONOMER \
+    ckpt_dir=./checkpoints/IDPFold2_ema_0.999_260114.pth \
+    plm_emb_dir=./embeddings \
+    csv_dir=./data/monomer_example.csv \
+    nsamples=100 \
+    max_batch_length=6000
+```
+
+关键参数说明如下：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `prefix` | `DEFAULT` | 添加到输出目录名称前的前缀标签 |
+| `ckpt_dir` | *必填* | `.pth` EMA 检查点的路径 |
+| `plm_emb_dir` | *必填* | ESM-2 嵌入的目录（若为空则自动填充） |
+| `csv_dir` | *必填* | 输入 CSV 文件的路径 |
+| `nsamples` | `100` | 要生成的构象数量 |
+| `max_batch_length` | `3500` | 每个批次的最大残基总数；请根据你的 GPU 显存进行调整 |
+| `logging_dir` | `./logs` | 根输出目录 |
+| `dt` | `0.005` | 流匹配的积分时间步长 |
+| `seed` | `42` | 用于可复现性的随机种子 |
+
+通过 `torchrun` 支持**多 GPU 推理**。请注意，所有设备将共享相同的种子，因此每块 GPU 将产生完全相同的预测结果——请据此调整你的 `nsamples`：
+
+```bash
+torchrun --nproc-per-node=4 src/inference.py \
+    prefix=MONOMER \
+    ckpt_dir=./checkpoints/IDPFold2_ema_0.999_260114.pth \
+    plm_emb_dir=./embeddings \
+    csv_dir=./data/monomer_example.csv \
+    nsamples=400 \
+    max_batch_length=6000
+```
+
+来源: [README.md](/README.md#L178-L224), [configs/inference.yaml](/configs/inference.yaml#L1-L15), [src/inference.py](/src/inference.py#L100-L160)
+
+## 运行多聚体推理
+
+多聚体推理使用相同的命令，仅需添加一个额外标志。CSV 文件必须遵循多聚体格式（链由 `:` 连接，并带有 `chain_ids` 列）：
+
+```bash
+python src/inference.py \
+    prefix=MULTIMER \
+    ckpt_dir=./checkpoints/IDPFold2_ema_0.999_260114.pth \
+    plm_emb_dir=./embeddings \
+    csv_dir=./data/multimer_example.csv \
+    nsamples=100 \
+    max_batch_length=6000 \
+    load_multimer=True
+```
+
+`load_multimer=True` 标志会使数据加载器期望 CSV 中存在多链序列和 `chain_ids`。**单体和多聚体无法在同一次运行中处理**——请分别调用。
+
+来源: [README.md](/README.md#L226-L246), [src/inference.py](/src/inference.py#L31-L55)
+
+## 理解输出
+
+推理完成后，输出目录（默认为 `./logs/`）包含：
+
+```
+logs/
+└── MONOMER_INF_2026-01-15_10-30-00/   # 前缀 + 时间戳
+    ├── config.yaml                      # 完整配置快照
+    ├── samples/
+    │   ├── THB_C2.pdb                   # 多模型 PDB：每个样本对应一个 MODEL
+    │   └── ...
+    └── tmp/                             # 每个批次的中间文件（会被清理）
+```
+
+`samples/` 中的每个 `.pdb` 文件都是一个**多模型 PDB**，其中每个 `MODEL ... END` 块代表一个采样构象。生成的结构为粗粒度（仅含 Cα）；如需进行全原子重建，请参阅[快速系综分析](14-quick-ensemble-analysis)。
+
+来源: [src/inference.py](/src/inference.py#L270-L310)
+
+## 快速完整性检查
+
+IDPFold2 附带了一个后处理脚本，可为每个生成的系综计算回转半径和末端距：
+
+```bash
+python scripts/quick_analysis.py ./logs/MONOMER_INF_2026-01-15_10-30-00/samples
+```
+
+此操作将在目标目录中生成一个 `metrics.pkl` 文件。如需更深入的评估——RMSD、天然接触、反向映射及基准测试集成——请参阅[快速系综分析](14-quick-ensemble-analysis)和[BioEmu 与 PeptoneBench 集成](15-bioemu-and-peptonebench-integration)。
+
+来源: [scripts/quick_analysis.py](/scripts/quick_analysis.py#L1-L82), [README.md](/README.md#L307-L316)
+
+## 在 Colab 中尝试
+
+如果你希望完全跳过本地安装，我们提供了一个 Colab 笔记本，它在一个笔记本中处理所有事务——克隆、检查点下载、输入准备、推理以及 3D 结构可视化：
+
+[**在 Google Colab 中打开**](https://colab.research.google.com/github/Junjie-Zhu/IDPFold2/blob/main/notebooks/IDPFold2_colab_monomer_preview.ipynb)
+
+运行前请选择 **运行时 → 更改运行时类型 → GPU**。该笔记本默认为 `THB_C2` 单体生成 4 个样本——这是一个快速预览，在 T4 GPU 上大约需要 2-3 分钟。
+
+来源: [notebooks/IDPFold2_colab_monomer_preview.ipynb](/notebooks/IDPFold2_colab_monomer_preview.ipynb#L1-L50), [README.md](/README.md#L15-L17)
+
+## 接下来去哪
+
+```mermaid
+flowchart TD
+    A["✅ 快速开始"] --> B["单体与多聚体\n推理"]
+    A --> C["架构概述"]
+    B --> D["采样与引导\n策略"]
+    B --> E["快速系综分析"]
+    C --> F["R³ 上的流匹配"]
+    C --> G["蛋白质 Transformer 网络"]
+```
+
+- **自信预测**：[单体与多聚体推理](3-inference-for-monomers-and-multimers)涵盖了高级采样模式、引导策略及所有配置覆盖。
+- **理解运行机制**：[架构概述](4-architecture-overview)端到端地讲解了流匹配 + MoE Transformer 架构。
+- **评估结果**：[快速系综分析](14-quick-ensemble-analysis)带你了解 RMSD、反向映射及基准测试评分。
+- **规模化部署**：[Docker 与 Ascend 部署](17-docker-and-ascend-deployment)涵盖了容器化及 Ascend 910B 环境的配置。
+
+---
+
+- [入门/单体与多聚体推理](https://zread.ai/Junjie-Zhu/IDPFold2/3-inference-for-monomers-and-multimers)
+
+---
+slug:3-inference-for-monomers-and-multimers
+blog_type:normal
+---
+
+
+IDPFold2 通过模拟从噪声到结构化蛋白质坐标的流匹配 ODE 来生成构象系综。推理流水线接受一个描述目标系统的简单 CSV 文件，自动解析 ESM-2 蛋白质语言模型嵌入，并生成包含采样系综的多模型 PDB 文件。无论你是在预测单链内在无序蛋白质的异质构象景观，还是多链复合物的四级排列，相同的入口点——`src/inference.py`——都能通过单个配置开关处理这两种情况。
+
+## 准备输入 CSV
+
+推理流水线由一个 **CSV 文件** 驱动，其列根据你运行的是单体还是多体预测而有所不同。该 CSV 扮演两个角色：为输出文件命名提供每个测试用例的名称，并提供模型所依赖的氨基酸序列。
+
+### 单体 CSV 格式
+
+对于单链蛋白质，CSV 恰好需要两列：`test_case` 和 `sequence`。
+
+| 列 | 描述 | 示例 |
+|---|---|---|
+| `test_case` | 用于输出 PDB 命名和嵌入文件命名的唯一标识符 | `THB_C2` |
+| `sequence` | 单体的单字母氨基酸序列 | `GPGSEDVWEILRQ...` |
+
+示例见 [data/monomer_example.csv](data/monomer_example.csv)：
+
+```csv
+test_case,sequence
+THB_C2,GPGSEDVWEILRQAPPSEYERIAFQYGVTDLRGMLKRLKGMRRDEKKSTAFQKKLEPAYQVSKGHKIRLTVELADHDAEVKWLKNGQEIQMSGSKYIFESIGAKRTLTISQCSLADDAAYQCVVGGEKCSTELFVKE
+Ubq2,MASHHHHHHGAQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGGMQIFVKTLTGKTITLEVEPSDTIENVKAKIQDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG
+```
+
+来源: [monomer_example.csv](data/monomer_example.csv#L1-L4)
+
+### 多体 CSV 格式
+
+对于多链复合物，CSV 需要**三列**：`test_case`、`chain_ids` 和 `sequence`。多条链由冒号 (`:`) 分隔符分隔。
+
+| 列 | 描述 | 示例 |
+|---|---|---|
+| `test_case` | 复合物的唯一标识符 | `4mvl` |
+| `chain_ids` | 由 `:` 分隔的链标签 | `A:B` |
+| `sequence` | 由 `:` 分隔的各链序列 | `QDSTSDL...:DAEFRH...` |
+
+示例见 [data/multimer_example.csv](data/multimer_example.csv)：
+
+```csv
+test_case,chain_ids,sequence
+4mvl,A:B,QDSTSDLIPAPPLSKVPLQQNFQDNQFHGKWYVVGAAGNVLLREDKDPLKMYATIYELKEDKSYNVTSVGFDDKKCLYKIRTFVPGSQPGEFTLGRIKSEPGGTSWLVRVVSTNYNQHAMVFFKEVAQNRETFNITLYGRTKELTSELKENFIRFSKSLGLPENHIVFPVPIDQCIDGSAWSHPQFEK:DAEFRHDSGYEVHHQKLVFFAEDVGSNKGAIIGLMVGGVV
+```
+
+<CgxTip>如果多体 CSV 中省略了 `chain_ids` 列，系统将回退到自动编号的链标识符（`1`、`2`、…）用于嵌入文件命名。然而，强烈建议提供显式的 `chain_ids`，以确保可复现性及输出 PDB 中链标签的正确性。</CgxTip>
+
+来源: [multimer_example.csv](data/multimer_example.csv#L1-L2), [inference.py](src/inference.py#L64-L74)
+
+## 理解推理流水线
+
+推理过程遵循从 CSV 输入到多模型 PDB 输出的明确顺序。下图展示了完整的流程，并突出了单体和多体路径的分叉点。
+
+```mermaid
+flowchart TD
+    A["CSV Input File"] --> B["GenerationDataset"]
+    B --> C{"Embeddings<br/>found?"}
+    C -- No --> D["Auto-generate ESM-2<br/>(esm2_t33_650M_UR50D)"]
+    D --> E["Save .pt embeddings<br/>to plm_emb_dir"]
+    C -- Yes --> E
+    E --> F{"load_multimer?"}
+    F -- False --> G["Monomer path:<br/>Single sequence → single .pt"]
+    F -- True --> H["Multimer path:<br/>Concat chains → chain IDs + residue_idx"]
+    G --> I["DataLoader<br/>(batch_size=1)"]
+    H --> I
+    I --> J["Load Model Checkpoint<br/>(ProteinTransformerAF3)"]
+    J --> K["generating_predict()<br/>→ R3NFlowMatcher.full_simulation()"]
+    K --> L{"chains in output?"}
+    L -- No --> M["to_pdb_simple()<br/>Single chain A PDB"]
+    L -- Yes --> N["to_pdb()<br/>Multi-chain PDB with TER records"]
+    M --> O["Gather & merge<br/>→ samples/{name}.pdb"]
+    N --> O
+```
+
+### 步骤 1 — 数据集构建与嵌入解析
+
+`GenerationDataset` 类读取 CSV 并解析 ESM-2 嵌入。如果指定的 `plm_emb_dir` 不存在或缺少任何条目的嵌入，数据集将**自动**运行 ESM-2（`esm2_t33_650M_UR50D`，6.5 亿参数）来提取逐残基嵌入，并将其缓存为 `.pt` 文件。这意味着由于需要计算嵌入，你的首次推理运行会比较慢；后续运行将重用缓存。
+
+对于**单体**，每行映射到一个嵌入文件：`{plm_emb_dir}/{test_case}.pt`。对于**多体**，每条链都有各自的嵌入文件：`{plm_emb_dir}/{test_case}_{chain_id}.pt`。随后，逐链嵌入会沿残基维度进行拼接，并构建额外的张量——`chains`（将每个残基分配到其链索引）和 `residue_idx`（每条链重置的逐链残基位置索引）。
+
+来源: [inference.py](src/inference.py#L31-L115)
+
+### 步骤 2 — 模型加载
+
+`ProteinTransformerAF3` 模型根据 Hydra 配置的 `model` 部分进行实例化，并加载检查点的 `model_state_dict`。当通过 `torchrun` 使用多 GPU 运行时，模型会被包装在 `DistributedDataParallel` (DDP) 中。如果 `autoguidance_ratio > 0`，还可以单独加载一个可选的 **autoguidance** 模型。
+
+来源: [inference.py](src/inference.py#L233-L263)
+
+### 步骤 3 — 流匹配模拟
+
+核心生成循环调用 `generating_predict()`，该函数将任务委托给 `R3NFlowMatcher.full_simulation()`。此过程对学习到的矢量场执行 Euler 积分，从 t=0（高斯噪声）到 t=1（清晰结构），使用配置中指定的时间表和采样模式。在每个步骤中，模型接收当前的含噪坐标 `x_t`、时间 `t`、PLM 嵌入、残基类型、残基索引和链信息，并预测清晰结构 `x_1`，速度场即由此推导得出。
+
+积分步数由 `dt` 决定（默认为 0.005，即产生 200 步）。样本以微批次大小生成，以遵守 `max_batch_length` 的内存限制——对于长度为 L 的蛋白质，每个微批次最多同时产生 `max_batch_length // L` 个样本。
+
+来源: [integral.py](src/model/integral.py#L322-L398), [r3flow.py](src/model/flow_matching/r3flow.py#L389-L538)
+
+### 步骤 4 — PDB 输出
+
+生成的坐标（单位为 nm）会被缩放为埃 (`× 10`) 并写入 PDB。单体使用 `to_pdb_simple()`，将所有残基分配到链 A；多体使用 `to_pdb()`，将残基分配到其正确的链标签并在链之间插入 `TER` 记录。每个微批次被写成一个包含多个 `MODEL` 条目的临时 PDB 文件。在所有微批次完成后，rank-0 进程会收集这些文件并将其合并到 `{logging_dir}/samples/{name}.pdb` 中的单一文件内，同时重新按顺序编排 `MODEL` 编号。
+
+来源: [inference.py](src/inference.py#L306-L351), [pdb_utils.py](src/utils/pdb_utils.py#L21-L106)
+
+## 运行单体推理
+
+使用以下命令执行推理，并根据你的环境调整路径和参数：
+
+```bash
+python src/inference.py \
+    prefix=MONOMER \
+    ckpt_dir=/PATH/TO/CHECKPOINT/IDPFold2_ema_0.999_260114.pth \
+    plm_emb_dir=./embeddings \
+    csv_dir=data/monomer_example.csv \
+    nsamples=100 \
+    max_batch_length=6000
+```
+
+下表解释了每个关键参数：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `prefix` | `DEFAULT` | 日志目录名的前缀 |
+| `ckpt_dir` | *必填* | EMA 模型检查点路径（`.pth` 文件） |
+| `plm_emb_dir` | *必填* | ESM-2 嵌入目录；若为空则自动填充 |
+| `csv_dir` | *必填* | 单体输入 CSV 文件路径 |
+| `nsamples` | `100` | 要生成的构象样本总数 |
+| `max_batch_length` | `3500` | 每个 GPU 微批次的最大总残基数；控制内存使用 |
+| `dt` | `0.005` | ODE 积分步长（越小 = 步数越多，分辨率越高） |
+| `seed` | `42` | 用于可复现性的随机种子 |
+
+<CgxTip>`max_batch_length` 参数直接控制 GPU 显存消耗。对于 V100-32GB，`3500` 是安全的默认值。对于 Ascend 910B (64GB)，`6000` 适用于所有测试过的蛋白质。如果遇到 OOM 错误，请减小此值——流水线会自动计算 `nsamples_per_batch = max_batch_length // protein_length` 并循环处理微批次。</CgxTip>
+
+来源: [inference.yaml](configs/inference.yaml#L1-L26), [inference.py](src/inference.py#L176-L226)
+
+## 运行多体推理
+
+多体推理使用相同的入口点，只需增加一个标志：
+
+```bash
+python src/inference.py \
+    prefix=MULTIMER \
+    ckpt_dir=/PATH/TO/CHECKPOINT/IDPFold2_ema_0.999_260114.pth \
+    plm_emb_dir=./embeddings \
+    csv_dir=data/multimer_example.csv \
+    nsamples=100 \
+    max_batch_length=6000 \
+    load_multimer=True
+```
+
+关键区别在于 `load_multimer=True`，它激活了 `GenerationDataset` 中的多体数据加载路径。此标志决定了：
+
+- **如何解析序列**：以冒号分隔的链会被拆分并单独处理
+- **如何命名嵌入**：每条链获得一个单独的 `.pt` 文件（例如 `4mvl_A.pt`、`4mvl_B.pt`）
+- **构建哪些辅助张量**：`chains`（每个残基的链分配）和 `residue_idx`（逐链残基索引）
+- **如何写入输出 PDB**：带有正确链 ID 和 `TER` 分隔符的多链格式
+
+**重要提示**：单体和多体无法在单次运行中同时处理。你必须为每种类型分别执行推理。
+
+来源: [inference.py](src/inference.py#L49-L80), [inference.py](src/inference.py#L306-L320)
+
+## 多 GPU 推理
+
+IDPFold2 支持通过 PyTorch 的 `torchrun` 进行分布式推理。样本在可用 GPU 之间均分，每个 rank 独立生成其负责的部分：
+
+```bash
+torchrun --nproc-per-node=4 src/inference.py \
+    prefix=MONOMER \
+    ckpt_dir=/PATH/TO/CHECKPOINT/IDPFold2_ema_0.999_260114.pth \
+    plm_emb_dir=./embeddings \
+    csv_dir=data/monomer_example.csv \
+    nsamples=100 \
+    max_batch_length=3500
+```
+
+所有 rank 完成后，rank 0 会收集所有批次的临时 PDB 文件，并将它们合并为一个单独的输出文件。DDP 进程组使用 NCCL 后端，带有可配置的超时时间（通过 `NCCL_TIMEOUT_SECOND` 环境变量默认设为 600 秒）。
+
+**注意**：当使用 `torchrun` 时，固定随机种子会使每个设备生成完全相同的预测。为了在各 GPU 间获得多样化的样本，请省略种子或为每个 rank 设置不同的种子。
+
+来源: [inference.py](src/inference.py#L205-L212), [inference.py](src/inference.py#L274-L329), [ddp_utils.py](src/utils/ddp_utils.py#L12-L34)
+
+## 高级采样选项
+
+除了基本的矢量场 (`vf`) 采样模式外，IDPFold2 还支持基于分数的随机采样和引导策略，这可以改善具有挑战性目标的样本质量。
+
+### 采样模式
+
+| 模式 | 配置键 | 描述 |
+|---|---|---|
+| **矢量场 (VF)** | `sampling.sampling_mode: vf` | 学习矢量场的标准 ODE 模拟。在给定初始噪声时具有确定性。 |
+| **分数 + 噪声 (SC)** | `sampling.sampling_mode: sc` | 通过 SDE 引入基于分数的漂移项和随机噪声项，实现多样化采样。受 `sc_scale_noise` 和 `sc_scale_score` 控制。 |
+
+### 时间表
+
+积分时间点根据 `schedule.schedule_mode` 离散化：
+
+| 时间表 | 行为 |
+|---|---|
+| `log` | 对数间隔——在噪声到结构转换最快的 t=0 附近更密集。参数 `schedule_p` 控制密度。 |
+| `uniform` | 在 [0, 1] 之间均匀间隔的步数。 |
+| `power` | 均匀分布的 `schedule_p` 次方。 |
+
+### 引导
+
+无分类器引导 (CFG) 和 autoguidance 可以结合使用以引导生成过程：
+
+| 参数 | 默认值 | 效果 |
+|---|---|---|
+| `guidance_weight` | `1.0` | 权重 ≥ 1 会放大条件预测。`1.0` = 无引导。 |
+| `autoguidance_ratio` | `0.0` | 在 CFG (`0.0`) 和 autoguidance (`1.0`) 之间混合。需要 `ag_dir` 检查点。 |
+| `autoguidance_ckpt_path` | `null` | autoguidance 模型检查点的路径。 |
+
+来源: [inference.yaml](configs/inference.yaml#L32-L46), [integral.py](src/model/integral.py#L40-L89), [r3flow.py](src/model/flow_matching/r3flow.py#L240-L322)
+
+## 输出结构
+
+推理完成后，日志目录包含：
+
+```
+{logging_dir}/
+└── {prefix}_INF_{timestamp}/
+    ├── config.yaml          # 保存的配置快照
+    ├── samples/             # 最终合并的 PDB 系综
+    │   ├── THB_C2.pdb       # 多模型 PDB (MODEL 1, MODEL 2, …)
+    │   └── Ubq2.pdb
+    └── tmp/                 # 收集后清空
+```
+
+`samples/` 中的每个 PDB 文件包含 `nsamples` 个 `MODEL` 条目。对于单体，所有残基被分配到仅含 CA 原子的链 A。对于多体，残基被分配到其天然链 ID，并在链之间带有 `TER` 记录。坐标单位为埃。
+
+来源: [inference.py](src/inference.py#L178-L186), [inference.py](src/inference.py#L334-L351), [pdb_utils.py](src/utils/pdb_utils.py#L21-L106)
+
+## 快速参考：单体 vs. 多体
+
+| 方面 | 单体 | 多体 |
+|---|---|---|
+| CSV 列 | `test_case`, `sequence` | `test_case`, `chain_ids`, `sequence` |
+| 序列格式 | 单个字符串 | 由 `:` 连接的多链 |
+| 配置标志 | `load_multimer=False`（默认） | `load_multimer=True` |
+| 嵌入文件 | `{name}.pt` | 每条链 `{name}_{chain}.pt` |
+| 链张量 | 全为 1（单链） | 逐残基的链分配 |
+| 残基索引 | 全局 `[0, 1, 2, …]` | 每条链重置 `[0,1,…]` |
+| PDB 输出 | `to_pdb_simple()` — 仅链 A | `to_pdb()` — 正确链 ID + TER |
+| 混合处理 | 不支持 — 需单独运行 | 不支持 — 需单独运行 |
+
+来源: [inference.py](src/inference.py#L49-L115), [inference.py](src/inference.py#L306-L320)
+
+## 后续步骤
+
+现在你已经能够生成构象系综，接下来可以探索使其成为可能的架构，以及用于评估样本质量的工具：
+
+- **理解生成框架**：[Flow Matching on R³](5-flow-matching-on-r3) 解释了作为采样基础的 ODE/SDE 模拟。
+- **探索模型架构**：[Architecture Overview](4-architecture-overview) 和 [Protein Transformer Network](7-protein-transformer-network) 详述了在每个积分步骤中是如何进行预测的。
+- **评估你的系综**：[Quick Ensemble Analysis](14-quick-ensemble-analysis) 涵盖了 RMSD、Rg 和天然接触计算。
+- **调整采样**：[Sampling and Guidance Strategies](10-sampling-and-guidance-strategies) 深入探讨了 CFG、autoguidance 和随机采样。
+- **配置一切**：[Configuration Reference](16-configuration-reference) 提供了完整的参数目录。
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/Junjie-Zhu/IDPFold2/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+IDPFold2 是一个用于蛋白质结构预测的**流匹配生成模型**，直接在欧几里得三维空间中运行。它不预测单一的静态结构，而是学习一个连续时间向量场，通过数值积分将噪声传输为结构化的蛋白质构象。该架构融合了三大支柱：**Protein Transformer Network**（基于注意力机制的主干网络，包含成对偏置注意力和自适应条件化）、**(R³)ⁿ 上的流匹配**框架（定义生成式 ODE/SDE），以及**混合专家过渡层**（通过稀疏专家路由实现容量扩展）。本页面提供了这三大支柱如何组合成一个连贯系统的自顶向下映射；随后每个支柱将在其专属页面中进行深入剖析。
+
+## 系统数据流
+
+整个 IDPFold2 流水线——从氨基酸序列到 3D 结构系综——遵循清晰的分阶段流程。在推理时，输入序列首先由冻结的 ESM-2 蛋白质语言模型进行编码，然后逐步对流匹配 ODE 进行数值积分，Protein Transformer 在每个时间步预测速度场。
+
+```mermaid
+flowchart TB
+    subgraph INPUT["输入准备"]
+        SEQ["氨基酸序列"] --> ESM["ESM-2 嵌入<br/>(冻结, 1280-d)"]
+        SEQ --> RES["残基类型<br/>(独热, 20-d)"]
+        SEQ --> IDX["残基索引<br/>(位置嵌入, 128-d)"]
+        SEQ --> CHAIN["链断裂<br/>(多聚体标志)"]
+    end
+
+    subgraph FM["流匹配循环 (t: 0 → 1)"]
+        direction TB
+        T0["采样 x₀ ~ N(0, I)"] --> INTERP
+        INTERP{"t < 1?"} -->|Yes| MODEL
+        MODEL["Protein Transformer<br/>预测 v(x_t, t)"] --> STEP["欧拉步<br/>x_{t+dt} = x_t + v·dt"]
+        STEP --> GUID["引导<br/>(CFG / 自动引导)"]
+        GUID --> INTERP
+        INTERP -->|No| OUT["输出: x₁ ≈ 干净结构"]
+    end
+
+    subgraph PTX["Protein Transformer 内部结构"]
+        direction TB
+        FEAT["特征工厂<br/>seq + pair 特征"] --> COND["条件化<br/>AdaLN(·, c)"]
+        FEAT --> PAIR["成对表示<br/>(分桶距离 + 相对位置)"]
+        COND --> TRUNK["主干: 10× 层<br/>PairBiasedAttn → MoE Transition"]
+        PAIR --> TRUNK
+        TRUNK --> DEC["3D 解码器<br/>LayerNorm → Linear(768, 3)"]
+    end
+
+    INPUT --> FM
+    MODEL -.-> PTX
+    OUT --> PDB["PDB 文件<br/>(Å 单位)"]
+```
+
+训练路径与此流程镜像但方向相反：干净的结构通过插值调度 x_t = (1−t)x₀ + t·x₁ 被加噪，模型学习预测干净目标 x₁ 或速度场 v，并由权重为 1/(1−t)² 的流匹配损失进行监督。
+
+来源: [inference.py](/src/inference.py#L176-L304), [integral.py](/src/model/integral.py#L322-L398), [train.py](/src/train.py#L31-L154)
+
+## 核心架构：ProteinTransformerAF3
+
+`ProteinTransformerAF3` 是核心神经网络，架构上受 AlphaFold3 扩散模块（算法 23）的启发。它通过分层主干处理三个耦合表示：
+
+| 表示 | 形状 | 目的 | 来源 |
+|---|---|---|---|
+| **序列** | `[b, n, 768]` | 每残基的隐状态 | PLM 嵌入 + 残基类型 + 索引 + 3D 坐标嵌入 |
+| **成对** | `[b, n, n, 512]` | 残基对的几何与位置信号 | 分桶成对距离 + 相对位置 |
+| **条件化** | `[b, n, 512]` | AdaLN 的时间依赖调制 | 时间嵌入 → 2× Transition 层 |
+
+前向传播执行四个顺序阶段：
+
+**阶段 1 — 输入编码。** 被加噪的 3D 坐标 x_t 从 3 → 768 维进行线性投影，并加到由 `FeatureFactory` 生成的初始序列表示中。因此序列表示为：`seq_repr = Linear(x_t) + FeatureFactory(plm_emb, res_type, res_idx, chain_break)`。
+
+**阶段 2 — 条件化路径。** 一个独立的 `FeatureFactory` 生成时间嵌入，该嵌入通过两个 `Transition` 层（扩展因子为 2 的基于 SwiGLU 的 MLP），形成条件化向量 **c**。该向量驱动主干中所有的 AdaptiveLayerNorm 和 AdaptiveLayerNormOutputScale 操作。
+
+**阶段 3 — 主干。** 十个堆叠的 `MultiheadAttnAndTransition` 层处理序列表示。每层应用： 经 AdaLN 输入调制和自适应输出缩放的成对偏置多头注意力，随后是 同样被 AdaLN 包裹的 Transition 层（MoE 或标准）。两个子层均支持可选的残差连接。
+
+**阶段 4 — 坐标解码。** 一个 `LayerNorm → Linear(768, 3)` 头将最终的序列表示映射回 3D 坐标。
+
+<CgxTip>该架构支持**寄存器令牌**（默认：10），这些可学习参数被前置到序列中。它们在不污染残基级表示的情况下吸收全局信息——这是一种源自视觉 Transformer 的技术，可提升变长序列的注意力质量。</CgxTip>
+
+来源: [protein_transformer.py](/src/model/protein_transformer.py#L305-L526), [inference.yaml](/configs/inference.yaml#L48-L92)
+
+## 三大表示流
+
+理解序列、成对和条件化表示如何交互，是理解整个架构的关键。下图展示了单个主干层的内部连线：
+
+```mermaid
+flowchart LR
+    subgraph LAYER["MultiheadAttnAndTransition 层"]
+        direction TB
+        X_IN["x (seq repr)"] --> ADA1["AdaLN(x, c)"]
+        ADA1 --> ATTN["PairBiasAttention<br/>(x, pair_rep)"]
+        ATTN --> SCALE1["AdaScale(attn_out, c)"]
+        SCALE1 --> RES1["+ x (残差)"]
+
+        RES1 --> ADA2["AdaLN(·, c)"]
+        ADA2 --> MOE["MoE Transition<br/>或标准 Transition"]
+        MOE --> SCALE2["AdaScale(·, c)"]
+        SCALE2 --> RES2["+ x (残差)"]
+    end
+
+    C["c (条件化)"] -.-> ADA1
+    C -.-> SCALE1
+    C -.-> ADA2
+    C -.-> SCALE2
+    PAIR["pair_rep"] -.-> ATTN
+```
+
+每层交错执行**注意力**（通过成对偏置捕获长程残基依赖）和**过渡**（通过 MoE 进行局部每残基特征变换）。条件化向量 **c** 通过 AdaptiveLayerNorm 调制每一步操作——这正是网络在流匹配的各个时间步中调整其行为的方式。
+
+来源: [protein_transformer.py](/src/model/protein_transformer.py#L153-L261), [af3_modules.py](/src/model/components/af3_modules.py#L1-L114)
+
+## 特征工程：FeatureFactory
+
+`FeatureFactory` 是一个声明式特征组合系统。它不对输入特征进行硬编码，而是接收一个特征名称列表，组装相应的计算模块，拼接它们的输出并投影到目标维度。同一个 `FeatureFactory` 类同时服务于序列和成对特征，通过 `mode="seq"` 或 `mode="pair"` 进行区分。
+
+### 序列特征（初始表示）
+
+| 特征键 | 模块 | 输出维度 | 描述 |
+|---|---|---|---|
+| `plm_emb` | `PLMSeqFeat` | 256 | ESM-2 嵌入 → Linear(1280, 256) → ReLU |
+| `res_type` | `ResidueTypeSeqFeat` | 20 | 独热氨基酸标识 |
+| `res_idx` | `IdxEmbeddingSeqFeat` | 128 | 正弦位置嵌入 |
+| `chain_break_per_res` | `ChainBreakPerResidueSeqFeat` | 1 | 链边界处的二值标志 |
+
+### 成对特征（成对表示）
+
+| 特征键 | 模块 | 输出维度 | 描述 |
+|---|---|---|---|
+| `xt_pair_dists` | `XtPairwiseDistancesPairFeat` | 64 | 带噪坐标的分桶成对距离 |
+| `rel_pos` | `RelativePositionPairFeat` | 66 | 相对位置（截断）+ 同链指示符 |
+
+### 条件化特征
+
+| 特征键 | 模块 | 输出维度 | 描述 |
+|---|---|---|---|
+| `time_emb` | `TimeEmbeddingSeqFeat` | 256 | 流匹配时间 t 的正弦嵌入 |
+
+当指定了 `feats_pair_cond` 时，成对表示还会额外通过一个以时间嵌入成对特征为条件的 `AdaptiveLayerNorm`，为成对偏置提供时间依赖的调制。
+
+来源: [feature_factory.py](/src/model/components/feature_factory.py#L74-L426), [inference.yaml](/configs/inference.yaml#L61-L82)
+
+## 流匹配：生成引擎
+
+IDPFold2 使用 (R³)ⁿ 上的**条件流匹配**作为其生成框架，由 `R3NFlowMatcher` 实现。核心插值方案为线性（最优传输）路径：
+
+> **x_t = (1 − t) · x₀ + t · x₁**, &nbsp;&nbsp; t ∈ [0, 1]
+
+其中 x₀ ~ N(0, I) 为高斯噪声，x₁ 为干净结构。向量场目标为：
+
+> **v(x_t, t) = (x₁ − x_t) / (1 − t)**
+
+在推理时，ODE dx_t = v(x_t, t) dt 使用带有自适应步长调度的欧拉步进行积分。系统还支持通过分数校正的 SDE 模式进行随机采样，其中分数由速度场解析导出：**s(x_t, t) = (t · v − x_t) / (scale_ref² · (1 − t))**。
+
+可选的质心约束（`zero_com=True`）将所有表示投影到零质心子空间，确保平移等变性。这对单体生成至关重要，并在基序条件化激活时被禁用。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L11-L183), [r3flow.py](/src/model/flow_matching/r3flow.py#L240-L352)
+
+## 混合专家过渡层
+
+当 `use_moe=True` 时，每个主干层用包含一个**共享专家**加 **N 个路由专家**（默认：1 个共享 + 5 个路由，激活 top-2）的 `MoE` 模块替换标准 `TransitionADALN`。路由机制为：
+
+1. 线性路由器根据输入令牌计算所有专家的 softmax 分数
+2. 每个令牌选择 Top-k 个专家
+3. 令牌基于容量缓冲被分发到其分配的专家
+4. 专家输出由路由分数加权，并与共享专家输出组合
+5. 若 `normalize_expert_weights=True`，最终输出为：`(shared + k·routed) / (k + 1)`
+
+**负载均衡辅助损失**鼓励批次间专家利用率的均匀性，防止所有令牌选择同一专家的路由崩塌。
+
+| MoE 参数 | 默认值 | 作用 |
+|---|---|---|
+| `n_experts` | 5 | 路由专家数量 |
+| `n_activated_experts` | 2 | 每个令牌的 Top-k 专家 |
+| `capacity_factor` | 1.3 | 专家分发的缓冲区大小缩放 |
+| `normalize_expert_weights` | True | 是否归一化共享 + 路由贡献 |
+| `dim_moe_cond` | 0 | 路由器的额外条件化维度 |
+
+来源: [moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L55-L108), [protein_transformer.py](/src/model/protein_transformer.py#L210-L228)
+
+## 引导与条件化策略
+
+IDPFold2 支持多种推理时引导机制，无需重新训练即可引导生成过程：
+
+**无分类器引导 (CFG)。** 通过从输入批次中丢弃 PLM 嵌入，模型生成无条件预测。引导预测进行插值：`x_guided = w · x_cond + (1 − w) · x_uncond`，其中 w > 1 放大条件信号。
+
+**自动引导。** 一个独立的（通常较弱的）模型检查点提供额外的参考预测。自动引导比例 ∈ [0, 1] 在 CFG 和自动引导之间混合：`x_pred = w · x_main + (1 − w) · [α · x_ag + (1 − α) · x_uncond]`。
+
+**基序条件化。** 对于部分结构设计，`SingleMotifFactory` 掩码骨架位置同时保留基序坐标，允许模型在遵守固定结构约束的同时对缺失区域进行修复。
+
+**自条件化。** 在训练期间，以 50% 的概率，模型来自前一次前向传播的自身预测作为附加输入特征 `x_sc` 反馈，从而在推理时实现迭代精炼。
+
+来源: [integral.py](/src/model/integral.py#L40-L89), [integral.py](/src/model/integral.py#L237-L319), [inference.yaml](/configs/inference.yaml#L28-L46)
+
+## 默认模型配置
+
+下表总结了为训练和推理配置的默认架构超参数：
+
+| 参数 | 值 | 参数 | 值 |
+|---|---|---|---|
+| `token_dim` | 768 | `nlayers` | 10 |
+| `nheads` | 12 | `pair_repr_dim` | 512 |
+| `dim_cond` | 512 | `num_registers` | 10 |
+| `use_moe` | True | `n_experts` | 5 |
+| `n_activated_experts` | 2 | `capacity_factor` | 1.3 |
+| `residual_mha` | True | `residual_transition` | True |
+| `parallel_mha_transition` | False | `use_attn_pair_bias` | True |
+| `use_qkln` | True | `target_pred` | v (速度) |
+| `t_emb_dim` | 256 | `idx_emb_dim` | 128 |
+| `plm_in_dim` | 1280 | `plm_out_dim` | 256 |
+
+来源: [inference.yaml](/configs/inference.yaml#L48-L92), [train.yaml](/configs/train.yaml#L58-L101)
+
+## 项目结构图
+
+```
+IDPFold2/
+├── src/                          # 核心源代码
+│   ├── model/                    # 神经网络模块
+│   │   ├── protein_transformer.py    # ★ ProteinTransformerAF3 + 层块
+│   │   ├── flow_matching/
+│   │   │   └── r3flow.py             # ★ R3NFlowMatcher：插值、ODE/SDE 模拟
+│   │   ├── components/
+│   │   │   ├── af3_modules.py        # AdaptiveLayerNorm, Transition, SwiGLU
+│   │   │   ├── pair_bias_attn.py     # PairBiasAttention
+│   │   │   ├── feature_factory.py    # ★ FeatureFactory + 所有特征模块
+│   │   │   ├── moe_modules_torch.py  # ★ MoE 路由器 + 专家分发
+│   │   │   ├── moe_operations.py     # 专家令牌路由的 Gather/scatter 操作
+│   │   │   └── motif_factory.py      # 部分结构设计的基序条件化
+│   │   ├── integral.py               # ★ 训练/推理循环、损失计算、引导
+│   │   ├── ema.py                    # 指数移动平均包装器
+│   │   └── optimizer.py             # 优化器 & 学习率调度器配置
+│   ├── data/                     # 数据集 & 变换
+│   ├── inference.py              # ★ Hydra 推理入口点
+│   ├── train.py                  # ★ Hydra 训练入口点
+│   ├── common/                   # 残基 & 原子常量
+│   └── utils/                    # DDP、PDB I/O、比对、聚类工具
+├── configs/                      # Hydra 配置文件
+│   ├── inference.yaml
+│   └── train.yaml
+├── megablocks/                   # 基于 Flash 的 MoE 内核
+├── benchmarks/                   # BioEmu & PeptoneBench 评估
+└── scripts/                      # ESM 嵌入提取、轨迹处理
+```
+
+标记为 ★ 的文件是本页面探讨的架构核心。
+
+## 后续阅读
+
+架构概述已映射了整个系统。要深入理解每个支柱，请按以下顺序阅读：
+
+1. **[R³ 上的流匹配](5-flow-matching-on-r3)** — 生成式 ODE/SDE、插值方案和模拟策略的数学基础
+2. **[混合专家过渡层](6-mixture-of-experts-transition-layers)** — 令牌路由、容量管理和负载均衡机制
+3. **[Protein Transformer 网络](7-protein-transformer-network)** — 完整主干架构、寄存器令牌及前向传播细节
+4. **[自适应层归一化与成对偏置注意力](8-adaptive-layer-norm-and-pair-biased-attention)** — 使架构具有时间感知能力的条件化机制与注意力偏置
+5. **[特征工厂与输入编码](9-feature-factory-and-input-encoding)** — 如何从原始输入组合序列、成对和条件化特征
+6. **[采样与引导策略](10-sampling-and-guidance-strategies)** — 推理时的 CFG、自动引导、基序条件化和自条件化
+
+---
+
+- [深入解析/配置参考](https://zread.ai/Junjie-Zhu/IDPFold2/16-configuration-reference)
+
+---
+slug:16-configuration-reference
+blog_type:normal
+---
+
+
+IDPFold2 采用 **Hydra** 和 **OmegaConf** 进行分层配置管理，提供了两个主要配置文件——`inference.yaml` 和 `train.yaml`——来控制所有的运行时行为。每个参数都在启动时通过 Hydra 的组合机制 (`@hydra.main`) 进行解析，且当前配置会自动序列化到日志目录下的 `config.yaml` 文件中，以确保完全的可复现性。本页为这两种配置模式、它们的共享子配置项以及消费各参数的代码路径，提供了完整的字段级参考。
+
+来源: [inference.yaml](/configs/inference.yaml#L1-L103), [train.yaml](/configs/train.yaml#L1-L124)
+
+## 配置架构
+
+两个入口点在模块级别声明了其 Hydra 配置，将配置名绑定到相应的 YAML 文件上。随后，配置被解包为 `DictConfig` 并整体传递给构造函数——最关键的是 `ProteinTransformerAF3(**args.model)`——这意味着 `model` 命名空间下的每个键都直接映射为模型构造函数的参数。
+
+```mermaid
+graph TD
+    subgraph Hydra
+        A["inference.yaml"] --> C["DictConfig (args)"]
+        B["train.yaml"] --> D["DictConfig (args)"]
+    end
+    C --> E["src/inference.py"]
+    D --> F["src/train.py"]
+    E --> G["ProteinTransformerAF3<br/>(**args.model)"]
+    F --> G
+    F --> H["PDBDataModule<br/>(args.data)"]
+    F --> I["get_optimizer<br/>(args.optimizer)"]
+    F --> J["EMAWrapper<br/>(args.ema)"]
+    E --> K["generating_predict<br/>(args.sampling, args.schedule)"]
+```
+
+`model` 子配置项在两种配置之间**结构完全相同**（仅 `training` 标志位不同），从而确保了训练和推理之间的架构一致性。推理配置额外提供了控制 ODE 积分循环的 `sampling` 和 `schedule` 子配置项，而训练配置则提供了 `noise`、`loss`、`data`、`optimizer`、`ema` 和 `resume` 子配置项。
+
+来源: [inference.py](/src/inference.py#L176-L177), [train.py](/src/train.py#L31-L32)
+
+## 顶层推理参数
+
+这些参数控制着从数据加载到结构生成的推理管线。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `prefix` | str | `"DEFAULT"` | 日志目录前缀。最终的日志目录为 `{logging_dir}/{prefix}_INF_{timestamp}`。 |
+| `csv_dir` | str\|null | `null` | **必填。** 包含测试用例的 CSV 文件路径（列：`test_case`，`sequence`）。 |
+| `plm_emb_dir` | str\|null | `null` | **必填。** 预计算的 ESM-2 嵌入（`.pt` 文件）目录。如果缺失，则即时生成嵌入。 |
+| `nsamples` | int | `100` | 每个输入序列要生成的结构样本数。 |
+| `max_batch_length` | int | `3500` | 内存自适应批处理：`nsamples_per_batch = max_batch_length // nres`。请根据 GPU 显存进行调整。 |
+| `dt` | float | `0.005` | 流匹配模拟的 ODE 积分步长。 |
+| `target_pred` | str | `"v"` | 网络预测目标：`"v"` 代表速度场，`"x_1"` 代表纯净结构。 |
+| `ckpt_dir` | str\|null | `null` | **必填。** 模型检查点文件（`.pth`）的路径。 |
+| `ag_dir` | str\|null | `null` | 自引导检查点的路径。仅在 `autoguidance_ratio > 0` 时必填。 |
+| `load_multimer` | bool | `False` | 设为 `True` 以进行多聚体推理（CSV 中为冒号分隔的序列）。 |
+| `num_workers` | int | `6` | DataLoader 工作线程数。 |
+| `seed` | int | `42` | 用于可复现性的随机种子。 |
+| `deterministic` | bool | `False` | 如果为 `True`，强制执行确定性 CUDA 操作。 |
+| `logging_dir` | str | `"./logs"` | 日志和生成 PDB 文件的根目录。 |
+
+### 条件标志
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `motif_conditioning` | bool | `False` | 启用基于基序的部分结构条件。 |
+| `moe_conditioning` | bool | `False` | 启用 MoE 专家路由条件。 |
+| `self_conditioning` | bool | `False` | 启用自条件：将先前的预测重新注入作为额外输入。 |
+
+来源: [inference.yaml](/configs/inference.yaml#L1-L30), [inference.py](/src/inference.py#L219-L304)
+
+## 顶层训练参数
+
+这些参数控制着训练循环、检查点保存以及分布式数据并行执行。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `task_prefix` | str | `"HYBRID_TRAIN"` | 日志目录前缀。最终的日志目录为：`{logging_dir}/{task_prefix}_{timestamp}`。 |
+| `batch_size` | int | `8` | 单设备批大小。有效批大小 = `batch_size × world_size`。 |
+| `epochs` | int | `500` | 总训练轮数。 |
+| `target_pred` | str | `"v"` | 网络预测目标（与推理相同）。 |
+| `checkpoint_interval` | int | `2` | 每隔 N 个轮数保存一次检查点。 |
+| `seed` | int | `42` | 随机种子，在所有 DDP 进程间同步。 |
+| `deterministic` | bool | `False` | 强制执行确定性操作。 |
+| `logging_dir` | str | `"./logs"` | 日志、检查点和样本 PDB 的根目录。 |
+
+训练也支持与推理相同的三种条件标志（`motif_conditioning`、`moe_conditioning`、`self_conditioning`），默认值为 `False`。
+
+来源: [train.yaml](/configs/train.yaml#L1-L13), [train.py](/src/train.py#L74-L77)
+
+## 采样配置（仅限推理）
+
+`sampling` 子配置项控制结构生成期间的 ODE/SDE 积分策略。它作为 `sampling_args` 直接传递给 `generating_predict`。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `sampling_mode` | str | `"vf"` | 积分模式：`"vf"` 代表确定性向量场 ODE，`"sc"` 代表带噪声注入的随机基于分数的 SDE。 |
+| `sc_scale_noise` | float | `0.0` | 当 `sampling_mode == "sc"` 时的噪声缩放。乘以维纳过程项。 |
+| `sc_scale_score` | float | `1.0` | 当 `sampling_mode == "sc"` 时的分数缩放。尚未完全实现。 |
+| `gt_mode` | str | `"1/t"` | 噪声调度函数 g(t)：`"1/t"`、`"us"` 或 `"tan"`。控制扩散系数的幅度。 |
+| `gt_p` | float | `1.0` | g(t) 的乘法缩放参数。 |
+| `gt_clamp_val` | float\|null | `null` | g(t) 的上限截断值。设为 `null` 表示无截断，或设为浮点数（例如 `10.0`）。 |
+
+<CgxTip>当 `sampling_mode` 为 `"vf"`（默认值）时，只有 `gt_mode`、`gt_p` 和 `gt_clamp_val` 会影响模拟调度。`sc_scale_noise` 和 `sc_scale_score` 参数仅在选择 `"sc"` 模式时激活，从而以结构精度为代价实现随机采样以提升多样性。</CgxTip>
+
+来源: [inference.yaml](/configs/inference.yaml#L32-L38), [integral.py](/src/model/integral.py#L386-L393), [r3flow.py](/src/model/flow_matching/r3flow.py#L240-L322)
+
+## 调度配置（仅限推理）
+
+`schedule` 子配置项控制 ODE 积分的时间步调度，决定积分时间 `t` 如何从 0 推进到 1。它作为 `schedule_args` 传递给 `generating_predict`。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `schedule_mode` | str | `"log"` | 时间离散化方案：`"log"` 表示对数间隔（在 t=0 附近分辨率更高），`"linear"` 表示均匀间隔。 |
+| `schedule_p` | float | `2.0` | 控制时间步密度的调度指数。较高的值会将时间步集中在 ODE 较僵硬的 t=0 附近。 |
+
+来源: [inference.yaml](/configs/inference.yaml#L40-L42), [integral.py](/src/model/integral.py#L386-L387)
+
+## 引导配置（仅限推理）
+
+无分类器引导和自引导参数控制推理时结构保真度与多样性之间的权衡。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `guidance_weight` | float | `1.0` | 引导强度。`1.0` 禁用引导（标准采样）。大于 1.0 的值会放大条件信号以获得更清晰的结构。 |
+| `autoguidance_ratio` | float | `0.0` | CFG 与自引导在 [0, 1] 之间的混合比例。`0.0` = 纯 CFG，`1.0` = 纯自引导。 |
+| `autoguidance_ckpt_path` | str\|null | `null` | 自引导模型检查点的路径。当 `autoguidance_ratio > 0` 时必填。 |
+
+组合预测为：`x_pred = w × x_cond + (1-w) × [α × x_ag + (1-α) × x_uncond]`，其中 `w` = `guidance_weight`，`α` = `autoguidance_ratio`。
+
+来源: [inference.yaml](/configs/inference.yaml#L44-L46), [integral.py](/src/model/integral.py#L64-L86)
+
+## 模型配置（共享）
+
+`model` 子配置项定义了 ProteinTransformerAF3 架构。它在 `inference.yaml` 和 `train.yaml` 之间**共享**，仅 `training` 标志位的值有所不同。所有键都作为 `**kwargs` 传递给 `ProteinTransformerAF3.__init__`。
+
+### 核心架构
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `training` | bool | `True`/`False` | **区分训练与推理。** 影响 MoE 负载均衡（仅在训练期间启用）。 |
+| `token_dim` | int | `768` | 每残基 token 表示的维度。 |
+| `nlayers` | int | `10` | Transformer 主干层数。 |
+| `nheads` | int | `12` | 注意力头数。`token_dim` 必须能被 `nheads` 整除。 |
+| `residual_mha` | bool | `True` | 多头注意力周围的残差连接。 |
+| `residual_transition` | bool | `True` | 转换层周围的残差连接。 |
+| `parallel_mha_transition` | bool | `False` | AF3 风格的 MHA 与转换层并行计算（相加）。如果为 `True` 且两者残差均为 `True`，则转换层的残差会自动禁用，以防重复计算。 |
+| `use_attn_pair_bias` | bool | `True` | 使用对表示来偏置注意力 logits（PairBiasAttention）。 |
+
+### 特征规格
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `strict_feats` | bool | `False` | 如果为 `False`，缺失的特征将用默认值填充。如果为 `True`，缺失特征将引发错误。 |
+| `feats_init_seq` | list[str] | `["plm_emb", "res_type", "res_idx", "chain_break_per_res"]` | 构成初始 token 表示的序列特征。 |
+| `feats_cond_seq` | list[str] | `["time_emb"]` | 构成 AdaptiveLayerNorm 条件向量的序列特征。 |
+| `feats_pair_repr` | list[str] | `["xt_pair_dists", "rel_pos"]` | 构成初始对表示的特征。 |
+| `feats_pair_cond` | list[str] | `["time_emb"]` | 用于通过 AdaptiveLayerNorm 进行对表示条件的对特征。 |
+
+### 特征维度
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `t_emb_dim` | int | `256` | 正弦时间嵌入的维度。 |
+| `idx_emb_dim` | int | `128` | 残基索引嵌入的维度。 |
+| `dim_cond` | int | `512` | AdaptiveLayerNorm 条件向量的维度。 |
+| `plm_in_dim` | int | `1280` | PLM 嵌入的输入维度（ESM-2 t33 输出维度）。 |
+| `plm_out_dim` | int | `256` | 投影后的 PLM 嵌入维度。 |
+| `xt_pair_dist_dim` | int | `64` | 含噪坐标 x_t 的对距离直方图的距离分箱数。 |
+| `xt_pair_dist_min` | float | `0.1` | 分箱的最小逐对距离（nm）。 |
+| `xt_pair_dist_max` | float | `3.0` | 分箱的最大逐对距离（nm）。 |
+| `r_max` | int | `32` | 相对位置编码的最大相对序列位置。 |
+| `pair_repr_dim` | int | `512` | 最终对表示的维度。 |
+| `num_registers` | int | `10` | 前置于序列的寄存器 token 数量。设为 `0` 以禁用。 |
+| `use_qkln` | bool | `True` | 在注意力内部应用 QK LayerNorm 以提升训练稳定性。 |
+
+### 混合专家
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `use_moe` | bool | `True` | 启用 MoE 转换层。如果为 `False`，则使用单个 `TransitionADALN`。 |
+| `n_experts` | int | `5` | 每层的专家网络总数。 |
+| `n_activated_experts` | int | `2` | 每个 token 激活的 Top-K 专家（路由）。 |
+| `dim_moe_cond` | int | `0` | MoE 路由器条件的维度。`0` 表示无条件。 |
+| `capacity_factor` | float | `1.3` | 用于负载均衡路由的专家容量因子。 |
+| `normalize_expert_weights` | bool | `True` | 跨被激活专家归一化路由器权重。 |
+
+来源: [inference.yaml](/configs/inference.yaml#L48-L101), [train.yaml](/configs/train.yaml#L58-L101), [protein_transformer.py](/src/model/protein_transformer.py#L322-L403)
+
+## 噪声配置（仅限训练）
+
+`noise` 子配置项控制训练期间插值时间 `t` 的采样分布，直接影响 t∈[0,1] 区间内的流匹配损失加权。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `mode` | str | `"mix_up02_beta"` | 时间采样分布。选项：`"uniform"`、`"logit-normal"`、`"beta"`、`"mix_up02_beta"`。 |
+| `p1` | float | `1.9` | 第一形状参数。对于 `"beta"`/`"mix_up02_beta"`：Beta(α=p1, β=p2)。对于 `"logit-normal"`：logit-normal 的均值。 |
+| `p2` | float | `1.0` | 第二形状参数。对于 `"beta"`/`"mix_up02_beta"`：Beta(α=p1, β=p2)。对于 `"logit-normal"`：标准差。对于 `"uniform"`：t_max 缩放。 |
+
+默认的 `"mix_up02_beta"` 模式从 Beta(1.9, 1.0) 分布中采样，并以 2% 的概率替换为均匀采样，从而覆盖流匹配权重 `1/(1-t)²` 发散的 t≈1 区域。
+
+来源: [train.yaml](/configs/train.yaml#L24-L27), [integral.py](/src/model/integral.py#L92-L117)
+
+## 损失配置（仅限训练）
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `moe_loss_weight` | float | `0.3` | MoE 负载均衡辅助损失的权重。总损失 = `fm_loss + moe_loss_weight × moe_loss`。 |
+
+来源: [train.yaml](/configs/train.yaml#L29-L30), [integral.py](/src/model/integral.py#L297-L313)
+
+## 数据配置（仅限训练）
+
+`data` 子配置项配置 PDB 数据管线、分割策略以及 DataLoader 行为。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `data_dir` | str | `"./data/hybrid_train/"` | 包含 PDB 文件的根目录。 |
+| `plm_emb_dir` | str | `"./data/hybrid_train/embedding/"` | 预计算 PLM 嵌入的目录。 |
+| `complex_dir` | str | `"./data/hybrid_train/complex_contacts.csv"` | 用于多聚体训练的复合体接触 CSV 的路径。 |
+| `complex_prop` | float | `0.8` | 每个批次中多聚体复合体样本的比例（混合单体/多聚体训练）。 |
+| `crop_size` | int | `256` | 每次裁切的残基数（针对长链的空间裁切）。 |
+| `format` | str | `"pdb"` | 输入文件格式。 |
+| `overwrite` | bool | `False` | 覆盖现有的已处理数据文件。 |
+| `batch_padding` | bool | `True` | 将批次填充至统一长度。 |
+| `sampling_mode` | str | `"cluster-random"` | 数据采样策略：感知聚类的随机采样。 |
+| `num_workers` | int | `6` | DataLoader 工作线程数。 |
+| `pin_memory` | bool | `True` | 锁页内存以加速 GPU 传输。 |
+| `fraction` | float | `1.0` | 使用的数据集比例。 |
+| `molecule_type` | str\|null | `null` | 按分子类型过滤。`null` = 无过滤。 |
+| `experiment_types` | str\|null | `null` | 按实验类型过滤（例如 X-RAY DIFFRACTION）。 |
+| `min_length` | int\|null | `null` | 最小残基数过滤。 |
+| `max_length` | int | `256` | 最大残基数过滤。 |
+| `oligomeric_min` | int\|null | `null` | 最小低聚态过滤。 |
+| `oligomeric_max` | int\|null | `null` | 最大低聚态过滤。 |
+| `best_resolution` | float\|null | `null` | 最佳（最小）分辨率阈值。 |
+| `worst_resolution` | float\|null | `null` | 最差（最大）分辨率阈值。 |
+| `train_val_prop` | list[float] | `[0.99, 0.01]` | 训练/验证集划分比例。 |
+| `split_type` | str | `"sequence_similarity"` | 划分策略：基于序列相似性的聚类。 |
+| `split_sequence_similarity` | float | `0.9` | 用于划分聚类的序列相似性阈值。 |
+| `overwrite_sequence_clusters` | bool | `False` | 强制重新计算序列聚类。 |
+
+来源: [train.yaml](/configs/train.yaml#L32-L56), [train.py](/src/train.py#L79-L120)
+
+## 优化器配置（仅限训练）
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `lr` | float | `0.0001` | 基础学习率。 |
+| `weight_decay` | float | `0.0` | L2 权重衰减。 |
+| `beta1` | float | `0.9` | Adam β₁（梯度动量）。 |
+| `beta2` | float | `0.999` | Adam β₂（方差动量）。 |
+| `use_adamw` | bool | `False` | 如果为 `True`，使用具有解耦权重衰减和选择性 2D 张量衰减的 AdamW；如果为 `False`，使用标准 Adam。 |
+| `lr_scheduler` | str | `"af3"` | 学习率调度器类型。`"af3"` 使用带线性预热的 AlphaFold3 步衰减调度器。 |
+| `warmup_steps` | int | `4000` | 线性学习率攀升的预热步数。 |
+| `decay_every_n_steps` | int | `80000` | 乘性学习率衰减的步间隔。 |
+| `decay_factor` | float | `0.98` | 每个间隔应用的乘性衰减因子。 |
+
+<CgxTip>默认的 `"af3"` 调度器实现了 AlphaFold3 学习率调度：在 `warmup_steps` 内线性预热，然后进行步衰减，即 `lr = base_lr × decay_factor^(step // decay_every_n_steps)`。这不同于余弦退火，它提供了更平缓、可控的衰减。</CgxTip>
+
+来源: [train.yaml](/configs/train.yaml#L103-L112), [optimizer.py](/src/model/optimizer.py#L63-L85), [optimizer.py](/src/model/optimizer.py#L163-L188)
+
+## EMA 配置（仅限训练）
+
+指数移动平均通过维护影子参数来提供更稳定的推理检查点。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `decay` | float | `0.999` | EMA 衰减率。设为 `0` 以完全禁用 EMA。 |
+| `mutable_param_keywords` | list[str] | `[""]` | 用于匹配参数名以进行 EMA 跟踪的关键词。`[""]` 会跟踪所有参数。 |
+
+来源: [train.yaml](/configs/train.yaml#L20-L22), [train.py](/src/train.py#L145-L153)
+
+## 恢复配置（仅限训练）
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `ckpt_dir` | str\|null | `null` | 用于恢复训练的优化器/调度器检查点路径。 |
+| `ema_dir` | str\|null | `null` | 用于从 EMA 快照恢复的 EMA 模型检查点路径。 |
+| `load_model_only` | bool | `True` | 如果为 `True`，仅加载模型权重（忽略优化器/调度器状态，重置轮数计数器）。如果为 `False`，恢复完整的训练状态。 |
+
+来源: [train.yaml](/configs/train.yaml#L15-L18), [train.py](/src/train.py#L174-L195)
+
+## Hydra 覆盖（共享）
+
+两种配置都包含了禁用自动日志记录的 Hydra 默认设置，以防止其干扰 IDPFold2 的自定义日志方案：
+
+```yaml
+defaults:
+  - _self_
+  - override hydra/hydra_logging: disabled
+  - override hydra/job_logging: disabled
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+```
+
+这会禁用 Hydra 的工作目录管理和日志文件创建，确保所有输出都进入用户指定的 `logging_dir`。
+
+来源: [inference.yaml](/configs/inference.yaml#L93-L103), [train.yaml](/configs/train.yaml#L114-L124)
+
+## 配置模式对比
+
+下表总结了每种模式下可用的配置子项，突显了共享 `model` 命名空间的结构对称性。
+
+| 子项 | 推理 | 训练 | 消费方 |
+|------------|:---------:|:--------:|-------------|
+| 顶层参数 | ✅ | ✅ | 入口脚本 |
+| `model` | ✅ | ✅ | `ProteinTransformerAF3` |
+| `sampling` | ✅ | — | `generating_predict` → `R3NFlowMatcher.full_simulation` |
+| `schedule` | ✅ | — | `generating_predict` → `R3NFlowMatcher.full_simulation` |
+| 引导参数 | ✅ | — | `conditioned_predict` |
+| `noise` | — | ✅ | `training_predict` → `sample_t` |
+| `loss` | — | ✅ | `training_predict` |
+| `data` | — | ✅ | `PDBDataModule`、`PDBDataSelector`、`PDBDataSplitter` |
+| `optimizer` | — | ✅ | `get_optimizer`、`get_lr_scheduler` |
+| `ema` | — | ✅ | `EMAWrapper` |
+| `resume` | — | ✅ | `train.py` 中的检查点加载 |
+
+有关设置首次推理运行的实用指南，请参阅[单体与多聚体推理](3-inference-for-monomers-and-multimers)。有关训练配置的详细演练，请参阅[训练与微调工作流](12-training-and-fine-tuning-workflow)。
+
+---
+
+- [深入解析/Docker 与昇腾部署](https://zread.ai/Junjie-Zhu/IDPFold2/17-docker-and-ascend-deployment)
+
+---
+slug:17-docker-and-ascend-deployment
+blog_type:normal
+---
+
+
+IDPFold2 提供了两个生产级 Docker 镜像 —— 一个针对 **NVIDIA/CUDA** GPU，另一个针对 **华为昇腾 910B** NPU。这两个镜像均安装了完整的 conda 环境和项目源码，但刻意**排除了模型检查点和 ESM 权重**以保持镜像精简；这些文件将在运行时挂载或下载。本文将逐一介绍各镜像的构建、运行和故障排除，并特别关注昇腾技术栈额外的 CANN 运行时依赖项及入口点编排。
+
+来源: [docker/README.md](docker/README.md#L1-L163), [README4Docker.md](README4Docker.md#L1-L88)
+
+## 架构概览
+
+这两个镜像共享一个公共逻辑层 —— 基础操作系统、Miniforge、conda 环境和项目安装 —— 但在加速器运行时层出现分化。CUDA 路径依赖 NVIDIA 基础镜像提供驱动桩程序，而昇腾路径则必须手动安装 CANN 工具包/内核，并通过自定义入口点连接驱动挂载。
+
+```mermaid
+flowchart TB
+    subgraph CUDA_Image["CUDA 镜像 (Dockerfile)"]
+        C1["nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04"] --> C2["Miniforge3 x86_64"]
+        C2 --> C3["conda env create -f environment.yaml"]
+        C3 --> C4["pip install fair-esm + ."]
+    end
+
+    subgraph Ascend_Image["昇腾镜像 (Dockerfile.ascend)"]
+        A1["ubuntu:22.04 aarch64"] --> A2["Miniforge3 aarch64"]
+        A2 --> A3["安装 CANN 工具包 + 内核"]
+        A3 --> A4["配置 ascend-env.sh"]
+        A4 --> A5["pip install torch + torch-npu + deps + ."]
+        A5 --> A6["ascend_entrypoint.sh"]
+    end
+
+    subgraph Shared["共享运行时层"]
+        S1["挂载 checkpoints/"] --> S2["挂载 embeddings/"]
+        S2 --> S3["idpfold2-infer / idpfold2-train"]
+    end
+
+    C4 --> Shared
+    A6 --> Shared
+```
+
+来源: [Dockerfile](Dockerfile#L1-L38), [Dockerfile.ascend](Dockerfile.ascend#L1-L86), [docker/ascend_entrypoint.sh](docker/ascend_entrypoint.sh#L1-L59)
+
+## 先决条件与主机配置
+
+在构建任一镜像之前，请为主机准备用于卷挂载的目录树。这些目录能在容器的生命周期之间持久化模型产物，并避免在每次运行时重新下载 ESM 权重。
+
+```bash
+mkdir -p checkpoints inputs embeddings outputs
+```
+
+| 目录 | 用途 | 容器路径 |
+|-----------|---------|----------------|
+| `checkpoints/` | 模型 `.pth` 检查点文件（从 [Zenodo](https://zenodo.org/records/18239596) 下载） | `/workspace/checkpoints` |
+| `inputs/` | 自定义 CSV 输入或训练元数据 | `/workspace/inputs` |
+| `embeddings/` | PLM 嵌入缓存（ESM 权重在首次使用时下载） | `/workspace/embeddings` |
+| `outputs/` | 推理样本和训练日志 | `/workspace/outputs` |
+
+**NVIDIA 主机** additionally 还需要安装可用的 NVIDIA 驱动和 **NVIDIA Container Toolkit**，以便 `docker run --gpus all` 正常运行。**昇腾主机** 需要在主机上安装昇腾驱动栈，将两个 CANN `.run` 安装程序文件放置在代码库根目录，并访问下文昇腾部分中描述的设备挂载。
+
+> 在 Windows PowerShell 中，请将所有卷挂载命令中的 `$(pwd)` 替换为 `${PWD}`。
+
+来源: [docker/README.md](docker/README.md#L6-L26)
+
+## NVIDIA/CUDA 镜像
+
+### 构建与运行
+
+CUDA 镜像使用默认的 `Dockerfile` 从代码库根目录构建，该文件继承自 `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04`，并通过 `environment.yaml` 创建 `idpfold2` conda 环境。
+
+```bash
+docker build -t idpfold2-env .
+```
+
+使用 GPU 加速运行：
+
+```bash
+docker run --rm -it --gpus all \
+  -v $(pwd)/checkpoints:/workspace/checkpoints \
+  -v $(pwd)/inputs:/workspace/inputs \
+  -v $(pwd)/embeddings:/workspace/embeddings \
+  -v $(pwd)/outputs:/workspace/outputs \
+  -w /workspace/IDPFold-multimer \
+  idpfold2-env
+```
+
+对于仅限 CPU 的冒烟测试，只需省略 `--gpus all` 即可。请注意，在没有 GPU 支持的情况下，推理速度会**显著变慢** —— 此模式仅适用于验证环境或处理极短的序列。
+
+来源: [Dockerfile](Dockerfile#L1-L38), [docker/README.md](docker/README.md#L29-L57)
+
+### 容器内推理
+
+进入容器 Shell 后，使用已安装的 CLI 入口点 `idpfold2-infer`（通过 `setup.py` 中的 console_scripts 注册）或直接调用模块：
+
+```bash
+# CLI 入口点
+idpfold2-infer \
+  prefix=MONOMER_DOCKER \
+  ckpt_dir=/workspace/checkpoints/IDPFold2_ema_0.999_260114.pth \
+  plm_emb_dir=/workspace/embeddings \
+  csv_dir=/workspace/IDPFold-multimer/data/monomer_example.csv \
+  nsamples=4 \
+  max_batch_length=3500 \
+  logging_dir=/workspace/outputs
+
+# 直接脚本形式（等效）
+python src/inference.py \
+  prefix=MONOMER_DOCKER \
+  ckpt_dir=/workspace/checkpoints/IDPFold2_ema_0.999_260114.pth \
+  csv_dir=/workspace/IDPFold-multimer/data/monomer_example.csv
+```
+
+`max_batch_length` 参数应根据你的 GPU 显存进行调整；默认值 3500 是针对 V100-32GB 校准的。完整参数目录请参阅[配置参考](16-configuration-reference)。
+
+来源: [docker/README.md](docker/README.md#L59-L78), [setup.py](setup.py#L35-L40), [configs/inference.yaml](configs/inference.yaml#L9-L11)
+
+### 训练冒烟测试
+
+最小化的训练调用可确认 CLI 和挂载路径是否正确解析。这**不是**完整的训练方案 —— 请将 `TRAIN_DATA_ROOT` 替换为你已准备好的数据集。
+
+```bash
+idpfold2-train \
+  task_prefix=DOCKER_SMOKE \
+  epochs=1 \
+  batch_size=1 \
+  data.data_dir=/workspace/inputs/TRAIN_DATA_ROOT \
+  data.plm_emb_dir=/workspace/embeddings
+```
+
+来源: [docker/README.md](docker/README.md#L83-L93), [setup.py](setup.py#L37-L38)
+
+## 昇腾 910B / CANN 镜像
+
+昇腾镜像面向华为昇腾 910B NPU，由于 CANN（神经网络计算架构）软件栈的存在，其构建和运行时配置要复杂得多。
+
+### 与 CUDA 镜像的主要差异
+
+| 方面 | CUDA 镜像 | 昇腾镜像 |
+|--------|-----------|--------------|
+| 基础镜像 | `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` | `ubuntu:22.04` |
+| 架构 | x86_64 | aarch64 |
+| PyTorch 版本 | 2.4.1 (conda) | 2.6.0 (pip, build-arg) |
+| NumPy 版本 | 1.23.5 | 1.26.0 |
+| 加速器桥接 | CUDA/cuDNN（位于基础镜像内） | `torch-npu` 2.6.0.post3 (pip) |
+| CANN 安装 | 不适用 | 工具包 + 内核（来自 `.run` 文件） |
+| 入口点 | `/bin/bash` | `ascend_entrypoint.sh` |
+| `mmseqs2` | ✅ 通过 bioconda 包含 | ❌ 刻意排除 |
+| 环境创建 | `conda env create -f environment.yaml` | 手动 `pip install` 序列 |
+
+<CgxTip>昇腾镜像未安装 `mmseqs2`，因为 aarch64 架构无法使用其 conda-forge 二进制包。使用预计算输入进行推理不受影响，但需要即时聚类的训练工作流必须使用预计算的聚类结果或单独安装 `mmseqs2`。</CgxTip>
+
+来源: [Dockerfile](Dockerfile#L1-L38), [Dockerfile.ascend](Dockerfile.ascend#L1-L86), [environment.yaml](environment.yaml#L1-L30), [environment ascend.yaml](environment ascend.yaml#L1-L25)
+
+### 构建先决条件
+
+在构建之前，请将 **CANN 安装程序文件**放置在代码库根目录。这些是特定于硬件的二进制包，无法通过包管理器获取：
+
+- `Ascend-cann-toolkit_8.2.RC1_linux-aarch64.run`
+- `Ascend-cann-kernels-910b_8.2.RC1_linux-aarch64.run`
+
+可选地，将 `Miniforge3-Linux-aarch64.sh` 放置在代码库根目录以进行**离线或气隙构建**。如果省略，Dockerfile 将在构建时从 GitHub 下载 Miniforge。
+
+来源: [Dockerfile.ascend](Dockerfile.ascend#L9-L12), [docker/README.md](docker/README.md#L99-L106)
+
+### 使用可配置构建参数构建
+
+昇腾 Dockerfile 对所有加速器包使用了 `ARG` 指令，允许你在不修改 Dockerfile 的情况下将版本匹配到你特定的 CANN 驱动/运行时：
+
+```bash
+docker build -f Dockerfile.ascend \
+  --build-arg MINIFORGE_LOCAL_FILE="Miniforge3-Linux-aarch64.sh" \
+  --build-arg CANN_TOOLKIT_RUN="Ascend-cann-toolkit_8.2.RC1_linux-aarch64.run" \
+  --build-arg CANN_KERNELS_RUN="Ascend-cann-kernels-910b_8.2.RC1_linux-aarch64.run" \
+  --build-arg TORCH_PACKAGE="torch==2.6.0" \
+  --build-arg PYG_PACKAGE="torch-geometric==2.6.1" \
+  --build-arg TORCH_NPU_PACKAGE="torch-npu==2.6.0.post3" \
+  -t idpfold2-ascend-env .
+```
+
+| 构建参数 | 默认值 | 用途 |
+|---------------|---------|---------|
+| `TORCH_PACKAGE` | `torch==2.6.0` | PyTorch pip 指定符 |
+| `PYG_PACKAGE` | `torch-geometric==2.6.1` | PyG pip 指定符 |
+| `TORCH_NPU_PACKAGE` | `torch-npu==2.6.0.post3` | 适用于 PyTorch 的昇腾 NPU 适配器 |
+| `MINIFORGE_URL` | Miniforge3 aarch64 GitHub 发行版 | Miniforge 下载 URL |
+| `MINIFORGE_LOCAL_FILE` | *(空)* | 用于离线构建的本地 Miniforge `.sh` 文件 |
+| `CANN_TOOLKIT_RUN` | `Ascend-cann-toolkit_8.2.RC1_linux-aarch64.run` | CANN 工具包安装程序文件名 |
+| `CANN_KERNELS_RUN` | `Ascend-cann-kernels-910b_8.2.RC1_linux-aarch64.run` | CANN 内核安装程序文件名 |
+
+来源: [Dockerfile.ascend](Dockerfile.ascend#L6-L12), [docker/README.md](docker/README.md#L110-L121)
+
+### CANN 安装与环境接线
+
+构建过程分两个阶段安装 CANN。首先，使用 `--install --quiet` 执行 `.run` 安装程序文件，对于交互式提示则回退至 `yes Y |` 管道输入。其次，将 CANN 的 `set_env.sh` 脚本引入至 `/etc/profile.d/ascend-env.sh`，以便所有后续 Shell 均继承 CANN 的 `PATH` 和 `LD_LIBRARY_PATH`。Dockerfile 会同时检查 `/usr/local/Ascend` 和 `/root/Ascend` 这两个安装位置。
+
+```mermaid
+flowchart LR
+    A[".run 安装程序文件<br/>(构建上下文)"] --> B["chmod +x &&<br/>--install --quiet"]
+    B --> C["CANN 工具包 →<br/>/usr/local/Ascend/ascend-toolkit"]
+    B --> D["CANN 内核 →<br/>/usr/local/Ascend/ascend-toolkit"]
+    C --> E["set_env.sh →<br/>/etc/profile.d/ascend-env.sh"]
+    E --> F["ascend_entrypoint.sh<br/>运行时引入"]
+```
+
+来源: [Dockerfile.ascend](Dockerfile.ascend#L44-L67)
+
+### 在昇腾 910B 上运行
+
+昇腾容器需要 `--privileged` 模式以及显式的设备/驱动挂载，以便从容器内访问 NPU 硬件：
+
+```bash
+docker run --rm -it --privileged \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
+  -v /usr/local/dcmi:/usr/local/dcmi:ro \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
+  -v /dev:/dev \
+  -v $(pwd)/checkpoints:/workspace/checkpoints \
+  -v $(pwd)/inputs:/workspace/inputs \
+  -v $(pwd)/embeddings:/workspace/embeddings \
+  -v $(pwd)/outputs:/workspace/outputs \
+  -w /workspace/IDPFold-multimer \
+  idpfold2-ascend-env
+```
+
+| 挂载 | 用途 |
+|-------|---------|
+| `/usr/local/Ascend/driver` (ro) | 主机昇腾驱动库 |
+| `/etc/ascend_install.info` (ro) | 昇腾安装元数据 |
+| `/usr/local/dcmi` (ro) | 设备管理接口 (DCMI) |
+| `/usr/local/bin/npu-smi` (ro) | NPU 管理实用程序 |
+| `/dev` | 用于 NPU 访问的设备节点 |
+
+来源: [docker/README.md](docker/README.md#L125-L138)
+
+## 昇腾入口点内部机制
+
+`ascend_entrypoint.sh` 脚本是昇腾镜像的 **ENTRYPOINT**，充当构建期间安装的 CANN 运行时与运行时可用驱动挂载之间的关键桥梁。它按顺序执行三项功能：
+
+1. **引入 CANN 环境** —— 首先尝试 `/etc/profile.d/ascend-env.sh`（在构建期间设置），然后回退至 `/usr/local/Ascend/ascend-toolkit/set_env.sh` 或 `/root/Ascend/ascend-toolkit/set_env.sh`，以适应不同主机配置的灵活性。
+
+2. **扩展 `PATH` 和 `LD_LIBRARY_PATH`** —— 使用去重辅助函数 `append_path_if_dir`（跳过已存在的目录）追加昇腾驱动工具路径（`/usr/local/Ascend/driver/tools`、`/usr/local/Ascend/driver/bin`）和库路径（驱动 `lib64` 目录、DCMI `lib64`）。
+
+3. **发出诊断警告** —— 如果在 `PATH` 中未找到 `npu-smi`，或通过 `ldconfig` 无法发现 `libascend_hal.so`，将打印警告，但不会阻止容器启动。
+
+脚本以 `exec "$@"` 终止，将控制权传递给 `CMD`（默认：`/bin/bash`），因此交互式 Shell 和任意命令均可继承完全配置好的环境。
+
+来源: [docker/ascend_entrypoint.sh](docker/ascend_entrypoint.sh#L1-L59), [Dockerfile.ascend](Dockerfile.ascend#L84-L85)
+
+### 运行时验证
+
+启动昇腾容器后，请验证 NPU 技术栈是否正常运行：
+
+```bash
+which npu-smi || true
+npu-smi info
+python -c "import torch, torch_npu; print(torch.__version__)"
+```
+
+如果 `torch_npu` 报告缺少共享库（`libhccl.so` 或 `libascend_hal.so`），请手动扩展 `LD_LIBRARY_PATH`：
+
+```bash
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64:/usr/local/Ascend/ascend-toolkit/8.2.RC1/hccl/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver:/usr/local/dcmi/lib64:${LD_LIBRARY_PATH}
+```
+
+<CgxTip>CANN 共享库解析问题是最常见的昇腾运行时故障。`ascend_entrypoint.sh` 脚本会主动添加主要的驱动 `lib64` 路径，但如果在你所用的 CANN 版本中 `set_env.sh` 未完全配置 `LD_LIBRARY_PATH`，HCCL 和工具包的 `lib64` 目录可能仍然缺失。</CgxTip>
+
+来源: [docker/README.md](docker/README.md#L140-L154), [docker/ascend_entrypoint.sh](docker/ascend_entrypoint.sh#L36-L56)
+
+## 故障排除
+
+| 症状 | 原因 | 解决方案 |
+|---------|-------|------------|
+| `could not select device driver` | 缺少或损坏 NVIDIA Container Toolkit | 安装/修复 NVIDIA Container Toolkit，然后重试 `--gpus all` |
+| 找不到检查点 | 挂载路径不匹配 | 验证 `/workspace/checkpoints` 内是否存在 `IDPFold2_ema_0.999_260114.pth` |
+| 首次推理非常缓慢 | 正在下载 ESM 权重并生成嵌入 | 后续运行将使用 `/workspace/embeddings` 中的缓存嵌入 |
+| CUDA/NPU 内存不足 | 批次或序列过长，超出了可用显存 | 降低 `nsamples` 或 `max_batch_length` |
+| 找不到 `libhccl.so` / `libascend_hal.so` | CANN `LD_LIBRARY_PATH` 不完整 | 应用上文的 `LD_LIBRARY_PATH` 导出命令 |
+| 构建期间依赖安装失败 | 包版本与驱动不兼容 | 清除部分 Docker 层（`--no-cache`）或将 `TORCH_PACKAGE`/`TORCH_NPU_PACKAGE` 构建参数固定至与你的 CANN 运行时匹配的版本 |
+| 未找到 `mmseqs2`（昇腾） | 已从昇腾镜像中刻意排除 | 使用预计算的聚类结果或单独安装 `mmseqs2` |
+
+来源: [docker/README.md](docker/README.md#L156-L163), [README4Docker.md](README4Docker.md#L87-L87)
+
+## 延伸阅读
+
+- 如需完整的推理参数参考，请参阅[配置参考](16-configuration-reference)。
+- 如需了解模型在每个步骤的计算内容，请参阅 [R³ 上的流匹配](5-flow-matching-on-r3) 和 [蛋白质 Transformer 网络](7-protein-transformer-network)。
+- 如需在不使用 Docker 的情况下运行推理，请参阅[单体与多聚体推理](3-inference-for-monomers-and-multimers)。
+
+---
+
+## 生成式框架
+
+- [深入解析/生成式框架/R³上的流匹配](https://zread.ai/Junjie-Zhu/IDPFold2/5-flow-matching-on-r3)
+
+---
+slug:5-flow-matching-on-r3
+blog_type:normal
+---
+
+
+IDPFold2 通过学习一个连续时间向量场，将噪声传输为真实的构象，从而生成 3D 蛋白质结构。`R3NFlowMatcher` 类在乘积空间 **(ℝ³)ⁿ**（每个残基对应一个 3D 坐标）上实现该传输，使其成为连接随机高斯参考样本与折叠蛋白质结构的生成引擎。本页将阐释共同促成高质量结构生成的数学基础、双参数化设计（预测干净样本 vs. 速度）、随机采样模式以及时间调度策略。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L1-L656)
+
+## 数学基础
+
+流匹配定义了一条时间相关的概率路径 *p_t*，连接简单的参考分布 *p₀*（各向同性高斯分布）与目标数据分布 *p₁*（折叠蛋白质）。(ℝ³)ⁿ 上的核心插值是**仿射随机插值**：
+
+> **x_t = (1 − t) x₀ + t x₁**, &emsp; t ∈ [0, 1]
+
+其中 *x₀ ~ N(0, σ²I)* 为参考样本，*x₁* 为以纳米坐标表示的干净蛋白质结构。对其求导可得出用于训练的目标速度场：
+
+> **ẋ_t = dx_t/dt = (x₁ − x_t) / (1 − t)**
+
+神经网络学习预测该速度（或等价地预测干净样本 *x₁*），在推理阶段，ODE/SDE 积分器遵循从 *t = 0* 到 *t = 1* 的已学习场，从而生成结构。
+
+```mermaid
+flowchart LR
+    subgraph Reference["t = 0 : Reference"]
+        X0["x₀ ~ N(0, I)"]
+    end
+    subgraph Interpolant["t ∈ (0,1) : Interpolation"]
+        XT["x_t = (1-t)x₀ + t·x₁"]
+    end
+    subgraph Target["t = 1 : Data"]
+        X1["x₁ = protein coords"]
+    end
+    X0 -->|"v(x_t, t)"| XT
+    XT -->|"v(x_t, t)"| X1
+```
+
+选择仿射插值并非任意——它产生了一个**闭式 log-SNR** 关系，从而实现了基于分数的采样：
+
+> **log-SNR(t) = 2 · ln(t / (1 − t))**, &emsp; **d/dt log-SNR = 2 / (t(1 − t))**
+
+此 log-SNR 在 `log_snr()` 中实现，为随机采样所需的向量场与分数函数之间提供了理论桥梁。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L95-L150)
+
+## 中心化平移与掩码
+
+蛋白质结构位于**零质心子空间** (ℝ₀³)ⁿ 上——全局平移是无关紧要的。`R3NFlowMatcher` 通过 `zero_com` 标志强制执行此约束，该标志在训练期间默认设为 `True`（具体为 `zero_com=not args.motif_conditioning`）。三个内部方法在整个流程中维持此不变性：
+
+| 方法 | 用途 | 关键操作 |
+|---|---|---|
+| `_force_zero_com(x, mask)` | 沿残基维度对张量进行中心化 | `x − mean(x, dim=-2)`（使用掩码感知均值） |
+| `_apply_mask(x, mask)` | 将填充残基置零 | `x * mask[..., None]` |
+| `_mask_and_zero_com(x, mask)` | 依次执行掩码 → 中心化（若 `zero_com` 为真） | 组合上述两操作 |
+
+掩码感知中心化使用 `align_utils` 中的 `mean_w_mask`，其计算掩码均值，从而使填充残基不会偏移质心。此不变性在每一阶段均被强制执行：参考采样、插值、速度计算以及每个欧拉积分步。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L28-L80), [train.py](/src/train.py#L127-L127)
+
+## 双参数化：干净样本 vs. 速度
+
+IDPFold2 中的一个关键设计选择是，**网络预测干净样本 x₁**（而非直接预测速度），随后通过 `xt_dot` 方法将其转换为速度。这由 `prediction_to_x_clean` 中的 `target_pred` 参数控制：
+
+| `target_pred` | 网络输出 | 恢复公式 |
+|---|---|---|
+| `"x_1"`（默认） | 预测的干净结构 *x̂₁* | 直接使用 *x̂₁* |
+| `"v"` | 预测的速度 *v̂* | *x̂₁ = x_t + (1−t) · v̂* |
+
+恢复 *x̂₁* 后，速度目标通过解析计算得出：
+
+> **v = (x̂₁ − x_t) / (1 − t)**
+
+这种干净样本参数化提供了一个关键优势：它支持**自条件化**，即将前一步预测的 *x̂₁* 作为 `x_sc` 反馈到网络的下一次前向传播中，允许模型迭代地优化其自身的预测。
+
+来源: [integral.py](/src/model/integral.py#L24-L37), [integral.py](/src/model/integral.py#L40-L89), [r3flow.py](/src/model/flow_matching/r3flow.py#L152-L183)
+
+## 流匹配训练损失
+
+训练目标是真实干净样本与预测干净样本之间的**加权 MSE 损失**。给定真实坐标 *x₁*、预测 *x̂₁*、时间 *t* 和残基掩码 *m*：
+
+1. 计算每个残基的误差：`err = (x₁ − x̂₁) · m[..., None]`
+2. 对有效残基求均值：`loss = Σ(err²) / (n_valid × 3)`
+3. 应用**逆 SNR 加权**：`loss × 1 / ((1−t)² + ε)`
+
+加权因子 `1 / (1−t)²` 增加了 *t = 1* 附近的损失权重（此时模型必须对最终结构保持精确），并降低了 *t = 0* 附近的权重（此时目标主要由噪声主导）。完整的训练循环还会在混合专家层激活时，添加**键距损失**（比较 10Å 截断内的成对距离矩阵）和 **MoE 负载均衡损失**。
+
+来源: [integral.py](/src/model/integral.py#L173-L228), [integral.py](/src/model/integral.py#L237-L319)
+
+## 采样：确定性 ODE 与随机 SDE
+
+在推理阶段，`full_simulation` 使用欧拉格式对 *t = 0* 到 *t = 1* 进行积分。有两种采样模式可用，对应于两种微分方程：
+
+**方程 (1) — 向量场 (VF) 模式**：`dx_t = v(x_t, t) dt`
+
+这是标准的确定性 ODE。欧拉步即 `x_{t+dt} = x_t + v · dt`。当 `sampling_mode="vf"` 时，所有步骤均使用此模式；且无论为何种模式，**最后几步均强制使用此模式**（t > 0.99），以确保收敛整洁。
+
+**方程 (2) — 分数 (SC) 模式**：`dx_t = [v + g(t)·s(x_t,t)] dt + √(2g(t)) dw_t`
+
+此 SDE 增加了**分数相关漂移**与**布朗噪声**。分数 *s(x_t, t)* 通过仿射插值与高斯参考的闭式关系，由已学习向量场推导得出：
+
+> **s(x_t, t) = (t · v − x_t) / (scale_ref² · (1 − t))**
+
+该计算在 `vf_to_score()` 中实现。噪声函数 *g(t)* 可配置（见下文）。两个缩放参数提供了精细控制：
+
+| 参数 | 作用 | 效果 |
+|---|---|---|
+| `sc_scale_noise` | 缩放扩散项 √(2·g·scale_noise·dt) | >1 增加多样性；<1 降低随机性 |
+| `sc_scale_score` | 缩放分数漂移 g·score·scale_score | 控制来自分数的引导强度 |
+
+当 *g(t) = 0* 或 `sc_scale_noise = sc_scale_score = 0` 时，SDE 严格退化为 ODE（除浮点差异外）。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L185-L352)
+
+## 时间调度策略
+
+区间 [0, 1] 的离散化显著影响样本质量。`get_schedule` 中实现了六种调度模式，每种均生成 `nsteps + 1` 个时间点：
+
+| 调度 | 公式 | 特征 |
+|---|---|---|
+| `"uniform"` | `linspace(0, 1, nsteps+1)` | 等距 |
+| `"power"` | `linspace(0,1)^p` | 集中步骤于 0 附近 (p>1) 或 1 附近 (p<1) |
+| `"log"` | `1 − logspace(−p, 0, nsteps+1).flip(0)`，归一化 | 对数间距，密集于 t=0 附近 |
+| `"loglinear"` | 基于 SNR，使用 `logspace(−6, 6)` | 在 log-SNR 空间中均匀 |
+| `"edm"` | EDM 风格的 σ² ρ-间距，通过 SNR 转换为 t | Karras 等人的调度 |
+| `"cos_sch_v_snr"` | SNR = (cos/sin)^p，转换为 t | 基于余弦的 SNR 调度 |
+
+**对数调度**（推理时的默认调度，p=2.0）在轨迹变化剧烈的早期噪声阶段放置了更多的积分步，而在结构接近成形的 t=1 附近放置较少步数。这符合直觉：模型在从噪声转变为结构时需要更精细的分辨率。
+
+类似地，**训练的时间采样分布**（`integral.py` 中的 `sample_t`）支持在损失计算期间抽取随机时间 *t* 的多种策略：均匀分布、logit-正态分布（logit 空间中的高斯分布）、Beta 分布，以及混合均匀+Beta 方案。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L601-L656), [integral.py](/src/model/integral.py#L92-L117)
+
+## 随机采样的噪声函数 g(t)
+
+`get_gt` 方法计算 SDE 采样模式中使用的噪声调度 *g(t)*。提供三种基础模式：
+
+| 模式 | 公式 | 行为 |
+|---|---|---|
+| `"us"` | `(1−t) / (t + ε)` | t=0 时发散，t=1 时趋于零 |
+| `"tan"` | `(π/2) · sin((1−t)π/2) / (cos((1−t)π/2) + ε)` | 三角变体，形状类似 |
+| `"1/t"` | `1 / (t + ε)` | 简单倒数，在 t=0 附近更强 |
+
+计算基础 *g(t)* 后，可通过 `transform_gt` 进行**幂变换**以重塑调度：对 *g* 进行对数中心归一化，应用 Sigmoid 函数，求 `param` 次幂，并逆转归一化。这在基础调度与扁平化版本之间提供了平滑且可调的插值。最后，`clamp_val` 对 *g(t)* 进行限幅以防止数值不稳定。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L540-L599)
+
+## 完整模拟循环
+
+`full_simulation` 方法编排了整个生成过程。下图展示了其控制流：
+
+```mermaid
+flowchart TD
+    A["Sample x₀ ~ N(0, I)"] --> B["Compute schedule ts"]
+    B --> C["Compute g(t) for all steps"]
+    C --> D{"Step < nsteps?"}
+    D -->|Yes| E["Build NN input: x_t, t, mask, embeddings"]
+    E --> F{"Self-conditioning<br/>and step > 0?"}
+    F -->|Yes| G["Add x_sc = x₁_pred<br/>from previous step"]
+    F -->|No| H["Pass without x_sc"]
+    G --> I["Predict: x₁_pred, v = predict(nn_in)"]
+    H --> I
+    I --> J{"t > 0.99?"}
+    J -->|Yes| K["Force VF mode<br/>for convergence"]
+    J -->|No| L["Use configured<br/>sampling mode"]
+    K --> M["Euler step:<br/>x_t, t = simulation_step(...)"]
+    L --> M
+    M --> D
+    D -->|No| N["Return final x_t<br/>as generated structure"]
+```
+
+关键实现细节：该方法在 `torch.no_grad()` 下运行，支持**模体条件化**（通过 `fixed_structure_mask` 和 `x_motif` 固定结构区域），并可通过向网络传递链标识符和残基索引来容纳**多聚体输入**。最后几步始终强制使用 VF 模式，以确保向最终结构的确定性收敛。
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L389-L538), [integral.py](/src/model/integral.py#L322-L400)
+
+## 训练 vs. 推理：全景概览
+
+流匹配框架扮演着由共享数学对象——向量场 *v(x_t, t)*——连接的两个不同角色：
+
+| 阶段 | 入口点 | 流匹配器角色 | 目标 |
+|---|---|---|---|
+| **训练** | `training_predict()` | `interpolate()` 构建 x_t；`xt_dot()` 计算目标 v | 通过对 *x̂₁* 的 MSE 学习 *v* |
+| **推理** | `generating_predict()` | `full_simulation()` 使用已学习的 *v* 积分 ODE/SDE | 生成蛋白质结构 |
+
+在训练期间，流匹配器构建训练信号：从参考中抽取 *x₀*，插值创建 *x_t*，并计算目标速度。网络被训练以匹配该速度（通过预测 *x₁* 间接实现）。在推理期间，训练后的网络扮演 ODE/SDE 中 *v* 的角色，流匹配器通过对其进行积分来生成样本。
+
+<CgxTip>`scale_ref` 参数（默认 1.0）缩放参考高斯标准差。它同时出现在 `sample_reference`（噪声乘以 `scale_ref`）和 `vf_to_score`（以 `scale_ref²` 形式出现）中。更改此参数需确保训练与推理间的一致性——分数推导假设生成训练数据时使用了相同的 `scale_ref`。</CgxTip>
+
+<CgxTip>自条件化（当 `self_cond=True` 时激活）是一种免费的推理时技术，可显著提升样本质量：在第一步之后的每个欧拉步中，前一步预测的干净样本将作为 `x_sc` 输入网络。这为模型提供了一个用于优化的“草稿”，类似于扩散模型中的迭代优化。在训练期间，自条件化以随机方式应用（50% 概率），以便网络学习使用该信号。</CgxTip>
+
+来源: [r3flow.py](/src/model/flow_matching/r3flow.py#L354-L387), [integral.py](/src/model/integral.py#L237-L319), [integral.py](/src/model/integral.py#L322-L400)
+
+## 后续内容
+
+流匹配框架定义了学习*什么*（ℝ³ 上的向量场）以及*如何*从中采样，但将实际的函数逼近委托给 **Protein Transformer 网络**。该网络架构——包括其混合专家过渡层和成对偏置注意力机制——决定了已学习向量场的表达力与效率。
+
+→ 继续阅读 [混合专家过渡层](6-mixture-of-experts-transition-layers) 以了解向量场如何参数化，或跳转至 [Protein Transformer 网络](7-protein-transformer-network) 查看完整架构概览。关于实际的采样配置，请参见 [采样与引导策略](10-sampling-and-guidance-strategies)。
+
+---
+
+- [深入解析/生成式框架/混合专家过渡层](https://zread.ai/Junjie-Zhu/IDPFold2/6-mixture-of-experts-transition-layers)
+
+---
+slug:6-mixture-of-experts-transition-layers
+blog_type:normal
+---
+
+
+IDPFold2 将每个 Transformer 层中稠密的前馈过渡块替换为**稀疏混合专家过渡层**。这一架构选择在不按比例增加逐 token 计算量的情况下扩展了模型容量：每个残差 token 始终由一个共享专家处理，并被选择性路由到少量专用专家子集中，使网络能够通过不同的专家路径学习独特的结构基序——螺旋、折叠、环、接触。该设计遵循**共享专家 + 路由专家**范式，其中单一专家提供稳定的基线变换，而路由专家注入依赖路由的专化特性。
+
+## 在蛋白质 Transformer 中的架构角色
+
+MoE 过渡层位于每个 `MultiheadAttnAndTransition` 块内部，该块是 `ProteinTransformerAF3` 主干的基本重复单元。每一层首先应用对偏置多头注意力，然后应用 MoE 过渡。当 `use_moe=False` 时，该过渡层退化为标准的 `TransitionADALN`（AdaptiveLayerNorm → SwiGLU MLP → 自适应输出缩放）。启用时，该单一专家成为**共享专家**，并实例化 `n_experts` 个独立副本作为路由专家。路由器为每个 token 选择 `n_activated_experts`（top-k）个专家，并由 softmax 分数加权。
+
+```mermaid
+flowchart TB
+    subgraph TransformerLayer["MultiheadAttnAndTransition (每层)"]
+        direction TB
+        X["x ∈ ℝ<b,n,d>"] --> Attn["对偏置 MHA + AdaLN"]
+        Attn --> XA["x_attn"]
+        XA --> MoEBlockOuter["MoE 过渡层"]
+    end
+
+    subgraph MoEBlock["MoE 过渡"]
+        direction TB
+        Input["x, cond, mask"] --> Router["路由器: Linear→Softmax"]
+        Input --> Shared["共享专家<br/>(TransitionADALN)"]
+        Router --> TopK["Top-K 选择<br/>(k=2 默认)"]
+        TopK --> Routed["路由专家 1…E<br/>(每个 TransitionADALN)"]
+        Shared --> Combine["加权组合"]
+        Routed --> Combine
+        Combine --> Output["(x_shared + x_routed · k) / (k+1)"]
+    end
+
+    MoEBlockOuter --> MoEBlock
+
+    style MoEBlock fill:#e8f4f8,stroke:#2c7bb6,stroke-width:2px
+    style Router fill:#fff3cd,stroke:#d4a017,stroke-width:1.5px
+    style Shared fill:#d4edda,stroke:#28a745,stroke-width:1.5px
+    style Routed fill:#f8d7da,stroke:#dc3545,stroke-width:1.5px
+```
+
+来源: [protein_transformer.py](/src/model/protein_transformer.py#L153-L261), [moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L55-L113)
+
+## MoE 类：共享专家 + 路由专家
+
+核心 `MoE` 模块实例化一个**共享专家**（基础 `TransitionADALN`）和一个 `Experts` 容器，该容器持有 `n_experts` 个相同专家架构的深拷贝实例。路由器是一个轻量级的 `nn.Linear(dim + dim_router_cond, n_experts)` 后接 `Softmax`，为每个展平的 token 生成在所有专家上的分布。
+
+**前向传播逻辑** — 给定输入 `x`、条件 `cond` 和掩码 `mask`：
+
+1. **路由器分数**：`scores = Softmax(W · [x | router_condition])`，然后 top-k 选择产生 `expert_weights` 和 `expert_indices`。
+2. **共享专家**：`x_shared = shared_expert(x, cond, mask)` — 始终执行。
+3. **路由专家**：Token 被收集到各专家的桶中，每个专家处理其桶内的 token，结果被散布回原位并由 `expert_weights` 加权。
+4. **组合**：当 `normalize_expert_weights=True`（默认）时，输出为 `(x_shared + x_routed * k) / (k + 1)`，确保共享和路由的贡献在比例上保持平衡。否则，使用简单求和 `x_shared + x_routed`。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `n_experts` | 5 | 路由专家的总数 |
+| `n_activated_experts` | 2 | 每个 token 激活的 top-k 专家数 |
+| `dim` | 768 | Token 维度（路由器输入） |
+| `dim_router_cond` | 0 | 路由器的可选额外条件维度 |
+| `capacity_factor` | 1.3 | 控制专家缓冲区容量以限制丢弃的 token |
+| `normalize_expert_weights` | True | 平衡共享与路由输出的幅度 |
+| `load_balance` | True (训练) / False (验证) | 是否累积负载均衡统计量 |
+
+来源: [moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L55-L113), [train.yaml](/configs/train.yaml#L96-L101)
+
+## Token 路由机制
+
+`Experts` 类使用基于桶的收集/散布模式实现了**容量受限的 token 路由**。这对高效的 GPU 利用率至关重要：并非为每个具有可变长度输入的专家启动一个核，而是将 token 按专家分配排序，打包到固定容量的桶中，并在统一的批处理循环中处理。
+
+### 路由流水线
+
+```mermaid
+flowchart LR
+    A["Token 分配<br/>(top-k 索引)"] --> B["按专家 ID 排序"]
+    B --> C["直方图<br/>(每个专家的 token 数)"]
+    C --> D["累加和<br/>(桶边界)"]
+    D --> E["binned_gather<br/>&#40;分发到专家缓冲区&#41;"]
+    F["专家前向传播<br/>&#40;每个专家顺序执行&#41;"]
+    E --> F
+    F --> G["binned_scatter<br/>&#40;路由回原位 + 应用权重&#41;"]
+    G --> H["重塑为<br/>[b, n, d]"]
+```
+
+**逐步说明：**
+
+1. **排序与直方图**：对专家分配进行排序以按目标专家对 token 分组。直方图计算每个专家的 token 数；包含累加和定义桶边界。
+2. **专家容量**：`capacity = min(max(tokens_per_expert), ⌊capacity_factor × k × total_tokens / n_experts⌋)`。超出容量的 token 将被**丢弃**（输出为零）。在验证期间，`force_capacity=False` 会禁用容量上限以避免丢弃。
+3. **`binned_gather`**：使用排序后的索引将 token 分发到形状为 `[n_experts, capacity, dim]` 的张量中。返回用于反向散布的目标索引。
+4. **专家计算**：每个专家 `i` 使用相应的 `cond` 和 `mask` 处理其切片 `x[i, :, :]`。优化路径（`_single_expert_forward`）会跳过空专家桶的计算。
+5. **`binned_scatter`**：将专家输出路由回原始 token 顺序，在回传过程中乘以 `expert_weights`，然后通过 `index_add_` 聚合 top-k 贡献。
+
+<CgxTip>`capacity_factor` 是一个关键超参数。过低 → token 被丢弃 → 信息丢失。过高 → 在补零上浪费内存。默认值 1.3 在均匀负载预期上提供了约 30% 的余量。在验证期间，容量限制被放宽（`force_capacity=False`）以确保没有 token 被丢弃。</CgxTip>
+
+来源: [moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L116-L240), [moe_operations.py](/src/model/components/moe_operations.py#L1-L59)
+
+## 两种后端实现
+
+IDPFold2 提供了两种功能等效但路由核不同的 MoE 实现：
+
+| 方面 | `moe_modules_torch.py` | `moe_modules.py` |
+|---|---|---|
+| **排序** | `torch.sort` | `megablocks.ops.sort` (CUDA 核) |
+| **直方图** | `torch.histc` | `megablocks.ops.histogram` (CUDA 核) |
+| **累加和** | N/A (使用 `torch.histc` + sort) | `megablocks.ops.inclusive_cumsum` |
+| **收集/散布** | `moe_operations.binned_gather/scatter` (PyTorch) | `megablocks.ops.binned_gather/scatter` (CUDA) |
+| **源索引** | `indices.long() // top_k` 用于正确的多 token 映射 | 直接 `megablocks.ops` 索引 |
+| **实际使用** | ✅ 在 `protein_transformer.py` 中导入 | 可用于 CUDA 优化路径 |
+
+**PyTorch 后端**（`moe_modules_torch`）是生产模型中实际导入使用的后端。**MegaBlocks 后端**（`moe_modules`）利用来自 `megablocks/` 子模块的自定义 CUDA 核，可能实现更快的排序和直方图计算，但需要编译 C++/CUDA 扩展。两者共享相同的 `MoE` 和 `Experts` 类接口以及相同的负载均衡损失累积机制。
+
+来源: [protein_transformer.py](/src/model/protein_transformer.py#L13), [moe_modules.py](/src/model/components/moe_modules.py#L1-L236), [moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L1-L244)
+
+## 路由器设计与条件化
+
+路由器将每个 token 的表示映射为专家上的概率分布：
+
+```python
+scores = Softmax(Linear(x_flat))  # [b*n, n_experts]
+expert_weights, expert_indices = topk(scores, k=n_activated_experts)
+expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True)  # 重新归一化
+```
+
+**路由器条件化**（`dim_router_cond > 0`）：当存在额外的条件信号（例如结构或序列嵌入）时，它们会在线性投影之前与 token 表示拼接：`scores = Softmax(W · [x | router_condition])`。在默认配置中，`dim_moe_cond=0`，意味着路由器纯粹基于 token 表示运行。这保持了路由器的轻量化——仅有一个线性层——避免了会增加计算开销从而破坏稀疏性优势的问题。
+
+**Top-k 专化**：当 `n_activated_experts=1` 时，路由器使用 `max` 而非 `topk`，退化为硬路由分配。当 `k=2`（默认）时，每个 token 接收两个专化专家的加权混合，提供更平滑的梯度和更好的专家利用率。
+
+来源: [moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L95-L108)
+
+## 负载均衡辅助损失
+
+稀疏 MoE 网络面临**专家坍塌**问题：路由器可能收敛到将所有 token 发送到一小部分专家，而使其他专家未受训练。IDPFold2 通过在前向传播中跨所有 MoE 层累积辅助负载均衡损失来解决此问题。
+
+**机制**：每次 `Experts.forward()` 调用都会将 `(tokens_per_expert, scores)` 附加到全局列表 `_LOAD_BALANCING_LOSS` 中。完整前向传播后，`batched_load_balancing_loss` 计算如下：
+
+$$L_{\text{balance}} = \frac{n_{\text{experts}} \cdot w_{\text{moe}}}{n_{\text{layers}} \cdot T \cdot k} \cdot \langle f, p \rangle$$
+
+其中 `f` 是跨层每个专家的 token 平均分数，`p` 是每个专家的平均路由概率，`T` 是 token 总数，`w_moe` 是损失权重（默认 0.3）。点积 ⟨f, p⟩ 惩罚高路由概率与高 token 负载之间的相关性——在均匀路由下，f 和 p 相互独立，其乘积最小化。
+
+| 配置键 | 值 | 目的 |
+|---|---|---|
+| `loss.moe_loss_weight` | 0.3 | 缩放辅助损失 |
+| `model.load_balance` | `True` (训练) | 累积损失统计量 |
+| `model.load_balance` | `False` (验证) | 跳过累积以进行纯净评估 |
+
+负载均衡损失在每个训练步开始时通过 `clear_load_balancing_loss()` 清除，并在 `training_predict` 期间添加到主要的流匹配损失中。
+
+<CgxTip>负载均衡损失是在完整的模型前向传播*之后*计算的，而不是在每层内部。这意味着所有 MoE 层共同贡献于一个标量辅助损失，然后由 `moe_loss_weight / (n_layers * T * k)` 缩放。此设计确保辅助损失的幅度不随层数或 token 数变化，防止其随着模型深度增加而主导主要的流匹配目标。</CgxTip>
+
+来源: [moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L9-L52), [integral.py](/src/model/integral.py#L10), [train.yaml](/configs/train.yaml#L30)
+
+## 专家架构：TransitionADALN
+
+每个单独的专家——无论是共享还是路由——都是一个 `TransitionADALN` 块，它用自适应条件化封装了基础 `Transition`（SwiGLU 前馈）：
+
+```
+TransitionADALN:
+  x → AdaptiveLayerNorm(x, cond) → Transition(x) → AdaptiveOutputScale(x, cond) → x * mask
+```
+
+`Transition` 本身使用 **SwiGLU** 激活：`Linear(d → 2d) → chunk → SiLU(gate) * value → Linear(d → d)`，扩展因子为 2（可配置）。自适应层在输入（AdaLN 调制缩放和偏置）和输出（AdaLN-zero 初始化接近恒等映射以稳定早期训练）处注入条件化信息（时间嵌入，序列特征）。
+
+这意味着 5 个路由专家中的每一个都维护其独立的 AdaLN 和 SwiGLU 参数集，允许它们在蛋白质结构预测任务的不同方面进行专化，同时共享相同的架构模板。
+
+来源: [af3_modules.py](/src/model/components/af3_modules.py#L84-L114), [protein_transformer.py](/src/model/protein_transformer.py#L125-L150)
+
+## 默认配置与参数预算
+
+从训练配置来看，MoE 过渡层对模型的总参数量贡献显著：
+
+| 组件 | 数量 | 各自参数量 | 总参数量 |
+|---|---|---|---|
+| 共享专家 | 1 | TransitionADALN(d=768) | ~4.7M |
+| 路由专家 | 5 | TransitionADALN(d=768) | ~23.5M |
+| 路由器 | 1 | Linear(768 → 5) | ~3.8K |
+| **每层** | — | — | **~28.2M** |
+| **跨 10 层** | — | — | **~282M** |
+
+如果没有 MoE（每层单个 TransitionADALN），过渡块总计仅约 47M 参数。因此，MoE 设计在过渡路径中提供了 **6 倍的容量增长**，同时每个 token 每层仅激活约 14.1M 参数（共享 + 2 路由），实现了 **2 倍的计算容量比**。
+
+来源: [train.yaml](/configs/train.yaml#L58-L101), [protein_transformer.py](/src/model/protein_transformer.py#L377-L403)
+
+## 与流匹配框架的集成
+
+在训练期间，MoE 过渡层在 `training_predict` 函数中被调用，该函数：(1) 清除负载均衡损失累加器，(2) 运行模型前向传播（触发每层的 MoE 路由），(3) 计算流匹配速度预测损失，(4) 添加由 `moe_loss_weight` 缩放的批处理负载均衡损失，(5) 返回组合损失用于反向传播。
+
+在推理期间（ODE 采样），传入 `force_moe_capacity=False` 以避免丢弃 token，并且 `load_balance=False` 完全跳过辅助损失累积，因为不需要计算梯度。路由器仍为每个 token 选择 top-k 专家，并应用相同的共享专家 + 路由专家组合。
+
+来源: [integral.py](/src/model/integral.py#L40-L89), [train.py](/src/train.py#L258-L270)
+
+## 后续步骤
+
+- 有关更广泛的网络上下文，请参阅 [蛋白质 Transformer 网络](7-protein-transformer-network)，其中展示了 MoE 层如何在整个主干中与注意力组合。
+- 有关每个专家内部的自适应条件化机制，请参阅 [自适应层归一化与对偏置注意力](8-adaptive-layer-norm-and-pair-biased-attention)。
+- 有关辅助损失集成的训练细节，请参阅 [负载均衡与 MoE 损失](13-load-balancing-and-moe-loss)。
+
+---
+
+- [深入解析/生成式框架/蛋白质 Transformer 网络](https://zread.ai/Junjie-Zhu/IDPFold2/7-protein-transformer-network)
+
+---
+slug:7-protein-transformer-network
+blog_type:normal
+---
+
+
+**蛋白质 Transformer 网络**（`ProteinTransformerAF3`）是 IDPFold2 的核心神经架构——一种条件自适应、对偏置的 Transformer，在流匹配采样过程中从噪声插值中预测干净的 3D 坐标。它从 AlphaFold3 的扩散模块（算法 23）中汲取了算法灵感，将**自适应 LayerNorm 条件化**、**对偏置多头注意力**和**混合专家过渡层**结合到一个统一的主干网络中，处理逐残基 token 表示以及成对结构表示。本页解释了网络的三阶段执行模型、其可组合的层架构，以及将序列、对和条件信号绑定在一起的数据流。
+
+来源：[protein_transformer.py](/src/model/protein_transformer.py#L1-L529)
+
+## 三阶段执行模型
+
+网络在三个不同阶段运行——**输入准备**、**主干执行**和**坐标解码**——每个阶段职责明确分离。理解这种分阶段执行对于掌握异构输入信号（噪声坐标、时间嵌入、残基类型、PLM 嵌入）如何统一为连贯的 3D 预测至关重要。
+
+```mermaid
+flowchart TD
+    subgraph Phase1["阶段 1: 输入准备"]
+        A["x_t (噪声坐标)"] -->|线性 3D 嵌入| B["coors_embed [b,n,token_dim]"]
+        C["特征工厂<br/>(init_repr)"] --> D["seq_f_repr [b,n,token_dim]"]
+        B --> E["seqs = coors_embed + seq_f_repr"]
+        D --> E
+        F["特征工厂<br/>(cond_seq)"] --> G["c [b,n,dim_cond]"]
+        G --> H["过渡层 ×2<br/>(精炼条件)"]
+        H --> I["c refined [b,n,dim_cond]"]
+        J["PairReprBuilder"] --> K["pair_rep [b,n,n,pair_dim]"]
+    end
+
+    subgraph Phase2["阶段 2: 主干 (×nlayers)"]
+        E --> L["MultiheadAttnAndTransition"]
+        I --> L
+        K --> L
+        L --> M["seqs updated [b,n,token_dim]"]
+    end
+
+    subgraph Phase3["阶段 3: 坐标解码"]
+        M --> N["LayerNorm → Linear(token_dim, 3)"]
+        N --> O["coors_pred [b,n,3]"]
+    end
+```
+
+**阶段 1 — 输入准备** 构建三个并行表示。*序列表示*（`seqs`）由噪声 3D 坐标的线性投影与特征派生的初始 token 相加形成。*条件向量*（`c`）由 `FeatureFactory` 生成，并通过两个连续的 `Transition` 层（基于 SwiGLU 的前馈网络）进行精炼。*对表示*（`pair_rep`）由 `PairReprBuilder` 构建，它可选择在对特征之上应用 AdaptiveLayerNorm 条件化。这三者在进入主干网络之前都会使用**寄存器 token** 进行扩展。
+
+**阶段 2 — 主干执行** 在序列表示上迭代 `nlayers` 个相同的 `MultiheadAttnAndTransition` 块，同时将对表示和条件向量作为侧边输入保持固定。每个块应用对偏置注意力，随后是一个（可能为 MoE 的）过渡层，两者都封装在 AdaptiveLayerNorm/AdaptiveOutputScale 中。
+
+**阶段 3 — 坐标解码** 剥离寄存器 token，并通过 `LayerNorm → Linear(token_dim, 3)` 头投影最终的 token 表示，以恢复预测的干净坐标。
+
+来源：[protein_transformer.py](/src/model/protein_transformer.py#L305-L526)
+
+## Transformer 层：MultiheadAttnAndTransition
+
+每个主干层都是 `MultiheadAttnAndTransition` 的一个实例，它是蛋白质 Transformer 网络内的原子计算单元。它封装了两个子操作——**对偏置注意力**和**过渡**——具有可配置的残差连接和执行顺序。
+
+### 执行模式：顺序 vs. 并行
+
+一个关键的架构选择是注意力和过渡是**顺序**执行（标准 Transformer）还是**并行**执行（AlphaFold3 风格）。在并行模式下，两个分支读取相同的输入 `x`，并将其输出相加，从而将每层的有效深度减少为单个逻辑步骤。当并行模式激活*且*两个分支都具有残差连接时，过渡残差会自动禁用，以防止将 `x` 相加两次。
+
+| 模式 | 计算 | 有效深度 | 残差约束 |
+|---|---|---|---|
+| 顺序 | `x → Attn → Transition` | 2 个子步骤 | 允许双残差 |
+| 并行 | `x → Attn(x) + Trans(x)` | 1 个子步骤 | 过渡残差自动禁用 |
+
+### 使用 AdaptiveLayerNorm 封装子操作
+
+注意力和过渡子操作都遵循相同的 **AdaLN → Op → AdaScale** 模式：
+
+1. **AdaptiveLayerNorm** 对输入进行归一化，并使用条件变量 `c` 对其重新缩放/重新偏移，产生一个依赖条件的输入变换。
+2. 核心操作（注意力或前馈）在 AdaLN 输出上执行。
+3. **AdaptiveLayerNormOutputScale** 对输出应用一个学习到的、依赖条件的门控（初始化接近零），实现了自适应 Layer Norm 论文中的“零初始化”技巧，确保每层在初始化时是一个近似恒等函数。
+
+这种封装模式对流匹配至关重要：时间嵌入通过 `c` 流入每个 AdaLN 门控，允许网络在扩散轨迹上连续调制其行为。
+
+来源：[protein_transformer.py](/src/model/protein_transformer.py#L153-L261), [af3_modules.py](/src/model/components/af3_modules.py#L1-L114)
+
+## 对偏置注意力机制
+
+主干中使用的注意力机制是 `MultiHeadBiasedAttentionADALN_MM`，它用 AdaptiveLayerNorm 条件化封装了 `PairBiasAttention`。核心注意力计算如下：
+
+```
+attn_weights = softmax(Q·K^T / √d + bias_from_pair)  ∈ [b, h, n, n]
+```
+
+**对偏置**项从对表示中通过线性层投影得出：`bias = Linear(LayerNorm(pair_rep))`，形状为 `[b, n, n, heads]`。这允许残基对之间的结构关系（编码为距离分箱、相对位置等）直接影响哪些 token 彼此关注——这是标准 Transformer 中缺失的机制，但对于捕获蛋白质结构中固有的几何先验至关重要。
+
+该注意力还支持 **Q/K LayerNorm**（`use_qkln`），它在计算点积之前对查询和键应用独立的 LayerNorm。这稳定了注意力幅度，并在推理配置中默认启用。
+
+<CgxTip>对偏置在 softmax *内部* 相加，而不是作为注意力后门控。这意味着对表示可以完全抑制或放大特定的注意力路径——它充当一个学习到的结构邻接矩阵，而不是一种软调制。</CgxTip>
+
+来源：[pair_bias_attn.py](/src/model/components/pair_bias_attn.py#L21-L96), [protein_transformer.py](/src/model/protein_transformer.py#L86-L122)
+
+## 混合专家过渡
+
+当 `use_moe=True` 时，过渡层被替换为 `MoE` 模块，该模块结合了一个**共享专家**（始终激活）和 `n_experts` 个路由专家，其中 `n_activated_experts`（top-k）由学习到的路由器按 token 选择：
+
+```mermaid
+flowchart LR
+    X["x [b,n,dim]"] --> R["路由器<br/>(Linear + Softmax)"]
+    R -->|top-k 权重| E["路由专家<br/>(1..n_experts)"]
+    X --> S["共享专家<br/>(TransitionADALN)"]
+    E --> O["归一化 & 组合"]
+    S --> O
+    O --> Y["output [b,n,dim]"]
+```
+
+路由器是一个线性投影（`dim + dim_moe_cond → n_experts`）后接 softmax，产生在专家上的概率分布。选择 top-k 专家，其输出由归一化的路由器分数加权。共享专家的输出始终包含在内，当 `normalize_expert_weights=True` 时，最终输出为：
+
+```
+output = (shared_expert(x) + k × routed_experts(x)) / (k + 1)
+```
+
+这种归一化确保 MoE 层无论激活专家数量如何，都具有大致单位尺度，防止在专家数量增长时出现幅度爆炸。
+
+### Token 路由与容量
+
+专家路由使用一种**基于分箱的分发**策略。Token 按其分配的专家排序，划分为每个专家的分箱，并并行处理。`capacity_factor`（默认 1.3）控制任何单个专家可以处理的最大 token 数——超过容量的 token 将被丢弃。这种机制防止负载不平衡导致内存激增。
+
+<CgxTip>在推理期间，`force_moe_capacity=True` 默认生效，它将有效容量上限设为 `min(max_tokens_per_expert, capacity_factor × top_k × total_tokens / n_experts)`。在训练期间，负载均衡损失（参见[负载均衡与 MoE 损失](13-load-balancing-and-moe-loss)）鼓励均匀的专家利用率以最小化 token 丢弃。</CgxTip>
+
+来源：[moe_modules_torch.py](/src/model/components/moe_modules_torch.py#L55-L244), [protein_transformer.py](/src/model/protein_transformer.py#L210-L228)
+
+## 输入特征构建
+
+### 序列表示特征
+
+初始序列表示是两个信号之和：噪声 3D 坐标的线性嵌入和特征派生的 token 向量。`FeatureFactory`（模式=`"seq"`）从可配置的特征创建器列表中组装后者：
+
+| 特征键 | 类 | 输出形状 | 描述 |
+|---|---|---|---|
+| `plm_emb` | `PLMSeqFeat` | `[b, n, plm_out_dim]` | 线性投影的 ESM-2 嵌入 |
+| `res_type` | `ResidueTypeSeqFeat` | `[b, n, 20]` | 独热氨基酸标识 |
+| `res_idx` | `IdxEmbeddingSeqFeat` | `[b, n, idx_emb_dim]` | 正弦索引嵌入 |
+| `chain_break_per_res` | `ChainBreakPerResidueSeqFeat` | `[b, n, 1]` | 二进制链边界指示符 |
+| `time_emb` | `TimeEmbeddingSeqFeat` | `[b, n, t_emb_dim]` | 正弦流时间嵌入 |
+
+每个特征独立计算，沿特征维度拼接，然后通过线性层（+ 可选 LayerNorm）投影到目标输出维度。除非 `strict_feats=True`，缺失的特征会优雅退化为零张量。
+
+### 对表示特征
+
+对表示由 `PairReprBuilder` 构建，它使用对模式 `FeatureFactory` 并可选地应用 AdaptiveLayerNorm 条件化：
+
+| 特征键 | 类 | 输出形状 | 描述 |
+|---|---|---|---|
+| `xt_pair_dists` | `XtPairwiseDistancesPairFeat` | `[b, n, n, dist_dim]` | 来自噪声坐标的分箱独热成对距离 |
+| `rel_pos` | `RelativePositionPairFeat` | `[b, n, n, 2+2(r_max+1)]` | 相对残基位置 + 同链指示符 |
+| `time_emb` | `TimeEmbeddingPairFeat` | `[b, n, n, t_emb_dim]` | 广播到对形状的时间嵌入 |
+
+`XtPairwiseDistancesPairFeat` 将来自噪声坐标 `x_t` 的成对欧几里得距离分箱为独热向量，将关于扩散轨迹当前状态的几何信息编码到对表示中。
+
+### 条件变量特征
+
+条件向量 `c` 由 `feats_cond_seq`（通常仅为 `time_emb`）构建，并在进入主干之前通过两个 `Transition` 层进行精炼。这种两步精炼将原始时间嵌入转换为更丰富的条件信号，供整个主干中的 AdaptiveLayerNorm 模块提取使用。
+
+来源：[feature_factory.py](/src/model/components/feature_factory.py#L1-L426), [protein_transformer.py](/src/model/protein_transformer.py#L344-L375)
+
+## 寄存器 Token
+
+网络支持**寄存器 token**——前置到序列表示的可学习参数，为注意力机制提供额外的“暂存空间”。这些 token：
+
+- 初始化为 `randn / 20.0`（小幅度）并在训练期间学习
+- 通过全注意力掩码参与所有残基 token 的注意力并被其关注
+- 携带零值对表示和零值条件化（它们是纯粹的注意力寄存器）
+- 在坐标解码前从输出中剥离
+
+寄存器通过提供专用 token 来缓解长序列中的注意力稀释问题，这些 token 可以聚合全局信息而无需与残基级信号竞争。默认配置使用 `num_registers=10`。
+
+来源：[protein_transformer.py](/src/model/protein_transformer.py#L333-L342), [protein_transformer.py](/src/model/protein_transformer.py#L410-L475)
+
+## 默认架构配置
+
+下表总结了推理配置中的默认架构超参数：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `token_dim` | 768 | 序列表示维度 |
+| `nlayers` | 10 | Transformer 主干层数 |
+| `nheads` | 12 | 注意力头数 |
+| `dim_cond` | 512 | 条件向量维度 |
+| `pair_repr_dim` | 512 | 对表示维度 |
+| `residual_mha` | True | 注意力周围的残差连接 |
+| `residual_transition` | True | 过渡层周围的残差连接 |
+| `parallel_mha_transition` | False | 顺序（非并行）层执行 |
+| `use_attn_pair_bias` | True | 对表示偏置注意力 |
+| `use_qkln` | True | 查询和键上的 LayerNorm |
+| `num_registers` | 10 | 寄存器 token 数量 |
+| `use_moe` | True | MoE 过渡层 |
+| `n_experts` | 5 | 每个 MoE 层的总路由专家数 |
+| `n_activated_experts` | 2 | 每个 token 激活的 Top-k 专家数 |
+| `capacity_factor` | 1.3 | 专家容量缩放因子 |
+| `normalize_expert_weights` | True | 按 (k+1) 归一化 MoE 输出 |
+
+来源：[inference.yaml](/configs/inference.yaml#L48-L92)
+
+## 类层次结构与组合
+
+```mermaid
+classDiagram
+    class ProteinTransformerAF3 {
+        +linear_3d_embed: Linear
+        +init_repr_factory: FeatureFactory
+        +cond_factory: FeatureFactory
+        +transition_c_1/2: Transition
+        +pair_repr_builder: PairReprBuilder
+        +transformer_layers: ModuleList
+        +coors_3d_decoder: Sequential
+        +registers: Parameter
+        +forward(batch_nn) Dict
+    }
+
+    class MultiheadAttnAndTransition {
+        +mhba: MultiHeadBiasedAttentionADALN_MM
+        +transition: TransitionADALN | MoE
+        +forward(x, pair_rep, cond, mask)
+    }
+
+    class MultiHeadBiasedAttentionADALN_MM {
+        +adaln: AdaptiveLayerNorm
+        +mha: PairBiasAttention
+        +scale_output: AdaptiveLayerNormOutputScale
+    }
+
+    class TransitionADALN {
+        +adaln: AdaptiveLayerNorm
+        +transition: Transition
+        +scale_output: AdaptiveLayerNormOutputScale
+    }
+
+    class MoE {
+        +shared_expert: TransitionADALN
+        +experts: Experts
+        +router_linear: Sequential
+        +forward(x, cond, mask)
+    }
+
+    class PairReprBuilder {
+        +init_repr_factory: FeatureFactory
+        +cond_factory: FeatureFactory
+        +adaln: AdaptiveLayerNorm
+    }
+
+    ProteinTransformerAF3 --> MultiheadAttnAndTransition : "nlayers ×"
+    MultiheadAttnAndTransition --> MultiHeadBiasedAttentionADALN_MM
+    MultiheadAttnAndTransition --> TransitionADALN : "if not use_moe"
+    MultiheadAttnAndTransition --> MoE : "if use_moe"
+    MoE --> TransitionADALN : "shared + routed experts"
+    ProteinTransformerAF3 --> PairReprBuilder
+    ProteinTransformerAF3 --> FeatureFactory : "init_repr + cond"
+```
+
+组合是严格层次化的：`ProteinTransformerAF3` 拥有特征工厂和主干层；每个主干层拥其注意力和过渡子模块；MoE 封装器拥其共享专家及 `Experts` 容器。这种清晰的分离确保每个组件都可以独立测试、替换或消融。
+
+来源：[protein_transformer.py](/src/model/protein_transformer.py#L305-L529)
+
+## 数据流总结
+
+完整的前向传播将至少包含 `{x_t, t, mask}` 的字典 `batch_nn` 转换为预测坐标 `{coors_pred}`：
+
+| 阶段 | 输入 | 操作 | 输出 |
+|---|---|---|---|
+| 条件化 | `batch_nn` | `cond_factory → Transition ×2` | `c [b,n,512]` |
+| 序列初始化 | `batch_nn`, `x_t` | `linear_3d_embed(x_t) + init_repr_factory(batch_nn)` | `seqs [b,n,768]` |
+| 对初始化 | `batch_nn` | `pair_repr_builder(batch_nn)` | `pair_rep [b,n,n,512]` |
+| 寄存器 | `seqs, pair_rep, mask, c` | 前置寄存器 token | 扩展后的张量 |
+| 主干 | `seqs, pair_rep, c, mask` | `×10 MultiheadAttnAndTransition` | `seqs [b,n,768]` |
+| 解码 | `seqs` | `LayerNorm → Linear(768,3)` | `coors_pred [b,n,3]` |
+
+此架构在流匹配 ODE 积分的每一步被调用（参见 [R³ 上的流匹配](5-flow-matching-on-r3)），其中它接收当前噪声状态 `x_t` 和时间 `t`，并预测速度场或干净数据目标。条件感知设计确保网络的行为在扩散轨迹上连续自适应——从早期去噪（高噪声，低 `t`）到最终精炼（低噪声，高 `t`）。
+
+要详细了解对偏置注意力和 AdaptiveLayerNorm 模块的工作原理，请参见[自适应 Layer Norm 与对偏置注意力](8-adaptive-layer-norm-and-pair-biased-attention)。对于特征编码流水线，请参见[特征工厂与输入编码](9-feature-factory-and-input-encoding)。关于训练期间如何强制执行 MoE 负载均衡，请参见[负载均衡与 MoE 损失](13-load-balancing-and-moe-loss)。
+
+---
+
+## 模型组件
+
+- [深入解析/模型组件/自适应层归一化与对偏置注意力](https://zread.ai/Junjie-Zhu/IDPFold2/8-adaptive-layer-norm-and-pair-biased-attention)
+
+---
+slug:8-adaptive-layer-norm-and-pair-biased-attention
+blog_type:normal
+---
+
+
+IDPFold2 的 Transformer 主体在两个关键方面脱离了标准架构约定：**自适应层归一化** 用依赖于条件信号的仿射变换取代了每层固定的归一化，而**对偶偏置注意力** 则将学习到的成对几何信号直接注入到注意力逻辑值中。这两种机制共同构成了“三明治”模式——前置 AdaLN，后置自适应输出缩放——该模式支配着 [`ProteinTransformerAF3`](/src/model/protein_transformer.py#L305-L526) 网络中的每一个注意力层和过渡层。本页将阐述这两个组件的数学公式、实现细节与组合结构。
+
+## 自适应层归一化
+
+### 公式与动机
+
+标准 LayerNorm 对归一化后的输入应用固定的、学习到的缩放（γ）和平移（β）。在以扩散时间步 *t* 为条件的生成模型中，这种刚性成为了劣势：不同的噪声水平需要性质不同的变换，然而标准归一化却一视同仁地处理所有时间步。**自适应层归一化** 通过使 γ 和 β 成为条件信号的函数来解决此问题，使得每一层都能在去噪过程从无序向有序演化时自适应地调整其行为。
+
+该操作定义为：
+
+> AdaLN(**x**, **c**) = LayerNorm(**x**) · σ(W_γ · LayerNorm(**c**)) + W_β · LayerNorm(**c**)
+
+其中 **x** ∈ ℝ^dim 为输入表示，**c** ∈ ℝ^dim_cond 为条件向量，σ 为 Sigmoid 函数，W_γ、W_β 为学习到的投影矩阵。对 γ 施加 Sigmoid 函数可确保缩放范围保持在 (0, 1) 内，提供了一种稳定的乘性调制，避免信号爆炸。
+
+### 实现
+
+[`AdaptiveLayerNorm`](/src/model/components/af3_modules.py#L5-L36) 类直接实现了这一点。两个独立的 `LayerNorm` 模块分别对输入流和条件流进行归一化。随后条件信号被分为两支：一支通过 `Linear → Sigmoid` 流水线生成 γ，另一支通过零偏置的 `Linear` 生成 β。二值掩码会将最终输出中的填充位置置零。
+
+```python
+# 核心计算（简化版）
+normed = self.norm(x)                # LayerNorm(x), elementwise_affine=False
+normed_cond = self.norm_cond(cond)   # LayerNorm(c)
+gamma = sigmoid(linear_gamma(normed_cond))  # 缩放 ∈ (0, 1)
+beta = linear_beta(normed_cond)             # 平移 ∈ ℝ
+out = normed * gamma + beta
+```
+
+注意，内部 `LayerNorm` 设置了 `elementwise_affine=False`——学习到的仿射参数被自适应参数完全取代。条件向量本身在投影前也进行了归一化，以防止 **c** 的幅度漂移破坏调制的稳定性。
+
+来源: [af3_modules.py](/src/model/components/af3_modules.py#L5-L36)
+
+### 自适应输出缩放
+
+第二种变体 [`AdaptiveLayerNormOutputScale`](/src/model/components/af3_modules.py#L39-L66) 仅提供自适应的乘性门控——无归一化，无平移。其关键设计特征是**零初始化**：线性层的权重初始化为零，偏置初始化为 −2.0，因此初始 Sigmoid 输出为 σ(−2.0) ≈ 0.12。这意味着每一层的输出贡献从接近零开始，并在训练过程中逐渐学习到合适的缩放比例。这正是源自 DiT 的 "AdaLN-Zero" 技术，它通过确保网络以近似恒等映射作为起点，极大地加速了早期阶段的训练。
+
+```python
+# 初始化模式
+torch.nn.init.zeros_(adaln_zero_gamma_linear.weight)
+torch.nn.init.constant_(adaln_zero_gamma_linear.bias, -2.0)  # σ(-2.0) ≈ 0.12
+```
+
+来源: [af3_modules.py](/src/model/components/af3_modules.py#L39-L66)
+
+### AdaLN 三明治模式
+
+`AdaptiveLayerNorm` 和 `AdaptiveLayerNormOutputScale` 从不被孤立使用——它们总是以**三明治**的形式包裹在一个核心变换之外。该模式在 [`ProteinTransformerAF3`](/src/model/protein_transformer.py#L305-L526) 内的三个复合模块中实例化：
+
+| 复合模块 | 核心变换 | 参考 |
+|---|---|---|
+| `MultiHeadAttentionADALN` | 标准多头注意力 | [protein_transformer.py](/src/model/protein_transformer.py#L56-L83) |
+| `MultiHeadBiasedAttentionADALN_MM` | 对偶偏置注意力 | [protein_transformer.py](/src/model/protein_transformer.py#L86-L122) |
+| `TransitionADALN` | SwiGLU 过渡 | [protein_transformer.py](/src/model/protein_transformer.py#L125-L150) |
+
+每个三明治遵循相同的三步协议：
+
+1. **AdaLN**：`x = adaln(x, cond, mask)` —— 使用条件变量自适应地对输入进行归一化
+2. **变换**：`x = core_op(x, ...)` —— 应用注意力或前馈操作
+3. **自适应缩放**：`x = scale_output(x, cond, mask)` —— 对输出幅度进行门控
+
+这确保了每个子层的输入分布和输出贡献均依赖于条件，从而创建了一个有效深度和路径强度随扩散时间步动态变化的网络。
+
+来源: [protein_transformer.py](/src/model/protein_transformer.py#L56-L150)
+
+## 对偶偏置注意力
+
+### 公式与动机
+
+标准自注意力将查询和键向量的点积作为兼容性得分。在蛋白质结构预测中，这忽略了一类丰富的信息源：残基之间的**成对几何关系**（距离、相对位置、链归属）。对偶偏置注意力利用从对偶表示中导出的学习偏置来增强标量注意力逻辑值，使模型能够在不改变核心 QKV 机制的情况下，基于空间邻近性及其他成对特征来调制注意力。
+
+修改后的注意力为：
+
+> attn(i, j) = softmax( (Q_i · K_j) / √d + b_ij + mask_ij )
+
+其中 **b** ∈ ℝ^(heads) 是逐头偏置，由对偶表示 **p** ∈ ℝ^dim_pair 通过线性投影计算得出：`b = Linear(pair_feats)`。该偏置在 softmax *之前* 被加入，使其能直接控制哪些 Token 对会产生强烈的注意力。
+
+### 实现
+
+[`PairBiasAttention`](/src/model/components/pair_bias_attn.py#L21-L96) 类将其实现为一个多头注意力层，具备四个鲜明特征：
+
+**1. 对偶偏置注入。** 对偶表示 `[b, n, n, pair_dim]` 通过 `pair_norm`（标准 `LayerNorm`）进行归一化，随后经由线性层 `to_bias` 投影，将 `pair_dim` 映射为 `heads`。重排为 `[b, heads, n, n]` 后，该偏置在 softmax 之前直接加到 QK 相似度矩阵上。
+
+**2. QK LayerNorm。** 当启用 `qkln` 标志时（在所有生产配置中均为 `True`），独立的 `LayerNorm` 模块会分别在投影*之后*、点积*之前*应用于查询和键向量。这通过防止极端查询/键幅度来稳定注意力得分，这是一项源自 AlphaFold3 的技术。
+
+**3. 输出门控。** 门控向量 **g** 由（已归一化的）输入通过专用线性投影 `to_g` 计算得出。注意力计算后，多头输出与 `sigmoid(g)` 进行逐元素相乘，提供了一个学习到的逐通道开关，可以抑制对给定输入无益的注意力头。
+
+**4. 节点预归一化。** 输入节点特征在任何投影之前通过 `node_norm` 进行归一化，确保无论前一层输出幅度如何，输入分布都能保持稳定。
+
+```python
+# 注意力计算（从 _attn 简化）
+sim = einsum("bhid, bhjd -> bhij", q, k) * scale   # QK 相似度
+sim = sim.masked_fill(~mask, -inf)                    # 掩码
+attn = softmax(sim + b, dim=-1)                       # 对偶偏置在此加入
+out = einsum("bhij, bhjd -> bhid", attn, v)          # 加权值
+# ... 然后进行门控：sigmoid(g) * out
+```
+
+来源: [pair_bias_attn.py](/src/model/components/pair_bias_attn.py#L21-L96)
+
+### 对偶表示的构建方式
+
+馈入 `PairBiasAttention` 的对偶表示由 [`PairReprBuilder`](/src/model/protein_transformer.py#L264-L302) 构造。该模块使用 [`FeatureFactory`](/src/model/components/feature_factory.py) 将原始成对特征（来自含噪坐标的分桶残基间距离、相对位置编码）组装成维度为 `pair_repr_dim` 的密集表示。可选地，第二个 `FeatureFactory` 生成条件对偶特征（例如，沿对偶维度广播的时间嵌入），用于对对偶表示本身应用额外的 `AdaptiveLayerNorm`——确保对偶偏置也能适应扩散时间步。
+
+默认配置组装如下：
+- `xt_pair_dists`：来自当前含噪坐标的分桶成对距离（64 个分桶，跨度 0.1–3.0 nm）
+- `rel_pos`：相对序列位置编码（最大偏移 ±32）
+- `time_emb`（作为对偶条件）：沿对偶维度广播的时间步嵌入
+
+来源: [protein_transformer.py](/src/model/protein_transformer.py#L264-L302), [feature_factory.py](/src/model/components/feature_factory.py#L1-L60)
+
+## 组合架构
+
+下图展示了 AdaLN 和对偶偏置注意力在单个 Transformer 层即 [`MultiheadAttnAndTransition`](/src/model/protein_transformer.py#L153-L261) 块中的组合方式：
+
+```mermaid
+flowchart TB
+    subgraph Input
+        X["x ∈ ℝ^(b×n×d_token)"]
+        P["pair_rep ∈ ℝ^(b×n×n×d_pair)"]
+        C["cond ∈ ℝ^(b×n×d_cond)"]
+        M["mask ∈ ℝ^(b×n)"]
+    end
+
+    subgraph AttnBranch["注意力分支 (MultiHeadBiasedAttentionADALN_MM)"]
+        A1["AdaLN(x, cond)"]
+        A2["PairBiasAttention"]
+        A3["AdaptiveScale(out, cond)"]
+        A1 --> A2 --> A3
+    end
+
+    subgraph TransBranch["过渡分支 (TransitionADALN 或 MoE)"]
+        T1["AdaLN(x, cond)"]
+        T2["SwiGLU Transition / MoE Experts"]
+        T3["AdaptiveScale(out, cond)"]
+        T1 --> T2 --> T3
+    end
+
+    X --> AttnBranch
+    P --> A2
+    C --> A1
+    C --> A3
+    C --> T1
+    C --> T3
+
+    X --> TransBranch
+
+    subgraph Combine
+        direction LR
+        Res1{"residual_mha?"}
+        Res2{"residual_transition?"}
+        Par{"parallel?"}
+    end
+
+    AttnBranch --> Res1
+    TransBranch --> Res2
+    Res1 --> Par
+    Res2 --> Par
+    Par --> Out["x_out ∈ ℝ^(b×n×d_token)"]
+```
+
+### 并行与串行组合
+
+`MultiheadAttnAndTransition` 块支持由 `parallel_mha_transition` 控制的两种组合模式：
+
+- **串行**（`parallel_mha_transition: False`，默认）：注意力输出馈入过渡块，反映了标准 Transformer 架构。这允许过渡层进一步精炼由注意力调制的表示。
+- **并行**（`parallel_mha_transition: True`）：两个分支对*相同*的输入进行操作，其输出被相加，遵循 AlphaFold3 的设计。在并行模式下，该块强制要求最多只有一个分支带有残差连接（以避免将 **x** 相加两次）。
+
+在这两种情况下，可选的残差连接（`residual_mha`、`residual_transition`）会在继续处理前将输入 **x** 加到子层输出上。
+
+来源: [protein_transformer.py](/src/model/protein_transformer.py#L153-L261)
+
+## 配置参考
+
+下表汇总了控制 AdaLN 和对偶偏置注意力行为的配置键，摘自默认的训练和推理配置：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `dim_cond` | 512 | 条件向量的维度（AdaLN 的 γ/β 投影输入） |
+| `use_qkln` | `True` | 在 `PairBiasAttention` 中对查询和键应用 LayerNorm |
+| `use_attn_pair_bias` | `True` | 在注意力中启用对偶表示偏置（当为 `False` 时，回退到标准 MHA） |
+| `pair_repr_dim` | 512 | 馈入 `to_bias` 投影的对偶表示维度 |
+| `feats_pair_repr` | `["xt_pair_dists", "rel_pos"]` | 构成对偶表示的特征 |
+| `feats_pair_cond` | `["time_emb"]` | 用于对对偶表示进行 AdaLN 条件化的对偶特征 |
+| `residual_mha` | `True` | 注意力子层周围的残差连接 |
+| `residual_transition` | `True` | 过渡子层周围的残差连接 |
+| `parallel_mha_transition` | `False` | 注意力与过渡的并行（AF3 风格）与串行组合 |
+| `nheads` | 12 | 注意力头数量（对偶偏置按头投影） |
+| `token_dim` | 768 | Token 维度；`dim_head = token_dim // nheads = 64` |
+
+来源: [train.yaml](/configs/train.yaml#L58-L94), [inference.yaml](/configs/inference.yaml#L48-L84)
+
+## 设计原理与联系
+
+此处采用的 AdaLN 三明治模式遵循了 **DiT（Diffusion Transformers）** 范式，其中依赖条件的调制取代了中间层上的交叉注意力或自适应注入。对于 ℝ³ 上的流匹配，此选择是经过深思熟虑的：被预测的速度场必须随噪声时间步平滑变化，而 AdaLN 提供了一种轻量级、可微的时间步依赖行为机制，且无需承担交叉注意力的二次方成本。
+
+对偶偏置注意力机制源自 **AlphaFold3 的 Algorithm 23**，其中成对几何信号在 softmax 之前对注意力逻辑值施加偏置。这在计算上比完整的成对注意力（复杂度为 O(n² · d)）更便宜，同时仍能提供逐对信息——这对于蛋白质结构至关重要，因为空间邻近性是一种强烈的注意力先验。QK LayerNorm 进一步稳定了 IDPFold2 所使用的长序列（最多 256 个残基）下的训练。
+
+<CgxTip>当禁用 `use_attn_pair_bias` 时，模型会回退到 `MultiHeadAttentionADALN`（带有 AdaLN 三明治的标准 MHA），而非 `MultiHeadBiasedAttentionADALN_MM`。此回退路径使用 PyTorch 原生的 `nn.MultiheadAttention` 代替自定义的 `PairBiasAttention`，速度更快但会丢失成对几何归纳偏置。在禁用对偶偏置前，请确认此回退是符合预期的。</CgxTip>
+
+<CgxTip>`AdaptiveLayerNormOutputScale` 的偏置初始化值 −2.0（产生 σ(−2.0) ≈ 0.12）对训练稳定性至关重要。如果修改此值，请注意较大（负值较小）的初始偏置会导致子层在初始化时贡献更多，当 AdaLN-Zero 的恒等映射特性最具价值时，这可能会破坏早期训练的稳定性。</CgxTip>
+
+来源: [af3_modules.py](/src/model/components/af3_modules.py#L5-L66), [pair_bias_attn.py](/src/model/components/pair_bias_attn.py#L21-L96), [protein_transformer.py](/src/model/protein_transformer.py#L56-L122)
+
+## 下一步
+
+- 要了解这些组件如何融入完整的 Protein Transformer 网络，请参阅 [Protein Transformer Network](7-protein-transformer-network)。
+- 有关条件变量和对偶特征构建的详细信息，请参阅 [Feature Factory and Input Encoding](9-feature-factory-and-input-encoding)。
+- 有关共享相同 AdaLN 三明治模式的 MoE 过渡层，请参阅 [Mixture-of-Experts Transition Layers](6-mixture-of-experts-transition-layers)。
+
+---
+
+- [深入解析/模型组件/特征工厂与输入编码](https://zread.ai/Junjie-Zhu/IDPFold2/9-feature-factory-and-input-encoding)
+
+---
+slug:9-feature-factory-and-input-encoding
+blog_type:normal
+---
+
+
+IDPFold2 的 **Feature Factory** 是一个可组合的、配置驱动的编码系统，它将原始批次数据——时间步、残基标识、位置索引、链结构、成对几何关系——转换为驱动 Protein Transformer 的序列和成对表示。该工厂模式并非硬编码输入管线，而是让你通过 YAML 列表声明需要包含的特征，系统随后会组装相应的编码器模块，拼接它们的输出，并将一切投影到所需的维度。本页将解释该工厂的架构、每一个具体的特征类，以及编码信号如何流入网络的三条表示通路。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L1-L426)，[protein_transformer.py](src/model/protein_transformer.py#L1-L529)
+
+## Feature Factory 架构
+
+`FeatureFactory` 充当具有统一后处理管线的**策略调度器**。给定一组特征名称字符串列表（例如，`["plm_emb", "res_type", "res_idx"]`）和一个模式（`"seq"` 或 `"pair"`），它会实例化相应的编码器类，在批次字典上并行运行它们，沿特征维度拼接其输出，应用填充掩码，最后通过一个线性层和可选的 LayerNorm 进行投影。
+
+```mermaid
+flowchart TB
+    subgraph Config["YAML Configuration"]
+        FIS["feats_init_seq<br/>['plm_emb','res_type','res_idx','chain_break_per_res']"]
+        FCS["feats_cond_seq<br/>['time_emb']"]
+        FPR["feats_pair_repr<br/>['xt_pair_dists','rel_pos']"]
+        FPC["feats_pair_cond<br/>['time_emb']"]
+    end
+
+    subgraph Factory["FeatureFactory (mode='seq' or 'pair')"]
+        direction TB
+        FEATS["Feature list"] --> DISPATCH["get_creator(f)<br/>String → Class"]
+        DISPATCH --> CREATORS["feat_creators<br/>ModuleList of Feature subclasses"]
+        CREATORS --> FWD["forward(batch)"]
+        FWD --> CAT["torch.cat along dim=-1"]
+        CAT --> MASK1["apply_padding_mask"]
+        MASK1 --> LINEAR["linear_out<br/>Σdim_f → dim_feats_out"]
+        LINEAR --> LN["ln_out<br/>(LayerNorm or Identity)"]
+        LN --> MASK2["apply_padding_mask"]
+    end
+
+    subgraph Consumers["ProteinTransformerAF3"]
+        IRF["init_repr_factory<br/>mode='seq'"]
+        CDF["cond_factory<br/>mode='seq'"]
+        PRB["pair_repr_builder<br/>mode='pair'"]
+    end
+
+    FIS --> IRF
+    FCS --> CDF
+    FPR --> PRB
+    FPC --> PRB
+    IRF --> Factory
+    CDF --> Factory
+    PRB --> Factory
+```
+
+每个 `FeatureFactory` 实例由四个参数配置：`feats`（特征名称字符串列表）、`dim_feats_out`（目标输出维度）、`use_ln_out`（投影后是否应用 LayerNorm）以及 `mode`（`"seq"` 表示逐残基特征，`"pair"` 表示逐残基对特征）。当 `feats` 为空或 `None` 时，工厂退化为 `ZeroFeat`，返回具有正确形状的零张量。否则，它会通过 `get_creator` 构建一个特征创建器的 `ModuleList`，计算其输出维度以确定投影层 `linear_out` 的大小，并可选择在输出外包裹 `LayerNorm`。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L303-L343)
+
+## 具体特征类
+
+每个特征都继承自抽象 `Feature` 基类，该基类存储了 `self.dim`（特征的输出维度）并定义了 `forward(batch) → Tensor` 接口。工厂的 `linear_out` 层将所有单独 `dim` 值的拼接映射到统一的 `dim_feats_out`。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L74-L95)
+
+### 序列特征 (mode="seq")
+
+序列特征生成形状为 **[b, n, d]** 的张量——每个残基一个向量。下表汇总了所有可用的序列特征及其属性：
+
+| 特征字符串 | 类 | 输出维度 | 使用的批次键 | 描述 |
+|---|---|---|---|---|
+| `"time_emb"` | `TimeEmbeddingSeqFeat` | `t_emb_dim` | `t`, `x_t` | 正弦时间嵌入，广播至所有残基 |
+| `"plm_emb"` | `PLMSeqFeat` | `plm_out_dim` | `plm_emb`, `x_t` | 蛋白质语言模型嵌入（如 ESM-2），通过 linear + ReLU 投影 |
+| `"res_type"` | `ResidueTypeSeqFeat` | 20 | `residue_type`, `mask` | 独热氨基酸标识（20 种标准类型） |
+| `"res_idx"` | `IdxEmbeddingSeqFeat` | `idx_emb_dim` | `residue_pdb_idx`, `x_t` | 基于残基索引的正弦位置嵌入 |
+| `"chain_break_per_res"` | `ChainBreakPerResidueSeqFeat` | 1 | `chain_break_per_res`, `chains`, `x_t` | 链间边界的二值指示符 |
+
+**时间嵌入** 使用扩散文献中的正弦编码（`get_time_embedding`），将连续时间 `t ∈ [0, 1]` 乘以 `max_positions=2000` 进行缩放，并在 `edim/2` 个频率上计算成对的 sin/cos 分量。生成的 [b, edim] 向量被广播到每个残基位置。这是主要的条件信号，用于告知模型当前状态在流匹配轨迹上“有多嘈杂”。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L116-L128)，[idx_emb_utils.py](src/utils/idx_emb_utils.py#L40-L65)
+
+**PLM 嵌入** (`PLMSeqFeat`) 处理蛋白质语言模型嵌入——来自 ESM-2 等模型的预计算逐残基向量。原始嵌入（ESM-2-large 的维度为 `plm_in_dim=1280`）通过一个带学习的线性层和 ReLU 激活函数投影至 `plm_out_dim=256`。通过检查嵌入和是否非零生成的掩码，可确保没有 PLM 嵌入的残基接收到零特征，而非虚假的投影值。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L277-L295)
+
+**残基类型** 生成标准的 20 维独热编码。一个关键细节是它与填充的交互：`residue_type` 字段对填充位置使用 `-1`，在独热编码前会先将其掩码处理为 `0`，从而确保填充残基映射为零向量，而不会引发索引错误。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L246-L274)
+
+**索引嵌入** (`IdxEmbeddingSeqFeat`) 将正弦 `get_index_embedding` 函数应用于残基位置。当批次包含 `residue_pdb_idx`（实际 PDB 残基编号）时，将使用它们；否则，将生成默认的顺序索引 `[1, 2, ..., n]`。这使得模型能够区分空间上邻近但顺序上较远的残基——这对检测链断裂和多聚体界面至关重要。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L146-L163)，[idx_emb_utils.py](src/utils/idx_emb_utils.py#L8-L37)
+
+**逐残基链断裂** 为每个残基生成一个标量二值特征，指示下一个残基是否属于不同的链。它可以通过检查相邻链 ID 不同的位置从 `chains` 字段计算得出，也可以直接从预计算的 `chain_break_per_res` 字段读取（由 `ChainBreakPerResidueTransform` 使用 4.0 Å CA-CA 距离截断值设置）。如果两者都不存在，则默认为零——这由 `strict_feats` 标志控制，当用户需要该特征但数据管线未提供时，该标志会引发错误。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L166-L184)，[transforms.py](src/data/transforms.py#L65-L99)
+
+### 成对特征 (mode="pair")
+
+成对特征生成形状为 **[b, n, n, d]** 的张量——每对残基一个向量。这些特征编码了所有残基对之间的几何和拓扑关系。
+
+| 特征字符串 | 类 | 输出维度 | 使用的批次键 | 描述 |
+|---|---|---|---|---|
+| `"xt_pair_dists"` | `XtPairwiseDistancesPairFeat` | `xt_pair_dist_dim` | `x_t` | 噪声坐标中成对欧氏距离的分桶独热编码 |
+| `"rel_pos"` | `RelativePositionPairFeat` | `2 + 2·(r_max+1)` | `chains`, `residue_pdb_idx`, `mask` | 相对序列位置 + 同链指示符 |
+| `"time_emb"` | `TimeEmbeddingPairFeat` | `t_emb_dim` | `t`, `x_t` | 正弦时间嵌入，广播至所有残基对 |
+
+**成对距离分桶** (`XtPairwiseDistancesPairFeat`) 是成对表示的几何核心。它从噪声坐标 `x_t` 计算所有成对欧氏距离，然后使用 `xt_pair_dist_min` (0.1 nm) 和 `xt_pair_dist_max` (3.0 nm) 之间均匀间隔的分桶边界，将其分入 `xt_pair_dist_dim` 个独热类别。分桶操作使用 `torch.bucketize` 进行高效分配，并使用 `F.one_hot` 进行最终表示。这将连续的距离值转换为分类表示，成对偏好注意力可以直接使用——无需学习的距离嵌入，因为独热分桶可作为隐式基函数。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L15-L48)，[feature_factory.py](src/model/components/feature_factory.py#L229-L243)
+
+**相对位置** (`RelativePositionPairFeat`) 编码了残基对拓扑的两个正交方面。首先，它根据残基 i 和 j 是否共享链 ID 计算一个 2 维独热的**同链指示符**。其次，对于同链残基对，它计算一个截断至 `[-r_max, r_max]` 的**相对序列偏移量** `|i - j|`，而跨链残基对则分配一个专用的越界分桶。结果是一个维度为 `2·(r_max+1)` 的相对位置独热向量与 2 维同链指示符拼接，总计 `2 + 2·(r_max+1)`。在默认 `r_max=32` 的情况下，生成一个 68 维特征。整个输出由逐残基填充掩码的外积进行掩码处理，确保涉及填充残基的配对被置零。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L187-L226)
+
+## 正弦编码工具
+
+时间嵌入和索引嵌入都依赖于 `idx_emb_utils.py` 中实现的正弦编码。尽管它们共享相同的 sin/cos 范式，但在频率计算上有所不同：
+
+**`get_time_embedding(t, edim)`** — 改编自 Ho 等人的扩散代码库。它将时间 `t` 乘以 `max_positions=2000` 进行缩放，然后为 `k ∈ [0, half_dim)` 计算几何间隔的频率 `exp(-k · log(20000) / (half_dim - 1))`，生成 [b, edim] 嵌入。这使得模型在 `t=0` 附近（信号最纯净处）对微小的时间差异具有细粒度的敏感度，同时仍能覆盖完整的时间范围。
+
+**`get_index_embedding(indices, edim, max_len=2056)`** — 标准的 Transformer 位置编码。它使用应用于整数残基索引的频率 `π / max_len^(2k/edim)`，生成 [n, edim] 或 [b, n, edim] 输出。`max_len=2056` 参数设定了最大可表示的序列长度。
+
+来源：[idx_emb_utils.py](src/utils/idx_emb_utils.py#L1-L65)
+
+## 集成至 Protein Transformer
+
+`ProteinTransformerAF3` 实例化了**三个** `FeatureFactory` 实例（加上内部又创建了两个的 `PairReprBuilder`），每个在网络输入管线中扮演不同的角色：
+
+```mermaid
+flowchart LR
+    subgraph Input["Batch Dictionary"]
+        XT["x_t [b,n,3]"]
+        T["t [b]"]
+        MASK["mask [b,n]"]
+        RT["residue_type [b,n]"]
+        RPI["residue_pdb_idx [b,n]"]
+        CH["chains [b,n]"]
+        PLM["plm_emb [b,n,1280]"]
+    end
+
+    subgraph Encoding["Feature Encoding Stage"]
+        direction TB
+        IRF["init_repr_factory<br/>seq: plm_emb+res_type+res_idx+chain_break"]
+        CDF["cond_factory<br/>seq: time_emb"]
+        PRB["pair_repr_builder<br/>pair: xt_pair_dists+rel_pos<br/>cond: time_emb"]
+    end
+
+    subgraph Assembly["Representation Assembly"]
+        direction TB
+        COORS["linear_3d_embed(x_t)<br/>[b,n,token_dim]"]
+        ADD["+<br/>seq = coors_embed + seq_f_repr"]
+        C_TR["transition_c_1 → transition_c_2<br/>[b,n,dim_cond]"]
+        PAIR["pair_repr [b,n,n,pair_dim]"]
+    end
+
+    Input --> Encoding
+    Encoding --> Assembly
+    COORS --> ADD
+    IRF --> ADD
+    CDF --> C_TR
+    PRB --> PAIR
+```
+
+**步骤 1 — 初始序列表示** (`init_repr_factory`)：模式为 `"seq"`，配置为 `feats_init_seq = ["plm_emb", "res_type", "res_idx", "chain_break_per_res"]`。工厂拼接这四个特征（输出维度分别为 256, 20, 128, 1 = 总计 405）并投影至 `token_dim=768`。这为模型在任何注意力机制之前提供了主要的逐残基“身份”信号。
+
+**步骤 2 — 坐标嵌入**：噪声 3D 坐标 `x_t` 通过一个简单的线性层（`linear_3d_embed`：3 → 768）嵌入，并与序列表示**相加**。这种相加而非拼接的方式意味着坐标信号和特征信号共享相同的 token 维度，使它们从第一层起便能交互。
+
+**步骤 3 — 条件变量** (`cond_factory`)：模式为 `"seq"`，配置为 `feats_cond_seq = ["time_emb"]`。256 维的时间嵌入被投影至 `dim_cond=512`，并通过两个过渡层进行精炼。该条件向量通过自适应层归一化 调制每个注意力和过渡块。
+
+**步骤 4 — 成对表示** (`pair_repr_builder`)：`PairReprBuilder` 包装器创建了两个工厂。表示工厂使用 `feats_pair_repr = ["xt_pair_dists", "rel_pos"]`（64 + 68 = 132 → 投影至 `pair_repr_dim=512`）。条件工厂使用 `feats_pair_cond = ["time_emb"]`（256 → 512），它通过自适应层归一化调制成对表示，随后其进入主干网络。
+
+来源：[protein_transformer.py](src/model/protein_transformer.py#L305-L376)，[protein_transformer.py](src/model/protein_transformer.py#L477-L526)，[train.yaml](configs/train.yaml#L71-L92)
+
+## 默认配置参考
+
+下表将每个与特征相关的配置键映射到其默认值及使用它的组件：
+
+| 配置键 | 默认值 | 消费者 |
+|---|---|---|
+| `feats_init_seq` | `["plm_emb","res_type","res_idx","chain_break_per_res"]` | `init_repr_factory` |
+| `feats_cond_seq` | `["time_emb"]` | `cond_factory` |
+| `feats_pair_repr` | `["xt_pair_dists","rel_pos"]` | `PairReprBuilder.init_repr_factory` |
+| `feats_pair_cond` | `["time_emb"]` | `PairReprBuilder.cond_factory` |
+| `t_emb_dim` | 256 | `TimeEmbeddingSeqFeat` / `TimeEmbeddingPairFeat` |
+| `idx_emb_dim` | 128 | `IdxEmbeddingSeqFeat` |
+| `plm_in_dim` | 1280 | `PLMSeqFeat` (ESM-2-large 输出维度) |
+| `plm_out_dim` | 256 | `PLMSeqFeat` (投影维度) |
+| `xt_pair_dist_dim` | 64 | `XtPairwiseDistancesPairFeat` |
+| `xt_pair_dist_min` | 0.1 | `XtPairwiseDistancesPairFeat` (nm) |
+| `xt_pair_dist_max` | 3.0 | `XtPairwiseDistancesPairFeat` (nm) |
+| `r_max` | 32 | `RelativePositionPairFeat` |
+| `strict_feats` | False | `Feature.assert_defaults_allowed` |
+| `dim_cond` | 512 | `cond_factory` 输出维度 |
+
+来源：[train.yaml](configs/train.yaml#L71-L92)，[inference.yaml](configs/inference.yaml#L61-L79)
+
+## 严格与宽松特征处理
+
+`strict_feats` 标志控制当批次中缺少所请求的特征时的优雅降级。当 `strict_feats=False`（默认）时，缺失的特征会回退到合理的默认值：缺失的残基索引变为顺序 `[1, 2, ..., n]`，缺失的链断裂变为零，缺失的 PLM 嵌入变为零张量。当 `strict_feats=True` 时，任何缺失的特征都会触发 `IOError`，并附带一条提示你包含相应数据变换的消息。这在训练管线开发期间对于尽早捕获配置/数据不匹配问题非常有价值。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L87-L94)
+
+## 填充掩码应用
+
+工厂应用填充掩码**两次**：一次在线性投影前（将填充位置的特征置零），一次在 LayerNorm 后（确保没有信息通过归一化统计从填充位置泄露）。对于序列特征，掩码沿残基维度应用为 `feature * mask[..., None]`。对于成对特征，掩码是外积 `mask[:, None, :] * mask[:, :, None]`，生成一个 [b, n, n] 的二值掩码，将涉及至少一个填充残基的任何配对置零。
+
+来源：[feature_factory.py](src/model/components/feature_factory.py#L377-L426)
+
+<CgxTip>添加新特征时，你必须：(1) 以正确的 `self.dim` 创建 `Feature` 子类，(2) 实现返回正确形状的 `forward(batch)`，以及 (3) 在 `FeatureFactory.get_creator` 的相应模式分支下注册特征字符串。投影层维度会自动从 `sum(c.get_dim())` 中计算得出——无需手动连线。</CgxTip>
+
+<CgxTip>成对表示在启用 LayerNorm 的情况下构建（`use_ln_out=True`），而初始序列表示则禁用它（`use_ln_out=False`）。这种不对称性的存在，是因为序列表示在下游会与坐标嵌入相加，而 LayerNorm 会在相加之前破坏坐标信号的尺度。</CgxTip>
+
+## 特征与数据变换依赖映射
+
+每个特征类可能需要批次字典中的特定键。下表将每个特征映射到负责填充所需键的数据变换或管线步骤：
+
+| 特征 | 所需批次键 | 来源变换 / 管线 |
+|---|---|---|
+| `ResidueTypeSeqFeat` | `residue_type` | `protein_to_pyg` 解析 (Graphein) |
+| `IdxEmbeddingSeqFeat` | `residue_pdb_idx` | `protein_to_pyg` 解析 (Graphein) |
+| `ChainBreakPerResidueSeqFeat` | `chain_break_per_res` 或 `chains` | `ChainBreakPerResidueTransform` 或 `protein_to_pyg` |
+| `PLMSeqFeat` | `plm_emb` | 在 `ProteinDataset.process_single_chain` 中加载的预计算 ESM-2 嵌入 |
+| `XtPairwiseDistancesPairFeat` | `x_t` | 流匹配噪声添加 (运行时) |
+| `RelativePositionPairFeat` | `chains`, `residue_pdb_idx` | `protein_to_pyg` 解析 (Graphein) |
+| `TimeEmbedding*Feat` | `t` | 流匹配时间采样 (运行时) |
+
+来源：[dataset.py](src/data/dataset.py#L465-L486)，[transforms.py](src/data/transforms.py#L65-L99)
+
+## 接下来去哪
+
+工厂生成的特征直接输入到**自适应层归一化** 条件机制和**成对偏好注意力** 块中。要了解条件向量如何调制每个 Transformer 层，请参阅 [Adaptive Layer Norm and Pair-Biased Attention](8-adaptive-layer-norm-and-pair-biased-attention)。要了解时间嵌入在流匹配框架中的起源如何决定模型的学习内容，请参阅 [Flow Matching on R³](5-flow-matching-on-r3)。有关使用这些表示的完整网络架构，请参阅 [Protein Transformer Network](7-protein-transformer-network)。
+
+---
+
+- [深入解析/模型组件/采样与引导策略](https://zread.ai/Junjie-Zhu/IDPFold2/10-sampling-and-guidance-strategies)
+
+---
+slug:10-sampling-and-guidance-strategies
+blog_type:normal
+---
+
+
+IDPFold2 的生成流水线由一组丰富的采样与引导机制控制，这些机制将学习到的向量场转换为多样化且可控的结构系综。这些策略在三个不同层面运作：**数值积分**（如何对 ODE/SDE 进行离散化与步进）、**引导**（如何修改预测的向量场以引导生成），以及**条件化**（外部约束——序列嵌入、基序或自条件预测——如何影响轨迹）。它们共同构成了一个可组合的控制面，使从业者无需重新训练即可在样本质量、多样性和约束满足度之间进行权衡。
+
+来源: [r3flow.py](src/model/flow_matching/r3flow.py#L1-L656), [integral.py](src/model/integral.py#L1-L403), [inference.yaml](configs/inference.yaml#L1-L103)
+
+## 积分方案：ODE 与 SDE 采样
+
+采样的核心在于**确定性 ODE 积分**与**随机性 SDE 积分**之间的选择，两者均在 `R3NFlowMatcher` 中作为 Euler 方案实现。确定性路径求解标准流匹配 ODE：
+
+> **等式 (1):** dx_t = v(x_t, t) dt
+
+其中 `v` 是学习到的向量场。对于给定的初始样本 x_0，这会产生一条从噪声到结构的固定轨迹，具有最高的可复现性，但不存在随机探索。随机路径通过基于分数的漂移项和 Wiener 噪声项对此进行了增强：
+
+> **等式 (2):** dx_t = [v(x_t, t) + g(t) · s(x_t, t)] dt + √(2g(t)) dw_t
+
+此处 `s(x_t, t)` 是中间密度的分数，IDPFold2 通过恒等式 s(x_t, t) = (t · v − x_t) / (scale_ref² · (1−t)) 从向量场**解析地**推导出该分数，从而避免了对单独训练的分数模型的需求。SDE 模式引入了可控的随机性，可以提高样本多样性并有助于逃离局部模式，这对于以结构异质性为目标而非将其视为缺陷的 IDP 系综而言尤为宝贵。
+
+来源: [r3flow.py](src/model/flow_matching/r3flow.py#L240-L322)
+
+### 分数-向量场转换
+
+从预测向量场到分数的转换由 `vf_to_score` 执行，它利用了在线性插值方案 x_t = (1−t)x_0 + t·x_1 下两者之间的数学关系。这是一个关键的设计选择：系统无需训练单独的分数网络，而是从现有的流匹配模型中免费恢复分数，使 SDE 采样成为一种零额外成本的选择。该实现严格截断 t < 1（因为分数在 t = 1 时发散），并且当 t > 0.99 时，最后几步积分会自动恢复为确定性 ODE 模式（`sampling_mode = "vf"`），以避免端点附近的数值不稳定。
+
+来源: [r3flow.py](src/model/flow_matching/r3flow.py#L324-L352), [r3flow.py](src/model/flow_matching/r3flow.py#L520-L525)
+
+### 噪声与分数缩放
+
+SDE 积分支持两个独立的缩放参数，将噪声注入与分数漂移解耦：
+
+| 参数 | 配置键 | 作用 | 默认值 |
+|---|---|---|---|
+| `sc_scale_noise` | `sampling.sc_scale_noise` | 乘以扩散系数 √(2·g(t)·sc_scale_noise·dt) | 0.0 |
+| `sc_scale_score` | `sampling.sc_scale_score` | 乘以漂移中的分数项 | 1.0 |
+
+将 `sc_scale_noise` 设置为 `0.0`（默认值）将完全禁用随机性，恢复为纯 ODE 采样。增大该值会注入与 g(t) 成正比的 Wiener 噪声，而 `sc_scale_score` 则控制基于分数的漂移对轨迹的修正强度。这两个缩放比例的相互作用可实现用于锐化分布的**低温采样**（小噪声，完整分数），或用于更广泛探索的**高温采样**（大噪声，减弱分数）。
+
+来源: [r3flow.py](src/model/flow_matching/r3flow.py#L295-L322), [inference.yaml](configs/inference.yaml#L33-L35)
+
+## 时间离散化调度
+
+从 t=0 到 t=1 的积分路径被离散化为 `nsteps = ceil(1/dt)` 步，但这些步的间距**默认是非均匀的**。这一点至关重要，因为流匹配动力学在时间线上变化剧烈：早期的步（t 较小）从近乎纯噪声控制大尺度的粗粒度结构，而后期的步（t 接近 1）则精修局部几何结构。`get_schedule` 方法支持六种调度策略：
+
+| 调度 | 公式 / 描述 | 关键参数 | 适用场景 |
+|---|---|---|---|
+| `uniform` | t = linspace(0, 1, nsteps+1) | — | 基线；每个阶段计算量相等 |
+| `power` | t = linspace(0,1)^p | `schedule_p` | p>1 在 t=0 附近集中步数；p<1 在 t=1 附近集中 |
+| `log` | t = 1 − logspace(−p, 0, nsteps+1), 翻转并归一化 | `schedule_p` (默认 2.0) | 早期步密集，用于粗粒度结构 |
+| `loglinear` | 基于 SNR 的 logspace(−6, 6) 通过 SNR→t 转换映射到 t | — | 均衡的 SNR 覆盖 |
+| `edm` | 具有ρ参数化的 EDM 风格 σ 调度 | `schedule_p` (ρ) | 在扩散文献中已被证明有效 |
+| `cos_sch_v_snr` | 基于余弦的 SNR 调度: (cos/sin)^p 映射到 t | `schedule_p` | 平滑的 SNR 过渡 |
+
+**对数调度**（默认，`schedule_p=2.0`）是 IDPFold2 的推荐选择。它在 t=0 附近分配了更密集的时间点，此时向量场必须解决从各向同性高斯分布到折叠骨架的转变——这是一个需要高精度的区域。当 t→1 时，步长变得粗略，因为结构已基本确定，仅需局部精修。
+
+来源: [r3flow.py](src/model/flow_matching/r3flow.py#L601-L655), [inference.yaml](configs/inference.yaml#L40-L42)
+
+## 扩散系数 g(t)
+
+函数 g(t) 控制 SDE 模式下分数漂移和噪声注入的幅度。IDPFold2 实现了三个参数族，每个参数族都带有可选的幂律变换和截断：
+
+| 模式 | 公式 | 行为 |
+|---|---|---|
+| `1/t` | g(t) = 1 / (t + ε) | t→0 时发散；早期扩散最强；**默认** |
+| `us` | g(t) = (1−t) / (t + ε) | t=0 时达峰值，t=1 时归零；适用于无条件采样 |
+| `tan` | g(t) = (π/2) · sin((1−t)π/2) / (cos((1−t)π/2) + ε) | 平滑的基于正切的缩放；π/2 归一化 |
+
+每个原始 g(t) 随后都会传入 `transform_gt`，该函数应用可选的幂律重塑：对数值居中后，通过 sigmoid 归一化至 [0,1]，再求 `gt_p` 次幂，最后映射回去。这提供了对扩散调度形状的细粒度控制。最终，`gt_clamp_val` 限制了 g(t) 的最大值以防止数值爆炸。默认配置使用 `gt_mode="1/t"`、`gt_p=1.0`（无变换）且无截断——产生经典的逆时间扩散，在早期步强烈随机化，同时平滑过渡到确定性精修。
+
+来源: [r3flow.py](src/model/flow_matching/r3flow.py#L540-L599), [inference.yaml](configs/inference.yaml#L36-L38)
+
+## 引导：无分类器引导与自引导
+
+IDPFold2 实现了一个**广义引导框架**，在无分类器引导 (CFG) 和自引导之间进行插值，由两个参数控制：`guidance_weight` 和 `autoguidance_ratio`。引导预测的计算方式为：
+
+> x_pred_guided = w · x_pred_cond + (1 − w) · [r · x_pred_ag + (1−r) · x_pred_uncond]
+
+其中 **w** = `guidance_weight`，**r** = `autoguidance_ratio`，`x_pred_cond` 是条件预测的结构，`x_pred_uncond` 是丢弃 PLM 嵌入后的预测（CFG 分支），而 `x_pred_ag` 是从 `autoguidance_ckpt_path` 加载的独立自引导模型的预测。
+
+| 参数 | 默认值 | 效果 |
+|---|---|---|
+| `guidance_weight` | 1.0 | w=1 → 无引导；w>1 → 放大条件信号；w=0 → 纯无条件/自引导 |
+| `autoguidance_ratio` | 0.0 | r=0 → 纯 CFG；r=1 → 纯自引导；0<r<1 → 混合 |
+
+<CgxTip>设置 `guidance_weight > 1.0`（通常为 2.0–5.0）且 `autoguidance_ratio = 0.0` 可恢复标准 CFG，该方式通过放大条件与无条件之间的差距来锐化结构预测。自引导（ratio=1.0）使用较弱的模型代替无条件分支，能在保持结构连贯性的同时产生更多样的系综——这对于以多样性为目标的 IDP 采样尤为宝贵。</CgxTip>
+
+CFG 的无条件分支通过在前向传播之前简单地**丢弃批次字典中的 `plm_embedding` 键**来实现。这是一种简洁且与架构无关的方法：FeatureFactory 将缺失的 PLM 嵌入视为零，从而有效地提供无条件上下文。自引导分支需要加载一个独立的检查点（`ag_dir`）作为第二个 `ProteinTransformerAF3` 实例，该模型通常应是一个能力较弱的模型（例如，训练步数较少、架构宽度不同），以提供“较弱的”基线。
+
+来源: [integral.py](src/model/integral.py#L40-L89), [inference.py](src/inference.py#L255-L298), [inference.yaml](configs/inference.yaml#L44-L46)
+
+## 条件化机制
+
+### 基序条件化
+
+基序条件化支持**部分结构指定**：固定选定残基（基序）的坐标，同时允许剩余骨架自由生成。这通过 `SingleMotifFactory` 实现，它生成三个注入批次的张量：`fixed_sequence_mask`（指示哪些位置被固定的逐残基布尔掩码）、`fixed_structure_mask`（由序列掩码的外积推导出的逐对布尔掩码），以及 `x_motif`（基序残基的 3D 坐标，由其掩码均值居中）。
+
+在采样期间，`full_simulation` 在每个积分步将这些张量直接传入网络输入字典，使模型能够以固定的结构上下文为条件。基序工厂支持随机的训练时增强：以 `motif_prob` 的概率，选择一个随机连续片段（由 `motif_min_pct_res` / `motif_max_pct_res` 和片段数量界限控制）作为基序；否则，发出零掩码（无条件）。在 `zeroes=True` 的推理时，除非提供显式的基序坐标，否则工厂始终发出零掩码，产生无条件样本。
+
+来源: [motif_factory.py](src/model/components/motif_factory.py#L309-L399), [r3flow.py](src/model/flow_matching/r3flow.py#L480-L504), [inference.yaml](configs/inference.yaml#L28-L29)
+
+### 自条件化
+
+自条件化是一种迭代精修技术，其中模型对干净结构 x_1 的**上一步预测**作为附加输入反馈到下一个积分步。具体而言，每步之后预测的 x_1 会被存储，并在后续步（当 `step > 0` 且 `self_cond=True` 时）作为 `nn_in["x_sc"]` 注入。这为网络提供了关于其自身轨迹的“提示”，在不增加额外模型参数的情况下提高了连贯性。在训练期间，自条件化以随机方式应用（50% 概率）以防止模型过度依赖自条件化输入；在推理期间，则每步都应用。
+
+来源: [r3flow.py](src/model/flow_matching/r3flow.py#L515-L516), [integral.py](src/model/integral.py#L286-L288), [inference.yaml](configs/inference.yaml#L30)
+
+### PLM 嵌入条件化
+
+主要的序列级条件化信号是 **ESM-2 650M 蛋白质语言模型嵌入**，它提供了丰富的进化与结构先验。在推理期间，如果未找到预计算的嵌入，则会使用 `esm2_t33_650M_UR50D` 即时计算并缓存。该嵌入是 CFG 无条件分支的目标（被丢弃以产生无条件预测），并且在标准条件采样中始终存在。
+
+来源: [inference.py](src/inference.py#L117-L165), [integral.py](src/model/integral.py#L73-L80)
+
+## 端到端采样流水线
+
+完整的采样轨迹由 `generating_predict` 编排，它将上述所有机制组合成一个传入 `full_simulation` 的单一可调用对象。下图展示了每个积分步的数据流：
+
+```mermaid
+flowchart TD
+    A["x_t, t from simulation"] --> B{"Motif conditioning?"}
+    B -->|Yes| C["Inject motif masks + x_motif"]
+    B -->|No| D["Standard input dict"]
+    C --> E["Build nn_in"]
+    D --> E
+    E --> F{"Self-conditioning?<br/>(step > 0)"}
+    F -->|Yes| G["Attach x_sc from<br/>previous x_1_pred"]
+    F -->|No| H["No self-cond input"]
+    G --> I["Forward pass: model(batch)"]
+    H --> I
+    I --> J["Convert prediction<br/>to x_1_pred"]
+    J --> K{"guidance_weight ≠ 1?"}
+    K -->|Yes| L["Compute guided prediction:<br/>w·x_cond + (1-w)·[r·x_ag + (1-r)·x_uncond]"]
+    K -->|No| M["Use x_1_pred directly"]
+    L --> N["Compute vector field v<br/>via flow_matching.xt_dot()"]
+    M --> N
+    N --> O["simulation_step:<br/>Euler ODE or SDE step"]
+    O --> P["Update x_t, t"]
+    P --> Q{"t ≥ 0.99?"}
+    Q -->|Yes| R["Switch to vf mode<br/>(deterministic)"]
+    Q -->|No| S["Continue with<br/>configured mode"]
+    R --> T["Next step"]
+    S --> T
+```
+
+来源: [integral.py](src/model/integral.py#L322-L400), [r3flow.py](src/model/flow_matching/r3flow.py#L389-L538)
+
+## 配置快速参考
+
+所有采样与引导参数均在 `configs/inference.yaml` 的 `sampling`、`schedule` 以及顶层键下进行配置：
+
+| 参数 | 路径 | 默认值 | 描述 |
+|---|---|---|---|
+| `dt` | 顶层 | 0.005 | 积分步长；nsteps = ceil(1/dt) |
+| `sampling_mode` | `sampling` | `vf` | `vf`（确定性 ODE）或 `sc`（随机性 SDE） |
+| `sc_scale_noise` | `sampling` | 0.0 | SDE 模式的噪声缩放 |
+| `sc_scale_score` | `sampling` | 1.0 | SDE 模式的分数缩放 |
+| `gt_mode` | `sampling` | `1/t` | 扩散系数模式：`us`、`tan` 或 `1/t` |
+| `gt_p` | `sampling` | 1.0 | g(t) 的幂律变换 |
+| `gt_clamp_val` | `sampling` | null | g(t) 的最大截断值；null = 无截断 |
+| `schedule_mode` | `schedule` | `log` | 时间离散化调度 |
+| `schedule_p` | `schedule` | 2.0 | 调度参数（解释因模式而异） |
+| `guidance_weight` | 顶层 | 1.0 | 引导强度；>1 放大条件信号 |
+| `autoguidance_ratio` | 顶层 | 0.0 | 在 CFG (0) 和自引导 (1) 之间混合 |
+| `motif_conditioning` | 顶层 | False | 启用基于基序的部分结构条件化 |
+| `self_conditioning` | 顶层 | False | 启用自条件化精修 |
+| `target_pred` | 顶层 | `v` | 网络参数化：`v`（向量场）或 `x_1`（干净样本） |
+
+<CgxTip>对于 IDP 系综生成，推荐的初始配置为：`sampling_mode: sc`、`sc_scale_noise: 0.5`、`schedule_mode: log`、`schedule_p: 2.0`、`guidance_weight: 1.5`、`self_conditioning: True`。这结合了用于多样性的温和随机性、用于粗粒度结构质量的对数密集早期步、用于连贯性的轻量 CFG，以及用于轨迹精修的自条件化——从而产生结构多样且物理合理的系综。</CgxTip>
+
+来源: [inference.yaml](configs/inference.yaml#L1-L103)
+
+## 预测参数化
+
+网络可以在由 `target_pred` 控制的两种预测模式下运行：
+
+- **`v` 模式**（默认）：网络直接预测向量场 v(x_t, t)。干净结构恢复为 x_1 = x_t + (1−t)·v。这是流匹配的自然参数化，在训练和推理期间均被使用。
+- **`x_1` 模式**：网络直接预测干净样本 x_1。向量场随后通过 `xt_dot` 从 x_1 推导得出。这可以提供不同的训练动态，但较少使用。
+
+`prediction_to_x_clean` 函数处理此转换，确保下游的引导和向量场计算无论网络的内部参数化如何，始终接收到一致的 x_1 预测。
+
+来源: [integral.py](src/model/integral.py#L24-L37), [inference.yaml](configs/inference.yaml#L12)
+
+## 质心约束
+
+当 `zero_com=True`（标准推理的默认值，当 `motif_conditioning=True` 时禁用）时，所有样本都被约束在质心精确为零的**居小子流形** (R₀³)ⁿ 上。这在每个积分步均被强制执行：在 Euler 更新后，`x_t` 通过减去掩码均值位置来重新居中。这消除了平移自由度，防止结构在空间中漂移，并确保生成的构象无需对齐即可直接比较。`scale_ref` 参数（默认 1.0）控制参考高斯分布的标准差，从而缩放初始噪声分布。
+
+---
+
+## 训练流水线
+
+- [深入解析/训练流水线/数据预处理与 PDB 筛选](https://zread.ai/Junjie-Zhu/IDPFold2/11-data-preprocessing-and-pdb-selection)
+
+---
+slug:11-data-preprocessing-and-pdb-selection
+blog_type:normal
+---
+
+
+IDPFold2 的训练流程要求严格的多阶段数据预处理工作流，将原始结构数据库转换为具备集群感知和裁剪增强特性的 PyTorch Geometric 图。本页剖析了该工作流的三个基础支柱：**PDB 元数据过滤**（`PDBDataSelector`）、**序列相似度感知的数据划分**（`PDBDataSplitter` + MMseqs2），以及针对内禀无序蛋白（IDP）系综的**轨迹到结构提取**。这些组件共同确保训练数据既具备结构多样性，又在训练/验证集边界之间不存在信息泄漏。
+
+## 预处理流程概览
+
+从原始数据来源到可用于训练的数据加载器，端到端的流程遵循由 `PDBDataModule` 编排的确定性序列，包括选择、下载、处理、划分和加载阶段：
+
+```mermaid
+flowchart TD
+    A[Raw Data Sources] --> B{Source Type?}
+    B -->|PDB Database| C[PDBDataSelector<br/>Metadata Filtering]
+    B -->|MD Trajectories| D[process_training_trajs.py<br/>Frame Extraction]
+    B -->|User PDB Folder| E[_load_pdb_folder_data<br/>Direct Scan]
+    C --> F[PDBManager<br/>Metadata Query]
+    F --> G[download_pdb_multiprocessing<br/>Structure Download]
+    D --> G
+    E --> G
+    G --> H[_process_structure_data<br/>PDB → PyG Graph .pt]
+    H --> I[PDBDataSplitter<br/>Sequence Similarity Clustering]
+    I --> J[MMseqs2 Clustering<br/>min_seq_id / coverage]
+    J --> K[Cluster-aware Split<br/>train / val]
+    K --> L[PDBDataset<br/>Crop + Transform + PLM Embed]
+    L --> M[ClusterSampler<br/>cluster-random / cluster-reps]
+    M --> N[DensePaddingDataLoader<br/>Batch for Training]
+```
+
+来源: [dataset.py](/src/data/dataset.py#L619-L1027), [process_training_trajs.py](/scripts/process_training_trajs.py#L19-L79), [cluster_utils.py](/src/utils/cluster_utils.py#L231-L288)
+
+## 阶段 1：PDB 数据选择 —— 元数据过滤
+
+`PDBDataSelector` 类对 PDB 数据库应用一系列级联的元数据过滤器，以构建蛋白质链候选集。它将所有元数据查询委托给 `PDBManager`（来自 `graphein_utils`），后者将 PDB REST API 和本地 RCSB PDB CSV 快照封装为可过滤的 pandas DataFrame。每个过滤器**按顺序**应用，逐步缩小候选池。
+
+### 过滤流程与参数
+
+| 参数 | 类型 | 默认值 | 过滤效果 |
+|---|---|---|---|
+| `fraction` | `float` | `1.0` | 对整个数据库进行随机子采样 |
+| `min_length` / `max_length` | `int` | `None` | 链长范围（残基数） |
+| `molecule_type` | `str` | `None` | 限制为 "protein"、"DNA" 等 |
+| `experiment_types` | `List[str]` | `None` | 仅保留 X-ray、NMR、EM 等 |
+| `oligomeric_min` / `oligomeric_max` | `int` | `None` | 寡聚态范围 |
+| `best_resolution` / `worst_resolution` | `float` | `None` | 分辨率质量范围 (Å) |
+| `has_ligands` | `List[str]` | `None` | 要求存在特定配体 |
+| `remove_ligands` | `List[str]` | `None` | 排除含有特定配体的链 |
+| `remove_non_standard_residues` | `bool` | `True` | 移除非标准氨基酸的链 |
+| `remove_pdb_unavailable` | `bool` | `True` | 移除 PDB 文件不可用的链 |
+| `remove_cath_unavailable` | `bool` | `False` | 移除无 CATH 分类的链 |
+| `exclude_ids` | `List[str]` | `None` | 明确要排除的 PDB ID |
+| `exclude_ids_from_file` | `str` | `None` | 包含要排除的 PDB ID 的文件 |
+
+`create_dataset()` 方法按固定顺序链接每个过滤器：比例子采样 → 实验类型 → 最大长度 → 最小长度 → 分子类型 → 寡聚态 → 分辨率 → 配体存在/缺失 → 非标准残基 → PDB 可用性 → CATH 可用性 → 显式排除。每次过滤后，都会记录剩余的链数，为可重现性提供审计追踪。
+
+<CgxTip>排除系统同时支持直接 ID 列表（`exclude_ids`）和基于文件的排除（`exclude_ids_from_file`），并通过集合并集自动去重。这对于在实验迭代中留出测试集结构或已知问题条目至关重要。</CgxTip>
+
+来源: [dataset.py](/src/data/dataset.py#L37-L224), [graphein_utils.py](/src/utils/graphein_utils.py#L315-L388)
+
+## 阶段 2：MD 轨迹处理 —— IDP 系综提取
+
+IDPFold2 专为内禀无序蛋白设计，这类蛋白以构象系综而非单一静态结构的形式存在。`process_training_trajs.py` 脚本将 MD 模拟轨迹转换为离散的 PDB 帧，从而以结构多样性填充训练集。
+
+### 两种提取模式
+
+该脚本支持两种轨迹来源，每种来源具有各自的帧采样策略：
+
+**AFCondense 模式**（`process_single_traj_afc`）：使用 `mdtraj` 加载 `.dcd` 轨迹，在整个轨迹中提取**50 个均匀间隔的帧**，并将每帧保存为名为 `{name}_f{index}.pdb` 的独立 PDB 文件。此模式会报告所有已处理轨迹中系统的最小和最大长度，用于诊断目的。
+
+**IDRome 模式**（`process_single_structure_idrome`）：使用序列名称编码方案导航 IDRome v4 目录结构。seq_name 被拆分为多个组件，这些组件编码了一个 3 级嵌套目录路径，从中加载 `traj.xtc` 和 `top.pdb`。此模式每条轨迹提取**20 个均匀间隔的帧**。
+
+两种模式均利用 `cpu_count()` 个工作进程的**多进程**（`mp.Pool`），并使用 `imap_unordered` 实现吞吐量最大化的并行提取。帧数（50 对 20）反映了每种数据源不同的模拟长度和存储考量。
+
+来源: [process_training_trajs.py](/scripts/process_training_trajs.py#L53-L119)
+
+## 阶段 3：结构下载与处理
+
+在选择（或直接提供）之后，必须下载原始结构文件并将其转换为内部表示。`PDBDataModule.prepare_data()` 通过两个阶段对此进行编排。
+
+### 下载阶段
+
+`_download_structure_data()` 方法确定仍需下载的 PDB 编码（检查 `raw/` 目录中的现有文件），对列表进行去重，然后委派给 `graphein_utils` 中的 `download_pdb_multiprocessing()`。此下载器支持多种格式——`pdb`、`cif`、`mmtf`、`ent`——并使用分块多进程从 RCSB PDB 进行高吞吐量检索。
+
+### 处理阶段 —— PDB 到 PyG 图
+
+`_process_structure_data()` 方法通过 `_load_and_process_pdb()` 将每个原始结构文件转换为序列化的 PyTorch Geometric `Data` 对象。每个结构的处理流程为：
+
+1. **解析**结构文件，使用 `graphein_utils` 中的 `protein_to_pyg()`，该函数通过 `read_pdb_to_dataframe()` 读取文件（支持使用 `cpdb`、`PandasMmcif` 或 `PandasMmtf` 的 PDB、mmCIF 和 MMTF 格式），选择链，去质子化，并将原子 DataFrame 转换为 `L × 37 × 3` 坐标张量。
+2. **计算**坐标掩码（`coord_mask`），其中缺失原子（用 `1e-5` 填充）被标记为 `False`。
+3. **编码**残基类型为整数索引，通过 `resname_to_idx` 映射完成。
+4. **提取**残基 PDB 索引，从 `residue_id` 字符串格式（`chain:resname:number`）中获取。
+5. **保存**处理后的图作为 `.pt` 文件至 `processed/` 目录。
+
+此阶段同样使用带有 `Pool(processes=num_workers)` 和 `imap_unordered` 的多进程，分块处理结构以实现最佳吞吐量。
+
+来源: [dataset.py](/src/data/dataset.py#L691-L882), [graphein_utils.py](/src/utils/graphein_utils.py#L704-L779)
+
+## 阶段 4：序列相似度感知的数据划分
+
+对蛋白质结构数据集进行朴素随机划分会导致**信息泄漏**——高度相似的序列同时出现在训练集和验证集中。IDPFold2 通过 `PDBDataSplitter` 进行集群感知划分来解决此问题，确保序列相似性集群的所有成员都驻留在同一划分中。
+
+### 划分策略
+
+| 策略 | `split_type` | 机制 | 泄漏风险 |
+|---|---|---|---|
+| 随机 | `"random"` | 带有随机种子的直接 `split_dataframe()` | 高 —— 相似序列可能跨越不同划分 |
+| 序列相似度 | `"sequence_similarity"` | MMseqs2 聚类 → 集群级划分 → 扩展 | 无 —— 集群在划分中保持原子性 |
+
+### 序列相似度划分工作流
+
+```mermaid
+flowchart LR
+    A["DataFrame<br/>Selected Chains"] --> B["df_to_fasta<br/>Extract Sequences"]
+    B --> C["MMseqs2 easy-cluster<br/>min_seq_id + coverage"]
+    C --> D["cluster_rep_seq.fasta<br/>Representative Sequences"]
+    C --> E["cluster_cluster.tsv<br/>Cluster Memberships"]
+    D --> F["split_dataframe<br/>Split Representatives"]
+    F --> G["expand_cluster_splits<br/>Map Reps → All Members"]
+    E --> G
+    G --> H["Train / Val DataFrames<br/>Leakage-Free"]
+```
+
+序列相似度划分的执行步骤如下：
+
+1. **FASTA 导出**：`df_to_fasta()` 将所有选定的链序列写入 FASTA 文件。
+2. **MMseqs2 聚类**：`cluster_sequences()` 使用配置的 `min_seq_id`（例如 `0.9` 表示 90% 一致性）和 `coverage`（默认 `0.8`）参数调用 `mmseqs easy-cluster`。对于超大数据集，`efficient_linclust=True` 会切换至线性扩展的 `mmseqs easy-linclust` 算法。
+3. **代表序列划分**：使用带有确定性种子（`seed=42`）的 `split_dataframe()` 将集群代表序列划分为训练/验证集。
+4. **集群扩展**：`expand_cluster_splits()` 使用集群 TSV（将每个代表序列映射至其所有集群成员）将代表序列级的划分扩展为完整的成员级划分，确保集群完整性。
+
+<CgxTip>默认训练配置使用 `split_sequence_similarity: 0.9`（90% 一致性），这相对宽松。对于序列多样性有限的 IDP 数据集，降低此阈值（例如降至 0.3）会创建更细粒度的集群和更严格的泄漏防范，代价是每个集群的训练集更小。</CgxTip>
+
+来源: [dataset.py](/src/data/dataset.py#L227-L326), [cluster_utils.py](/src/utils/cluster_utils.py#L151-L369)
+
+## 阶段 5：数据集构建 —— 裁剪、变换与多聚体组装
+
+`PDBDataset` 是核心的 `torch.utils.data.Dataset` 子类，它加载已处理的 `.pt` 图并应用即时增强。其 `__getitem__` 方法实现了复杂的多路径逻辑：
+
+### 单体与多聚体路径
+
+对于每个样本，数据集首先通过 `process_single_chain()` 加载单链图。如果**复合体（多聚体）信息可用**（来自 `complex_contacts.csv` 文件）且随机抽取值低于 `complex_prop`（默认 `0.8`），数据集将：
+
+1. 从 `complex_chains`（一个预构建的查找字典）中选择随机伴随链。
+2. 通过 `concat_two_chains()` 加载并拼接伴随链。
+3. 应用**空间裁剪**（50% 概率，以界面残基为中心）或**多链连续裁剪**（50% 概率）以达到 `crop_size`。
+
+如果未选择伴随链（或不可用），则应用**单链连续裁剪**：选择一个包含 `crop_size` 个残基的随机连续窗口，并将残基 PDB 索引重新设定为从 1 开始。
+
+### 坐标重排序
+
+`process_single_chain()` 中的关键步骤是将坐标轴从 PDB 约定重排序至 OpenFold 约定：`graph.coords = graph.coords[:, PDB_TO_OPENFOLD_INDEX_TENSOR, :]`。这确保了原子排序与模型内部表示的一致性，后者遵循 OpenFold/AlphaFold2 的 atom37 布局，而非原始 PDB 原子排序。
+
+### PLM 嵌入加载
+
+当配置了 `plm_embedding` 时，数据集从 `.pt` 文件加载预计算的蛋白质语言模型嵌入（ESM-2）。命名约定因数据来源而异：IDRome 条目使用 `{name}_f0.pt`（在同一序列的所有帧间共享帧 0 嵌入），PDB 条目直接使用 PDB 编码，MDCATH 条目使用序列标识符。形状断言验证嵌入长度与坐标张量长度是否匹配。
+
+来源: [dataset.py](/src/data/dataset.py#L329-L606)
+
+## 阶段 6：数据变换 —— 旋转与填充增强
+
+`transforms.py` 模块提供可组合的变换类，这些类作用于 PyG `Data` 对象。每个变换遵循 `BaseTransform` 模式，在应用修改之前浅拷贝数据，以防止原位变异。
+
+| 变换 | 目的 | 关键参数 |
+|---|---|---|
+| `CopyCoordinatesTransform` | 在加噪前备份原始坐标 | None |
+| `ChainBreakPerResidueTransform` | 通过 CA-CA 距离 > 4.0 Å 检测链断裂 | `chain_break_cutoff` |
+| `PaddingTransform` | 将所有张量填充至统一的 `max_size` | `max_size`, `fill_value` |
+| `GlobalRotationTransform` | 对坐标应用 SO(3) 均匀随机旋转 | `rotation_strategy` |
+
+`GlobalRotationTransform` 使用 `scipy.spatial.transform.Rotation.random()` 从 SO(3) 中均匀采样，这保证了等变训练——模型必须学习旋转不变表示。`ChainBreakPerResidueTransform` 通过检查连续 Cα 原子是否超过距离阈值来识别肽链主链的不连续性，生成一个用作序列级特征的二值掩码。
+
+来源: [transforms.py](/src/data/transforms.py#L1-L197)
+
+## 阶段 7：集群感知采样与 DataLoader 构建
+
+最后阶段通过 `PDBDataModule.get_train_dataloader()` 将划分后的数据集连接到训练循环，该函数使用 `ClusterSampler` 构建集群感知的数据加载器。
+
+### 采样模式
+
+| 模式 | 行为 | 适用场景 |
+|---|---|---|
+| `"random"` | 标准随机洗牌，无集群感知 | 小型数据集，无聚类 |
+| `"cluster-reps"` | 始终从每个集群中采样代表（最长）序列 | 确定性，降低多样性 |
+| `"cluster-random"` | 每个 epoch 从每个集群中随机采样一个成员 | **默认** —— 最大化集群内多样性 |
+
+`ClusterSampler` 与 PyTorch 的分布式训练集成：当 `torch.distributed.is_initialized()` 时，它跨 rank 划分集群，并处理填充/丢弃以实现均匀整除。在非分布式模式下，它打乱集群顺序并根据所选模式每个集群产生一个样本。
+
+数据加载器本身在 `batch_padding=True` 时使用 `DensePaddingDataLoader`，它将批次内长度可变的图填充至最大长度——这对于基于裁剪训练策略的高效 GPU 利用至关重要。
+
+来源: [dataset.py](/src/data/dataset.py#L957-L1027), [cluster_utils.py](/src/utils/cluster_utils.py#L20-L148)
+
+## 训练配置 —— 数据参数
+
+`configs/train.yaml` 文件将所有数据预处理和加载参数整合在 `data:` 键下。IDPFold2 训练的默认配置为：
+
+```yaml
+data:
+  data_dir: ./data/hybrid_train/
+  plm_emb_dir: ./data/hybrid_train/embedding/
+  complex_dir: ./data/hybrid_train/complex_contacts.csv
+  complex_prop: 0.8          # 80% chance of multimer assembly
+  crop_size: 256             # residues per crop
+  format: "pdb"              # structure file format
+  sampling_mode: "cluster-random"  # cluster-aware sampling
+  max_length: 256            # maximum chain length
+  train_val_prop: [0.99, 0.01]
+  split_type: "sequence_similarity"
+  split_sequence_similarity: 0.9  # 90% identity clustering
+```
+
+`split_sequence_similarity: 0.9` 设置创建了相对粗糙的集群——序列必须共享 ≥90% 的一致性才能被分到一组。`crop_size: 256` 结合 `max_length: 256` 意味着训练结构最多包含 256 个残基，并且裁剪主要作为多聚体尺寸控制机制，而非单体的长度缩减策略。
+
+来源: [train.yaml](/configs/train.yaml#L32-L56)
+
+## 整合全局 —— 端到端流程
+
+从原始 PDB 数据库到训练批次的完整预处理生命周期遵循以下序列：
+
+1. **`PDBDataSelector.create_dataset()`** —— 按元数据（长度、分辨率、寡聚态等）过滤 PDB 数据库，生成候选 DataFrame。
+2. **`PDBDataModule.prepare_data()`** —— 下载缺失的结构，将每种结构解析为 `L × 37 × 3` 坐标张量，计算掩码和残基编码，保存为 `.pt` 文件。
+3. **`PDBDataSplitter.split_data()`** —— 通过 MMseqs2 聚类序列，将集群代表序列划分为训练/验证集，并扩展至所有集群成员。
+4. **`PDBDataModule.setup()`** —— 加载划分后的 DataFrame 和集群映射。
+5. **`PDBDataset.__getitem__()`** —— 训练时：加载 `.pt` 图，可选组装多聚体，应用空间或连续裁剪，加载 PLM 嵌入，应用变换（旋转、填充）。
+6. **`ClusterSampler`** —— 每 epoch 每集群产生一个样本，最大化结构多样性同时防止划分泄漏。
+
+此架构确保每个训练批次包含结构多样、长度归一化、旋转增强的蛋白质图，且训练集与验证集之间不存在序列相似度泄漏——这是学习内禀无序蛋白可泛化构象分布的先决条件。
+
+要了解这些预处理数据流如何连接到模型优化循环，请继续阅读[训练与微调工作流](12-training-and-fine-tuning-workflow)。关于补充集群感知采样的聚类数学和负载均衡损失，请参阅[负载均衡与 MoE 损失](13-load-balancing-and-moe-loss)。
+
+---
+
+- [深入解析/训练流水线/训练与微调工作流](https://zread.ai/Junjie-Zhu/IDPFold2/12-training-and-fine-tuning-workflow)
+
+---
+slug:12-training-and-fine-tuning-workflow
+blog_type:normal
+---
+
+
+IDPFold2 通过 **ℝ³ 上的流匹配** 进行训练——这是一种生成式框架，通过沿插值路径预测速度场，学习将高斯噪声传输为蛋白质构象。训练流程由一个 Hydra 配置的入口点（`src/train.py`）统一编排，它将分布式数据并行、AlphaFold3 风格的学习率调度、指数移动平均（EMA）权重跟踪，以及结合了流匹配误差与混合专家负载均衡的复合损失串联在一起。本页将介绍完整的生命周期：从数据准备与配置，到训练循环内部机制，再到基于检查点的微调与验证时的结构生成。
+
+来源: [train.py](/src/train.py#L1-L437), [train.yaml](/configs/train.yaml#L1-L124)
+
+## 训练流水线架构
+
+训练工作流遵循“顺序初始化 → 循环”模式，每个阶段建立在前一阶段之上。下图展示了高层的数据与控制流：
+
+```mermaid
+flowchart TD
+    A[Hydra Config<br/>train.yaml] --> B[Environment Setup<br/>DDP + Seeding]
+    B --> C[PDBDataModule<br/>Select → Split → Load]
+    C --> D[Model Instantiation<br/>ProteinTransformerAF3]
+    D --> E[EMAWrapper<br/>Shadow Weights]
+    E --> F[Optimizer + LR Scheduler<br/>Adam / AdamW + AF3 Schedule]
+    F --> G{Resume from<br/>Checkpoint?}
+    G -->|Yes| H[Load Weights +<br/>Optimizer State]
+    G -->|No| I[Sanity Validation<br/>Check]
+    H --> I
+    I --> J[Training Loop]
+    J --> K[EMA Update<br/>per step]
+    K --> L[training_predict<br/>FM Loss + MoE Loss]
+    L --> M[Backprop +<br/>Optimizer Step]
+    M --> N[Validation Loop<br/>with EMA Shadow]
+    N --> O{Checkpoint<br/>Interval?}
+    O -->|Yes| P[Save .pth +<br/>EMA .pth + Sample PDB]
+    O -->|No| J
+    P --> J
+```
+
+来源: [train.py](/src/train.py#L31-L196), [train.py](/src/train.py#L234-L410)
+
+## 配置与启动
+
+训练通过 Hydra 启动，Hydra 从 `configs/train.yaml` 组合出完整配置。入口点使用 `@hydra.main` 装饰，这意味着所有超参数都可以作为 `DictConfig` 对象访问，并可以从命令行覆盖。
+
+```bash
+# 单 GPU
+python src/train.py
+
+# 通过 torchrun 进行多 GPU 训练
+torchrun --nproc_per_node=4 src/train.py
+
+# 覆盖特定参数
+python src/train.py model.nlayers=12 optimizer.lr=0.0002 epochs=1000
+```
+
+配置会在每次运行开始时自动保存到日志目录，确保完全的可复现性。下表总结了顶层的配置组：
+
+| 配置项 | 用途 | 关键字段 |
+|---|---|---|
+| `task_prefix` | 日志目录的运行标识符 | `HYBRID_TRAIN` |
+| `batch_size` | 每设备批次大小 | `8` |
+| `epochs` | 总训练轮数 | `500` |
+| `target_pred` | 流匹配参数化 | `v`（速度）或 `x_1`（干净预测） |
+| `checkpoint_interval` | 保存间隔的轮数 | `2` |
+| `seed` / `deterministic` | 可复现性控制 | `42` / `False` |
+| `resume` | 检查点恢复路径 | `ckpt_dir`, `ema_dir`, `load_model_only` |
+| `ema` | EMA 衰减与可变参数 | `decay: 0.999` |
+| `noise` | 时间采样分布 | `mode: mix_up02_beta`, `p1: 1.9`, `p2: 1.0` |
+| `loss` | 损失加权 | `moe_loss_weight: 0.3` |
+| `data` | 数据集与 DataLoader 配置 | 见下方数据部分 |
+| `model` | 架构超参数 | 见架构页面 |
+| `optimizer` | 优化器与学习率调度 | 见下方优化器部分 |
+
+来源: [train.py](/src/train.py#L31-L33), [train.yaml](/configs/train.yaml#L1-L124)
+
+## 分布式训练设置
+
+IDPFold2 通过 PyTorch 的 `DistributedDataParallel` (DDP) 支持**多节点、多 GPU 训练**。`DistWrapper` 工具读取由 `torchrun` 或类似启动器设置的标准环境变量（`RANK`、`LOCAL_RANK`、`WORLD_SIZE`、`LOCAL_WORLD_SIZE`），并将它们作为单例 `DIST_WRAPPER` 暴露出来。
+
+初始化序列为：(1) 检测 CUDA 可用性并根据本地秩分配设备，(2) 如果 `world_size > 1`，则使用可配置的超时时间（通过 `NCCL_TIMEOUT_SECOND` 默认为 600 秒）初始化 NCCL 进程组，(3) 调用 `seed_everything` 以同步所有秩的随机种子。启用确定性模式时，会禁用 cuDNN 基准测试，设置 `cudnn.deterministic = True`，并配置 `CUBLAS_WORKSPACE_CONFIG` 以实现完全的可复现性——代价是吞吐量降低。
+
+当 DDP 激活时，模型会使用 `DDP(model, device_ids=[local_rank], output_device=local_rank, static_graph=True)` 进行包装。`static_graph=True` 标志是一个重要的优化：它告知 DDP 计算图结构在迭代间不会改变，使其能够跳过每次前向传播中昂贵的图分析。
+
+来源: [ddp_utils.py](/src/utils/ddp_utils.py#L1-L50), [train.py](/src/train.py#L46-L77), [train.py](/src/train.py#L130-L143)
+
+## 数据流水线：从 PDB 到批次
+
+数据流水线由三个类控制，形成一个“选择 → 划分 → 加载”的层级结构：
+
+**`PDBDataSelector`** 根据元数据约束过滤结构——分子类型、实验类型、序列长度边界、寡聚态、分辨率范围以及配体存在情况。当 `molecule_type` 为 `null`（如在默认配置中）时，选择器将被完全跳过，流水线回退为加载 `data_dir/raw/` 目录中找到的所有 PDB 文件。
+
+**`PDBDataSplitter`** 使用以下两种策略之一将数据集划分为训练/验证集：
+
+| 划分类型 | 机制 | 适用场景 |
+|---|---|---|
+| `random` | 随机洗牌 + 按比例划分 | 快速实验 |
+| `sequence_similarity` | 在相似度阈值下进行 MMseqs2 聚类，然后进行感知聚类的划分 | 防止同源物之间的数据泄露 |
+
+默认配置使用 0.9（90% 一致性）的 `sequence_similarity`，以及 99%/1% 的训练/验证比例——这反映了蛋白质结构数据集的大规模特性，其中验证仅作为健全性检查而非模型选择。
+
+**`PDBDataModule`** 编排整个流水线：它将原始 PDB 文件处理为 PyTorch Geometric 的 `Data` 对象（保存为 `.pt` 文件），支持多进程数据加载，并使用 `DensePaddingDataLoader` 构建用于批次填充的 `DataLoader`。默认应用两种变换：`GlobalRotationTransform`（通过均匀采样旋转矩阵进行 SO(3) 增强）和 `ChainBreakPerResidueTransform`（通过 CA-CA 距离 > 4.0 Å 指示链不连续性的二进制掩码）。`sampling_mode: "cluster-random"` 确保构建的批次能够采样多样的聚类，而不是过度代表任何单一的结构家族。
+
+对于多聚体训练，`complex_dir` 参数指向指定链间接触的 CSV 文件，`complex_prop: 0.8` 控制在每个批次中采样复合物（多聚体）结构与单体结构的概率。
+
+来源: [dataset.py](/src/data/dataset.py#L37-L224), [dataset.py](/src/data/dataset.py#L227-L326), [dataset.py](/src/data/dataset.py#L700-L758), [transforms.py](/src/data/transforms.py#L65-L196), [train.py](/src/train.py#L79-L123)
+
+## 训练循环
+
+### 损失计算：`training_predict`
+
+核心训练步骤封装在 `training_predict` 中，执行以下序列：
+
+1. **提取干净样本** — 从批次中提取 CA 坐标，从 Å 转换为 nm，并应用随机全局旋转以进行 SO(3) 等变训练。
+2. **采样时间** — 抽取插值时间 `t ~ mix_up02_beta(1.9, 1.0)`，这是一个与 2% 均匀样本混合的 Beta(1.9, 1.0) 分布。这偏向于较晚的时间（更接近干净结构），同时保持对早期时间的覆盖。
+3. **采样参考** — 从居中且已掩码的高斯参考分布中抽取 `x_0 ~ N(0, I)`。
+4. **插值** — 计算 `x_t = (1 - t) * x_0 + t * x_1`，即标准的条件流匹配插值。
+5. **模型前向传播** — 在带噪状态 `x_t` 上运行 `ProteinTransformerAF3`，以预测速度 `v` 或干净结构 `x_1`（由 `target_pred` 控制）。
+6. **计算流匹配损失** — 主损失为时间加权 MSE：`loss = Σ(||x_1 - x_1_pred||² * mask) / (3 * nres) * 1/((1-t)² + ε)`。逆 `(1-t)²` 加权重强调了 `t=1`（干净结构）附近的准确性。
+7. **计算 MoE 负载均衡损失** — 如果 `moe_loss_weight > 0`，则添加来自混合专家路由的辅助负载均衡损失。
+8. **返回** — 总损失 `fm_loss + moe_loss` 以及用于记录的各单独损失组件字典。
+
+### 自条件化
+
+当 `self_conditioning=True` 时，模型执行初始前向传播（概率为 0.5）以生成初步预测 `x_sc`，然后将其作为额外输入反馈给第二次前向传播。这种受扩散模型中自条件化启发的技术，允许模型在训练期间迭代地细化其预测。
+
+### 基序与 MoE 条件化
+
+可以通过 `motif_conditioning` 和 `moe_conditioning` 启用两种可选的条件化机制。基序条件化使用 `SingleMotifFactory` 在生成其余部分时固定部分结构，`motif_prob` 控制保持固定的残基比例。MoE 条件化将不同的结构上下文路由到专门的专家网络。两者在基础配置中均默认为 `False`。
+
+来源: [integral.py](/src/model/integral.py#L237-L319), [integral.py](/src/model/integral.py#L173-L199), [integral.py](/src/model/integral.py#L92-L117), [train.py](/src/train.py#L234-L283), [r3flow.py](/src/model/flow_matching/r3flow.py#L95-L124)
+
+## 优化器与学习率调度
+
+IDPFold2 支持两种优化器族，通过 `use_adamw` 选择：
+
+| 优化器 | 行为 | 权重衰减策略 |
+|---|---|---|
+| **Adam** (默认) | 带均匀权重衰减的标准 Adam | 应用于所有参数 |
+| **AdamW** | 带融合 CUDA 内核的解耦权重衰减 | 2D+ 参数衰减；偏置和 LayerNorm 参数排除 |
+
+默认配置使用标准 Adam，`lr=1e-4`，`β=(0.9, 0.999)`，以及零权重衰减。
+
+提供三种学习率调度器，通过 `lr_scheduler` 键选择：
+
+| 调度器 | 调度配置 | 关键参数 |
+|---|---|---|
+| **`af3`** (默认) | 线性预热 → 阶梯衰减 | `warmup_steps=4000`, `decay_every_n_steps=80000`, `decay_factor=0.98` |
+| **`cosine_annealing`** | 线性预热 → 余弦衰减 | `warmup_steps`, `decay_steps`, `min_lr` |
+| **`constant`** | 固定学习率 | 无 |
+
+**AlphaFold3 调度器**是默认选项，遵循 AlphaFold3 第 5.4 节中所述的调度：在预热期间，`lr = (step + 1) / (warmup_steps + 1) * base_lr`；预热之后，学习率每 `decay_every_n_steps` 步衰减 `decay_factor`，即 `lr = base_lr * decay_factor^(step // decay_every_n_steps)`。在默认设置下（4000 步预热，每 80K 步衰减 0.98），学习率遵循一个阶阶梯衰减模式，该模式已在蛋白质结构生成中得到经验验证。
+
+来源: [optimizer.py](/src/model/optimizer.py#L63-L85), [optimizer.py](/src/model/optimizer.py#L163-L199), [optimizer.py](/src/model/optimizer.py#L202-L237), [train.py](/src/train.py#L156-L171)
+
+## 指数移动平均 (EMA)
+
+`EMAWrapper` 维护所有模型参数的影子副本，在每次训练步骤后通过以下公式更新：`shadow = (1 - decay) * param + decay * shadow`。当 `decay=0.999` 时，影子权重代表了大约最近 1000 步的指数平均，提供了模型更平滑的版本，通常能生成更高质量的结构。
+
+每个轮次中，EMA 工作流分为三个阶段：
+
+1. **训练** — 每次前向-反向步骤后调用 `ema_wrapper.update()`，将最新参数混合到影子权重中。
+2. **验证** — `ema_wrapper.apply_shadow()` 用影子权重交换实时参数进行评估，之后 `ema_wrapper.restore()` 恢复为实时权重。
+3. **检查点保存** — 保存时，应用影子权重，单独保存 EMA 检查点（仅包含 `model_state_dict`），随后进行恢复。
+
+`mutable_param_keywords` 字段控制哪些参数接收 EMA 平均。默认包含一个空字符串 `[""]`，匹配所有参数名称——意味着每个参数都被 EMA 跟踪。要排除特定参数（例如位置嵌入），请将其名称前缀添加到列表中。
+
+来源: [ema.py](/src/model/ema.py#L1-L49), [train.py](/src/train.py#L145-L153), [train.py](/src/train.py#L254-L255), [train.py](/src/train.py#L301-L332)
+
+## 检查点与微调
+
+### 保存检查点
+
+检查点每 `checkpoint_interval` 个轮次（默认：2）保存一次，并在最后一个轮次结束时总是保存。持久化两种类型的检查点：
+
+| 检查点类型 | 内容 | 文件名模式 |
+|---|---|---|
+| **完整** | `model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`, `epoch` | `epoch_{n}.pth` |
+| **EMA** | `model_state_dict` (仅影子权重) | `_ema_{decay}_{n}.pth` |
+
+此外，在每个检查点处，EMA 模型使用 `generating_predict` 通过对数调度 ODE 积分（`schedule_mode: "log"`，`schedule_p: 2.0`，`dt: 0.005`）生成 **5 个验证样本结构**。这些 PDB 文件保存到 `samples/` 目录，提供了训练进展的定性监控——你可以直观地检查生成的结构是否随轮次变得更加真实。
+
+损失历史持续追加到 `loss.csv`，包含列 `Epoch`、`Loss`、`Val Loss`。
+
+### 恢复训练
+
+`resume` 配置块支持两种检查点来源：
+
+- **`ckpt_dir`** — 完整检查点（优化器 + 调度器状态）。当 `load_model_only=False` 时，这会恢复精确的训练状态，包括轮次计数器、优化器动量以及学习率调度位置。当 `load_model_only=True` 时，仅加载模型权重——这是标准的**微调**模式，你希望从预训练模型开始，但使用全新的优化器状态（可能使用不同的学习率）。
+- **`ema_dir`** — EMA 检查点（仅模型权重）。此检查点优先加载并重新注册 EMA 包装器，允许你从先前训练的影子状态继续跟踪 EMA。
+
+加载顺序很重要：首先加载 EMA 检查点（如果提供），然后完整检查点覆盖模型权重。这意味着当两者都指定时，完整检查点优先。
+
+```yaml
+# 使用全新优化器从预训练检查点进行微调
+resume:
+  ckpt_dir: ./logs/HYBRID_TRAIN_2024-01-15/checkpoints/epoch_500.pth
+  ema_dir: null
+  load_model_only: True    # 为微调提供全新的优化器状态
+
+# 从中断处完全恢复
+resume:
+  ckpt_dir: ./logs/HYBRID_TRAIN_2024-01-15/checkpoints/epoch_250.pth
+  ema_dir: null
+  load_model_only: False   # 恢复优化器 + 调度器状态
+```
+
+来源: [train.py](/src/train.py#L173-L195), [train.py](/src/train.py#L344-L407)
+
+## 自定义数据集的预处理
+
+当基于分子动力学 (MD) 模拟轨迹而非 PDB 结构进行训练时，`scripts/process_training_trajs.py` 工具将轨迹文件转换为适合训练流水线的单个 PDB 帧。它支持两种模式：
+
+- **IDRome 轨迹** — 从 IDRome v4 数据库加载 XTC 轨迹，每条轨迹提取 20 个均匀间隔的帧。
+- **任意 DCD 轨迹** — 加载带有独立拓扑 PDB 的 DCD 轨迹，提取 50 个均匀间隔的帧。
+
+该脚本还包含（已注释掉的）用于计算 ESM-2 650M 嵌入（`esm2_t33_650M_UR50D`）的基础设施，这是模型序列特征编码所需的 `plm_emb` 输入。在生产环境中，应预计算嵌入并存储在由 `data.plm_emb_dir` 指定的目录中。
+
+自定义训练运行的总体数据准备工作流如下：
+
+```mermaid
+flowchart LR
+    A[Raw MD Trajectories<br/>or PDB structures] --> B[process_training_trajs.py<br/>Extract PDB frames]
+    B --> C[data/hybrid_train/raw/<br/>Individual .pdb files]
+    C --> D[get_esm_embedding.py<br/>Precompute PLM embeddings]
+    D --> E[data/hybrid_train/embedding/<br/>Per-structure .pt files]
+    E --> F["PDBDataModule.setup<br/>Process → Split → Dataloader"]
+    F --> G[Training Loop]
+```
+
+来源: [process_training_trajs.py](/scripts/process_training_trajs.py#L1-L147), [get_esm_embedding.py](/scripts/get_esm_embedding.py#L1-L1)
+
+## 关键训练参数摘要
+
+下表整合了影响最大的训练超参数及其默认值和调整指南：
+
+| 参数 | 默认值 | 效果 | 调整指南 |
+|---|---|---|---|
+| `batch_size` | 8 | 每 GPU 批次大小 | 如果 GPU 内存允许则增加以提高稳定性；使用 `crop_size` 降低 OOM 风险 |
+| `epochs` | 500 | 总训练轮数 | 完整训练通常为 200-500；微调为 50-100 |
+| `data.crop_size` | 256 | 每样本最大残基数 | 更长的链需要更多内存；256 是一个良好的平衡 |
+| `data.max_length` | 256 | 过滤掉更长的结构 | 必须 ≥ `crop_size` |
+| `data.complex_prop` | 0.8 | 采样多聚体的概率 | 设为 0.0 进行仅单体训练 |
+| `optimizer.lr` | 1e-4 | 基础学习率 | 完整训练为 1e-4；微调为 1e-5 到 5e-5 |
+| `optimizer.warmup_steps` | 4000 | 学习率预热时长 | 随数据集大小缩放；约 1-2 个轮次的步数 |
+| `ema.decay` | 0.999 | EMA 平滑因子 | 长时间训练为 0.999；极长运行周期为 0.9999 |
+| `loss.moe_loss_weight` | 0.3 | MoE 负载均衡权重 | 0.1-0.5 范围；过高会损害 FM 损失，过低会导致专家坍塌 |
+| `noise.p1` / `noise.p2` | 1.9 / 1.0 | t 采样的 Beta 分布参数 | 偏向 t≈1；如果早期时间预测较差则进行调整 |
+
+<CgxTip>对于流匹配训练，`target_pred: v` 参数化（速度预测）通常比 `x_1`（干净结构预测）更稳定，因为它避免了在从速度转换为干净预测时在 t=1 附近出现的 `1/(1-t)` 爆炸问题。</CgxTip>
+
+<CgxTip>微调时，请始终设置 `resume.load_model_only: True` 并使用较低的学习率（1e-5 到 5e-5）以及较少的预热步数。这可以防止预训练阶段优化器累积的动量对已学习的特征造成破坏性更新。</CgxTip>
+
+来源: [train.yaml](/configs/train.yaml#L1-L124), [train.py](/src/train.py#L1-L437)
+
+## 验证与训练中采样
+
+在每个轮次结束时，模型切换到评估模式并应用 EMA 影子权重。在整个验证集上使用相同的 `training_predict` 函数计算验证损失，但设置 `force_moe_capacity=False`——这在验证期间禁用专家容量限制，确保所有 token 均被处理，从而提供无偏的损失估计。
+
+验证之后，如果 EMA 处于激活状态且正在保存检查点，一次小型生成运行会从最后的验证批次生成 5 个样本结构。这些结构通过 `generating_predict` 生成，该函数使用步长为 `dt=0.005` 的对数时间调度执行从 `t=0` 到 `t=1` 的完整 ODE 模拟。生成的坐标从 nm 转换回 Å（×10），并保存为名为 `val_{epoch}.pdb` 的 PDB 文件。这提供了模型在每个检查点是否生成物理合理结构的直接视觉检查。
+
+来源: [train.py](/src/train.py#L287-L407), [integral.py](/src/model/integral.py#L322-L398)
+
+## 接下来阅读什么
+
+- 关于流匹配损失和插值方案的数学基础，请参阅 [Flow Matching on R³](5-flow-matching-on-r3)。
+- 关于训练期间与 FM 损失相结合的 MoE 负载均衡损失，请参阅 [Load Balancing and MoE Loss](13-load-balancing-and-moe-loss)。
+- 关于如何选择、过滤和划分训练数据的详细信息，请参阅 [Data Preprocessing and PDB Selection](11-data-preprocessing-and-pdb-selection)。
+- 关于可配置参数的完整列表，请参阅 [Configuration Reference](16-configuration-reference)。
+
+---
+
+- [深入解析/训练流水线/负载均衡与 MoE 损失](https://zread.ai/Junjie-Zhu/IDPFold2/13-load-balancing-and-moe-loss)
+
+---
+slug:13-load-balancing-and-moe-loss
+blog_type:normal
+---
+
+
+IDPFold2 在其过渡层中采用了 **Mixture-of-Experts (MoE)** 架构，其中一项关键的辅助损失——负载均衡损失——用于防止路由器坍塌并确保专家的均衡利用。本页将剖析其数学公式、全局累积机制，以及在流匹配优化期间保持 MoE 子系统稳定的训练集成方式。
+
+## 过渡层中的 MoE 架构
+
+当 `use_moe=True` 时，[ProteinTransformerAF3](7-protein-transformer-network) 中的每个 Transformer 块会将其标准的 `TransitionADALN` 替换为 `MoE` 包装器。该 MoE 模块包含 **一个共享专家**（始终处于激活状态）以及 **N 个路由专家**（每个 token 激活排名前 K 的专家）。路由器由一个线性投影接 softmax 组成：
+
+```
+scores = Softmax(Linear(x))    # shape: [tokens, n_experts]
+expert_weights, expert_indices = TopK(scores, k=n_activated_experts)
+```
+
+当 `normalize_expert_weights=True`（默认值）时，排名前 K 的权重会被重新归一化以使总和为 1，输出将共享专家与路由专家的结果进行混合：
+
+$$x_{\text{out}} = \frac{x_{\text{shared}} + K \cdot x_{\text{routed}}}{K + 1}$$
+
+这确保了无论 K 值如何，共享专家和 MoE 集成都能贡献均等。路由部分的计算是通过分箱收集 → 各专家前向传播 → 分箱散射的流水线，将 token 分配给其对应的专家，其中专家容量控制了单个专家最多可接收的 token 数。
+
+来源: [moe_modules_torch.py](src/model/components/moe_modules_torch.py#L55-L93), [protein_transformer.py](src/model/protein_transformer.py#L210-L228)
+
+## 负载均衡损失公式
+
+若无辅助损失，路由器可能会退化至始终选择同一子集的专家——这种失效模式被称为**路由器坍塌**。负载均衡损失会对以下两者的相关性施加惩罚：(1) 路由至每个专家的 token 比例，以及 (2) 分配给每个专家的平均路由器概率。当各专家达到完美均衡时，该乘积最小化。
+
+### 各层贡献
+
+在每个 `Experts` 模块的前向传播过程中，会有两个量被记录到**全局累加器** `_LOAD_BALANCING_LOSS` 中：
+
+| 量 | 形状 | 含义 |
+|----------|------|---------|
+| `tokens_per_expert` | `[n_experts]` | 分配给每个专家的 token 计数（排名前 K 索引的直方图） |
+| `scores` | `[tokens, n_experts]` | 所有 token 的完整 softmax 路由器概率 |
+
+它们通过 `save_load_balancing_loss()` 以元组 `(tokens_per_expert, scores)` 的形式存储，该函数会将其追加到模块级列表中。这种设计意味着该损失可以在**单次前向传播的所有 MoE 层中**进行累积，而无需显式的跨层连接。
+
+### 批量聚合
+
+在训练阶段，`batched_load_balancing_loss()` 将所有各层的贡献聚合为一个标量：
+
+$$\mathcal{L}_{\text{balance}} = \frac{E \cdot w_{\text{moe}}}{L \cdot T \cdot K} \cdot \langle \mathbf{f}, \bar{\mathbf{p}} \rangle$$
+
+其中：
+
+| 符号 | 定义 |
+|--------|-----------|
+| $E$ | 专家数量 (`n_experts`) |
+| $w_{\text{moe}}$ | 损失权重 (`moe_loss_weight`，默认为 0.3) |
+| $L$ | Transformer 层数 (`nlayers`) |
+| $T$ | 批次中的 token 数量 |
+| $K$ | 每个 token 激活的专家数量 (`n_activated_experts`) |
+| $\mathbf{f}$ | 所有层中每个专家的拼接 token 计数 |
+| $\bar{\mathbf{p}}$ | 按层平均的路由器概率，跨专家拼接 |
+
+缩放因子 $\frac{E}{L \cdot T \cdot K}$ 对损失进行归一化，使其对模型深度、专家数量、批次大小和 top-K **保持不变**——这使得 `moe_loss_weight` 在不同配置间可以直接对比。
+
+<CgxTip>全局累加器模式 (`_LOAD_BALANCING_LOSS`) 意味着你**必须**在计算损失后调用 `clear_load_balancing_loss()`，以防止过期条目污染下一次前向传播。训练循环中的 `compute_moe_loss()` 会自动处理此操作。</CgxTip>
+
+来源: [moe_modules_torch.py](src/model/components/moe_modules_torch.py#L9-L52), [integral.py](src/model/integral.py#L231-L234)
+
+## 专家容量与 Token 路由
+
+**专家容量**决定了在分箱收集/散射流水线中为每个专家分配的缓冲区大小：
+
+$$\text{capacity} = \left\lfloor \text{capacity\_factor} \cdot \frac{K \cdot T}{E} \right\rfloor$$
+
+这表示在均匀路由下每个专家的预期 token 数，并按 `capacity_factor`（默认 1.3）进行缩放。存在两种容量模式：
+
+| 模式 | 触发条件 | 行为 |
+|------|------|----------|
+| `force_capacity=True` | 训练 | 容量上限设为 `min(max(tokens_per_expert), computed_capacity)` —— 防止溢出，但如果某个专家超载，可能会丢弃 token |
+| `force_capacity=False` | 验证 / 推理 | 容量设为 `max(tokens_per_expert)` —— 不丢弃 token，动态分配 |
+
+路由流水线本身遵循三个阶段：
+
+```mermaid
+flowchart TD
+    A[路由器: Softmax + TopK] --> B[按专家分配排序 token]
+    B --> C[直方图: tokens_per_expert]
+    C --> D[分箱收集: 分发至专家缓冲区]
+    D --> E[各专家前向传播: TransitionADALN]
+    E --> F[分箱散射: 带权重重组]
+    F --> G[将 tokens_per_expert + scores 保存至累加器]
+    G --> H[归一化: 混合共享 + 路由输出]
+```
+
+在纯 PyTorch 后端（`moe_modules_torch.py`）中，排序使用 `torch.sort`，直方图使用 `torch.histc`；而 MegaBlocks 后端（`moe_modules.py`）则使用自定义 CUDA 核函数以实现更高吞吐量。活跃后端在导入时选定——`protein_transformer.py` 从 `moe_modules_torch` 导入。
+
+来源: [moe_modules_torch.py](src/model/components/moe_modules_torch.py#L116-L222), [moe_operations.py](src/model/components/moe_operations.py#L1-L56)
+
+## 训练集成
+
+MoE 损失在 `training_predict()` 内部计算，并叠加到主流匹配损失上：
+
+```python
+# From integral.py training_predict()
+fm_loss = compute_fm_loss(x_1, x_pred, t, mask)     # 主损失
+moe_loss = compute_moe_loss(weight, n_layers, n_experts, top_k)  # 辅助损失
+total_loss = fm_loss + moe_loss
+```
+
+函数 `compute_moe_loss()` 委托给 `batched_load_balancing_loss()`，随后调用 `clear_load_balancing_loss()` 以重置累加器。模型的 `nlayers`、`n_experts` 和 `top_k` 属性从 `ProteinTransformerAF3`（或其 DDP 包装的 `.module`）中读取，用于参数化缩放因子。
+
+### 默认训练配置
+
+| 参数 | 值 | 用途 |
+|-----------|-------|---------|
+| `use_moe` | `True` | 在过渡层中启用 MoE |
+| `n_experts` | `5` | 每层的总路由专家数 |
+| `n_activated_experts` | `2` | 每个 token 激活的 Top-K 专家数 |
+| `capacity_factor` | `1.3` | 专家缓冲区超额配置 |
+| `normalize_expert_weights` | `True` | 重新归一化 Top-K 权重 + 与共享专家混合 |
+| `moe_loss_weight` | `0.3` | 辅助负载均衡损失的权重 |
+
+<CgxTip>设置 `moe_loss_weight=0` 会完全禁用辅助损失（`batched_load_balancing_loss` 会提前返回 0.0），但 `save_load_balancing_loss` 的调用仍会执行。如果你想彻底消除此开销，请在 MoE 构造函数中设置 `load_balance=False`，这会在源头跳过累加器的写入操作。</CgxTip>
+
+来源: [integral.py](src/model/integral.py#L294-L319), [train.yaml](configs/train.yaml#L29-L101), [protein_transformer.py](src/model/protein_transformer.py#L377-L399)
+
+## 双后端：MegaBlocks vs 纯 PyTorch
+
+IDPFold2 提供了两种外部接口一致但内部路由后端不同的 MoE 实现：
+
+| 方面 | `moe_modules.py` (MegaBlocks) | `moe_modules_torch.py` (PyTorch) |
+|--------|------|------|
+| 排序 | `megablocks.ops.sort` (CUDA 核函数) | `torch.sort` |
+| 直方图 | `megablocks.ops.histogram` (CUDA 核函数) | `torch.histc` |
+| 累加和 | `megablocks.ops.inclusive_cumsum` | 不需要（分箱计算方式不同） |
+| 收集/散射 | `megablocks.ops.binned_gather/scatter` | `moe_operations.py` 中的自定义 `binned_gather/binned_scatter` |
+| 实际使用 | 可用但默认不被导入 | **活跃** —— 被 `protein_transformer.py` 和 `integral.py` 导入 |
+
+MegaBlocks 后端需要编译的 CUDA 扩展（`megablocks/csrc/`），适用于核函数级优化至关重要的大规模分布式训练。PyTorch 后端在 `moe_operations.py` 中采用透明的基于索引的路由策略，通过 `torch.index_select` 和散射索引将 token 映射到专家大小的缓冲区——更易于调试，且对单节点训练已经足够。
+
+来源: [moe_modules.py](src/model/components/moe_modules.py#L1-L8), [moe_operations.py](src/model/components/moe_operations.py#L1-L56)
+
+## 路由器分数诊断
+
+PyTorch 后端包含一个内置的诊断工具 `save_moe_router_scores()`，它将完整的 softmax 路由器概率矩阵以 CSV 格式写入磁盘（`./moe_router_scores.txt`）。该工具在默认的前向传播中被注释掉，但可以重新启用以分析专家特化模式——例如，识别某些专家是否始终接收来自特定结构模体（螺旋、折叠、环）的 token。该文件在每次调用时追加，因此会跨批次和跨周期累积。
+
+来源: [moe_modules_torch.py](src/model/components/moe_modules_torch.py#L28-L31)
+
+## 端到端损失流
+
+在一个训练步中，MoE 负载均衡损失的完整生命周期如下：
+
+```mermaid
+sequenceDiagram
+    participant T as training_predict()
+    participant M as ProteinTransformerAF3
+    participant E as Experts (×L layers)
+    participant A as _LOAD_BALANCING_LOSS
+
+    T->>M: forward(batch)
+    loop 每个 transformer 层
+        M->>E: Experts.forward()
+        E->>E: 路由器分数 + TopK
+        E->>E: 直方图 → tokens_per_expert
+        E->>A: save_load_balancing_loss((tokens_per_expert, scores))
+        E->>E: 分箱收集 → 专家前向传播 → 散射
+    end
+    M-->>T: 预测结果
+    T->>T: compute_moe_loss(weight, nlayers, n_experts, top_k)
+    T->>A: batched_load_balancing_loss() → 标量
+    T->>A: clear_load_balancing_loss()
+    T->>T: total_loss = fm_loss + moe_loss
+```
+
+这种设计清晰地将**累积阶段**（前向传播期间逐层进行）与**聚合阶段**（完整前向传播结束后统一进行）分离开来，从而避免了在模型层次结构中传递损失句柄的需要。
+
+---
+
+## 评估与基准测试
+
+- [深入解析/评估与基准测试/快速集成分析](https://zread.ai/Junjie-Zhu/IDPFold2/14-quick-ensemble-analysis)
+
+---
+slug:14-quick-ensemble-analysis
+blog_type:normal
+---
+
+
+IDPFold2 生成结构系综——即从学习到的流匹配分布中采样得到的构象集合——而非单一的静态预测。**快速系综分析**（Quick Ensemble Analysis）流水线可为这些系综提供即时、轻量级的表征，而无需进行全原子反向映射或依赖外部基准数据集。它会计算每个预测系统中每个构象的两个基本聚合物物理描述符——**回转半径**和**末端距**，汇总结果并将其序列化以供下游检查。本页涵盖快速分析脚本、其输入约定、计算的指标，以及如何在内在无序和多结构域蛋白质系综的语境下解读输出结果。
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L1-L82), [inference.py](src/inference.py#L1-L379)
+
+## 从推理到可分析的系综
+
+在运行快速分析之前，你必须首先通过推理流水线生成系综。推理引擎生成**多模型 PDB 文件**——每个输入序列对应一个文件，其中每个 `MODEL` 块代表一个采样构象。默认配置为每个系统生成 100 个样本（`nsamples: 100`），不过可根据所需的系综覆盖率进行调整。每个 PDB 文件被写入日志目录的 `samples/` 子目录中，所有模型块从 1 开始按顺序索引。这种多模型 PDB 格式正是 `quick_analysis.py` 所期望的确切输入约定。
+
+```mermaid
+flowchart LR
+    A["CSV Input<br/>(test_case, sequence)"] --> B["Inference Engine<br/>(Flow Matching + MoE)"]
+    B --> C["Multi-Model PDB<br/>(N models per file)"]
+    C --> D["quick_analysis.py<br/>(Rg + Re2e)"]
+    D --> E["metrics.pkl<br/>(consolidated results)"]
+    style A fill:#e8f4f8,stroke:#2196F3
+    style C fill:#fff3e0,stroke:#FF9800
+    style E fill:#e8f5e9,stroke:#4CAF50
+```
+
+对于一个名为 `THB_C2` 且设置了 `nsamples=100` 的蛋白质，推理输出会生成一个包含 100 个 `MODEL` 块的 `THB_C2.pdb` 文件，每个块保存一个采样构象的 Cα 轨迹。快速分析脚本会扫描预测目录中的所有此类 `.pdb` 文件，并并行处理它们。
+
+来源: [inference.py](src/inference.py#L331-L351), [inference.yaml](configs/inference.yaml#L8-L10), [pdb_utils.py](src/utils/pdb_utils.py#L21-L58)
+
+## 运行快速分析
+
+该脚本接受一个位置参数——即包含生成的多模型 PDB 文件的目录路径：
+
+```bash
+python scripts/quick_analysis.py /PATH/TO/GENERATED/ENSEMBLE
+```
+
+对于典型的推理运行，系综目录对应于日志目录内的 `samples/` 子目录。例如，如果推理运行时设置了 `logging_dir=./logs`，则系综文件位于 `./logs/MONOMER_INF_<timestamp>/samples/` 中。
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L17-L19), [README.md](README.md#L332-L336)
+
+## 计算的指标
+
+快速分析流水线计算两个全局结构描述符，它们对于无序和多结构域蛋白质尤为具有信息量：
+
+| 指标 | 符号 | 物理含义 | 计算方式 |
+|--------|--------|-----------------|-------------|
+| **回转半径** | Rg | 原子到质心的均方根距离；衡量构象的整体紧凑度 | `biotite.structure.gyration_radius()` — 对每个模型中的所有原子进行计算 |
+| **末端距** | Re2e | 首尾 Cα 原子间的欧几里得距离；衡量链的延伸度 | 仅针对 Cα 原子计算 ∥coord\[0\] − coord\[N−1\]∥₂ |
+
+**Rg** 捕获构象的整体空间范围。对于完全折叠的球状蛋白质，Rg 的标度约为 ~N^(1/3)；对于理想的无规线团（无序态），其标度约为 ~N^(1/2)。系综中 Rg 的分布直接揭示了蛋白质采样的是紧凑、延伸还是混合的构象态。
+
+**Re2e** 专门度量 N 端和 C 端之间的分离距离。对于无序蛋白质，具有在大值处显著概率质量的宽 Re2e 分布表明呈延伸链行为，而在零附近出现窄峰则提示呈环状或发夹状构象。
+
+<CgxTip>这两个指标均在每个多模型 PDB 文件中**逐模型**计算。对于 Rg，biotite 的 `gyration_radius` 作用于每个模型的完整原子数组。对于 Re2e，该函数首先过滤出 Cα 原子（`atom_name == 'CA'`），然后再计算 N 端到 C 端的距离，这使得它在处理多链结构时具有鲁棒性，避免了非 CA 原子对末端距测量的扭曲。</CgxTip>
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L44-L68)
+
+## 执行模型与并行机制
+
+该脚本利用 Python 的 `multiprocessing.Pool` 并发处理所有 PDB 文件。此并行化策略简单直接，但对批量推理输出非常有效：
+
+```mermaid
+flowchart TB
+    subgraph Main
+        SCAN["Scan pred_dir for *.pdb files"]
+        SCAN --> PAR{"cpu_count() > 1?"}
+        PAR -->|Yes| POOL["mp.Pool(cpu_count)<br/>imap_unordered"]
+        PAR -->|No| SEQ["Sequential loop"]
+        POOL --> CONS["consolidate_results()"]
+        SEQ --> CONS
+        CONS --> PKL["pickle.dump → metrics.pkl"]
+    end
+    subgraph Worker["process_fn(system, pred_dir)"]
+        LOAD["biotite: load_structure()"] --> RGG["rg() → float or array"]
+        LOAD --> REE["re2e() → ndarray"]
+        RGG --> DICT["Return dict"]
+        REE --> DICT
+    end
+    POOL -.-> Worker
+    SEQ -.-> Worker
+```
+
+关键实现细节：脚本使用了 `imap_unordered` 而非 `imap` 或 `map`，这意味着只要任何工作进程完成，结果就会被产出——由于所有系统相互独立且处理时间随系综大小和链长而变化，此方式在这里是最优的。`tqdm` 进度条包裹了该迭代器以提供实时反馈。在单核机器上，脚本会退化为顺序迭代。
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L17-L33)
+
+## 输出格式
+
+处理完所有系统后，脚本将各个结果字典合并为一个列表字典，并将其作为 Python pickle 文件（`metrics.pkl`）保存在预测目录中：
+
+```python
+# Structure of metrics.pkl
+{
+    'name':          ['THB_C2', 'Ubq2', ...],           # system identifiers
+    'rg_predict':    [array([...]), array([...]), ...],  # Rg per model per system
+    're2e_predict':  [array([...]), array([...]), ...],  # Re2e per model per system
+}
+```
+
+`consolidate_results` 函数将系统维度的字典列表 `[{name: ..., rg_predict: ..., re2e_predict: ...}, ...]` 转置为指标维度的列表字典 `{name: [...], rg_predict: [...], re2e_predict: [...]}`。`rg_predict` 和 `re2e_predict` 中的每个条目都是一个 NumPy 数组，包含对应 PDB 文件中每个模型的值。
+
+要以编程方式加载和检查结果：
+
+```python
+import pickle
+import numpy as np
+
+with open('/PATH/TO/ENSEMBLE/metrics.pkl', 'rb') as f:
+    metrics = pickle.load(f)
+
+for i, name in enumerate(metrics['name']):
+    rg_vals = metrics['rg_predict'][i]
+    re2e_vals = metrics['re2e_predict'][i]
+    print(f"{name}: Rg = {np.mean(rg_vals):.2f} ± {np.std(rg_vals):.2f} Å, "
+          f"Re2e = {np.mean(re2e_vals):.2f} ± {np.std(re2e_vals):.2f} Å")
+```
+
+<CgxTip>pickle 格式直接保留了 NumPy 数组，避免了 CSV 序列化带来的任何精度损失。然而，pickle 文件对 Python 版本敏感。如果需要跨语言或长期存档的兼容性，可考虑在加载后重新序列化为 NumPy 的 `.npz` 格式。</CgxTip>
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L70-L33)
+
+## 解读系综分布
+
+Rg 和 Re2e 真正的分析能力并非仅源于其均值，而是源于它们在系综中的**联合分布**。请考虑以下解读模式：
+
+| 分布模式 | Rg 表现 | Re2e 表现 | 结构解读 |
+|---------------------|-------------|---------------|------------------------|
+| **球状/折叠态** | 窄分布，低均值 | 窄分布，中等均值 | 单一主导构象 |
+| **无序-延伸态** | 宽分布，高均值 | 宽分布，高均值 | 延伸链系综 |
+| **熔球态** | 双峰或宽分布，中等均值 | 中等展宽 | 紧凑但无紧密堆叠 |
+| **多结构域柔变** | 宽分布，中高均值 | 双峰（耦合/解耦） | 结构域取向变化 |
+| **成环/塌缩态** | 中等，窄分布 | 窄分布，低均值 | 链端在空间上邻近 |
+
+对于**多结构域蛋白质**——这是 IDPFold2 的一项关键能力——Rg 对结构域间的分离度敏感，而 Re2e 则捕获特定的 N 端到 C 端延伸度。例如，宽的 Rg 分布伴随双峰的 Re2e 分布，可能表明蛋白质在结构域耦合（紧凑）与解耦（延伸）状态之间交替——这是结构域柔性的标志。
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L44-L68)
+
+## 与深层基准流水线的关系
+
+快速分析可对系综质量提供即时反馈，但其设计有意保持极简。若要针对参考数据进行严格的定量评估，IDPFold2 提供了两套基准测试套件：
+
+- **[BioEmu 和 PeptoneBench 集成](15-bioemu-and-peptonebench-integration)**：通过二维投影和密度比较计算自由能面误差（MAE/RMSE，单位 kcal/mol）、针对参考结构的 RMSD 以及天然接触比例。BioEmu 流水线将系综投影到低维接触图特征上，并将预测的自由能面与 MD 模拟参考进行比较。PeptoneBench 流水线则针对实验可观测量（化学位移、PREs、RDCs、SAXS）执行积分重加权。
+
+快速分析的指标可作为**初步健全性检查**：如果 Rg 或 Re2e 分布退化（零方差）或物理化学上不合理（例如，对于 100 个残基的蛋白质 Rg < 5 Å），则在投入更耗时的基准评估之前，可能需要对该系综进行调查。
+
+| 分析级别 | 工具 | 指标 | 是否需要外部数据 | 开销 |
+|---------------|------|---------|----------------------|------|
+| **快速** | `quick_analysis.py` | Rg, Re2e | 否 | 秒级 |
+| **BioEmu** | `analyze_md_emulation.py` | 自由能 MAE/RMSE, 覆盖度 | 参考投影 + 参数 | 分钟级 |
+| **PeptoneBench** | `analyze_*_integrative.py` | 重加权 RMSE, ESS, χ² | 实验数据 (CS, PRE, RDC, SAXS) | 分钟至小时级 |
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L1-L82), [analyze_md_emulation.py](benchmarks/bioemu-benchmark/analyze_md_emulation.py#L95-L144), [analyze_cs_integrative.py](benchmarks/peptonebench/analyze_cs_integrative.py#L140-L200)
+
+## 扩展快速分析
+
+`quick_analysis.py` 的模块化设计使得添加自定义指标非常简单。每个指标都是一个独立的函数，接受一个 `biotite.structure.AtomArray` 并返回一个标量或数组。要添加新指标——例如**非球面度**或**天然接触比例**——请遵循此模式：
+
+```python
+# Add a new metric function
+def asphericity(structures):
+    """Compute asphericity from the gyration tensor eigenvalues."""
+    models = [structures] if structures.coord.ndim == 2 else structures
+    asph = []
+    for model in models:
+        coords = model.coord - model.coord.mean(axis=0)
+        gyration_tensor = np.einsum('ij,ik->jk', coords, coords) / len(coords)
+        eigvals = np.sort(np.linalg.eigvalsh(gyration_tensor))
+        l1, l2, l3 = eigvals
+        asph.append(1.5 * (l1**2 + l2**2 + l3**2 - l1*l2 - l1*l3 - l2*l3) / (l1 + l2 + l3)**2)
+    return np.array(asph)
+
+# Register in process_fn
+def process_fn(system, pred_dir):
+    predict = strucio.load_structure(os.path.join(pred_dir, f'{system}.pdb'))
+    return {
+        'name': system,
+        'rg_predict': rg(predict),
+        're2e_predict': re2e(predict),
+        'asphericity_predict': asphericity(predict),  # new metric
+    }
+```
+
+`consolidate_results` 函数会自动处理添加到结果字典中的任何新键，因此无需进一步修改——新指标将无缝传播至 `metrics.pkl`。
+
+来源: [quick_analysis.py](scripts/quick_analysis.py#L36-L74)
+
+## 后续步骤
+
+运行快速分析后，可根据你的评估需求考虑以下后续操作：
+
+- 若需全原子结构（许多下游工具所需），请使用在 [单体与多聚体的推理](3-inference-for-monomers-and-multimers) 中文档化的反向映射流水线。
+- 若要与 MD 参考数据或实验可观测量进行定量比较，请前往 [BioEmu 和 PeptoneBench 集成](15-bioemu-and-peptonebench-integration)。
+- 若要了解系综的生成方式以及采样参数如何影响多样性，请查阅 [采样与引导策略](10-sampling-and-guidance-strategies)。
+
+---
+
+- [深入解析/评估与基准测试/BioEmu 与 PeptoneBench 集成](https://zread.ai/Junjie-Zhu/IDPFold2/15-bioemu-and-peptonebench-integration)
+
+---
+slug:15-bioemu-and-peptonebench-integration
+blog_type:normal
+---
+
+
+IDPFold2 提供了两个互补的基准测试套件，用于根据已有的实验和模拟基线严格评估生成的蛋白质系综。**BioEmu** 通过低维投影和分布比较，评估采样得到的构象分布能否忠实地再现由分子动力学（MD）推导出的自由能面。**PeptoneBench** 利用最大熵重加权和正向模型一致性，针对真实的实验观测值（SAXS、化学位移、RDC 和 PRE）验证系综质量。两者共同构成了一个双轴评估体系：BioEmu 探究对模拟参考数据的*热力学保真度*，而 PeptoneBench 则探究系综平均观测值的*实验真实性*。
+
+## BioEmu 基准测试：MD 模拟与多构象比较
+
+BioEmu 基准测试套件通过两条独立的评估路径运作：**MD 模拟**（自由能面准确度）和**多构象比较**（针对多个参考状态的结构 RMSD）。这两条路径被编排为并行执行，并生成跨测试用例的聚合指标。
+
+### MD 模拟流水线
+
+MD 模拟基准测试量化了生成的系综再现参考分子动力学模拟的**自由能面**的程度。评估遵循“投影-比较”范式：将结构嵌入到低维接触图空间中，对其密度进行离散化，然后逐点比较自由能面。
+
+```mermaid
+flowchart TD
+    A["加载样本<br/>(mdtraj 轨迹)"] --> B["计算 Cα 接触图<br/>projection.py"]
+    B --> C["投影至 2D<br/>通过学习参数<br/>(√Σ⁻¹, μ)"]
+    C --> D["离散化密度<br/>2D 直方图分箱"]
+    D --> E["计算自由能<br/>F = −k~B~T ln ρ"]
+    E --> F["比较曲面<br/>MAE, RMSE, 覆盖度"]
+    F --> G["聚合结果<br/>MDEmulationResults"]
+    
+    H["参考投影<br/>(md_emulation_benchmark_0.1)"] --> D
+    I["投影参数<br/>(每个测试用例的 √Σ⁻¹, μ)"] --> C
+```
+
+入口点 `evaluate_md_emulation()` 接收一个以测试用例 ID 为键的 mdtraj 轨迹字典。它从绑定的 `md_emulation_benchmark_0.1` 资产目录中加载预计算的参考投影和投影参数，将样本投影到相同的 2D 空间中，并委派给 `compute_state_metrics()` 进行分布比较。结果被打包到 `MDEmulationResults` 数据类中，该数据类支持 `save_results()`（写入 CSV 指标和 NPZ 投影）和 `get_aggregate_metrics()`（返回平均 MAE、RMSE 和覆盖度）。
+
+<CgxTip>`get_indexed_samples()` 函数使用具有 `os.cpu_count()` 个 worker 的 `multiprocessing.Pool` 来并行加载轨迹。在单 CPU 环境中，它会回退到顺序加载——这对于 I/O 占主导地位的大型基准测试集非常重要。</CgxTip>
+
+来源: [analyze_md_emulation.py](/benchmarks/bioemu-benchmark/analyze_md_emulation.py#L95-L183), [utils.py](/benchmarks/bioemu-benchmark/utils.py#L1-L54)
+
+### 投影机制：从接触图到潜空间
+
+`projection.py` 中的投影流水线将原始 3D 结构转换为 2D 潜空间，在潜空间中可以有意义地比较自由能面。这是一个三阶段的过程：
+
+| 阶段 | 操作 | 详情 |
+|-------|-----------|---------|
+| **特征提取** | Cα 接触图 | 从末端修剪 `n_trim` 个残基，计算 Cα 间距离，排除序列中 `exclude_neighbors` 范围内的相邻残基 |
+| **接触图计算** | 指数核 | `feature = min(exp(−d_ij / d_eff), 1.0)`，其中 `d_eff = 0.8` nm；上三角提取移除冗余 |
+| **线性投影** | 白化变换 | `projection = (features − μ) @ √Σ⁻¹`，使用来自参考 MD 的预拟合均值和平方根逆协方差 |
+
+`ProjectionParameters` 数据类存储每个测试用例的 `sqrt_inv_cov` 矩阵和 `mean` 向量。`FeatureSettings` 类控制修剪（`n_trim=2`）、邻居排除（`exclude_neighbors=2`）和有效距离参数（`effective_distance=0.8`）。这种白化投影确保了 2D 自由能面能够捕捉在参考模拟中识别出的构象变异性的主要模式。
+
+来源: [projection.py](/benchmarks/bioemu-benchmark/projection.py#L1-L152)
+
+### 自由能面指标
+
+`state_metric.py` 模块实现了核心的分布比较引擎。给定 2D 空间中的投影样本和参考，它计算三个指标：
+
+| 指标 | 公式 | 解释 |
+|--------|---------|----------------|
+| **MAE** | `min_δ mean(|F_pred − F_ref + δ|)` | 自由能的平均绝对误差，通过二分法优化积分常数 δ |
+| **RMSE** | `min_δ sqrt(mean((F_pred − F_ref + δ)²))` | 自由能的均方根误差，最优偏移 δ = mean(F_ref) − mean(F_pred) |
+| **覆盖度** | `|common_mask| / |low_energy_mask|` | 具有对应样本密度的参考低能状态比例 |
+
+`DistributionMetrics2D` 类实现了比较协议：(1) 使用高斯噪声（`n_resample=1,000,000` 个点，`σ=0.25`）对两种分布进行重采样，以保证分箱稳定性；(2) 在 50×50 网格上离散化；(3) 通过能量截断值（`4.0` kcal/mol）识别低能区域；(4) 将自由能计算为 `F = −k_BT ln(ρ)`，其中 `k_B = 0.001987` kcal/(mol·K)；(5) 使用优化后的全局偏移评估 MAE/RMSE。`score_nonzero()` 方法还会在参考和样本密度均非零的状态上计算覆盖度。
+
+<CgxTip>4.0 kcal/mol 的 `energy_cutoff` 定义了热力学相关区域——参考中高于此阈值的状态将被排除在指标计算之外。收紧此截断值会使指标对主要自由能盆地更加敏感。</CgxTip>
+
+来源: [state_metric.py](/benchmarks/bioemu-benchmark/state_metric.py#L1-L375)
+
+### 多构象比较流水线
+
+`compare_to_multi_conf.py` 脚本在五个子基准测试中，针对**多个不同的参考构象**评估生成的系综：
+
+| 子基准测试 | 关注点 | 参考来源 |
+|---------------|-------|-----------------|
+| `crypticpocket` | 揭示隐藏口袋的构象变化 | 替代的结合/脱辅基状态 |
+| `domainmotion` | 结构域间重排 | 结构域交换或旋转的构象异构体 |
+| `localunfolding` | 局部二级结构转变 | 部分展开状态 |
+| `ood60` | 分布外（60% 序列同一性） | 远缘同源物 |
+| `oodval` | 分布外验证 | 留出的测试结构 |
+
+对于每个测试用例，脚本执行以下操作：(1) 使用 Biotite 的 `align_optimal` 和标准蛋白质替换矩阵，在预测和参考之间进行序列比对；(2) 从指定比对和指标残基范围的 `local_residinfo` JSON 文件中选择锚点区域；(3) 在锚点残基上进行结构叠合；(4) 计算**局部 RMSD**（在锚点/指标区域上）和**全局 RMSD**（在叠合后的所有比对残基上）；(5) 使用 8.0 Å 的 Cα–Cα 距离阈值和邻居排除（±3 个残基）计算**接触分数**。详尽的 `RESI_THREE_TO_1` 字典（127 个条目）处理非标准残基名称，包括修饰的半胱氨酸、质子化状态和 D-型氨基酸。
+
+来源: [compare_to_multi_conf.py](/benchmarks/bioemu-benchmark/compare_to_multi_conf.py#L128-L352)
+
+## PeptoneBench：实验观测值验证
+
+PeptoneBench 根据 PeptoneDB 中的**真实实验测量值**评估生成的系综，涵盖四个正交的生物物理可观测量。该工作流包含两个阶段：正向模型计算（通过上游 PeptoneBench 环境计算 SAXS 和化学位移）和整合分析（通过本地 `peptone` 环境进行重加权和指标计算）。
+
+### 双环境架构
+
+```mermaid
+flowchart LR
+    subgraph Upstream["peptonebench 环境"]
+        A["UCBShift<br/>化学位移"] 
+        B["Pepsi-SAXS<br/>散射曲线"]
+    end
+    
+    subgraph Local["peptone 环境"]
+        C["addhydrogens.py<br/>质子化"] 
+        D["calc_PRE.py<br/>PRE 正向模型"]
+        E["calc_RDC.py<br/>通过 PALES 计算 RDC"]
+        F["analyze_saxs_integrative.py<br/>最大熵重加权"]
+        G["analyze_cs_integrative.py<br/>CS 重加权"]
+        H["analyze_pre_integrative.py<br/>τ_c 扫描 + PRE RMSE"]
+        I["analyze_rdc_integrative.py<br/>Q 因子"]
+    end
+    
+    A --> G
+    B --> F
+    C --> D
+    C --> E
+    F --> H
+    G --> I
+    D --> H
+    E --> I
+```
+
+上游环境（来自 PeptoneBench 仓库的 `peptonebench` conda 环境）运行 UCBShift 和 Pepsi-SAXS 正向模型。本地环境（在 `env.yaml` 中定义的 `peptone` conda 环境）处理添加氢原子（通过 OpenMM/PDBFixer）、PRE 计算（通过 DEERPREdict）、RDC 计算（通过 PALES）以及所有整合重加权分析。外部工具依赖包括 SPARTA+、Pepsi-SAXS、Reduce、CSpred（带有 Dryad 托管的权重）和 PALES。
+
+来源: [README4peptone.md](/benchmarks/peptonebench/README4peptone.md#L1-L225), [env.yaml](/benchmarks/peptonebench/env.yaml#L1-L20)
+
+### 系综质子化：addhydrogens.py
+
+在计算 PRE 或 RDC 之前，生成系综中的每一帧都必须在实验 pH 下进行**质子化**。`addhydrogens.py` 脚本从 PeptoneDB-Integrative 的 `info.csv` 文件中读取 pH 值（按蛋白质在各实验中取平均值），然后通过 OpenMM 的 `PDBFixer` 处理每一帧：寻找缺失的残基、寻找缺失的原子、添加缺失的原子，并在目标 pH 下添加缺失的氢原子。帧级处理使用 `multiprocessing.Pool` 在 `cpu_count() // 4` 个 worker 间并行化，每个 worker 将其质子化的 PDB 直接保存到磁盘以减轻内存压力。
+
+来源: [addhydrogens.py](/benchmarks/peptonebench/addhydrogens.py#L26-L99)
+
+### PRE 计算：calc_PRE.py
+
+顺磁弛豫增强（PRE）测量自旋标记（通常为 MTSSL）与附近酰胺质子之间的距离。`calc_PRE.py` 脚本封装了 **DEERPREdict** 以计算每帧的 PRE 量：
+
+- **r3/r6 矩**：由异构体库卷积得出的距离矩 `⟨r⁻³⟩` 和 `⟨r⁻⁶⟩`
+- **角项**：来自自旋标记旋转自由度的序参数贡献
+- **残基映射**：NaN 过滤后的逐残基分配
+
+每个帧×位点的组合都在独立处理（唯一的 `tmp_site_{site}_frame_{frame}` 目录）中，以避免与 DEERPREdict 的文件写入行为发生竞争条件。结果通过跨有效帧拼接矩数组进行聚合，并保存为 `PREdata-{site}.npy`。MTSSL 异构体库默认为 `'MTSSL MMMx'`。
+
+来源: [calc_PRE.py](/benchmarks/peptonebench/calc_PRE.py#L24-L155)
+
+### RDC 计算：calc_RDC.py
+
+残余偶极耦合（RDC）报告了键向量相对于部分取向张量的取向。`calc_RDC.py` 脚本使用**滑动窗口**方法逐残基调用 **PALES**：
+
+对于每个残基 `i`，PALES 在窗口 `[i − w, i + w]` 内被调用，其中 `w = min(7, i − 1, N − i − 1)`，提供局部取向张量估计。脚本生成包含序列和 H-N 耦合的 PALES 输入文件，通过 `os.system` 执行 PALES，并从输出中解析该残基的预测 RDC。跨帧的结果被转置为 `(n_residues, n_frames)` 形状，并以残基序列号作为标签保存为 CSV。
+
+来源: [calc_RDC.py](/benchmarks/peptonebench/calc_RDC.py#L21-L153)
+
+### 最大熵重加权框架
+
+整合分析脚本共享一个统一的**最大熵重加权**框架。给定一个具有均匀先验权重的系综，目标是找到非负权重，使其在接近先验的同时最小化与实验观测值的偏差。这被表述为一个**拉格朗日对偶优化**：
+
+| 量 | 表达式 |
+|----------|-----------|
+| **目标** | `γ(λ) = ln Z(λ) + ½ α ‖λ‖²`，其中 `Z = Σᵢ exp(−λ · δᵢ)` |
+| **梯度** | `∇γ = −⟨δ⟩_w + αλ`，其中 `⟨δ⟩_w` 为重加权后的可观测量平均值 |
+| **权重** | `wᵢ = softmax(−λ · δᵢ)` |
+| **RMSE** | `‖⟨δ⟩_w‖₂ / √n_obs` |
+| **ESS** | `(Σwᵢ)² / Σ(wᵢ²)`（Kish 有效样本大小） |
+
+**α 正则化参数**在对数网格上扫描（通常为从 `10⁻²` 到 `10⁷–10⁸` 的 64 个值）。**热启动**策略将 α 从最大（简单，接近均匀解）到最小（强重加权）排序，将每个解用作下一个的初始猜测。L-BFGS-B 优化器利用解析梯度提高效率。**ESS 阈值化**选择保持至少 `max(100, 0.1 × n_samples)` 个有效样本的最激进重加权。
+
+来源: [analyze_saxs_integrative.py](/benchmarks/peptonebench/analyze_saxs_integrative.py#L88-L285), [analyze_cs_integrative.py](/benchmarks/peptonebench/analyze_cs_integrative.py#L26-L64)
+
+### SAXS 整合分析
+
+SAXS 分析（`analyze_saxs_integrative.py`）为每个蛋白质实现了完整流水线：(1) 从 Pepsi-SAXS CSV 输出中加载生成的 SAXS 曲线；(2) 从 `SAXS_bift.dat` 中加载实验 SAXS；(3) 使用 Svergun 强度缩放计算标准化残差 `δ = (c·I_gen − I_exp) / σ_exp`；(4) 使用热启动的 L-BFGS-B 运行 α 扫描重加权；(5) 通过 ESS 阈值选择最优 α；(6) 将先验 RMSE、后验 RMSE、最优 α、ESS 和完整权重数组保存为 `SAXSrew_{protein}.npy`。此处生成的权重数组将被下游 PRE 分析所使用。
+
+来源: [analyze_saxs_integrative.py](/benchmarks/peptonebench/analyze_saxs_integrative.py#L181-L247)
+
+### 化学位移整合分析
+
+CS 分析（`analyze_cs_integrative.py`）在 SAXS 流水线基础上增加了两项关键改进：
+
+**不确定性标准化**将 POTENCI 内在不确定性与预测器特定误差相结合，由 **g 得分**（序参数）调制：`σ = σ_POTENCI + (σ_predictor − σ_POTENCI) × (1 − g)`。具有高 g 得分（有序）的残基使用内在不确定性下限；无序残基的不确定性向预测器误差膨胀。UCBShift、SPARTA+ 和 ShiftX2 的不确定性映射按原子类型进行了硬编码。
+
+**BMRB 过滤**移除超出该残基/原子类型的 BMRB 统计分布 `3σ` 范围的实验化学位移，防止异常测量值破坏重加权。
+
+来源: [analyze_cs_integrative.py](/benchmarks/peptonebench/analyze_cs_integrative.py#L15-L209)
+
+### PRE 整合分析
+
+PRE 分析（`analyze_pre_integrative.py`）在 **SAXS 重加权系综**上操作，继承来自 `SAXSrew_{protein}.npy` 的权重。对于每个蛋白质：
+
+1. **γ² 计算**：使用具有两个相关时间（全局 `τ_c` 和局部 `τ_t = 0.5 ns`）的谱密度模型，从 DEERPREdict 输出计算 PRE 速率
+2. **强度转换**：使用实验类型特定公式（HSQC vs HMQC vs 原始 γ²）将 γ² 映射到可观测量 `I_para/I_dia` 比值
+3. **τ_c 扫描**：在 1–20 ns 范围内的 20 个值上优化全局相关时间，选择使相对于实验强度的 RMSE 最小的 τ_c
+4. **先验 vs 后验**：比较均匀权重（先验）和 SAXS 重加权（后验）的 RMSE
+
+物理常数（`K_CONST = 1.23×10¹⁶ s⁻²`、来自 `PRE_MHz` 的拉莫频率、延迟和 R₂ 速率）与标准 PRE 实验参数相匹配。
+
+来源: [analyze_pre_integrative.py](/benchmarks/peptonebench/analyze_pre_integrative.py#L12-L200)
+
+### RDC 整合分析
+
+RDC 分析（`analyze_rdc_integrative.py`）针对实验 H-N 耦合评估 **Cornilescu Q 因子**。它从 `CSrew_{protein}.npy`（而非 SAXS 重加权）加载 CS 重加权权重，将计算的 RDC 与实验残基索引对齐，并计算：
+
+- **缩放因子** `s = Σ(cᵢ · eᵢ) / Σ(cᵢ²)`，限制在符号匹配的残基上
+- **Q 因子** `Q = RMS(s·c − e) / RMS(e)`，带有 `s ≥ 0` 约束
+- **先验 Q**：使用均匀权重（对非物理帧进行 NaN 掩码）
+- **后验 Q**：使用 CS 重加权权重
+
+¹⁵N 旋磁比的符号在解析期间通过将计算的 RDC 乘以 −1 来处理。
+
+来源: [analyze_rdc_integrative.py](/benchmarks/peptonebench/analyze_rdc_integrative.py#L14-L130)
+
+## 完整执行工作流
+
+下表总结了完整的 PeptoneBench 执行序列、环境要求和输出产物：
+
+| 步骤 | 脚本 | 环境 | 输入 | 输出 |
+|------|--------|-------------|-------|--------|
+| 1 | `run_forward_model.py -p UCBshift` | `peptonebench` | 系综 + PeptoneDB-CS | `UCBshift-{protein}.csv` |
+| 2 | `run_forward_model.py -p Pepsi` | `peptonebench` | 系综 + PeptoneDB-SAXS | `Pepsi-{protein}.csv` |
+| 3 | `addhydrogens.py` | `peptone` | 系综 + PeptoneDB-Integrative | 每帧质子化 PDB |
+| 4 | `calc_PRE.py` | `peptone` | 质子化 PDB | 每个蛋白质的 `PREdata-{site}.npy` |
+| 5 | `calc_RDC.py` | `peptone` | 质子化 PDB + PALES | 每个蛋白质的 `RDC.csv` |
+| 6 | `analyze_saxs_integrative.py` | `peptone` | Pepsi 输出 + 实验 SAXS | `SAXSrew_{protein}.npy` |
+| 7 | `analyze_cs_integrative.py` | `peptone` | UCBShift 输出 + 实验 CS + BMRB | `CSrew_{protein}.npy` |
+| 8 | `analyze_pre_integrative.py` | `peptone` | SAXS 权重 + PRE 数据 + 实验 PRE | `PRE_analysis_{protein}.json` |
+| 9 | `analyze_rdc_integrative.py` | `peptone` | CS 权重 + RDC 数据 + 实验 RDC | `RDC_analysis_{protein}.npy` |
+
+注意**权重传播链**：SAXS 重加权（步骤 6）产生供 PRE 分析（步骤 8）使用的权重；CS 重加权（步骤 7）产生供 RDC 分析（步骤 9）使用的权重。必须遵循此执行顺序。
+
+## 两基准测试的指标总结
+
+| 基准测试 | 指标 | 单位 | 方向 | 衡量内容 |
+|-----------|--------|------|-----------|-----------------|
+| BioEmu (MD 模拟) | MAE | kcal/mol | ↓ | 自由能面逐点准确度 |
+| BioEmu (MD 模拟) | RMSE | kcal/mol | ↓ | 自由能面平方偏差 |
+| BioEmu (MD 模拟) | 覆盖度 | 分数 | ↑ | 被采样的参考状态比例 |
+| BioEmu (多构象) | 局部 RMSD | Å | ↓ | 功能区域的结构准确度 |
+| BioEmu (多构象) | 全局 RMSD | Å | ↓ | 整体结构准确度 |
+| BioEmu (多构象) | 接触分数 | 分数 | ↑ | 天然接触保留度 |
+| PeptoneBench (SAXS) | 先验/后验 RMSE | 无量纲 | ↓ | 散射曲线一致性 |
+| PeptoneBench (CS) | 先验/后验 RMSE | 无量纲 | ↓ | 化学位移一致性 |
+| PeptoneBench (PRE) | 先验/后验 RMSE | 无量纲 | ↓ | 顺磁强度一致性 |
+| PeptoneBench (RDC) | 先验/后验 Q 因子 | 无量纲 | ↓ | 偶极耦合取向质量 |
+
+有关运行输入这些基准测试的快速系综分析的更多详情，请参阅[快速系综分析](14-quick-ensemble-analysis)。有关控制系综生成的推理配置，请查阅[配置参考](16-configuration-reference)。
+
+---
