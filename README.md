@@ -660,6 +660,8 @@ Type tags used in this repo:
 Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to flag "known but not yet filled" entries and "empty niches to be added".
 
 - [ ] Add TIMELINE graph for each category
+- [ ] Update the wiki in docs/, and manually refresh it in sync with the original repository commit date
+- [ ] extract the model architecture for those tools tagged `Approach: DL`, e.g., attention, GNN, flow-matching 
 
 ## Reference
 
