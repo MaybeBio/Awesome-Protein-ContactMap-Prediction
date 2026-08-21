@@ -608,7 +608,30 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
+PLMGraph-Inter
 
+https://github.com/ChengfeiYan/PLMGraph-Inter
+---
+
+DeepHomo，DeepHomo2
+
+---
+
+ESMDynamic
+
+---
+https://www.nature.com/articles/s41467-026-69172-y
+
+---
+https://deepwiki.com/j3xugit/RaptorX-3DModeling/1-overview
+
+--- 
+
+CDPred
+
+https://github.com/BioinfoMachineLearning/CDPred
+
+--- 
 
 <!-- More sequence-based placeholders can be added here -->
 <!-- PLACEHOLDER: multi-chain trRosetta variant -->
