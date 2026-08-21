@@ -593,16 +593,15 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Approach:** DL
 </details>
 
-#### <!-- PLACEHOLDER --> DRN-1D2D_Inter
+--- 
 
 <details>
-<summary>Sequence-based · contact predictor</summary>
+<summary>DRN-1D2D_Inter</summary>
 
-- **Paper:** [TBD]
-- **Docs:** [Read more →](docs/drn-1d2d-inter/) *to be written*
-- **Input:** [TBD]
-- **Output:** [TBD]
-- **Code:** N/A
+- **Paper:** [Improved inter-protein contact prediction using dimensional hybrid residual networks and protein language models](https://academic.oup.com/bib/article/24/2/bbad039/7033302) (Briefings in Bioinformatics, 2023)
+- **Docs:** [Read more →](docs/DRN-1D2D_Inter/) *to be written*
+- **Code:** https://github.com/ChengfeiYan/DRN-1D2D_Inter
+- **Approach:** DL
 </details>
 
 <!-- More sequence-based placeholders can be added here -->
