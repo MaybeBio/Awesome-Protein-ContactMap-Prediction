@@ -694,6 +694,3 @@ Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to 
 - [ ] extract DATASET part in these models README
 
 ## Reference
-
-- https://github.com/AspirinCode/awesome-BioMolGenFold#folding-tool-collection
-- 
