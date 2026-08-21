@@ -543,6 +543,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/FINCHES/) *to be written*
 - **Code:** https://github.com/idptools/finches | https://github.com/idptools/finches-colab
 - **Web server:** https://www.finches-online.com/
+- **Approach:** Force Field
 - **For IDR**
 </details>
 
@@ -555,22 +556,18 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Disobind: A sequence-based, partner-dependent contact map and interface residue predictor for intrinsically disordered regions](https://www.cell.com/cell-systems/abstract/S2405-4712(25)00319-9) (Cell Systems, 2026)
 - **Docs:** [Read more →](docs/Disobind/) *to be written*
 - **Code:** https://github.com/isblab/disobind
+- **Approach:** DL
 - **For IDR**
 </details>
 
 
 --- 
 
-
-#### DeepInteract
-
 <details>
-<summary>Sequence-based · contact predictor</summary>
+<summary>DeepInteract</summary>
 
-- **Paper:** [Geometric Transformers for Protein Interface Contact Prediction](https://arxiv.org/pdf/2110.02423.pdf) (ICLR, 2022)
-- **Docs:** [Read more →](docs/deepinteract/)
-- **Input:** two-chain sequence / structure features
-- **Output:** L1×L2 inter-chain contact-probability matrix
+- **Paper:** [Geometric Transformers for Protein Interface Contact Prediction](https://arxiv.org/abs/2110.02423) (arXiv, 2022)
+- **Docs:** [Read more →](docs/DeepInteract/)
 - **Code:** https://github.com/BioinfoMachineLearning/DeepInteract
 </details>
 
