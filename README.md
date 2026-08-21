@@ -12,7 +12,7 @@
 > The figure above was adapted from paper [StructureDistiller: Structural relevance scoring identifies the most informative entries of a contact map](https://www.nature.com/articles/s41598-019-55047-4)
 
 
-A curated collection of computational tools for `intermolecular interaction prediction`. For any input number of polypeptide chains(≥2), each method outputs a `two-dimensional inter-chain residue-residue interaction matrix` encoding pairwise contact probabilities or predicted inter-residue distances. Methods are organized by their capability to generate full residue-pair interaction/contact maps, rather than by domain labels (e.g., PPI prediction vs. structure prediction, DL vs docking/physics).
+A curated collection of computational tools for `intermolecular interaction prediction`, primarily focus on `Protein Interface Contact Prediction` task. For any input number of polypeptide chains(≥2), each method outputs a `two-dimensional inter-chain residue-residue interaction matrix` encoding pairwise contact probabilities or predicted inter-residue distances. Methods are organized by their capability to generate full residue-pair interaction/contact maps, rather than by domain labels (e.g., PPI prediction vs. structure prediction, DL vs docking/physics).
 
 > **⚠️ Admission criteria:** A tool must produce `a complete 2D matrix across all residue pairs`, with values corresponding to contact probabilities or predicted inter-residue distances. Tools that output only per-residue binding-site scalar scores — without explicit residue-pair coupling information — are excluded from the main track and may only be presented as low-resolution baselines.
 
@@ -23,6 +23,8 @@ A curated collection of computational tools for `intermolecular interaction pred
 > although we all know MDS(multi-dimensional scaling) can convert a distance matrix to a 3D structure, the reverse is not true. A 3D structure can be converted to a distance matrix, but it is not guaranteed that the distance matrix can be converted back to the original 3D structure. This is because the distance matrix may not contain enough information to uniquely determine the 3D structure, especially if there are multiple conformations or if the structure is flexible. Therefore, while contact-map prediction can provide valuable information about protein-protein interactions, it may not always be sufficient for accurate structure prediction.
 >
 > 🌟 `But in this repository, we will try to discuss what within contact-map is more fundamental and important than structure prediction.` 
+>
+> What properties of a contact map are intrinsically more essential than the end goal of 3D structure reconstruction?
 
 ---
 
