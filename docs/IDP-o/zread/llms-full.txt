@@ -1,0 +1,2567 @@
+# PeptoneLtd/IDP-o
+
+Source: https://zread.ai/PeptoneLtd/IDP-o
+
+# 入门
+
+- [入门/概述](https://zread.ai/PeptoneLtd/IDP-o/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**IDP-o** 是一个基于片段的集合生成器，专用于内在无序蛋白（IDPs）。给定一条蛋白质序列，它能生成一个**构象集合**——即一系列物理上合理的 3D 结构——其原理是将序列分解为重叠片段，在 AlphaFold 数据库中搜索结构同源物，重建它们的 3D 坐标，并按层级将它们拼接在一起。生成的每个结构都会推断出氢原子，使其可以直接用于下游的计算生物物理任务，例如核磁共振（NMR）化学位移预测或分子动力学初始化。
+
+![IDP-o workflow](https://github.com/PeptoneLtd/IDP-o/blob/main/assets/idp-o.png?raw=true)
+
+来源: [README.md](/README.md#L1-L15)
+
+## IDP-o 解决了什么问题？
+
+内在无序蛋白（IDPs）不会形成单一的稳定折叠。相反，它们在溶液中会在庞大的构象集合之间不断互变。传统的结构预测工具（AlphaFold、RoseTTAFold）只返回单一的静态结构——这种点估计从根本上错误地表示了无序状态。IDP-o 通过生成**多个结构**来解决这一问题，这些结构共同对构象景观进行采样，生成的输出捕捉了对于 IDPs 生物物理分析至关重要的结构异质性。
+
+来源: [README.md](/README.md#L1-L15)
+
+## 核心流水线一览
+
+IDP-o 的流水线由 `build_ensemble.py` 编排，它会顺序调用三个阶段。每个阶段都是一个专用脚本，负责处理从序列到集合工作流中的一次转换：
+
+```mermaid
+flowchart LR
+    A["Protein<br>Sequence"] --> B["Stage 1:<br>Fragment & Search"]
+    B --> C["Stage 2:<br>Extract & Reconstruct"]
+    C --> D["Stage 3:<br>Join & Ensemble"]
+    D --> E["Conformational<br>Ensemble"]
+
+    subgraph Database
+        F["Foldcomp DB<br>(AlphaFold)"]
+        G["Offset FASTA<br>(byte indices)"]
+    end
+
+    F --- B
+    G --- B
+    F --- C
+```
+
+| 阶段 | 脚本 | 输入 | 输出 | 加速器 |
+|-------|--------|-------|--------|-------------|
+| **1. 片段化与搜索** | `fasta_search_in_foldcomp_database.py` | 蛋白质序列 | 序列化后的命中字典（字节偏移量 + 残基索引） | GPU (CuPy) |
+| **2. 提取与重建** | `extract_structures_from_foldcomp_database.py` | 命中字典 | 每个片段的 `.h5` 轨迹文件 | CPU (JAX JIT) |
+| **3. 拼接与集合** | `join_fragments.py` | 片段 `.h5` 文件 | 最终集合文件（`.h5`, `.xtc`, `.pdb` 等） | GPU (JAX vmap) |
+
+来源: [scripts/build_ensemble.py](/scripts/build_ensemble.py#L22-L54), [scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L1-L194), [scripts/extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L1-L326), [scripts/join_fragments.py](/scripts/join_fragments.py#L1-L348)
+
+## 片段化策略
+
+IDP-o 将蛋白质序列切割为 **6 残基的片段**，连续片段之间存在 **2 个残基的重叠**。重叠区域提供了片段拼接时使用的结构锚点——通过仿射（Kabsch）叠合对齐这两个共享残基，以确定相邻片段的相对位置。根据序列总长度，最后一个片段可能少于 6 个残基。
+
+对于长度为 *L* 的序列，片段数量大约为 ⌈(*L* − 6) / (6 − 2)⌉ + 1 = ⌈(*L* − 6) / 4⌉ + 1。这种滑动窗口片段化确保了每个残基至少被一个片段覆盖，同时保持片段足够短，以便在数据库中拥有丰富的结构同源物。
+
+来源: [scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L117-L126), [README.md](/README.md#L7-L8)
+
+## 结构数据库: Foldcomp + AlphaFold
+
+IDP-o 依赖 AlphaFold 数据库的 **Foldcomp** 压缩表示（`afdb_uniprot_v4`，约 1.1 TB）。Foldcomp 以离散二进制格式存储骨架二面角（φ, ψ, ω）、键角和侧链构象，而非完整的笛卡尔坐标。这种压缩至关重要：它使得 IDP-o 能够在整个 AlphaFold 数据库（覆盖 UniProt 蛋白质组）中执行穷举子串搜索，然后仅使用 JAX 编译的坐标重建函数按需重建相关的 3D 结构。
+
+系统需要一种特殊格式的 FASTA 文件，其中每个头信息包含对应条目在 Foldcomp 数据库文件中的**字节偏移量**，而非序列标识符。`prepare_foldcomp_fasta.py` 脚本可自动下载并创建此文件。
+
+来源: [scripts/prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L1-L150), [scripts/extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L60-L110), [README.md](/README.md#L20-L28)
+
+## 项目结构
+
+```
+IDP-o/
+├── Dockerfile                          # NVIDIA JAX GPU 容器定义
+├── LICENSE                             # Apache 2.0
+├── README.md                           # 包含使用示例的仓库说明
+├── assets/
+│   └── idp-o.png                       # 流水线工作流图
+├── generate_dataset.py                 # 批量封装: CSV/FASTA → 多个集合
+└── scripts/
+    ├── build_ensemble.py               # 流水线编排器 (入口点)
+    ├── fasta_search_in_foldcomp_database.py   # 阶段 1: GPU 子串搜索
+    ├── extract_structures_from_foldcomp_database.py  # 阶段 2: 结构重建
+    ├── join_fragments.py               # 阶段 3: 层级片段拼接
+    └── prepare_foldcomp_fasta.py       # 数据库设置: 下载 + 偏移 FASTA
+```
+
+来源: [Dockerfile](/Dockerfile#L1-L9), [generate_dataset.py](/generate_dataset.py#L1-L126), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L1-L167)
+
+## 技术栈
+
+| 层级 | 技术 | 在 IDP-o 中的作用 |
+|-------|-----------|---------------|
+| **GPU 计算** | JAX (NVIDIA 容器) | 向量化片段拼接 (`vmap`)，JIT 编译重建 |
+| **GPU 搜索** | CuPy | 跨 Foldcomp FASTA 的并行子串匹配 |
+| **坐标引擎** | nerfax (Peptone) | 内坐标 → 笛卡尔坐标重建，侧链放置，氢原子推断 |
+| **结构 I/O** | MDTraj | 多格式轨迹加载/保存 (HDF5, XTC, PDB, DCD) |
+| **数据库** | Foldcomp | 压缩的 AlphaFold DB 访问，二进制角度解码 |
+| **哈希** | hirola | 用于序列编码的快速氨基酸查找表 |
+| **部署** | Docker (NVIDIA JAX 24.10) | 可复现的 GPU 运行时环境 |
+
+来源: [Dockerfile](/Dockerfile#L1-L9), [scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L19-L20), [scripts/join_fragments.py](/scripts/join_fragments.py#L14-L20), [scripts/extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L19-L29)
+
+## 关键输出
+
+IDP-o 生成一个**构象集合**，可以保存为以下任何格式，可通过 `--format` 标志选择：
+
+| 格式 | 扩展名 | 最适用场景 |
+|--------|-----------|----------|
+| HDF5 | `.h5` | 紧凑，快速随机访问，MDTraj 原生 |
+| XTC | `.xtc` | 兼容 GROMACS，压缩轨迹 |
+| PDB | `.pdb` | 人类可读，可视化工具 |
+| 压缩 PDB | `.pdb.gz` | 节省存储空间的 PDB |
+| DCD | `.dcd` | 兼容 CHARMM/NAMD 的轨迹 |
+
+每个集合包含 `--max_structures_in_ensemble` 个结构（默认: 100），氢原子通过 MDTraj 的标准残基模板自动推断，使得输出可以直接用于下游的 NMR 或 MD 应用。
+
+来源: [scripts/join_fragments.py](/scripts/join_fragments.py#L299-L330), [generate_dataset.py](/generate_dataset.py#L44-L49), [README.md](/README.md#L35-L46)
+
+<CgxTip>在 Docker 中运行时，必须使用 `--gpus 1` 标志——GPU 加速的序列搜索（阶段 1）和 JAX 向量化的片段拼接（阶段 3）均依赖于 CUDA。请确保宿主机已安装 NVIDIA 驱动和容器工具包。</CgxTip>
+
+## 接下来去哪
+
+既然你已经了解了 IDP-o 的功能及其流水线结构，可以按照以下阅读路径进一步深入：
+
+1. **[快速开始](2-quick-start)** — 端到端运行你的首次集合生成
+2. **[Foldcomp 数据库设置](3-foldcomp-database-setup)** — 下载并准备约 1.1 TB 的结构数据库
+3. **[架构概览](4-architecture-overview)** — 详尽的数据流和模块间关系
+4. **[片段生成策略](5-fragment-generation-strategy)** — 重叠片段化的工作原理及为何选择 6 个残基
+5. **[GPU 加速序列搜索](6-gpu-accelerated-sequence-search)** — 基于 CuPy 的子串匹配内部机制
+6. **[层级片段拼接](8-hierarchical-fragment-joining)** — 二的幂次拼接算法与冲突检测
+7. **[批量数据集生成](11-batch-dataset-generation)** — 使用 `generate_dataset.py` 扩展至数千条序列
+
+---
+
+- [入门/快速开始](https://zread.ai/PeptoneLtd/IDP-o/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+通过四个步骤让 IDP-o 端到端地运行起来：克隆、构建、准备数据库以及生成你的首个系综。本页将通过准确的命令引导你完成每一步，解释你需要的每一个参数，并在你准备深入探索时为你指引更详细的文档。
+
+![IDP-o workflow](PeptoneLtd/IDP-o/blob/main/assets/idp-o.png?raw=true)
+
+## 前提条件
+
+在开始之前，请验证你的环境满足以下要求：
+
+| 要求 | 详情 |
+|---|---|
+| **Docker** | Docker Engine 20+ 并已安装 NVIDIA Container Toolkit |
+| **GPU** | 支持 CUDA 12 的 NVIDIA GPU（基于 CuPy 的 GPU 加速序列搜索所需） |
+| **磁盘空间** | 约 1.1 TB，用于存放 `afdb_uniprot_v4` Foldcomp 数据库（仅需下载一次） |
+| **平台** | Linux x86_64（Docker 镜像目标为 `linux/amd64`） |
+
+Docker 镜像基于 `nvcr.io/nvidia/jax:24.10-py3` 构建，其中捆绑了 JAX、CUDA 12 和 Python 3——因此你**无需**在宿主机上安装任何 Python 依赖。
+
+来源：[Dockerfile](/Dockerfile#L1-L9), [README.md](/README.md#L1-L76)
+
+## 快速入门工作流
+
+以下四个步骤构成了从全新克隆到可用系综的线性流水线。步骤 2（数据库准备）是一次性开销；后续的系综生成将完全跳过此步骤。
+
+```mermaid
+flowchart LR
+    A["① Clone & Build"] --> B["② Prepare Foldcomp DB"]
+    B --> C["③ Generate Ensemble"]
+    C --> D["④ Inspect Output"]
+
+    style A fill:#4A90D9,color:#fff
+    style B fill:#7B68EE,color:#fff
+    style C fill:#2ECC71,color:#fff
+    style D fill:#F39C12,color:#fff
+```
+
+来源：[README.md](/README.md#L16-L52), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L73-L167)
+
+## 步骤 1 — 克隆并构建 Docker 镜像
+
+克隆仓库并构建容器。`--platform=linux/amd64` 标志确保了即使在基于 ARM 的 Docker 宿主机（如搭载 Rosetta 的 Apple Silicon）上也能兼容运行：
+
+```bash
+# 克隆仓库
+git clone https://github.com/PeptoneLtd/IDP-o
+cd IDP-o
+
+# 构建 Docker 镜像
+docker build --platform=linux/amd64 . -t idp-o
+```
+
+构建过程会在容器内安装六个运行时依赖：**foldcomp**（数据库 I/O）、**tables**（HDF5 支持）、**cupy-cuda12x**（GPU 序列搜索）、**hirola**（用于氨基酸查找的哈希表）、**pynmrstar**（NMR STAR 格式）、**joblib**（并行化）以及 **nerfax**（JAX 加速的坐标重建）。你无需在宿主机上安装这些——Docker 会处理一切。
+
+来源：[Dockerfile](/Dockerfile#L1-L9), [README.md](/README.md#L16-L21)
+
+## 步骤 2 — 准备 Foldcomp 数据库
+
+IDP-o 在 **AlphaFoldDB**（通过 Foldcomp 发行）中搜索与你蛋白质子序列匹配的结构片段。该数据库以压缩二进制文件形式提供，但 IDP-o 需要一个配套的 FASTA 文件，其中每条记录的头部编码了在 Foldcomp 数据库中的**字节偏移量**：
+
+```
+> {byte_offset_in_foldcomp_db}
+{amino_acid_sequence}
+```
+
+一个便捷脚本可自动完成下载和 FASTA 生成：
+
+```bash
+docker run -v $(pwd):/data --entrypoint python idp-o \
+  /IDP-o/scripts/prepare_foldcomp_fasta.py --workdir /data
+```
+
+此命令按顺序执行三项操作：(1) 将 `afdb_uniprot_v4` Foldcomp 数据库下载到你的工作目录（约 1.1 TB），(2) 使用 Foldcomp 二进制文件提取原始 FASTA，以及 (3) 将每条记录的头部重新映射为其在数据库文件中的字节偏移量，生成 `afdb_uniprot_v4.fasta`。在后续运行中，该脚本会检测现有文件并自动跳过已完成的步骤。
+
+<CgxTip>`--workdir` 标志控制数据库和 FASTA 文件的写入位置。在后续所有的 `docker run` 命令中挂载同一目录（`-v $(pwd):/data`），以便 IDP-o 能够找到这些文件。</CgxTip>
+
+来源：[scripts/prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L97-L150), [README.md](/README.md#L23-L37)
+
+## 步骤 3 — 生成你的首个系综
+
+数据库准备就绪后，即可为单个蛋白质序列生成系综。以下示例使用了一条 69 残基的天然无序序列：
+
+```bash
+docker run -v $(pwd):/data --gpus 1 \
+  idp-o \
+    --sequence DLIVERANDSANDRDANDCARLDANDMICHELEANDLDHIEANDFADIDANDSTEFANDANDISTVANANDALDERTANDDLIVERAGAINPLASDTHERS \
+    --outpath /data/example/ensemble.h5 \
+    --scratch_folder /data/example/ \
+    --foldcomp_fasta /data/afdb_uniprot_v4.fasta \
+    --foldcomp_db /data/afdb_uniprot_v4 \
+    --n_max_structures_per_fragment 100
+```
+
+`--gpus 1` 标志向容器暴露一块 NVIDIA GPU，用于 CuPy 加速的序列搜索阶段。`--sequence` 参数仅接受由**标准 20 种氨基酸**组成的字符串——非标准残基将导致 `ValueError`。
+
+### 核心参数
+
+| 参数 | 必需 | 默认值 | 描述 |
+|---|---|---|---|
+| `--sequence` | **是** | — | 目标蛋白质序列（标准 20 种氨基酸） |
+| `--outpath` | **是** | — | 输出文件路径；扩展名决定格式（`.h5`、`.xtc`、`.dcd`、`.pdb`、`.pdb.gz`） |
+| `--scratch_folder` | 否 | `/tmp` | 用于存放中间片段 `.h5` 文件的目录 |
+| `--foldcomp_fasta` | 否 | `/data/afdb/afdb_uniprot_v4.fasta` | 步骤 2 生成的偏移量编码 FASTA 文件 |
+| `--foldcomp_db` | 否 | `/data/afdb/afdb_uniprot_v4` | Foldcomp 数据库二进制文件路径 |
+| `--n_max_structures_per_fragment` | 否 | `1000` | 从数据库中为每个 6 残基片段提取的最大结构数 |
+| `--max_structures_in_ensemble` | 否 | `100` | 最终输出系综中的结构数量 |
+| `--reduction_factor` | 否 | `1` | 搜索数据库的比例（例如，`10` = 搜索 1/10） |
+| `--exclude_cis_omega` | 否 | `False` | 过滤掉具有顺式 ω 骨架角的结构 |
+| `--rmsd_sort` | 否 | `False` | 按 RMSD 接近度对输出帧排序，以实现更平滑的可视化 |
+| `--overwrite` | 否 | `False` | 覆盖已存在的输出文件 |
+
+来源：[scripts/build_ensemble.py](/scripts/build_ensemble.py#L115-L167), [README.md](/README.md#L39-L52)
+
+### 内部运行机制
+
+当你运行上述命令时，三个流水线阶段将按顺序执行：
+
+```mermaid
+flowchart TB
+    S["Input Sequence"] --> F["Fragment into 6-mers<br/>(overlap = 2 residues)"]
+    F --> G1["GPU Sequence Search<br/>(CuPy on Foldcomp FASTA)"]
+    G1 --> G2["Structure Reconstruction<br/>(JAX from Foldcomp binary)"]
+    G2 --> G3["Hierarchical Fragment Joining<br/>(overlap alignment + clash detection)"]
+    G3 --> H["Hydrogen Inference<br/>(nerfax)"]
+    H --> O["Ensemble Output<br/>(.h5 / .xtc / .pdb / .dcd)"]
+
+    style G1 fill:#4A90D9,color:#fff
+    style G2 fill:#7B68EE,color:#fff
+    style G3 fill:#2ECC71,color:#fff
+    style H fill:#F39C12,color:#fff
+```
+
+1. **片段化 + 搜索** — 序列被切分为带有 2 残基重叠的 6 残基片段。每个片段使用 GPU 加速的子串匹配在 Foldcomp 数据库中进行搜索。命中结果被记录为字节偏移量，以便直接访问数据库。
+2. **提取 + 重建** — 对于每个片段，从 Foldcomp 二进制文件中加载最多 `n_max_structures_per_fragment` 个命中结果。JAX 编译的重建函数将压缩的内部坐标（骨架角、扭转角、侧链角）解码为包含所有重原子的完整 3D 坐标。
+3. **拼接 + 输出** — 片段系综使用重叠比对和冲突检测进行分层合并（按 2 的幂次分组）。存活的结构将接受氢原子推断，并写入指定的输出格式。
+
+来源：[scripts/build_ensemble.py](/scripts/build_ensemble.py#L34-L70), [scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L37-L136), [scripts/extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L200-L326), [scripts/join_fragments.py](/scripts/join_fragments.py#L286-L334)
+
+## 步骤 4 — 检查输出
+
+系综以多帧轨迹文件保存。以下是使用 **MDTraj**（容器内已提供）读取它的方法：
+
+```python
+import mdtraj as md
+
+# 加载系综
+t = md.load("example/ensemble.h5")
+
+print(f"Frames:   {t.n_frames}")       # 构象数量
+print(f"Residues: {t.n_residues}")     # 应与输入序列长度匹配
+print(f"Atoms:    {t.n_atoms}")        # 重原子 + 推断的氢原子
+```
+
+### 支持的输出格式
+
+| 格式 | 扩展名 | 备注 |
+|---|---|---|
+| HDF5 | `.h5` | 推荐；MDTraj 原生格式，快速随机访问 |
+| XTC | `.xtc` | GROMACS 压缩轨迹；会自动生成配套的 `.pdb` 拓扑文件 |
+| DCD | `.dcd` | CHARMM/NAMD 格式；会自动生成配套的 `.pdb` 拓扑文件 |
+| PDB | `.pdb` | 单个多模型 PDB 文件 |
+| 压缩 PDB | `.pdb.gz` | Gzip 压缩的 PDB 文件 |
+
+来源：[scripts/join_fragments.py](/scripts/join_fragments.py#L309-L319)
+
+## 批量数据集生成
+
+要一次性处理多个序列，请使用 `generate_dataset.py` 并传入 CSV 或 FASTA 输入文件。CSV 必须包含两列（可通过 `--column_names` 配置）：一列用于序列名称，一列用于氨基酸字符串。
+
+```bash
+docker run -v $(pwd):/data --gpus 1 --entrypoint python idp-o \
+  /IDP-o/generate_dataset.py \
+    --input /data/sequences.csv \
+    --outfolder /data/ensembles/ \
+    --max_structures_in_ensemble 100 \
+    --format h5
+```
+
+### 批量参数
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `--input` / `-i` | — | 输入 CSV 或 FASTA 文件（必需） |
+| `--outfolder` / `-o` | `./ensembles` | 系综文件的输出目录 |
+| `--max_structures_in_ensemble` / `-n` | `0`（不生成） | 每个系综的帧数；必须 > 0 才能触发生成 |
+| `--format` | `xtc` | 输出格式：`h5`、`xtc`、`pdb`、`pdb.gz`、`dcd` |
+| `--shuffle` | `False` | 随机化处理顺序（适用于并行运行） |
+| `--overwrite` | `False` | 覆盖已存在的系综文件 |
+
+<CgxTip>将 `-n` 设置为正整数——默认值 `0` 是一个安全防护，它会记录警告并完全跳过系综生成。这允许你在提交长时间计算之前验证输入文件。</CgxTip>
+
+来源：[generate_dataset.py](/generate_dataset.py#L24-L126)
+
+## 故障排除
+
+| 症状 | 原因 | 解决方案 |
+|---|---|---|
+| `ValueError: Input sequence contains invalid amino acid` | `--sequence` 中存在非标准残基 | 移除 B、Z、X 或其他非标准代码；仅接受 20 种标准氨基酸 |
+| `ensemble file already exists` | 输出路径已存在文件 | 在命令中添加 `--overwrite` |
+| `mask is all zero, retrying` | 片段拼接未找到无冲突的比对 | 增加 `--n_max_structures_per_fragment` 以扩大片段候选池 |
+| Docker 在 ARM 上构建失败 | 缺少 `--platform` 标志 | 使用 `docker build --platform=linux/amd64 . -t idp-o` |
+| 首次系综生成缓慢 | 首次运行时 JAX JIT 编译 | 同一容器内的后续系综生成将复用已编译的内核；冷启动仅为一次性开销 |
+
+来源：[scripts/build_ensemble.py](/scripts/build_ensemble.py#L42-L48), [scripts/join_fragments.py](/scripts/join_fragments.py#L215-L223)
+
+## 后续步骤
+
+现在你已经生成了首个系综，可以深入探索其架构与算法：
+
+1. **数据库设置详情** — [Foldcomp 数据库设置](3-foldcomp-database-setup) 涵盖了高级配置、替代数据库和节省磁盘空间的策略。
+2. **工作原理** — [架构概览](4-architecture-overview) 解释了三阶段流水线及脚本间的数据流。
+3. **片段策略** — [片段生成策略](5-fragment-generation-strategy) 详述了 6-mer 重叠方案及其数学依据。
+4. **输出格式** — [输出格式及下游应用](12-output-formats-and-downstream-use) 展示了如何将系综输入到 NMR、MD 或 ML 工作流中。
+5. **完整 CLI 参考** — [命令行配置参考](13-command-line-configuration-reference) 记录了每个标志的类型、默认值和作用。
+
+---
+
+- [入门/Foldcomp 数据库设置](https://zread.ai/PeptoneLtd/IDP-o/3-foldcomp-database-setup)
+
+---
+slug:3-foldcomp-database-setup
+blog_type:normal
+---
+
+
+IDP-o 依赖 **Foldcomp** 压缩结构数据库——具体而言是 AlphaFold DB UniProt v4 版本（`afdb_uniprot_v4`）——作为其片段级结构模板的来源。然而，仅有数据库是不够的。IDP-o 需要一个**特殊格式的 FASTA 文件**，其中每个头部包含对应条目在原始 Foldcomp 数据库文件中的字节偏移量。这种编码了偏移量的 FASTA 文件，正是实现 GPU 加速的字节级序列搜索、从而驱动整个流水线的关键。本页将详述此自定义格式存在的原因、安装脚本的产出内容，以及如何运行它。
+
+来源：[README.md](/README.md#L26-L42)，[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L1-L30)
+
+## 为什么需要自定义 FASTA 格式？
+
+标准 FASTA 格式使用描述性头部（例如 `>AF-Q9H2S5-F1-model_v4`），虽易于人工阅读，但在计算上是不透明的。IDP-o 的搜索引擎（`fasta_search_in_foldcomp_database.py`）通过 CuPy 经 GPU 加速的模式匹配，在**原始字节级别**扫描 FASTA 文件。当找到一个片段序列时，搜索引擎必须立即知道该结构的压缩数据**位于 Foldcomp 数据库二进制文件的何处**，而无需进行二次查找。通过将字节偏移量直接嵌入 FASTA 头部，搜索引擎能在单次遍历中将序列命中映射到数据库的寻道位置，从而在热路径中消除整个连接操作。
+
+最终生成的格式如下所示：
+
+```
+>677
+LPYPAHLEILVQTLRYWIRDVSSL
+>14402
+MKVILLFVGLSF...
+```
+
+此处，`677` 表示 `LPYPAHLEILVQTLRYWIRDVSSL` 的 Foldcomp 数据库条目起始于 `afdb_uniprot_v4` 二进制文件的**字节 677** 处。下游结构提取器会打开数据库文件，寻道至该字节位置，并直接读取压缩的主链和侧链数据。
+
+来源：[fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L40-L63)，[extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L83-L103)
+
+## 安装流水线概述
+
+准备脚本 `prepare_foldcomp_fasta.py` 执行一个四阶段的流水线，将原始 Foldcomp 发行版转换为 IDP-o 所需的两个产物：
+
+```mermaid
+flowchart TD
+    A["阶段 1：下载<br/>foldcomp.setup()"] --> B["阶段 2：计算偏移量<br/>Join .index + .lookup"]
+    B --> C["阶段 3：提取 FASTA<br/>foldcomp extract --fasta"]
+    C --> D["阶段 4：重写头部<br/>Label → Byte Offset"]
+
+    A -.->|生成| A1["afdb_uniprot_v4<br/>(~1.1 TB 二进制数据库)"]
+    A -.->|生成| A2["afdb_uniprot_v4.index<br/>(id → start, end bytes)"]
+    A -.->|生成| A3["afdb_uniprot_v4.lookup<br/>(id → label)"]
+    C -.->|生成| C1["afdb_uniprot_v4_fasta<br/>(标准 FASTA, 临时)"]
+    D -.->|生成| D1["afdb_uniprot_v4.fasta<br/>(偏移量编码的 FASTA)"]
+
+    style A fill:#e8f4fd,stroke:#2196F3
+    style B fill:#fff3e0,stroke:#FF9800
+    style C fill:#e8f5e9,stroke:#4CAF50
+    style D fill:#fce4ec,stroke:#E91E63
+    style D1 fill:#fce4ec,stroke:#E91E63,stroke-width:2px
+    style A1 fill:#e8f4fd,stroke:#2196F3,stroke-width:2px
+```
+
+每个阶段都是**幂等**的——脚本会检查现有产物并跳过已完成的阶段，因此在中断后重新运行是安全的。
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L120-L150)
+
+## 阶段详情
+
+### 阶段 1 — 数据库下载
+
+脚本调用 `foldcomp.setup("afdb_uniprot_v4")`，从 Foldcomp 发行版服务器下载官方 Foldcomp 数据库。此操作会生成核心二进制数据库文件及其附带的 `.index` 和 `.lookup` 制表符分隔文件。下载量约为 **1.1 TB**，是最耗时的阶段。如果数据库文件已在本地存在，则完全跳过下载。
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L133-L137)
+
+### 阶段 2 — 偏移量映射计算
+
+此阶段通过连接两个 Foldcomp 辅助文件，构建从**蛋白质标签 → 字节偏移量**的关键映射：
+
+| 文件 | 列 | 用途 |
+|------|---------|---------|
+| `afdb_uniprot_v4.index` | `id`，`start`，`end` | 将内部数字 ID 映射到数据库二进制文件中的字节范围 |
+| `afdb_uniprot_v4.lookup` | `id`，`label`，`other` | 将内部数字 ID 映射到人类可读标签（如 UniProt 编号） |
+
+连接过程如下：在共享的 `id` 列上执行 `lookup.join(index)`，然后以 `label` 重新索引，并将 `start` 列提取到字典中。这会生成一个 `dict[str, int]`，其中每个键是蛋白质标签，每个值是其在数据库文件中的字节起始位置。
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L33-L49)
+
+### 阶段 3 — FASTA 提取
+
+脚本调用 **foldcomp CLI 二进制文件**，使用 `extract --fasta` 子命令将数据库中的所有序列解压为标准 FASTA 文件（`afdb_uniprot_v4_fasta`）。如果在 `PATH` 或当前目录中未找到 `foldcomp` 二进制文件，脚本会**自动下载**相应平台的二进制文件：
+
+| 平台 | 架构 | 下载 URL 模式 |
+|----------|-------------|---------------------|
+| Linux | x86_64 | `foldcomp-linux-x86_64.tar.gz` |
+| Linux | arm64 | `foldcomp-linux-arm64.tar.gz` |
+| macOS | universal | `foldcomp-macos-universal.tar.gz` |
+| Windows | x64 | `foldcomp-windows-x64.zip` |
+
+提取的 FASTA 使用标准头部（蛋白质标签），这是阶段 4 重写步骤的输入。如果 `_fasta` 文件已存在，则跳过提取。
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L52-L103)
+
+### 阶段 4 — 头部重写
+
+最后阶段逐行读取阶段 3 生成的标准 FASTA，并将其重写至输出文件（`afdb_uniprot_v4.fasta`）。对于每个头部行，在阶段 2 生成的偏移量映射中查找蛋白质标签，并将该标签替换为对应的字节偏移量。序列行原样保留不变。最终结果即为 IDP-o 搜索引擎所使用的偏移量编码 FASTA 文件。
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L106-L117)
+
+## 运行安装
+
+### 快速命令
+
+推荐的方法是使用 IDP-o Docker 镜像，该镜像已包含 `foldcomp` Python 包及所有依赖项：
+
+```bash
+docker run -v $(pwd):/data \
+  --entrypoint python idp-o \
+  /IDP-o/scripts/prepare_foldcomp_fasta.py \
+  --workdir /data
+```
+
+此命令会将数据库下载到当前工作目录，并生成所需的两个产物。
+
+来源：[README.md](/README.md#L34-L42)
+
+### CLI 参数
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `--foldcomp-db` | `afdb_uniprot_v4` | 要下载和处理的 Foldcomp 数据库名称 |
+| `--threads` | `8` | `foldcomp extract` 操作的线程数 |
+| `--workdir` | `/data/foldcomp_db` | 所有下载和生成文件的工作目录 |
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L120-L128)
+
+### 自定义数据库名称
+
+如果你拥有不同的 Foldcomp 数据库（例如自定义子集），可通过 `--foldcomp-db` 指定其名称。脚本期望 `foldcomp.setup()` 能够下载该数据库，且生成的文件将遵循 `{db_name}` 和 `{db_name}.fasta` 的命名模式。
+
+### 磁盘空间与时间估算
+
+| 阶段 | 磁盘空间 | 典型耗时 |
+|-------|-----------|-----------------|
+| 数据库下载 | ~1.1 TB | 数小时（取决于网络） |
+| 偏移量映射计算 | ~可忽略不计（内存中） | 数分钟 |
+| FASTA 提取 | ~数十 GB（临时） | 数十分钟 |
+| 头部重写 | ~数十 GB（输出 FASTA） | 数分钟 |
+| **总计** | **~1.1 TB+** | **数小时** |
+
+阶段 3 生成的临时 `_fasta` 文件与最终 `.fasta` 输出文件占用同量级的空间。脚本完成后，你可以安全地删除 `afdb_uniprot_v4_fasta`——运行时仅需二进制数据库（`afdb_uniprot_v4`）和偏移量编码的 FASTA（`afdb_uniprot_v4.fasta`）。
+
+<CgxTip>请预留至少 **1.5 TB** 的可用磁盘空间，以同时容纳数据库、中间文件和输出文件。脚本的幂等设计意味着你可以安全地中断并恢复——已完成的阶段会被检测到并在重新运行时跳过。</CgxTip>
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L133-L149)，[README.md](/README.md#L34-L42)
+
+## 输出产物及其下游用途
+
+安装完成后，IDP-o 流水线将使用以下两个文件：
+
+| 产物 | 消费者 | 用途 |
+|----------|----------|---------|
+| `afdb_uniprot_v4`（二进制数据库） | `extract_structures_from_foldcomp_database.py` | 压缩的主链/侧链坐标来源；通过字节偏移量寻道访问条目 |
+| `afdb_uniprot_v4.fasta`（偏移量 FASTA） | `fasta_search_in_foldcomp_database.py` | GPU 加速的字节级搜索表面；头部编码字节偏移量以直接进行数据库寻道 |
+
+调用集成构建器时，必须同时提供这两个路径：
+
+```bash
+docker run -v $(pwd):/data --gpus 1 idp-o \
+  --sequence YOUR_SEQUENCE \
+  --outpath /data/output/ensemble.h5 \
+  --scratch_folder /data/output/ \
+  --foldcomp_fasta /data/afdb_uniprot_v4.fasta \
+  --foldcomp_db /data/afdb_uniprot_v4 \
+  --n_max_structures_per_fragment 100
+```
+
+来源：[build_ensemble.py](/scripts/build_ensemble.py#L91-L108)，[README.md](/README.md#L44-L54)
+
+## 验证安装
+
+你可以通过检查两个必需产物并检查偏移量编码来确认安装是否成功：
+
+```bash
+# 验证两个文件是否存在
+ls -lh afdb_uniprot_v4 afdb_uniprot_v4.fasta
+
+# 查看偏移量编码 FASTA 的前几个条目
+head -4 afdb_uniprot_v4.fasta
+```
+
+预期输出应显示数字头部后跟氨基酸序列——**而非**蛋白质名称或编号：
+
+```
+>0
+MEN...
+>577
+MKL...
+```
+
+如果头部包含字母标识符（例如 `>AF-Q9H2S5-F1`），则说明阶段 4 未正确完成。重新运行脚本即可——它将跳过阶段 1–3，仅重新执行头部重写。
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L106-L117)
+
+## 下一步
+
+在 Foldcomp 数据库和偏移量编码的 FASTA 就位后，你即可运行 IDP-o 流水线。下一页将提供架构的全局概览，随后的深入解析将详细介绍每个流水线阶段：
+
+- **[架构概述](4-architecture-overview)** — 了解数据库产物如何流经三阶段流水线
+- **[GPU 加速序列搜索](6-gpu-accelerated-sequence-search)** — 偏移量编码的 FASTA 如何实现字节级片段匹配
+- **[从 Foldcomp 重构结构](7-structure-reconstruction-from-foldcomp)** — 如何使用字节偏移量解压并重构 3D 坐标
+
+---
+
+# 深入探究
+
+- [深入探究/架构概述](https://zread.ai/PeptoneLtd/IDP-o/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+IDP-o 是一个针对本征无序蛋白（IDPs）的**基于片段的系综生成器**。其架构遵循确定性的三阶段流水线 — **搜索 → 重构 → 拼接** — 将单个氨基酸序列转换为包含推断氢原子在内的多样化三维结构构象系综。该系统基于两个关键性能原则构建：通过 CuPy 实现的 GPU 加速子序列匹配，以及通过 JAX 编译的向量化坐标重构与片段拼接。本页映射了完整的架构拓扑：入口点、数据流、各阶段职责以及将它们结合在一起的技术栈。
+
+![IDP-o workflow](https://github.com/PeptoneLtd/IDP-o/blob/main/assets/idp-o.png?raw=true)
+
+来源：[README.md](/README.md#L1-L11), [Dockerfile](/Dockerfile#L1-L9)
+
+## 项目结构
+
+该仓库设计紧凑 — 包含一个编排脚本、三个流水线阶段模块、一个批处理包装器以及一个数据库准备工具。所有流水线逻辑均位于 `scripts/` 目录下，`generate_dataset.py` 作为轻量级批处理驱动程序位于仓库根目录。
+
+```
+IDP-o/
+├── Dockerfile                          # NVIDIA JAX 基础镜像，入口点 → build_ensemble.py
+├── generate_dataset.py                 # 批处理包装器：遍历 CSV/FASTA → 调用 build_ensemble.py
+├── scripts/
+│   ├── build_ensemble.py               # 流水线编排器（入口点）
+│   ├── fasta_search_in_foldcomp_database.py   # 阶段 1：GPU 加速序列搜索
+│   ├── extract_structures_from_foldcomp_database.py  # 阶段 2：JAX 结构重构
+│   ├── join_fragments.py               # 阶段 3：层次化片段拼接
+│   └── prepare_foldcomp_fasta.py       # 预处理：构建带偏移量标注的 FASTA
+└── assets/
+    └── idp-o.png                       # 工作流图表
+```
+
+来源：[Dockerfile](/Dockerfile#L1-L9), [generate_dataset.py](/generate_dataset.py#L1-L20), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L15-L23)
+
+## 流水线架构
+
+核心流水线由 `build_ensemble.py` 编排，严格按照顺序执行三个阶段。每个阶段生成定义明确的中间产物，供下一阶段消费。流水线在运行之间是无状态的 — 所有中间产物写入临时文件夹，最终系综写入指定的输出路径。
+
+```mermaid
+flowchart TD
+    SEQ["Protein Sequence"] --> FRAG["Fragment Generation<br/>(overlap=2, length=6)"]
+    
+    subgraph Stage1["阶段 1：GPU 序列搜索"]
+        FRAG --> GPU["CuPy 向量化匹配<br/>针对 Foldcomp FASTA"]
+        GPU --> PKL["byte_starts.pkl<br/>(每个片段的偏移量)"]
+    end
+
+    subgraph Stage2["阶段 2：结构重构"]
+        PKL --> FCZ["Foldcomp 二进制数据库<br/>(压缩结构)"]
+        FCZ --> RECON["JAX JIT 编译<br/>内坐标 → 笛卡尔坐标重构"]
+        RECON --> H5["每个片段的 .h5 文件<br/>(三维坐标系综)"]
+    end
+
+    subgraph Stage3["阶段 3：层次化拼接"]
+        H5 --> ALIGN["重叠比对 +<br/>冲突检测 (JAX vmap)"]
+        ALIGN --> HJOIN["2的幂次层次化<br/>片段拼接"]
+        HJOIN --> HADD["氢原子推断<br/>(nerfax)"]
+        HADD --> OUT["系综输出<br/>(.h5 / .xtc / .dcd / .pdb)"]
+    end
+
+    style Stage1 fill:#e8f4e8,stroke:#2d7d2d
+    style Stage2 fill:#e8e8f4,stroke:#2d2d7d
+    style Stage3 fill:#f4e8e8,stroke:#7d2d2d
+```
+
+编排器的 `main()` 函数编码了这一精确调用序列：它首先针对标准氨基酸验证输入序列，然后按顺序调用每个阶段模块的 `main()` — `fasta_search_in_foldcomp_database.main()`、`extract_structures_from_foldcomp_database.main()` 和 `join_fragments.main()` — 将每个阶段的输出作为下一阶段的输入传递。
+
+来源：[scripts/build_ensemble.py](/scripts/build_ensemble.py#L25-L80)
+
+## 阶段职责
+
+每个流水线阶段都有明确的契约。下表总结了每个阶段的输入/输出契约及主导的计算技术。
+
+| 阶段 | 模块 | 输入 | 输出 | 核心技术 | 计算特征 |
+|-------|--------|-------|--------|-----------------|----------------------|
+| **1. 序列搜索** | `fasta_search_in_foldcomp_database` | 蛋白质序列 + foldcomp FASTA | `byte_starts.pkl` (每个片段的命中偏移量) | **CuPy** (GPU) | 跨约 1.1 TB FASTA 的易并行子串匹配 |
+| **2. 结构重构** | `extract_structures_from_foldcomp_database` | 命中偏移量 + foldcomp 二进制数据库 | 每个片段的 `.h5` 文件 (三维系综) | **JAX** `jit` + `vmap` | JIT 编译的内坐标 → 笛卡尔坐标重构 |
+| **3. 片段拼接** | `join_fragments` | 每个片段的 `.h5` 系综 + 序列 | 最终系综文件 (h5/xtc/dcd/pdb) | **JAX** `vmap` + `lax.scan` | 向量化比对、冲突检测、层次化归约 |
+
+来源：[scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L40-L144), [scripts/extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L240-L268), [scripts/join_fragments.py](/scripts/join_fragments.py#L195-L249)
+
+## 数据流与中间产物
+
+理解各阶段之间的数据契约对于调试以及与外部工具的潜在集成至关重要。流水线在磁盘上生成两种中间产物：
+
+**片段生成**是第一个操作，在 `fasta_search_in_foldcomp_database.main()` 内部执行。给定一个蛋白质序列，它使用 `generate_fragments()` 函数生成具有 2 个残基重叠的 6 残基重叠片段。对于长度为 *L* 的序列，这会生成大约 ⌈(*L* − 6) / (6 − 2)⌉ + 1 个片段。根据序列长度，最后一个片段可能短于 6 个残基。
+
+**阶段 1 → 阶段 2 契约**：pickle 文件 `byte_starts.pkl` 包含一个以片段序列字符串为键的字典，其中每个值是一个由 NumPy 数组组成的 3 元组 — `(hit_idxs, byte_starts, aa_start_index)`。这三个数组共同指定了：每次命中在 FASTA 文件中的字节位置、对应条目在 foldcomp 二进制数据库中的字节偏移量，以及片段匹配开始的残基在该数据库条目中的索引。
+
+**阶段 2 → 阶段 3 契约**：每个片段的结构系综以 mdtraj HDF5 文件（`{fragment_sequence}.h5`）的形式写入临时片段目录。这些文件包含匹配该片段的所有重构结构的完整三维坐标（骨架 + 侧链）。
+
+**阶段 3 → 输出**：最终拼接的系综通过 mdtraj 写入用户指定的输出路径。写入前，氢原子由 `nerfax.reduce_utils.reconstruct_from_mdtraj` 推断得出。对于轨迹格式（.xtc, .dcd），还会生成一个包含第一帧的配套 .pdb 文件，用于拓扑参考。
+
+来源：[scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L164), [scripts/extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L271-L274), [scripts/join_fragments.py](/scripts/join_fragments.py#L277-L320)
+
+## 技术栈与运行环境
+
+IDP-o 运行在基于 NVIDIA JAX 基础镜像（`nvcr.io/nvidia/jax:24.10-py3`）构建的 Docker 容器内，确保 CuPy 和 JAX 计算均可访问 GPU。容器的入口点为 `build_ensemble.py`，使得流水线可直接通过 `docker run` 调用。
+
+| 层级 | 技术 | 在流水线中的角色 |
+|-------|-----------|-----------------|
+| **GPU 计算** | CuPy (CUDA 12.x) | 阶段 1：GPU 上的向量化字节级序列匹配 |
+| **自动微分/向量化** | JAX (XLA 编译器) | 阶段 2–3：JIT 编译的重构，`vmap` 化的比对与冲突检测 |
+| **结构数据库** | foldcomp (~0.1.0) | 压缩的 AlphaFold 数据库存储及二进制格式解析 |
+| **坐标数学** | nerfax | 内坐标 → 笛卡尔坐标重构、侧链放置、氢原子推断、拓扑构建 |
+| **轨迹 I/O** | mdtraj | 读写 .h5, .xtc, .dcd, .pdb 格式；拓扑管理 |
+| **哈希表** | hirola (~0.3.0) | 重构期间快速的氨基酸查找 |
+| **并行化** | joblib (~1.5.2) | 用于数据集生成中的批处理级并行 |
+| **NMR Star** | pynmrstar (~3.3.6) | 下游 NMR 格式兼容性 |
+
+<CgxTip>`join_fragments.py` 中设置的环境变量 `XLA_PYTHON_CLIENT_MEM_FRACTION=".96"` 为 JAX 预留了 96% 的 GPU 内存，这对于向量化拼接阶段至关重要。如果你在拼接期间遇到 OOM 错误，减少 `--joins_to_attempt_per_pairing` 比调整此比例更有效。</CgxTip>
+
+来源：[Dockerfile](/Dockerfile#L1-L3), [scripts/join_fragments.py](/scripts/join_fragments.py#L22-L23)
+
+## 入口点与执行模式
+
+IDP-o 支持两种不同的执行模式，每种模式均有其专属入口点：
+
+**单序列模式** — 通过 Docker 容器直接调用（入口点：`build_ensemble.py`）。这是每次为一个蛋白质序列生成系综的主要模式。所有流水线参数均作为 CLI 参数暴露。
+
+**批处理模式** — 通过 `generate_dataset.py` 调用，该脚本读取包含多个序列的 CSV 或 FASTA 文件并对其进行遍历，将 `build_ensemble.py` 作为子进程为每个序列调用。它支持用于跨独立运行并行化的乱序生成顺序、输入序列去重以及可配置的输出格式。错误处理按序列进行：失败会记录到配套的 `.txt` 文件中，而不会终止整个批处理。
+
+```mermaid
+flowchart LR
+    subgraph SingleMode["单序列模式"]
+        S1["docker run idp-o<br/>--sequence SEQ ..."] --> BE1["build_ensemble.py"]
+    end
+
+    subgraph BatchMode["批处理模式"]
+        S2["python generate_dataset.py<br/>--input sequences.csv"] --> GD["generate_dataset.py"]
+        GD -->|"subprocess per sequence"| BE2["build_ensemble.py"]
+        BE2 -->|"repeat"| BE3["build_ensemble.py"]
+    end
+
+    style SingleMode fill:#e8f4e8,stroke:#2d7d2d
+    style BatchMode fill:#e8e8f4,stroke:#2d2d7d
+```
+
+来源：[scripts/build_ensemble.py](/scripts/build_ensemble.py#L83-L166), [generate_dataset.py](/generate_dataset.py#L89-L125)
+
+## 预处理：Foldcomp 数据库准备
+
+在流水线运行之前，必须将 foldcomp 数据库准备为特定格式。`prepare_foldcomp_fasta.py` 脚本自动执行此操作：它下载 `afdb_uniprot_v4` foldcomp 数据库（约 1.1 TB），使用 foldcomp 二进制文件提取其 FASTA 表示，并重写 FASTA 头部，使其包含每个条目在压缩二进制数据库文件中的**字节偏移量**，而非序列标签。这种带偏移量标注的 FASTA 正是阶段 1 搜索的对象 — 搜索期间发现的字节偏移量被阶段 2 直接用于在二进制数据库中寻址并提取结构数据，无需任何索引查找开销。
+
+来源：[scripts/prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L33-L149)
+
+## 架构约束与设计原理
+
+部分架构决策被硬编码，值得明确理解：
+
+**片段重叠固定为 2 个残基。** `join_fragments.py` 模块在 `pre_join_fragments()` 和 `_join_fragments()` 内部均包含作为硬编码断言的 `overlap = 2`。此重叠定义了拼接相邻片段时用于比对的“肽键”区域 — 两个重叠残基提供四个骨架原子（N, CA, C, O）作为比对参考。
+
+**片段长度默认为 6 个残基**，但最后一个片段可能较短。该值平衡了搜索特异性（较长的片段在数据库中命中较少）与覆盖率（较短的片段更可能在数据库中找到匹配）。
+
+**层次化拼接采用 2 的幂次归约。** `build_ensemble()` 函数将片段数量分解为 2 的幂次之和，在每个 2 的幂次子集内层次化地拼接对（每个子集进行 log₂ 轮），然后线性拼接子集结果。此策略在保持中间系综大小可控的同时，最小化了总拼接操作数。
+
+**有效拼接的 RMSD 阈值为 0.6 Å**（在代码中硬编码为 `rmsds < 0.06`，单位为 nm，因为 mdtraj 内部使用纳米）。超过此阈值或表现出空间冲突（任意非键合原子间距离 < 1.0 Å）的配对将被拒绝。
+
+<CgxTip>层次化拼接策略意味着系综多样性在初始片段中最高，并随着片段的拼接逐渐收窄，因为每个拼接步骤会过滤掉未通过比对或冲突检查的构象。这是设计使然 — 它自然而然地生成了在局部和全局尺度上均结构合理的系综。</CgxTip>
+
+来源：[scripts/join_fragments.py](/scripts/join_fragments.py#L76-L123), [scripts/join_fragments.py](/scripts/join_fragments.py#L195-L249), [scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152)
+
+## 接下来去哪
+
+架构概述确立了流水线的整体形态。以下页面将深入探讨每个阶段的实现细节及其驱动算法：
+
+- **[片段生成策略](5-fragment-generation-strategy)** — 序列如何被分解为重叠片段，以及为何 6/2 是默认值
+- **[GPU 加速序列搜索](6-gpu-accelerated-sequence-search)** — 阶段 1 内部原理：CuPy 字节级匹配与分块处理
+- **[从 Foldcomp 重构结构](7-structure-reconstruction-from-foldcomp)** — 阶段 2 内部原理：foldcomp 二进制格式解析与 JAX 坐标重构
+- **[层次化片段拼接](8-hierarchical-fragment-joining)** — 阶段 3 内部原理：比对、冲突检测及 2 的幂次归约策略
+
+---
+
+- [深入探究/片段生成策略](https://zread.ai/PeptoneLtd/IDP-o/5-fragment-generation-strategy)
+
+---
+slug:5-fragment-generation-strategy
+blog_type:normal
+---
+
+
+IDP-o 的核心创新在于采用**基于片段的分解**方法，将本质上固有无序的蛋白质（IDP）序列分解为短的、重叠的子序列，每个子序列独立地在海量结构数据库（通过 Foldcomp 访问的 AlphaFold DB）中进行解析。随后，这些片段级的结构系综在几何约束（重叠比对和冲突拒绝）下被分层重组，从而生成全长的构象系综。本页将解释将蛋白质序列切割为片段的*策略*、选择这些参数的原因，以及片段词汇表如何为下游流水线提供数据。
+
+来源: [README.md](/README.md#L8-L8), [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152)
+
+## 序列分解为重叠片段
+
+片段生成函数 `generate_fragments` 实现了**具有可配置重叠的固定长度滑动窗口**。给定蛋白质序列 *s*、片段长度 `seq_len` 和重叠长度 `overlap`，连续片段起始位置之间的步长（偏移量）为：
+
+> **shift = seq_len − overlap**
+
+对于递增的 *i*，每个片段提取为 `s[i × shift : i × shift + seq_len]`，此过程持续进行直至覆盖整个序列。片段数量由 `((len(s) − seq_len) // shift) + 2` 决定，并包含两种边界情况修正：(1) **最后一个片段可能短于** `seq_len` —— 它仅提取剩余的残基；(2) 如果最后一个片段退化至恰好等于重叠长度，则将其**移除**，因为它不包含任何独有的残基信息。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152)
+
+### 默认参数与设计原理
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `seq_len` | 6 | 片段的残基长度 |
+| `overlap` | 2 | 连续片段之间的共享残基数 |
+| `shift` | 4 (派生) | 片段起始位置之间的步长 |
+
+**6 残基的片段长度**在两种相互竞争的需求之间取得了平衡。较短的片段（例如 3–4 个残基）会在拼接阶段产生过度的组合爆炸，而较长的片段（例如 10+ 个残基）在 Foldcomp 数据库中会产生过少的命中——特别是对于局部结构在 AlphaFold DB 中代表性不足的无序序列。**2 残基的重叠**是提供足够几何约束以在片段拼接期间实现稳健成对比对的最小值（重叠必须跨越至少一个完整的肽键，这需要 ≥ 2 个残基以完成主链 N–CA–C–O 的对齐）。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L155-L156), [join_fragments.py](/scripts/join_fragments.py#L76-L77), [join_fragments.py](/scripts/join_fragments.py#L286-L287)
+
+### 计算示例
+
+考虑序列 `DLIVERANDSANDR`（14 个残基）。使用 `seq_len=6` 和 `overlap=2`：
+
+| 片段索引 | 起始 | 结束 | 子序列 | 与前一片段的重叠 |
+|:-:|:-:|:-:|:--|:--|
+| 0 | 0 | 6 | `DLIVER` | — |
+| 1 | 4 | 10 | `ERANDS` | `ER` |
+| 2 | 8 | 14 | `NDSANDR` | `ND` |
+
+片段 2 恰好为 6 个残基（完全匹配）。如果序列长度为 15 个残基，则最后一个片段将为 7 个残基——该算法能从容处理这种不对称性。重叠残基（`ER`、`ND`）在分层拼接时作为**几何缝合区域**。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152)
+
+### 片段数量公式
+
+对于长度为 *L* 的序列，片段长度为 *F*，重叠为 *O*，片段数量 *N* 约为：
+
+> **N ≈ ⌈(L − O) / (F − O)⌉**
+
+这意味着一个 100 残基的 IDP 会产生约 25 个片段，每个片段在 Foldcomp 数据库中约 2 亿个结构里进行独立搜索。片段数量直接控制了分层拼接树的深度（参见 [分层片段拼接](8-hierarchical-fragment-joining)）。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152)
+
+## 从片段到结构系综
+
+一旦序列被分解，每个片段在进入拼接阶段前需经过流水线的三个阶段。下图展示了由 `generate_fragments` 生成的片段词汇表如何流入下游阶段：
+
+```mermaid
+flowchart TD
+    A["输入序列<br/>(例如 100 个残基)"] --> B["generate_fragments()<br/>seq_len=6, overlap=2"]
+    B --> C["片段列表<br/>约 25 个重叠的 6-mer"]
+    C --> D["GPU 序列搜索<br/>针对 Foldcomp DB"]
+    D --> E["每个片段的命中索引<br/>(byte_start, aa_start_index)"]
+    E --> F["结构重建<br/>来自 Foldcomp 二进制数据"]
+    F --> G["每个片段的系综<br/>(磁盘上的 .h5 文件)"]
+    G --> H["分层拼接<br/>重叠比对 + 冲突检查"]
+    H --> I["全长系综<br/>包含推断的氢原子"]
+
+    style B fill:#4a90d9,color:#fff
+    style C fill:#4a90d9,color:#fff
+    style H fill:#2d7d46,color:#fff
+    style I fill:#2d7d46,color:#fff
+```
+
+**阶段 1 — 序列搜索**：使用 GPU 加速的精确匹配（CuPy），将每个片段字符串与特殊格式的 Foldcomp FASTA 进行比对扫描。搜索返回在 Foldcomp 数据库中的字节偏移量，以及在每个命中蛋白质中片段匹配开始的残基索引。详见 [GPU 加速序列搜索](6-gpu-accelerated-sequence-search)。
+
+**阶段 2 — 结构重建**：对于每个片段，从 Foldcomp 二进制数据库中加载最多 `n_max_structures_per_fragment` 个命中结果。内坐标（主链键角、二面角、侧链键角）被解码，并通过 JAX 编译的重建函数转换为笛卡尔坐标。可选择排除包含 *顺式*-ω 肽键的结构。详见 [从 Foldcomp 重建结构](7-structure-reconstruction-from-foldcomp)。
+
+**阶段 3 — 分层拼接**：使用分治树将片段系综重组为全长系综，该树在每一层执行成对重叠比对和冲突检测。此主题详见 [分层片段拼接](8-hierarchical-fragment-joining)。
+
+来源: [build_ensemble.py](/scripts/build_ensemble.py#L60-L80), [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L40-L144), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L240-L268)
+
+## 重叠作为几何约束
+
+2 残基的重叠不仅是一种记录约定——它是使片段拼接具有良好适定性的**几何锚点**。在成对拼接期间，重叠区域提供两个完整的主链单元（每个包含 N、Cα、C、O 原子），这足以通过 SVD 分解计算左右片段之间唯一的刚体对齐。
+
+对齐过程从左侧片段提取**尾部重叠**，从右侧片段提取**首部重叠**，然后：
+
+1. **仿射对齐** — 计算基于 SVD 的最优旋转和平移，将右侧片段的重叠原子叠加到左侧片段的重叠原子上
+2. **RMSD 验证** — 检查重叠的均方根偏差是否低于 **0.06 nm (0.6 Å)** 的阈值；超过此阈值的片段对将被拒绝
+3. **冲突检测** — 对齐后，检查合并结构中的所有原子间距离；任何距离小于 **0.1 nm** 的非键合原子对将触发拒绝
+
+这些阈值是硬编码的，反映了肽键几何的物理容差：2 个残基上 0.6 Å 的 RMSD 表明两个片段在局部主链构象上保持一致，而 0.1 nm 的冲突截断值可防止在物理上不切实际的立体违规。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L38-L50), [join_fragments.py](/scripts/join_fragments.py#L96-L123), [join_fragments.py](/scripts/join_fragments.py#L112-L119)
+
+<CgxTip>2 残基的重叠在整个代码库中被显式断言并作为默认假设——`pre_join_fragments` 函数无论输入如何都硬编码 `overlap = 2`，而 `_join_fragments` 函数通过 `bb_indices[indexing].ravel()[2:-2]` 提取主链索引，其中 `[2:-2]` 切片选择了左侧重叠残基的 (C, O) 原子和右侧重叠残基的 (N, Cα) 原子——即肽键连接处。更改重叠需要对此切片逻辑进行协同修改。</CgxTip>
+
+## 片段词汇表与数据库覆盖度
+
+片段策略隐式定义了一个**词汇表问题**：每个 6 残基片段必须在 AlphaFold DB 中具有足够的结构代表，以填充有意义的系综。这就是为什么 IDP-o 使用完整的 `afdb_uniprot_v4` 数据库（约 2 亿个结构，压缩后约 1.1 TB），而不是较小的精选集。
+
+对于**有序区域**，大多数 6-mer 将有大量命中（数千到数百万个结构）。对于**无序区域**，覆盖度较为稀疏，因为 AlphaFold DB 偏向于折叠良好的蛋白质。`n_max_structures_per_fragment` 参数（在构建脚本中默认为 1000）限制了每个片段的系综大小——当一个片段的命中数超过此限制时，将随机对结构进行下采样，以控制拼接期间的内存和计算成本。
+
+| 片段类型 | 典型命中数 | 系综行为 |
+|---------------|-------------------|-------------------|
+| 结构良好的 6-mer | 10³ – 10⁶+ | 下采样至 `n_max_structures_per_fragment` |
+| 部分无序的 6-mer | 10² – 10³ | 完全保留 |
+| 罕见的 6-mer | < 10² | 可能产生稀疏系综 |
+| 未发现命中 | 0 | 流水线将在此片段处失败 |
+
+`reduction_factor` 参数提供了一个调试/性能调节旋钮，可按比例减少搜索的数据库比例——值为 10 表示仅扫描十分之一的 FASTA，以牺牲覆盖度换取速度。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L252-L256), [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L64-L65), [build_ensemble.py](/scripts/build_ensemble.py#L125-L127)
+
+## 流水线中的端到端片段流程
+
+`build_ensemble.py` 脚本编排了完整的片段生命周期。片段生成参数（`overlap=2`、`seq_len=6`）在 `join_fragments.main` 入口点设置，并在拼接阶段开始时传播给 `generate_fragments`。下表总结了每个流水线阶段如何与片段分解进行交互：
+
+| 流水线阶段 | 脚本 | 片段交互 |
+|----------------|--------|---------------------|
+| 序列搜索 | `fasta_search_in_foldcomp_database.py` | 调用 `generate_fragments()` 生成片段列表；在 Foldcomp FASTA 中搜索每个片段 |
+| 结构提取 | `extract_structures_from_foldcomp_database.py` | 读取每个片段的命中索引；重建 3D 坐标；保存每个片段的 `.h5` 系综 |
+| 片段拼接 | `join_fragments.py` | 再次调用 `generate_fragments()` 重构片段列表；加载每个片段的 `.h5` 文件；执行分层拼接 |
+
+注意，`generate_fragments()` 被调用了**两次**——一次在搜索期间（以确定要查找的片段），一次在拼接期间（以重构分层组装的片段排序）。这是一种无状态设计：片段列表始终由输入序列和固定参数派生，避免了序列化片段列表本身的需要。
+
+来源: [build_ensemble.py](/scripts/build_ensemble.py#L60-L80), [join_fragments.py](/scripts/join_fragments.py#L286-L287)
+
+<CgxTip>`generate_dataset.py` 包装器将 `--fragments_overlap` 作为可配置参数（默认值为 1）暴露，但该值在当前代码中**未传播**至 `build_ensemble.py`——系构建模器始终使用硬编码的默认值 `overlap=2`。`generate_dataset.py` 中的 `--fragments_overlap` 参数似乎是未来可配置性的占位符。</CgxTip>
+
+## 设计权衡
+
+片段生成策略包含几项深思熟虑的权衡，在解释系综输出时值得理解：
+
+**固定与自适应片段长度** — IDP-o 使用固定的 6 残基窗口。另一种设计方案是使用可变长度片段，以适应局部无序倾向（例如，螺旋区域使用较长片段，高度无序区域使用较短片段）。固定长度方法简化了流水线并确保了统一的重叠几何，但可能在半有序区域中代表性不足局部结构偏好。
+
+**精确与近似序列搜索** — 片段通过在 Foldcomp FASTA 中的精确子字符串搜索进行匹配。不执行序列相似性或模糊匹配。这意味着具有单个罕见突变的片段可能返回零命中，即使数据库中存在相近的同源物。该权衡偏向速度（GPU 精确匹配极快）而非敏感度。
+
+**重叠大小与拼接灵活性** — 较大的重叠（例如 3–4 个残基）将提供更多几何约束并可能产生更高质量的拼接，但也会减小片段间的步长，从而增加片段数量及拼接树的深度。2 残基重叠是最小可行选择，并最大化了计算效率。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152), [join_fragments.py](/scripts/join_fragments.py#L76-L77)
+
+## 后续指引
+
+片段生成策略为每项下游计算奠定了基础。要了解片段如何在数据库中被搜索，请参见 [GPU 加速序列搜索](6-gpu-accelerated-sequence-search)。要了解如何从 Foldcomp 二进制数据中恢复 3D 坐标，请参见 [从 Foldcomp 重建结构](7-structure-reconstruction-from-foldcomp)。要了解片段系综如何在几何约束下缝合在一起，请参见 [分层片段拼接](8-hierarchical-fragment-joining)。有关重叠比对和冲突检测的数学细节，请参见 [重叠比对与冲突检测](9-overlap-alignment-and-clash-detection)。
+
+---
+
+- [深入探究/批量数据集生成](https://zread.ai/PeptoneLtd/IDP-o/11-batch-dataset-generation)
+
+---
+slug:11-batch-dataset-generation
+blog_type:normal
+---
+
+
+IDP-o 的批量数据集生成系统将一组蛋白质序列（以 CSV 或 FASTA 文件的形式提供）转换为完整的结构系综数据集。编排器脚本 `generate_dataset.py` 遍历输入中的每一条序列，通过子进程调用 `build_ensemble.py` 将其分发至完整的三阶段流水线（GPU 加速搜索 → 结构重建 → 片段拼接）。此设计将**批次层面的关注点**（输入解析、去重、并行化、容错能力）与**序列层面的关注点**（实际的系综计算）分离开来，从而能够跨数千个天然无序蛋白质进行可扩展的数据集生成。
+
+来源: [generate_dataset.py](/generate_dataset.py#L1-L126), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L1-L167)
+
+## 批次编排器架构
+
+批处理系统完全由 `generate_dataset.py` 驱动，它充当一个轻量级协调器。它不直接导入流水线各阶段——而是通过 `subprocess.check_call` 将 `build_ensemble.py` 作为子进程调用。这种架构选择提供了**进程隔离**：某个系综计算中的崩溃或 GPU 内存泄漏不会破坏编排器的状态或后续序列的处理。
+
+```mermaid
+flowchart TD
+    A["Input File<br/>(.csv or .fasta)"] --> B["Parse & Deduplicate"]
+    B --> C{"--shuffle?"}
+    C -- Yes --> D["Randomize Row Order"]
+    C -- No --> E["Preserve Input Order"]
+    D --> F["Iterate Sequences"]
+    E --> F
+    F --> G["Spawn build_ensemble.py<br/>subprocess per sequence"]
+    G --> H{"Success?"}
+    H -- Yes --> I["Increment Counter"]
+    H -- No --> J["Log Error to .txt File"]
+    I --> K{"More Sequences?"}
+    J --> K
+    K -- Yes --> F
+    K -- No --> L["Report Total Ensembles Generated"]
+```
+
+编排器读取输入文件，对行进行去重，可选择打乱处理顺序，然后循环遍历每条序列并将其分发至 `build_ensemble.py`。发生失败时，它会捕获完整的回溯信息，并将其写入预期输出路径旁的配套 `.txt` 文件中，从而使批处理能够不间断地继续执行。
+
+来源: [generate_dataset.py](/generate_dataset.py#L67-L125)
+
+## 输入格式处理
+
+批处理生成器接受两种输入格式，每种格式具有由 `--column_names` 标志控制的特定列映射语义：
+
+| 格式 | 检测规则 | 解析方法 | 必需列 |
+|--------|---------------|----------------|-----------------|
+| **FASTA** (`.fasta`) | 文件名以 `.fasta` 结尾 | 逐行解析：去掉 `>` 前缀的头部 → 下一行为序列 | 隐式：`>name` 后接 `sequence` |
+| **CSV** (`.csv`) | 文件名以 `.csv` 结尾 | 使用 `pandas.read_csv` 并通过 `usecols` 进行选择性加载 | 可通过 `--column_names` 配置 |
+
+`--column_names` 参数默认为 `seq_name,fasta`，并按逗号分割以识别序列标识符列和氨基酸序列列。对于 FASTA 文件，这些列名被分配给内部构建的 DataFrame。对于 CSV 文件，仅将指定的两列加载到内存中，从而最大程度减少宽表的 I/O 开销。
+
+对两列**独立**执行**去重**。如果检测到重复的序列名称或重复的 FASTA 字符串，将记录警告并使用 `pandas.drop_duplicates` 丢弃重复项，仅保留首次出现的记录。
+
+来源: [generate_dataset.py](/generate_dataset.py#L67-L87)
+
+## 子进程分发与容错能力
+
+对于每条序列行，编排器构造一个命令列表，使用以下参数调用 `build_ensemble.py`：
+
+| 参数 | 值来源 | 描述 |
+|----------|-------------|-------------|
+| `--sequence` | `row[fasta]` | 氨基酸序列字符串 |
+| `--outpath` | `{outfolder}/{seq_name}.{format}` | 由序列名称和格式派生的输出文件路径 |
+| `--scratch_folder` | `/tmp/tmp-{seq_name}` | 每条序列独立的暂存目录 |
+| `--max_structures_in_ensemble` | CLI 参数 `--max_structures_in_ensemble` | 最终系综中保留的帧数 |
+| `--overwrite` | CLI 标志 | 若指定则透传 |
+
+<CgxTip>每条序列在 `/tmp/tmp-{seq_name}` 下都会获得一个**独立的暂存目录**。这可以防止在针对同一输入文件并发运行多个批处理时，中间文件（片段系综、字节起始 pickle 文件）发生冲突。</CgxTip>
+
+当子进程失败时，异常会被捕获，格式化完整的回溯信息，并将尝试执行的命令与错误信息一并写入输出文件夹中的 `{seq_name}.txt` 文件。随后批处理继续处理下一条序列。这种**快速失败**策略确保了单条有问题的序列（例如，包含非标准氨基酸的序列）不会中断剩余条目的数据集生成。
+
+来源: [generate_dataset.py](/generate_dataset.py#L97-L125)
+
+## 基于随机打乱的并行化
+
+`--shuffle` 标志使用 `pandas.sample(frac=1)` 随机打乱序列的处理顺序。这不仅仅是为了美观——它是**分布式并行化的主要机制**。由于每条序列都是独立处理的（迭代之间没有共享的可变状态），多个工作器可以独立地运行 `generate_dataset.py`，并启用 `--shuffle` 来处理**同一输入文件**。根据统计期望，每个工作器将首先处理不同的随机子集，从而在无需任何中央协调器或队列系统的情况下自然地分配工作负载。
+
+在实践中，你可以通过启动 N 个容器或进程来划分工作，每个容器或进程都使用 `--shuffle` 读取相同的输入文件。应省略 `--overwrite` 标志，以便 `build_ensemble.py` 跳过已完成的系综（其输出文件已存在），从而提供隐式的**幂等检查点**。
+
+来源: [generate_dataset.py](/generate_dataset.py#L94-L96), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L40-L45)
+
+## 每序列流水线集成
+
+每次子进程调用都会触发 `build_ensemble.py` 内部的完整三阶段流水线，该流水线将三个核心脚本作为模块级函数调用进行链接：
+
+```mermaid
+flowchart LR
+    A["fasta_search_in_foldcomp_database<br/>.main()"] -->|"byte_starts.pkl"| B["extract_structures_from_foldcomp_database<br/>.main()"]
+    B -->|"fragment_ensembles/*.h5"| C["join_fragments<br/>.main()"]
+    C --> D["Final Ensemble<br/>(.h5 / .xtc / .pdb / .dcd)"]
+```
+
+| 阶段 | 脚本 | 输入 | 输出 | 传递的关键参数 |
+|-------|--------|-------|--------|----------------------|
+| **1. 搜索** | `fasta_search_in_foldcomp_database` | 序列，foldcomp FASTA | `byte_starts.pkl` | `sequence`, `foldcomp_fasta`, `reduction_factor` |
+| **2. 重建** | `extract_structures_from_foldcomp_database` | Foldcomp DB，字节起始位置 | 片段 `.h5` 文件 | `foldcomp_fasta`, `foldcomp_db`, `n_max_structures_per_fragment`, `exclude_cis_omega` |
+| **3. 拼接** | `join_fragments` | 片段 `.h5` 文件 | 最终系综 | `joins_to_attempt_per_pairing`, `max_structures_in_ensemble`, `rmsd_sort` |
+
+批次编排器仅向子进程暴露 `--max_structures_in_ensemble` 和 `--overwrite`；所有其他流水线参数（`foldcomp_fasta`、`foldcomp_db`、`reduction_factor`、`n_max_structures_per_fragment`、`joins_to_attempt_per_pairing`、`exclude_cis_omega`、`rmsd_sort`）均回退至 `build_ensemble.py` 内部的默认值。这使得批处理接口保持简单，同时依赖于合理的每序列默认值。
+
+来源: [scripts/build_ensemble.py](/scripts/build_ensemble.py#L60-L80), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L91-L142)
+
+## 输出文件组织
+
+批处理生成器将每条输入序列的系综文件写入指定的 `--outfolder` 目录。命名约定为 `{sequence_name}.{format}`，其中格式扩展名由 `--format` 标志决定：
+
+| 格式 | 扩展名 | 轨迹拓扑文件 | 备注 |
+|--------|-----------|--------------------------|-------|
+| **HDF5** | `.h5` | 内嵌 | 原生 MDTraj 格式；I/O 效率最高 |
+| **XTC** | `.xtc` | 配套 `.pdb` | GROMACS 压缩格式；为第一帧写入 `.pdb` |
+| **DCD** | `.dcd` | 配套 `.pdb` | CHARMM 格式；为第一帧写入 `.pdb` |
+| **PDB** | `.pdb` | N/A | 单帧；仅保留最后一帧构象 |
+| **PDB.GZ** | `.pdb.gz` | N/A | Gzip 压缩的 PDB |
+
+<CgxTip>对于轨迹格式（`.xtc`、`.dcd`），`join_fragments.py` 会自动写入一个配套的 `.pdb` 文件，其中包含来自第一帧的拓扑信息。这是必需的，因为这些二进制格式仅存储坐标——`.pdb` 提供了下游工具所需的原子名称、残基信息和键连接性。</CgxTip>
+
+失败的序列会生成一个 `.txt` 错误日志来代替结构文件，从而便于识别并重试失败的条目。
+
+来源: [generate_dataset.py](/generate_dataset.py#L100-L124), [scripts/join_fragments.py](/scripts/join_fragments.py#L317-L319)
+
+## 安全防护与试运行模式
+
+当省略 `--max_structures_in_ensemble` 或将其设置为 `0`（默认值）时，编排器会加载并去重输入文件，但**不会派生任何子进程**。相反，它会记录一条警告：`"set '--max_structures_in_ensemble' to actually generate the ensembles"`。这可作为防止意外运行完整数据集（可能需要数小时或数天）的**安全防护**，同时也可作为**试运行/验证模式**——你可以在提交完整计算之前确认输入文件解析正确，并检查去重警告。
+
+来源: [generate_dataset.py](/generate_dataset.py#L91-L93)
+
+## CLI 参考摘要
+
+下表总结了 `generate_dataset.py` 接受的所有参数：
+
+| 参数 | 短选项 | 类型 | 默认值 | 是否必需 | 描述 |
+|----------|-------|------|---------|----------|-------------|
+| `--input` | `-i` | `str` | — | **是** | 输入 CSV 或 FASTA 文件的路径 |
+| `--outfolder` | `-o` | `str` | `./ensembles` | 否 | 系综文件的输出目录 |
+| `--max_structures_in_ensemble` | `-n` | `int` | `0` | 否 | 每个系综的帧数；`0` = 试运行 |
+| `--fragments_overlap` | — | `int` | `1` | 否 | 片段之间重叠的残基数 |
+| `--column_names` | — | `str` | `seq_name,fasta` | 否 | CSV 中的列名（以逗号分隔） |
+| `--shuffle` | — | 标志 | `False` | 否 | 随机打乱处理顺序以实现并行化 |
+| `--format` | — | `str` | `xtc` | 否 | 输出格式：`h5`、`xtc`、`pdb`、`pdb.gz`、`dcd` |
+| `--overwrite` | — | 标志 | `False` | 否 | 覆盖已存在的系综文件 |
+
+来源: [generate_dataset.py](/generate_dataset.py#L24-L59)
+
+## 典型使用模式
+
+从包含 500 条序列的 CSV 文件进行**单机批处理生成**：
+
+```bash
+docker run -v $(pwd):/data --gpus 1 idp-o \
+  python /IDP-o/generate_dataset.py \
+    --input /data/sequences.csv \
+    --outfolder /data/ensembles \
+    --max_structures_in_ensemble 100 \
+    --format h5
+```
+
+在具有独立 GPU 的 4 台机器上进行**分布式并行化**，均读取相同的输入：
+
+```bash
+# 在每台机器上 (运行 1-4):
+docker run -v $(pwd):/data --gpus 1 idp-o \
+  python /IDP-o/generate_dataset.py \
+    --input /data/sequences.csv \
+    --outfolder /data/ensembles \
+    --max_structures_in_ensemble 100 \
+    --shuffle \
+    --format xtc
+```
+
+每个工作器独立地打乱并处理序列；由于未指定 `--overwrite`，已完成的系综将被跳过，从而提供自然的工作窃取行为。
+
+在长时间批处理之前，用于检查输入解析的**验证试运行**：
+
+```bash
+python generate_dataset.py \
+  --input sequences.fasta \
+  --outfolder ./ensembles
+# 保留 -n 为默认值 0 → 记录计数和重复项，不进行计算
+```
+
+来源: [generate_dataset.py](/generate_dataset.py#L23-L59)
+
+## 后续步骤
+
+- 对于每次批处理调用触发的每序列流水线，请参阅[架构概览](4-architecture-overview)以及各个流水线阶段页面：[GPU 加速序列搜索](6-gpu-accelerated-sequence-search)、[从 Foldcomp 重建结构](7-structure-reconstruction-from-foldcomp)和[分层片段拼接](8-hierarchical-fragment-joining)。
+- 有关输出文件格式及如何在下游分析中使用它们的详细信息，请参阅[输出格式与下游使用](12-output-formats-and-downstream-use)。
+- 有关所有脚本的完整 CLI 参数集（包括批处理封装器未暴露的每序列参数），请参阅[命令行配置参考](13-command-line-configuration-reference)。
+
+---
+
+- [深入探究/输出格式与下游应用](https://zread.ai/PeptoneLtd/IDP-o/12-output-formats-and-downstream-use)
+
+---
+slug:12-output-formats-and-downstream-use
+blog_type:normal
+---
+
+
+IDP-o 生成**结构完整的多帧蛋白质系综** —— 即轨迹文件，其中每一帧代表内在无序蛋白质的一种合理构象。其输出经过专门设计，可被标准分子动力学 (MD) 分析工具包、可视化软件及下游模拟引擎直接使用，无需任何后处理。本页详细说明了 IDP-o 可输出的所有格式、与主输出一同生成的辅助文件，以及将这些输出集成到常见下游工作流中的具体模式。
+
+来源：[generate_dataset.py](/generate_dataset.py#L1-L126), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L1-L167), [scripts/join_fragments.py](/scripts/join_fragments.py#L1-L348)
+
+## 支持的输出格式
+
+IDP-o 支持五种轨迹格式，可通过 `generate_dataset.py` 中的 `--format` 标志进行选择，或从 `build_ensemble.py` 中的 `--outpath` 扩展名推断得出。所有格式均通过 **MDTraj** 的 I/O 层写入，从而保证与读取这些标准的所有工具实现字节级兼容。
+
+| 格式 | 扩展名 | 拓扑存储 | 压缩方式 | 最适用场景 |
+|---|---|---|---|---|
+| **HDF5** | `.h5` | 内嵌于文件 | 无损 | 单文件便携性，Python 原生分析 |
+| **XTC** | `.xtc` | 伴随 `.pdb` | 有损 (GROMACS) | GROMACS 流水线，大型轨迹 |
+| **PDB** | `.pdb` | 按模型内嵌 | 无 | 目视检查，小规模系综 |
+| **Gzipped PDB** | `.pdb.gz` | 按模型内嵌 | gzip | 归档，减少磁盘占用 |
+| **DCD** | `.dcd` | 伴随 `.pdb` | 无 | CHARMM/OpenMM 流水线 |
+
+<CgxTip>对于生产级数据集（数百条序列 × 数百帧），请选择 **XTC** —— 其有损压缩生成的文件比 DCD 小约 3 倍，同时保持亚埃级精度，且 GROMACS 工具可原生读取。当你的下游分析完全基于 Python，且希望将拓扑和坐标整合在单个文件中而不产生任何伴随文件时，请选择 **HDF5**。</CgxTip>
+
+该格式在 `generate_dataset.py` 中通过 `--format` 参数于批次级别指定，默认值为 `xtc`。输入 CSV/FASTA 中的每条序列都会在输出文件夹中生成一个名为 `{sequence_name}.{format}` 的输出文件。
+
+来源：[generate_dataset.py](/generate_dataset.py#L74-L78), [scripts/join_fragments.py](/scripts/join_fragments.py#L321-L326)
+
+## 伴随文件与辅助输出
+
+### 二进制格式的拓扑伴随文件
+
+二进制轨迹格式（`.xtc`、`.dcd`）仅存储坐标数组 —— 它们缺乏解释坐标所需的原子名称、残基标识和键合信息。IDP-o 在选择这些格式时，会自动写入一个包含第 0 帧拓扑的**伴随 PDB 文件**：
+
+```python
+t.save(outpath)
+if outpath.endswith((".xtc", ".dcd")):
+    t[0].save(outpath[:-3] + "pdb")
+```
+
+这会生成一对文件，例如 `P53_TAD.xtc` + `P53_TAD.pdb`。伴随 PDB 是一个**单帧文件**（系综的第 0 帧），作为所有需要分离坐标加拓扑输入的下游工具的拓扑参考。
+
+来源：[scripts/join_fragments.py](/scripts/join_fragments.py#L324-L326)
+
+### 生成失败时的错误日志
+
+当批量生成遇到单条序列失败时，IDP-o 不会中止整个数据集的生成。相反，它会在预期输出路径旁写入一个名为 `{sequence_name}.txt` 的**纯文本错误日志**，其中包含失败的命令和完整的回溯信息：
+
+```python
+with open(os.path.splitext(outpath)[0] + ".txt", "w") as f:
+    f.write(cmd + "\n" + error_msg + "\n")
+```
+
+这使得批量数据集生成能够在个别失败后继续进行，同时保留完整的调试诊断信息。
+
+来源：[generate_dataset.py](/generate_dataset.py#L114-L116)
+
+### 中间临时产物
+
+在系综构建期间，IDP-o 会将两类中间文件写入 `--scratch_folder`：
+
+| 产物 | 路径模式 | 用途 | 生命周期 |
+|---|---|---|---|
+| **字节起始索引** | `scratch_folder/byte_starts.pkl` | 经 Pickle 序列化的字典，将每个片段映射到其在 Foldcomp 数据库中的命中位置 | 由序列搜索写入；由结构提取消耗 |
+| **片段系综** | `scratch_folder/fragment_ensembles/{fragment}.h5` | 来自 Foldcomp 重建的逐片段 HDF5 轨迹 | 由结构提取写入；由片段拼接消耗 |
+| **片段系综 (顺式排除)** | `scratch_folder/fragment_ensembles-exclude_cis_omega/{fragment}.h5` | 同上，但仅保留反式-ω (trans-ω) 过滤结果 | 在启用 `--exclude_cis_omega` 时使用 |
+
+这些中间文件在系综生成完成后**不会自动清理**。对于大批量运行，你应定期清空暂存目录，或将其挂载到高速临时存储上。
+
+来源：[scripts/fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L170-L173), [scripts/extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L300-L305), [scripts/build_ensemble.py](/scripts/build_ensemble.py#L50-L55)
+
+## 系综结构与完整性
+
+### 包含推断氢原子的全原子输出
+
+拼接流水线返回的最终系综会经历一个关键的后处理步骤：**氢原子推断与插入**。Foldcomp 数据库仅存储重原子坐标（主链 N/CA/C/O 及侧链原子）。在写入输出文件之前，IDP-o 会调用：
+
+```python
+t = infer_and_insert_hydrogens(t)
+```
+
+该函数（来自 `nerfax` 库）利用标准键长和键角，从重原子几何结构中重建所有氢原子位置，从而生成**完全全原子轨迹**。这意味着输出可直接用于力场评估、NMR 化学位移预测器以及任何需要氢原子位置的计算 —— 无需外部质子化步骤。
+
+来源：[scripts/join_fragments.py](/scripts/join_fragments.py#L317-L318)
+
+### 帧数与选择
+
+最终系综中的构象数量由 `--max_structures_in_ensemble` 控制（默认值：在 `build_ensemble.py` 中为 100）。此参数作为写入磁盘帧数的**硬性上限**：
+
+```python
+t = md.Trajectory(
+    data[seq]["coords"][:max_structures_in_ensemble],
+    md.Topology.from_dataframe(build_mdtraj_top(seq)),
+)
+```
+
+这些帧取自层级拼接过程生成的前 *N* 个结构。当启用 `--rmsd_sort` 时，这些帧将在应用上限前按贪心最近邻 RMSD **重排序**，确保所选帧在结构空间中形成一条平滑的构象路径。
+
+来源：[scripts/join_fragments.py](/scripts/join_fragments.py#L311-L319)
+
+### 可选的基于 RMSD 的排序
+
+`--rmsd_sort` 标志会触发一个两步后处理流水线：
+
+1. **叠合**：所有帧通过 `trajectory.superpose(trajectory, frame=0)` 与第 0 帧对齐。
+2. **贪心 RMSD 排序**：通过 RMSD 矩阵进行最近邻排序，安排帧的顺序，使连续帧之间的结构偏差最小，从而在制作动画时产生视觉上平滑的轨迹。
+
+```mermaid
+flowchart LR
+    A["Raw Joined\nEnsemble"] --> B{"--rmsd_sort?"}
+    B -- No --> C["Write Output\n(original join order)"]
+    B -- Yes --> D["Superpose all\nframes to frame 0"]
+    D --> E["Compute pairwise\nRMSD matrix"]
+    E --> F["Greedy nearest-\nneighbor sort"]
+    F --> G["Infer & insert\nhydrogens"]
+    G --> H["Write Output\n(RMSD-sorted order)"]
+    C --> G2["Infer & insert\nhydrogens"]
+    G2 --> C2["Write Output"]
+```
+
+此排序主要是一种**可视化辅助**手段 —— 它不会改变系综的统计特性，仅改变帧的排序。
+
+来源：[scripts/join_fragments.py](/scripts/join_fragments.py#L259-L275), [scripts/join_fragments.py](/scripts/join_fragments.py#L315-L319)
+
+## 下游集成模式
+
+### 使用 MDTraj 加载系综 (Python)
+
+由于 IDP-o 写入的是标准 MDTraj 兼容格式，最简单的加载模式为：
+
+```python
+import mdtraj as md
+
+# HDF5 — 拓扑内嵌
+ensemble = md.load_hdf5("P53_TAD.h5")
+
+# XTC — 拓扑来自伴随 PDB
+ensemble = md.load("P53_TAD.xtc", top="P53_TAD.pdb")
+
+# DCD — 拓扑来自伴随 PDB
+ensemble = md.load("P53_TAD.dcd", top="P53_TAD.pdb")
+
+# 多模型 PDB
+ensemble = md.load("P53_TAD.pdb")
+```
+
+这四种调用均返回一个 `md.Trajectory` 对象，其 `n_frames` 等于 `--max_structures_in_ensemble`，`n_atoms` 包含所有推断的氢原子。
+
+### 计算系综平均性质
+
+IDP-o 系综专为直接计算 IDP 相关可观测量而设计：
+
+```python
+# 回转半径分布
+rg = md.compute_rg(ensemble)
+print(f"Rg: {rg.mean():.2f} ± {rg.std():.2f} Å")
+
+# 逐残基 RMSF（需以平均结构为参考）
+rmsf = md.rmsf(ensemble, ensemble[0])
+
+# 残基间距离分布
+pairs = ensemble.topology.select_pairs("resid 0", "resid 50")
+dists = md.compute_distances(ensemble, pairs)
+```
+
+### 与 GROMACS / CHARMM 流水线集成
+
+对于 `.xtc` 输出，GROMACS 工具可直接接受该文件对：
+
+```bash
+# 相对于参考计算 RMSD
+gmx rms -s ref.tpr -f ensemble.xtc -o rmsd.xvg
+
+# 聚类构象
+gmx cluster -f ensemble.xtc -s topol.tpr -method gromos -c clusters.pdb
+```
+
+对于 `.dcd` 输出，VMD 和 CHARMM 工具可原生使用该轨迹 + PDB 拓扑文件对。
+
+### NMR 化学位移预测
+
+由于 IDP-o 系综包含所有氢原子位置，它们可以直接输入到化学位移预测器（如 **SPARTA+** 或 **ShiftX2**），无需任何质子化步骤：
+
+```python
+# 将帧导出为 PDB 作为 SPARTA+ 输入
+ensemble[0].save("frame_0.pdb")
+# SPARTA+ 直接读取全原子 PDB
+```
+
+### 批量数据集集成
+
+`generate_dataset.py` 封装器为每条输入序列生成一个系综，使输出文件夹可直接作为**数据集**使用。命名约定 `{sequence_name}.{format}` 保留了输入 CSV/FASTA 中的标识符，从而实现输入序列与其系综之间的程序化交叉引用。失败的序列生成 `.txt` 错误日志而非系综文件，因此系综文件本身的存在即可作为成功指示器。
+
+来源：[generate_dataset.py](/generate_dataset.py#L95-L116), [scripts/join_fragments.py](/scripts/join_fragments.py#L306-L326)
+
+## 输出格式比较：决策矩阵
+
+以下矩阵总结了权衡因素，以指导针对特定下游场景的格式选择：
+
+| 下游用例 | 推荐格式 | 理由 |
+|---|---|---|
+| 纯 Python 分析 (MDTraj, PyEMMA) | `.h5` | 单文件，拓扑内嵌，随机帧访问最快 |
+| GROMACS MD 精修 | `.xtc` | 原生格式，有损压缩节省磁盘，自动生成伴随 PDB |
+| CHARMM/OpenMM MD 精修 | `.dcd` | 这些引擎的原生格式，自动生成伴随 PDB |
+| 目视检查 (PyMOL, ChimeraX) | `.pdb` | 可直接打开，多模型 PDB，无需伴随文件 |
+| 长期归档或传输 | `.pdb.gz` | 最小独立文件，解压后通用可读 |
+| 机器学习数据集 | `.h5` | 通过 h5py 实现高效向量化读取，可附加元数据 |
+| NMR 反算 | `.h5` 或 `.xtc` | 氢原子存在；格式选择取决于预测器的输入 API |
+
+<CgxTip>在构建大规模数据集（例如数千条 IDP 序列）时，请使用 `.xtc` 以提高存储效率，并单独归档伴随的 `.pdb` 文件 —— 它们对于给定序列的所有帧都是相同的，因此每个序列只需一个。对于需要反复迭代帧的 ML 训练流水线，`.h5` 可避免重复解析拓扑的开销。</CgxTip>
+
+来源：[generate_dataset.py](/generate_dataset.py#L74-L78), [scripts/join_fragments.py](/scripts/join_fragments.py#L321-L326)
+
+## 接下来阅读什么
+
+- 有关大规模生成这些输出的批量生成工作流，请参阅 [批量数据集生成](11-batch-dataset-generation)。
+- 有关控制输出格式、帧数和排序行为的完整 CLI 标志集，请参阅 [命令行配置参考](13-command-line-configuration-reference)。
+- 有关氢原子推断算法和结构完整性保证，请参阅 [JAX 向量化系综计算](10-jax-vectorized-ensemble-computation)。
+
+---
+
+- [深入探究/命令行配置参考](https://zread.ai/PeptoneLtd/IDP-o/13-command-line-configuration-reference)
+
+---
+slug:13-command-line-configuration-reference
+blog_type:normal
+---
+
+
+IDP-o 暴露了**六个命令行接口**，涵盖一个批量调度器、一个核心流水线入口点、三个内部流水线阶段以及一个数据库准备工具。两个主要的面向用户的入口点是 `generate_dataset.py`（批量处理）和 `scripts/build_ensemble.py`（单序列系综构建），而其余脚本由流水线内部调用，但也可在高级工作流中独立运行。每个接口都使用 Python 的 `argparse` 及 `ArgumentDefaultsHelpFormatter`，这意味着 `--help` 输出将始终包含默认值。本参考文档记录了所有标志及其类型、默认值、约束条件以及脚本间的配置传递。
+
+来源：[generate_dataset.py](/generate_dataset.py#L24-L59), [build_ensemble.py](/scripts/build_ensemble.py#L87-L143), [prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L121-L128)
+
+## 入口点层次结构
+
+下图阐明了哪些脚本由用户直接调用，哪些由流水线内部调用。当使用 `generate_dataset.py` 时，大部分配置通过其自身的标志进行传递，并通过子进程构建传播至 `build_ensemble.py` —— 在批量级别仅暴露了 `build_ensemble.py` 参数的一个子集。
+
+```mermaid
+graph TD
+    subgraph "User-Facing Entry Points"
+        G["generate_dataset.py<br/>(Batch Orchestrator)"]
+        B["scripts/build_ensemble.py<br/>(Single-Sequence Builder)"]
+        P["scripts/prepare_foldcomp_fasta.py<br/>(Database Prep)"]
+    end
+    subgraph "Internal Pipeline Stages"
+        F["scripts/fasta_search_in_foldcomp_database.py<br/>(Stage 1: Sequence Search)"]
+        E["scripts/extract_structures_from_foldcomp_database.py<br/>(Stage 2: Structure Extraction)"]
+        J["scripts/join_fragments.py<br/>(Stage 3: Fragment Joining)"]
+    end
+    G -->|"subprocess per sequence"| B
+    B -->|"calls main()"| F
+    B -->|"calls main()"| E
+    B -->|"calls main()"| J
+    P -.->|"produces .fasta + DB"| F
+    P -.->|"produces DB"| E
+
+    style G fill:#4a90d9,color:#fff
+    style B fill:#4a90d9,color:#fff
+    style P fill:#4a90d9,color:#fff
+    style F fill:#7b8a9e,color:#fff
+    style E fill:#7b8a9e,color:#fff
+    style J fill:#7b8a9e,color:#fff
+```
+
+**Docker 容器**将 `scripts/build_ensemble.py` 设置为其 `ENTRYPOINT`，因此所有 Docker 调用都会将标志直接传递给该脚本。`PYTHONPATH` 被设置为 `/IDP-o/`，以支持跨 `scripts/` 目录的内部模块导入。
+
+来源：[Dockerfile](/Dockerfile#L1-L9), [build_ensemble.py](/scripts/build_ensemble.py#L25-L80)
+
+## `generate_dataset.py` — 批量调度器
+
+这是跨整个数据集（CSV 或 FASTA）生成系综的顶级脚本。它遍历输入序列，为每个序列启动 `build_ensemble.py` 作为子进程。关键设计约束是，**仅传播了 `build_ensemble.py` 参数的一个子集** —— 对 `--foldcomp_fasta`、`--foldcomp_db`、`--n_max_structures_per_fragment`、`--reduction_factor`、`--joins_to_attempt_per_pairing`、`--exclude_cis_omega` 和 `--rmsd_sort` 的高级调整需要直接调用 `build_ensemble.py`。
+
+| 标志 | 短选项 | 类型 | 默认值 | 必需 | 描述 |
+|------|-------|------|---------|----------|-------------|
+| `--input` | `-i` | `str` | — | **是** | 输入文件路径（`.csv` 或 `.fasta`） |
+| `--outfolder` | `-o` | `str` | `./ensembles` | 否 | 生成系综的输出目录 |
+| `--max_structures_in_ensemble` | `-n` | `int` | `0` | 否 | 每个系综的帧数；`0` = 试运行（不生成系综） |
+| `--fragments_overlap` | | `int` | `1` | 否 | 片段间的重叠残基数 |
+| `--column_names` | | `str` | `seq_name,fasta` | 否 | CSV 中以逗号分隔的列名 |
+| `--shuffle` | | flag | `False` | 否 | 打乱处理顺序（用于并行化） |
+| `--format` | | `str` | `xtc` | 否 | 输出格式：`h5`、`xtc`、`pdb`、`pdb.gz`、`dcd` |
+| `--overwrite` | | flag | `False` | 否 | 覆盖已存在的系综文件 |
+
+<CgxTip>`--max_structures_in_ensemble` 的默认值 `0` 被有意设定为试运行模式 —— 脚本会记录警告并退出，不生成任何内容。你**必须**将其设置为正整数才能产生输出。</CgxTip>
+
+**输入格式处理**：当 `--input` 以 `.fasta` 结尾时，解析器将以 `>` 为前缀的标头读取为序列名称，随后的行读取为序列。当以 `.csv` 结尾时，仅加载由 `--column_names` 指定的列。重复的序列名称或序列将被丢弃并发出警告。每个序列的输出文件在 `--outfolder` 中命名为 `{seq_name}.{format}`。
+
+**子进程传播**：对于每个序列，脚本构造一个命令调用 `build_ensemble.py`，并传入 `--sequence`、`--outpath`、`--scratch_folder`（设为 `/tmp/tmp-{seq_name}`）、`--max_structures_in_ensemble` 以及条件性传入的 `--overwrite`。不会转发其他 `build_ensemble.py` 参数，这意味着 Foldcomp 路径、缩减因子、连接尝试和质量过滤器均使用其自身默认值。
+
+来源：[generate_dataset.py](/generate_dataset.py#L67-L125)
+
+## `scripts/build_ensemble.py` — 单序列系综构建器
+
+这是**核心流水线入口点**，也是 Docker 的 `ENTRYPOINT`。它按顺序编排所有三个流水线阶段 —— 序列搜索、结构提取和片段连接。它接受最丰富的配置标志集，是你直接调用以进行单蛋白工作或需要对每个流水线参数进行细粒度控制时的脚本。
+
+| 标志 | 类型 | 默认值 | 必需 | 描述 |
+|------|------|---------|----------|-------------|
+| `--sequence` | `str` | — | **是** | 氨基酸序列（单字母代码） |
+| `--foldcomp_fasta` | `str` | `/data/afdb/afdb_uniprot_v4.fasta` | 否 | Foldcomp 数据库的带偏移量注释的 FASTA |
+| `--foldcomp_db` | `str` | `/data/afdb/afdb_uniprot_v4` | 否 | Foldcomp 数据库文件路径 |
+| `--n_max_structures_per_fragment` | `int` | `1000` | 否 | 每个片段提取的最大结构数 |
+| `--outpath` | `str` | — | **是** | 输出路径；扩展名决定格式（`.h5`、`.xtc`、`.dcd`、`.pdb`、`.pdb.gz`） |
+| `--scratch_folder` | `str` | `/tmp` | 否 | 中间文件目录 |
+| `--reduction_factor` | `int` | `1` | 否 | 数据库搜索缩减（例如，`10` = 搜索 1/10） |
+| `--joins_to_attempt_per_pairing` | `int` | `500000` | 否 | 每个片段对的连接尝试次数 |
+| `--max_structures_in_ensemble` | `int` | `100` | 否 | 最终系综中的最大帧数 |
+| `--exclude_cis_omega` | flag | `False` | 否 | 排除具有顺式-ω 骨架角的结构 |
+| `--rmsd_sort` | flag | `False` | 否 | 基于 RMSD 排序并叠加帧以进行可视化 |
+| `--overwrite` | flag | `False` | 否 | 覆盖已存在的输出文件 |
+
+**序列验证**：`main()` 函数验证 `--sequence` 中的每个字符是否属于标准的 20 个氨基酸字母表（`ACDEFGHIKLMNPQRSTVWY`）。非标准残基（包括 `B`、`Z`、`X`、`*`）将引发 `ValueError`。
+
+**临时目录结构**：临时文件夹接收两个产物：一个 `byte_starts.pkl` 文件（来自阶段 1 的搜索结果）和一个 `fragment_ensembles/` 子目录，其中包含来自阶段 2 的每个片段的 `.h5` 文件。当激活 `--exclude_cis_omega` 时，片段目录会附加 `-exclude_cis_omega` 后缀，以避免与未过滤的结果发生冲突。
+
+来源：[build_ensemble.py](/scripts/build_ensemble.py#L25-L80), [build_ensemble.py](/scripts/build_ensemble.py#L87-L166)
+
+## `scripts/prepare_foldcomp_fasta.py` — 数据库准备工具
+
+此一次性设置脚本下载 Foldcomp 数据库，提取其 FASTA，并将标头重写为包含字节偏移量而非蛋白质标签 —— 生成搜索阶段所需的特殊格式 `.fasta` 文件。它是唯一**不**参与系综生成流水线本身的脚本。
+
+| 标志 | 类型 | 默认值 | 必需 | 描述 |
+|------|------|---------|----------|-------------|
+| `--foldcomp-db` | `str` | `afdb_uniprot_v4` | 否 | Foldcomp 数据库名称（用于 `foldcomp.setup()`） |
+| `--threads` | `int` | `8` | 否 | `foldcomp extract` 的线程数 |
+| `--workdir` | `str` | `/data/foldcomp_db` | 否 | 下载和提取的工作目录 |
+
+**行为细节**：脚本首先切换到 `--workdir`，然后检查数据库文件是否存在于本地 —— 如果不存在，则调用 `foldcomp.setup()` 进行下载（`afdb_uniprot_v4` 数据库大约为 1.1 TB）。然后，它从 `.index` 和 `.lookup` 伴随文件计算字节偏移映射，使用 `foldcomp` 二进制文件提取原始 FASTA（如果在 `PATH` 中未找到该二进制文件，则自动下载），最后将 FASTA 标头从 `>protein_label` 重写为 `>byte_offset`。
+
+<CgxTip>`foldcomp` 二进制文件通过 `shutil.which()` 自动检测，若未找到则回退到当前目录下的 `./foldcomp`，最后对于 Windows (x64)、macOS (universal) 和 Linux (x86_64 / arm64) 平台，会从 `mmseqs.com` 自动下载。如果未预装该二进制文件，请确保网络可访问。</CgxTip>
+
+来源：[prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L33-L149)
+
+## `scripts/fasta_search_in_foldcomp_database.py` — 阶段 1：序列搜索
+
+此 GPU 加速阶段在带偏移量注释的 FASTA 中搜索每个片段序列的所有实例。它由 `build_ensemble.py` 内部调用，但也可独立运行以进行调试或预计算搜索结果。
+
+| 标志 | 类型 | 默认值 | 必需 | 描述 |
+|------|------|---------|----------|-------------|
+| `--sequence` | `str` | — | **是** | 要切片和搜索的完整蛋白质序列 |
+| `--foldcomp_fasta` | `str` | `/data/afdb/afdb_uniprot_v4.fasta` | 否 | 带偏移量注释的 FASTA 路径 |
+| `--pkl_outpath` | `str` | — | **是** | 搜索命中数据的输出 `.pkl` 路径 |
+| `--reduction_factor` | `int` | `1` | 否 | 比例缩减（例如，`10` = 搜索 1/10 的数据库） |
+
+**内部片段生成**：`main()` 函数使用硬编码参数 `overlap=2` 和 `seq_len=6`（生成具有 2 个残基重叠的 6 残基片段）对输入序列进行切片。这些未作为 CLI 标志暴露。`--reduction_factor` 控制扫描 FASTA 文件的比例 —— 值为 `N` 意味着仅搜索文件（按字节大小）的 `1/N`，以速度换取召回率。
+
+**输出格式**：序列化输出是一个字典，将每个片段字符串映射到由三个 NumPy 数组组成的 3 元组：`(hit_idxs, byte_starts, aa_start_index)`，其中 `byte_starts` 是 Foldcomp 数据库文件中的字节偏移量，`aa_start_index` 是匹配在命中蛋白质中开始的残基索引。
+
+来源：[fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L155-L193)
+
+## `scripts/extract_structures_from_foldcomp_database.py` — 阶段 2：结构提取
+
+此阶段读取搜索命中，定位到 Foldcomp 数据库中，使用 JAX 编译的函数从压缩的内部坐标表示重建 3D 坐标，并写入每个片段的 HDF5 轨迹文件。
+
+| 标志 | 类型 | 默认值 | 必需 | 描述 |
+|------|------|---------|----------|-------------|
+| `--byte_starts_path` | `str` | `example/byte_starts.pkl` | **是** | 来自阶段 1 的序列化搜索命中 |
+| `--foldcomp_fasta` | `str` | `/data/afdb/afdb_uniprot_v4.fasta` | 否 | 带偏移量注释的 FASTA 路径 |
+| `--foldcomp_db` | `str` | `/data/afdb/afdb_uniprot_v4` | 否 | Foldcomp 数据库文件路径 |
+| `--outfolder` | `str` | — | **是** | 每个片段的 `.h5` 文件的输出目录 |
+| `--n_max_structures_per_fragment` | `int` | `1000` | 否 | 每个片段提取的最大结构数 |
+| `--exclude_cis_omega` | flag | `False` | 否 | 过滤掉具有顺式-ω 角（|ω| ≤ 90°）的结构 |
+
+**顺式-ω 过滤**：当激活 `--exclude_cis_omega` 时，提取步骤会检查每个候选结构的 omega 骨架角。**所有** omega 角满足 `|ω| > 90°`（即呈反式样）的结构被保留；任何至少具有一个顺式样 omega 的结构将被丢弃。这是一个保守的过滤器 —— 它要求片段中的每个 omega 都是反式样，而不仅仅是大多数。
+
+**JAX 编译**：该模块在导入时设置 `JAX_PLATFORMS=cpu`，强制所有 JAX 计算在 CPU 上执行，即使有可用的 GPU。这是有意为之 —— 阶段 2 是计算轻量但内存密集型的，GPU 被保留用于阶段 1 基于 CuPy 的搜索。
+
+来源：[extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L17-L18), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L277-L325)
+
+## `scripts/join_fragments.py` — 阶段 3：片段连接
+
+此阶段加载每个片段的 HDF5 文件，执行带有重叠对齐和冲突检测的分层成对连接，并写入最终的系综轨迹。
+
+| 标志 | 类型 | 默认值 | 必需 | 描述 |
+|------|------|---------|----------|-------------|
+| `--sequence` | `str` | — | **是** | 完整的蛋白质序列 |
+| `--fragments_folder` | `str` | — | **是** | 包含每个片段 `.h5` 文件的目录 |
+| `--outpath` | `str` | — | **是** | 输出轨迹路径 |
+| `--joins_to_attempt_per_pairing` | `int` | `500000` | 否 | 每个片段对的随机连接尝试次数 |
+| `--max_structures_in_ensemble` | `int` | `500000` | 否 | 最终系综中的最大帧数 |
+| `--rmsd_sort` | flag | `False` | 否 | 基于 RMSD 排序并叠加帧 |
+| `--overwrite` | flag | `False` | 否 | 覆盖已存在的输出文件 |
+
+**默认值差异说明**：当独立调用时，`--max_structures_in_ensemble` 默认为 `500000`，但当从 `build_ensemble.py` 调用时，它接收到的默认值为 `100`。这意味着独立运行时的默认值实际上是“保留所有有效连接”，而流水线默认值则更具选择性。在独立运行阶段 3 时请注意此差异。
+
+**XLA 内存配置**：该模块在导入时设置 `XLA_PYTHON_CLIENT_MEM_FRACTION=.96`，为 JAX 编译保留 96% 的可用加速器内存。这对于向量化连接操作至关重要，且无法通过 CLI 配置 —— 如需更改，必须在源代码中修改。
+
+**RMSD 排序**：当激活 `--rmsd_sort` 时，最终轨迹会叠加到第 0 帧，然后帧按 RMSD 空间中的贪婪最近邻重新排序。这会产生更平滑的可视化效果，但对于大型系综会增加显著的计算量。
+
+来源：[join_fragments.py](/scripts/join_fragments.py#L22-L23), [join_fragments.py](/scripts/join_fragments.py#L323-L347)
+
+## 环境变量
+
+流水线依赖于在源代码内导入时设置的两个环境变量。这些**未**作为 CLI 标志暴露，需要修改源代码或通过 Docker `ENV` 覆盖才能更改。
+
+| 变量 | 设置位置 | 值 | 用途 |
+|----------|--------|-------|---------|
+| `JAX_PLATFORMS` | `extract_structures_from_foldcomp_database.py` | `cpu` | 强制阶段 2 的 JAX 计算在 CPU 上执行 |
+| `XLA_PYTHON_CLIENT_MEM_FRACTION` | `join_fragments.py` | `.96` | 为阶段 3 保留 96% 的加速器内存 |
+| `PYTHONPATH` | `Dockerfile` | `/IDP-o/` | 支持 `scripts/` 中的跨模块导入 |
+
+来源：[extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L17), [join_fragments.py](/scripts/join_fragments.py#L22), [Dockerfile](/Dockerfile#L6)
+
+## 输出格式参考
+
+`--format` 标志（在 `generate_dataset.py` 中）和 `--outpath` 扩展名（在 `build_ensemble.py` 和 `join_fragments.py` 中）决定输出轨迹格式。所有格式都包含由 `nerfax.reduce_utils.reconstruct_from_mdtraj` 推断的氢原子。
+
+| 格式 | 扩展名 | 备注 |
+|--------|-----------|-------|
+| HDF5 | `.h5` | MDTraj HDF5；原生往返；推荐用于大型系综 |
+| XTC | `.xtc` | Gromacs XTC；自动生成伴随的 `.pdb` 拓扑文件 |
+| DCD | `.dcd` | CHARMM DCD；自动生成伴随的 `.pdb` 拓扑文件 |
+| PDB | `.pdb` | 每帧一个 PDB 文件（多模型） |
+| 压缩 PDB | `.pdb.gz` | Gzip 压缩的多模型 PDB |
+
+对于 XTC 和 DCD 格式，`join_fragments.py` 会自动在轨迹旁保存一个单帧 `.pdb` 文件，以提供下游工具所需的拓扑参考。
+
+来源：[join_fragments.py](/scripts/join_fragments.py#L318-L319), [generate_dataset.py](/generate_dataset.py#L52-L57)
+
+## 配置传递映射
+
+当使用 `generate_dataset.py` 时，下表确切显示了哪些 `build_ensemble.py` 参数从调度器接收值，哪些回落至其内置默认值。这对于了解每个调用级别可用的调整旋钮至关重要。
+
+| `build_ensemble.py` 参数 | 由 `generate_dataset.py` 设置 | 值来源 | 未传递时的默认值 |
+|-------------------------------|------------------------------|--------------|---------------------------|
+| `--sequence` | ✅ 是 | 输入 CSV/FASTA 行 | — |
+| `--outpath` | ✅ 是 | `{outfolder}/{seq_name}.{format}` | — |
+| `--scratch_folder` | ✅ 是 | `/tmp/tmp-{seq_name}` | — |
+| `--max_structures_in_ensemble` | ✅ 是 | `-n` 标志值 | — |
+| `--overwrite` | ✅ 是 | `--overwrite` 标志 | — |
+| `--foldcomp_fasta` | ❌ 否 | 内置默认值 | `/data/afdb/afdb_uniprot_v4.fasta` |
+| `--foldcomp_db` | ❌ 否 | 内置默认值 | `/data/afdb/afdb_uniprot_v4` |
+| `--n_max_structures_per_fragment` | ❌ 否 | 内置默认值 | `1000` |
+| `--reduction_factor` | ❌ 否 | 内置默认值 | `1` |
+| `--joins_to_attempt_per_pairing` | ❌ 否 | 内置默认值 | `500000` |
+| `--exclude_cis_omega` | ❌ 否 | 内置默认值 | `False` |
+| `--rmsd_sort` | ❌ 否 | 内置默认值 | `False` |
+
+六个未传递的参数代表了**高级调整面** —— 若要控制它们，请直接调用 `build_ensemble.py`（或通过 Docker），而不是通过批量调度器。
+
+来源：[generate_dataset.py](/generate_dataset.py#L103-L118), [build_ensemble.py](/scripts/build_ensemble.py#L87-L143)
+
+## Docker 调用模式
+
+Docker 镜像使用 `scripts/build_ensemble.py` 作为其 `ENTRYPOINT`，因此镜像名称后的所有标志都直接映射到该脚本的参数解析器。以下模式涵盖了最常见的工作流。
+
+**单序列系综生成**（GPU 加速搜索 + CPU 重建）：
+```bash
+docker run -v $(pwd):/data --gpus 1 \
+  idp-o \
+    --sequence DLIVERANDSANDRDANDCARLDANDMICHELEANDLDHIEANDFADIDANDSTEFANDANDISTVANANDALDERTANDDLIVERAGAINPLASDTHERS \
+    --outpath /data/output/ensemble.xtc \
+    --scratch_folder /data/output/scratch \
+    --foldcomp_fasta /data/afdb_uniprot_v4.fasta \
+    --foldcomp_db /data/afdb_uniprot_v4 \
+    --n_max_structures_per_fragment 100 \
+    --max_structures_in_ensemble 50
+```
+
+**数据库准备**（覆盖 ENTRYPOINT）：
+```bash
+docker run -v $(pwd):/data --entrypoint python idp-o \
+  /IDP-o/scripts/prepare_foldcomp_fasta.py --workdir /data
+```
+
+**批量生成**（覆盖 ENTRYPOINT）：
+```bash
+docker run -v $(pwd):/data --gpus 1 --entrypoint python idp-o \
+  /IDP-o/generate_dataset.py \
+    --input /data/sequences.csv \
+    --outfolder /data/ensembles \
+    --max_structures_in_ensemble 50 \
+    --format xtc
+```
+
+来源：[Dockerfile](/Dockerfile#L1-L9), [README.md](/README.md#L44-L52)
+
+## 快速参考：所有脚本的所有标志
+
+为便于快速查找，以下汇总表列出了所有六个脚本中的每个 CLI 标志及其类型和默认值。
+
+| 脚本 | 标志 | 类型 | 默认值 | 必需 |
+|--------|------|------|---------|----------|
+| `generate_dataset.py` | `--input` / `-i` | `str` | — | 是 |
+| `generate_dataset.py` | `--outfolder` / `-o` | `str` | `./ensembles` | 否 |
+| `generate_dataset.py` | `--max_structures_in_ensemble` / `-n` | `int` | `0` | 否 |
+| `generate_dataset.py` | `--fragments_overlap` | `int` | `1` | 否 |
+| `generate_dataset.py` | `--column_names` | `str` | `seq_name,fasta` | 否 |
+| `generate_dataset.py` | `--shuffle` | flag | `False` | 否 |
+| `generate_dataset.py` | `--format` | `str` | `xtc` | 否 |
+| `generate_dataset.py` | `--overwrite` | flag | `False` | 否 |
+| `build_ensemble.py` | `--sequence` | `str` | — | 是 |
+| `build_ensemble.py` | `--foldcomp_fasta` | `str` | `/data/afdb/afdb_uniprot_v4.fasta` | 否 |
+| `build_ensemble.py` | `--foldcomp_db` | `str` | `/data/afdb/afdb_uniprot_v4` | 否 |
+| `build_ensemble.py` | `--n_max_structures_per_fragment` | `int` | `1000` | 否 |
+| `build_ensemble.py` | `--outpath` | `str` | — | 是 |
+| `build_ensemble.py` | `--scratch_folder` | `str` | `/tmp` | 否 |
+| `build_ensemble.py` | `--reduction_factor` | `int` | `1` | 否 |
+| `build_ensemble.py` | `--joins_to_attempt_per_pairing` | `int` | `500000` | 否 |
+| `build_ensemble.py` | `--max_structures_in_ensemble` | `int` | `100` | 否 |
+| `build_ensemble.py` | `--exclude_cis_omega` | flag | `False` | 否 |
+| `build_ensemble.py` | `--rmsd_sort` | flag | `False` | 否 |
+| `build_ensemble.py` | `--overwrite` | flag | `False` | 否 |
+| `prepare_foldcomp_fasta.py` | `--foldcomp-db` | `str` | `afdb_uniprot_v4` | 否 |
+| `prepare_foldcomp_fasta.py` | `--threads` | `int` | `8` | 否 |
+| `prepare_foldcomp_fasta.py` | `--workdir` | `str` | `/data/foldcomp_db` | 否 |
+| `fasta_search_in_foldcomp_database.py` | `--sequence` | `str` | — | 是 |
+| `fasta_search_in_foldcomp_database.py` | `--foldcomp_fasta` | `str` | `/data/afdb/afdb_uniprot_v4.fasta` | 否 |
+| `fasta_search_in_foldcomp_database.py` | `--pkl_outpath` | `str` | — | 是 |
+| `fasta_search_in_foldcomp_database.py` | `--reduction_factor` | `int` | `1` | 否 |
+| `extract_structures_from_foldcomp_database.py` | `--byte_starts_path` | `str` | `example/byte_starts.pkl` | 是 |
+| `extract_structures_from_foldcomp_database.py` | `--foldcomp_fasta` | `str` | `/data/afdb/afdb_uniprot_v4.fasta` | 否 |
+| `extract_structures_from_foldcomp_database.py` | `--foldcomp_db` | `str` | `/data/afdb/afdb_uniprot_v4` | 否 |
+| `extract_structures_from_foldcomp_database.py` | `--outfolder` | `str` | — | 是 |
+| `extract_structures_from_foldcomp_database.py` | `--n_max_structures_per_fragment` | `int` | `1000` | 否 |
+| `extract_structures_from_foldcomp_database.py` | `--exclude_cis_omega` | flag | `False` | 否 |
+| `join_fragments.py` | `--sequence` | `str` | — | 是 |
+| `join_fragments.py` | `--fragments_folder` | `str` | — | 是 |
+| `join_fragments.py` | `--outpath` | `str` | — | 是 |
+| `join_fragments.py` | `--joins_to_attempt_per_pairing` | `int` | `500000` | 否 |
+| `join_fragments.py` | `--max_structures_in_ensemble` | `int` | `500000` | 否 |
+| `join_fragments.py` | `--rmsd_sort` | flag | `False` | 否 |
+| `join_fragments.py` | `--overwrite` | flag | `False` | 否 |
+
+来源：[generate_dataset.py](/generate_dataset.py#L24-L59), [build_ensemble.py](/scripts/build_ensemble.py#L87-L143), [prepare_foldcomp_fasta.py](/scripts/prepare_foldcomp_fasta.py#L121-L128), [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L168-L193), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L277-L316), [join_fragments.py](/scripts/join_fragments.py#L323-L337)
+
+## 下一步
+
+有关这些参数背后的架构原理 —— 特别是为什么片段长度固定为 6、重叠固定为 2，以及分层连接策略如何确定 `--joins_to_attempt_per_pairing` —— 请参阅[片段生成策略](5-fragment-generation-strategy)和[分层片段连接](8-hierarchical-fragment-joining)。有关输出格式细节和下游使用模式，请参阅[输出格式与下游使用](12-output-formats-and-downstream-use)。
+
+---
+
+## 流水线阶段
+
+- [深入探究/流水线阶段/GPU 加速序列搜索](https://zread.ai/PeptoneLtd/IDP-o/6-gpu-accelerated-sequence-search)
+
+---
+slug:6-gpu-accelerated-sequence-search
+blog_type:normal
+---
+
+
+GPU 加速序列搜索是 IDP-o 流水线中的首个计算阶段，负责在海量 Foldcomp 结构数据库中定位短蛋白片段。它将全长蛋白序列转换为一组重叠的 6 残基片段，随后利用**基于 CuPy 的 CUDA 并行计算**，直接对特殊格式 FASTA 文件的原始字节执行字节级模式匹配——从而实现仅在 CPU 上无法企及的搜索吞吐量。该阶段的输出是一个记录命中位置的字典，借此可在压缩的 Foldcomp 数据库中依据精确的字节偏移量提取下游结构，而无需解压整个归档文件。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L1-L194), [build_ensemble.py](/scripts/build_ensemble.py#L60-L61)
+
+## 算法架构
+
+该搜索基于一项核心洞见：与其将 FASTA 文件解析为序列数据库再执行 BLAST 风格的比对，不如将文件视为一个**扁平字节数组**，并在原始字节层面执行精确子串匹配。这消除了所有的解析开销，并自然映射到 GPU 广域 SIMD 执行模式。由 [Foldcomp 数据库设置](3-foldcomp-database-setup) 生成的特殊格式 FASTA 文件，直接将 Foldcomp 数据库中各条目的字节偏移量编码至 FASTA 头部，因此单次搜索即可同时获得序列匹配结果与结构数据位置。
+
+```mermaid
+flowchart TD
+    A["输入序列<br/>(例如 100 个残基)"] --> B["片段生成<br/>6 残基窗口,<br/>2 残基重叠"]
+    B --> C["片段集合<br/>(约 24 个片段)"]
+    
+    D["偏移 FASTA 文件<br/>(约 1.1 TB 原始字节)"] --> E["分块加载<br/>GPU 显存大小的<br/>字节数组"]
+    
+    C --> F["GPU 字节级搜索<br/>CuPy SIMD 匹配"]
+    E --> F
+    
+    F --> G["命中检测<br/>逐片段逐块"]
+    G --> H["头部解析<br/>从 FASTA 头部<br/>提取字节偏移量"]
+    H --> I["命中聚合<br/>跨块汇总"]
+    I --> J["Pickle 输出<br/>片段 → (hit_idxs,<br/>byte_starts,<br/>aa_start_index)"]
+    
+    J --> K["结构提取<br/>[结构重建](7-structure-reconstruction-from-foldcomp)"]
+```
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L40-L144), [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152)
+
+## 片段生成策略
+
+输入蛋白序列通过 `generate_fragments` 被分解为重叠的 6 残基片段，该函数实现了具有可配置重叠度的滑动窗口。在默认参数（`seq_len=6`，`overlap=2`）下，每个片段与其相邻片段共享 2 个残基，确保了后续由[层级片段拼接](8-hierarchical-fragment-joining)重组时结构的连续性。连续片段起始位置间的步移量为 `seq_len - overlap = 4` 个残基，对于长度为 N 的序列，约生成 `⌈(N - 6) / 4⌉ + 2` 个片段。长度等于重叠大小的末端片段会被丢弃，因为它不包含前趋片段已编码之外的独立结构信息。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152)
+
+## 字节级 GPU 匹配：`extract_all_byte_starts`
+
+这是搜索阶段的计算核心。该函数以适配 GPU 显存大小的**块**（默认：320 MB）为单位处理偏移 FASTA 文件，并对每个片段在每个数据块上同时执行三项操作。
+
+### 块加载与头部索引
+
+每个数据块通过 `f.read(chunk_size)` 作为原始字节读入，并立即转换为 CuPy `uint8` 数组——此过程不进行任何字符串解析。所有 `>` 字符（FASTA 头部）的位置通过 `cp.flatnonzero` 在单次 GPU 遍历中定位，生成 `start_bytes` 索引，从而将字节流分割为序列记录。最后一块会补零至 8 字节的整数倍，以满足 GPU 显存对齐要求。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L64-L86)
+
+### 基于布尔卷积的精确子串匹配
+
+对于每个片段，其编码序列（同为 `uint8`）与数据块的匹配是通过**在所有位置上同时进行并行逐元素比较**来完成的。初始化一个全为 True 的布尔累加器 `energies`，随后片段中每个残基位置 `j` 通过 AND 归约操作来收缩该累加器：
+
+```python
+energies &= indexs[j : chunk_size - (ncoeff - j)] == sequence_encoded[j]
+```
+
+仅在片段中**每个残基连续匹配**的字节位置处，该表达式的结果才为 `True`——这是一个 O(L × C) 复杂度的操作，其中 L 为片段长度，C 为块大小，完全在 GPU 上执行，无分支或循环开销。对所得布尔掩码执行 `flatnonzero` 即可得出块内的命中位置。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L88-L99)
+
+### 偏移量提取与氨基酸索引
+
+对于每次命中，通过在 `start_bytes` 数组上执行 `searchsorted` 来确定其前趋 FASTA 头部。存储在该头部中的数字字节偏移量（如 `>677`）通过向量化十进制分解从其 ASCII 数字表示中解码：数字字符被掩码提取，按其位权乘以 10 的幂次后求和——全部在 GPU 上完成。同时，匹配序列内的**氨基酸起始索引**将根据头部 `>` 符号的偏移量计算得出，并考虑了变长的字节偏移量字符串。这三元组——`(hit_idxs, byte_starts, aa_start_index)`——通过 `.get()` 传回 CPU，并按片段和数据块分别存储。
+
+来源: [fasta_search_in_detail_from_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L101-L121)
+
+### 跨块聚合
+
+片段序列跨越块边界的命中将被**有意丢弃**（第 102 行：`hit_idxs = hit_idxs[hit_idxs > start_bytes[0]]`）。这是一项审慎的设计抉择：跨块边界的部分匹配需要跨块协调，这将破坏高度并行的块处理模型。在所有块处理完毕后，每个片段的命中结果将通过 `np.concatenate` 跨块拼接，对于在给定块中未产生命中的片段则用空数组替代。最终结果是一个字典，将每个片段字符串映射到由拼接后的 NumPy 数组构成的三元组。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L101-L143)
+
+## CuPy 与 NumPy 对比：为何 GPU 加速至关重要
+
+整个匹配流水线采用 CuPy（NumPy 的直接 GPU 替代品）实现，原因在于搜索操作直接针对**约 1.1 TB FASTA 文件的原始字节**进行。在 CPU 上，针对单个 6 残基片段在 320 MB 数据块上的逐元素比较循环将需要约 24 亿次比较，且需对约 24 个片段重复此过程。CuPy 将其作为大规模并行 CUDA 内核执行，充分利用 GPU 数千个核心及合并内存访问模式。唯一的 CPU-GPU 数据传输发生在边界处：块字节上传一次，最终的命中元组（通常极小，仅数百条目）通过 `.get()` 下载。
+
+| 方面 | CPU (NumPy) | GPU (CuPy) |
+|--------|-------------|------------|
+| 比较执行 | 逐片段位置串行 | 跨所有位置大规模并行 |
+| 内存模型 | 主机 RAM，无对齐约束 | 设备 VRAM，8 字节对齐块 |
+| 数据传输 | 无（原生） | 上传块一次，仅下载命中结果 |
+| 吞吐量瓶颈 | 单核标量运算 | 饱和显存带宽 |
+| 典型块处理耗时 | 每片段数分钟 | 每片段亚秒级 |
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L20-L21), [Dockerfile](/Dockerfile#L1-L3)
+
+## 输出格式与流水线集成
+
+搜索阶段输出一个 **pickle 文件**，包含一个以片段字符串为键的字典，每个值为由三个 `np.int64` 数组构成的三元组：
+
+| 元组索引 | 名称 | 含义 |
+|-------------|------|---------|
+| 0 | `hit_idxs` | FASTA 文件中匹配开始的字节位置 |
+| 1 | `byte_starts` | Foldcomp 数据库文件中匹配条目结构数据起始处的字节偏移量 |
+| 2 | `aa_start_index` | 匹配的数据库序列中片段匹配起点的残基索引（用于子提取特定残基范围） |
+
+此 pickle 文件由 [Foldcomp 结构重建](7-structure-reconstruction-from-foldcomp) 阶段直接消费，该阶段利用 `byte_starts` 寻址至压缩的 Foldcomp 数据库，并利用 `aa_start_index` 仅提取相关的残基子范围——从而避免解压整个条目。此流程由 `build_ensemble.py` 负责编排，它按顺序调用搜索、提取和拼接阶段。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L155-L164), [build_ensemble.py](/scripts/build_ensemble.py#L60-L61)
+
+## 配置参数
+
+搜索阶段暴露了两个控制搜索范围与精度的参数：
+
+| 参数 | CLI 标志 | 默认值 | 作用 |
+|-----------|----------|---------|--------|
+| `chunk_size` | — | 320,000,000 字节 | GPU 显存块大小。当文件小于单块时自动缩减，并向下取整至 8 的倍数。未通过 CLI 暴露。 |
+| `reduction_factor` | `--reduction_factor` | 1 | 应用于文件大小估算的除数。值为 10 时仅搜索约 1/10 的数据库——适用于开发期间的快速迭代或无需搜索完整性的场景。 |
+| `overlap` | — | 2 | 连续片段间的重叠残基数。在整个流水线中硬编码为 2。未通过 CLI 暴露。 |
+| `seq_len` | — | 6 | 片段的残基长度。未通过 CLI 暴露——更改此值需在[重叠比对与碰撞检测](9-overlap-alignment-and-clash-detection)中作相应调整。 |
+
+<CgxTip>`reduction_factor` 参数**并非**对序列进行二次采样——而是对 FASTA 文件的**字节范围**进行二次采样。这意味着缩减因子为 10 并非搜索每第 10 条序列；而是按字节偏移量搜索文件的前 1/10。对于统计均匀采样而言，这是可接受的，因为 AlphaFoldDB 条目并未按序列内容排序。</CgxTip>
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L40-L46), [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L167-L193)
+
+## 运行环境
+
+搜索阶段要求具备支持 CUDA 的 GPU 以及 CuPy CUDA 12x 运行时，如 Dockerfile 基础镜像 `nvcr.io/nvidia/jax:24.10-py3` 及 `cupy-cuda12x~=13.6.0` 依赖项所指定。整个 IDP-o 流水线通过此 Docker 镜像编排，该镜像将基于 CuPy 的搜索与基于 JAX 的下游计算打包于单一容器中。搜索作为 `build_ensemble.py` 的首要步骤被调用，将其 pickle 输出写入临时目录后，控制权即移交至结构提取阶段。
+
+---
+
+- [深入探究/流水线阶段/基于 Foldcomp 的结构重建](https://zread.ai/PeptoneLtd/IDP-o/7-structure-reconstruction-from-foldcomp)
+
+---
+slug:7-structure-reconstruction-from-foldcomp
+blog_type:normal
+---
+
+
+**结构重建**阶段是 IDP-o 的计算核心：它将压缩的 Foldcomp 数据库条目（以量化的内部坐标形式存储）转换回完整的 3D 笛卡尔原子坐标。该阶段位于 [GPU 加速序列搜索](6-gpu-accelerated-sequence-search)（用于识别片段命中及其字节位置）与[层级片段拼接](8-hierarchical-fragment-joining)（将重叠的片段系综缝合为完整链）之间。整个重建流程实现在 `extract_structures_from_foldcomp_database.py` 中，并由 `build_ensemble.py` 统一调度，作为三个连续阶段中的第二阶段被调用。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L1-L326), [build_ensemble.py](/scripts/build_ensemble.py#L60-L70)
+
+## 架构概述
+
+重建阶段可分解为四个紧密耦合的子阶段：**二进制反序列化**（解析 Foldcomp FCMP 条目格式）、**反量化**（将离散整数编码转换回弧度制的连续角度）、**骨架重建**（通过 Nerfax 进行从内部坐标到笛卡尔坐标的顺序变换）以及**侧链重建**（将侧链原子放置在重建骨架的相对位置上）。整个流程由 JAX 加速，并提供一条 JIT 编译的特化路径，对于相同氨基酸序列的重复重建，该路径最高可实现约 2000 倍的加速。
+
+```mermaid
+flowchart TD
+    A["搜索命中<br/>(byte_starts.pkl)"] --> B["二进制反序列化<br/>FCMP 条目解析"]
+    B --> C["反量化<br/>离散 → 连续角度"]
+    C --> D["骨架重建<br/>内部 → 笛卡尔坐标"]
+    D --> E["侧链重建<br/>旋转异构体放置"]
+    E --> F{"exclude_cis_omega?"}
+    F -->|Yes| G["顺式-Omega 过滤<br/>|ω| > 90°"]
+    F -->|No| H["系综下采样<br/>≤ n_max 结构"]
+    G --> H
+    H --> I["片段系综<br/>(fragment.h5)"]
+
+    style A fill:#2d3748,color:#fff
+    style I fill:#2d3748,color:#fff
+    style D fill:#4a5568,color:#fff
+    style E fill:#4a5568,color:#fff
+```
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L217-L268)
+
+## Foldcomp 二进制格式 — FCMP 条目布局
+
+Foldcomp 数据库中的每个蛋白质结构均作为单独的 FCMP 条目存储。重建阶段必须利用从搜索命中元数据（`fasta_byte_start`、`byte_start`、`aa_start_index`）中导出的字节级精确偏移量来解析此二进制布局。条目以 `b"FCMP"` 魔术标签起始，随后是头部字段，这些字段编码了残基数、锚点，以及至关重要的、控制反量化过程的**离散化矩阵**。
+
+| 字段 | 偏移量 (相对) | 大小 | 类型 | 描述 |
+|---|---|---|---|---|
+| 魔术标签 | `byte_start` | 4 B | `@4s` | 必须等于 `b"FCMP"` |
+| `nResidue` | `+4` | 2 B | `H` (uint16) | 条目中的总残基数 |
+| `nAnchor` | `+12` | 1 B | `B` (uint8) | 锚点数量 |
+| `lenTitle` | `+24` | 4 B | `I` (uint32) | 标题字符串长度 |
+| 离散化器 | `+28` | 48 B | `float32[2,6]` | 最小值 + 配置缩放比例 |
+| 骨架数据 | `+89 + 40·nAnchor + lenTitle` | 8·nRes B | `uint8[nRes, 8]` | 每个残基的打包角度/扭角 |
+| 侧链数据 | 骨架数据之后 | 可变 | `uint8[]` | 每个残基的侧链角度 |
+
+骨架数据段起始于计算得出的偏移量：`byte_start + 89 + 40 * nAnchor + lenTitle`。骨架段的前 8 个字节为虚拟填充位；实际的每残基数据从该起始点偏移 `(l - 1) * 8` 字节处开始，其中 `l` 为片段命中的残基起始索引。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L83-L103)
+
+## 二进制反序列化 — 逐位骨架解码
+
+`load_backbone_data` 函数对每个残基的 8 个字节执行**逐位解包**，提取出六个内部坐标值和一个氨基酸标识符。每个残基的 8 字节行首先被向上转型为 `uint16`，以实现 12 位字段的提取。字节 0 的最高 5 位编码了氨基酸索引（`(d[:,0] & 0xF8) >> 3`）。剩余的位通过移位和掩码操作跨越字节边界重新组合，形成三个 12 位的扭角/角度值（omega, psi, phi），而最后三个字节则直接提供键角（n_ca_c, ca_c_n, c_n_ca）。
+
+```python
+# 从最高 5 位获取氨基酸
+aas = (d[:, 0] & 0xF8) >> 3
+# 跨字节边界的 12 位重建
+d[:, 0] = ((d[:, 0] & 0x0007) << 8) | (d[:, 1] & 0x00FF)   # omega
+d[:, 1] = ((d[:, 2] & 0x00FF) << 4) | (d[:, 3] & 0x00FF) >> 4  # psi
+d[:, 2] = ((d[:, 3] & 0x000F) << 8) | (d[:, 4] & 0x00FF)   # phi
+# 重排为规范顺序: [phi, psi, omega, n_ca_c_angle, ca_c_n_angle, c_n_ca_angle]
+mainChainAnglesTorsions = d[:, [2, 1, 0, 7, 5, 6]]
+```
+
+列重排 `d[:, [2, 1, 0, 7, 5, 6]]` 将数据从存储布局 `(omega, psi, phi, ..., ca_c_n, c_n_ca, n_ca_c)` 映射到下游重建函数所期望的规范内部坐标顺序 `(phi, psi, omega, n_ca_c_angle, ca_c_n_angle, c_n_ca_angle)`。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L66-L77)
+
+## 反量化 — 从离散编码到弧度
+
+离散整数值必须使用逐条目的离散化矩阵进行**线性反量化**，还原为连续角度。这个 2×6 的 `float32` 矩阵包含最小值（`mins`）和配置缩放比例（`conf_fs`），每个内部坐标通道各一对。在 `reconstruct_backbone` 中应用的反量化公式为：
+
+```
+continuous = (discrete × conf_fs + mins) × (π / 180)
+```
+
+乘以 `π/180` 是将度数转换为弧度。反量化之后，角度在坐标重建前还要经历两次变换：**扭角重排** `[..., [1, 2, 0]]` 将顺序从 `(phi, psi, omega)` 重组为 `(psi, omega, phi)`，以匹配 N→CA→C 的链行走约定；以及**键角互补** `π - angle`，这是为了适应 SCNet 的历史约定，即存储的角度是内部坐标键角的补角。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L137-L163)
+
+## 骨架重建 — 从内部坐标到笛卡尔坐标的变换
+
+凭借反量化并重排后的角度、扭角，以及来自 `BACKBONE_BOND_LENGTHS` 的固定骨架键长，`reconstruct_backbone` 函数执行**顺序化的内部坐标到笛卡尔坐标重建**。三个初始锚点位置被放置在 3D 空间的 `[-1, -1, 0], [-1, 0, 0], [0, 0, 0]`，随后 Nerfax 的 `reconstruct_from_internal_coordinates_pure_sequential` 函数沿链行走，利用由键长、键角和二面角定义的 N-CA-C 肽键骨架几何结构，放置后续的每个原子。输出的 `bb_pos` 包含了片段中每个残基的完整骨架笛卡尔坐标（N, CA, C, O）。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L137-L163)
+
+## 侧链重建
+
+`reconstruct` 函数通过调用 Nerfax 的 `reconstruct_sidechains` 进行**侧链原子放置**，从而扩展了骨架重建过程。侧链数据从 Foldcomp 条目中单独加载：每个残基的侧链被编码为可变数量的 `uint8` 值，每个残基的具体数量由氨基酸类型通过 `AA_N_SC_ATOMS` 查找表确定。对 `AA_N_SC_ATOMS` 值计算前缀累加和，可得出在侧链数据段中的字节偏移量，从而能够选择性提取仅属于片段残基的数据，而非整个条目。随后，侧链角度被用于将旋转异构体放置在其重建的骨架锚点相对位置上。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L116-L134), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L166-L169)
+
+## JAX JIT 编译 — 序列特化重建
+
+此阶段最显著的性能优化是通过 `build_reconstruct_fn` 实现的 **JAX JIT 编译特化**。该函数并非通过通用的 `reconstruct` 路径逐个重建结构，而是利用 `jax.ensure_compile_time_eval()` 将氨基酸序列捕获为编译时常量，从而生成一个特化的 XLA 编译函数，消除了运行时所有依赖氨基酸类型的分支逻辑。
+
+```mermaid
+flowchart LR
+    A["reconstruct()"] -->|通用路径| B["~1× 基线速度"]
+    C["build_reconstruct_fn()"] -->|"jit + ensure_compile_time_eval"| D["~2000× 提速"]
+    E["build_parallel_reconstruct_fn()"] -->|"jit + 对批次 vmap"| F["批次并行<br/>每结构 ~2000×"]
+```
+
+`build_parallel_reconstruct_fn` 变体将 `reconstruct` 包装在 `vmap` 中，参数为 `in_axes=(0, 0, None, 0)`——对离散化器、骨架角度和侧链角度进行批处理，同时保持氨基酸数组为常量（因为片段系综中的所有结构共享相同的序列）。这个批处理的 vmapped 函数随后被 JIT 编译，使得片段的整个系综重建可以作为单一的 XLA 编译计算执行。
+
+<CgxTip>在模块导入时，JAX 被显式强制使用 CPU 后端（`os.environ["JAX_PLATFORMS"] = "cpu"`）。GPU 被保留给前置的序列搜索阶段使用，而重建过程属于计算密集型，相比于 GPU 传输开销，它更能从 XLA 的 CPU 编译和内存局部性中获益。</CgxTip>
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L15-L17), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L189-L206)
+
+## 顺式-Omega 过滤
+
+可选的 `--exclude_cis_omega` 标志用于过滤掉带有**顺式肽键**的结构，这种肽键在天然蛋白质中极为罕见（非脯氨酸肽键中占比 < 0.1%）。该过滤器在完全重建之前，对反量化后的 omega 二面角进行操作：只有当片段中的**所有** omega 角度都满足 `|ω| > 90°`（即所有肽键均为反式构象）时，该结构才会被保留。此过滤器在 `extract_data` 内部的原始角度层应用，避免了为那些本会被丢弃的结构执行全坐标重建的计算开销。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L230-L235)
+
+## 流程调度 — `compute_ensembles` 与 `extract_data`
+
+顶层 `compute_ensembles` 函数驱动着每个片段的完整流程。对于搜索结果字典中的每个片段键，它依次执行：(1) 通过 `extract_data` 从 Foldcomp 数据库中读取片段系综，该函数遍历所有命中 `(fasta_byte_start, byte_start, aa_start_index)` 并加载残基范围 `[l, l+nres)` 的重建数据，通过 `join_list_of_identical_pytrees` 堆叠结果；(2) 若结构数量超过 `n_max_structures_per_fragment`，则通过随机索引选择进行下采样；(3) 通过 JIT 编译的 `build_parallel_reconstruct_fn` 在一次批量调用中重建整个系综；(4) 将坐标从埃（Å）转换为纳米（÷10.0），并使用 mdtraj 将轨迹保存为 HDF5 文件，其中拓扑结构通过 `build_mdtraj_top` 从片段序列构建。
+
+| 步骤 | 函数 | 关键操作 |
+|---|---|---|
+| 1 | `extract_data` | 从所有命中中加载并堆叠重建数据 |
+| 2 | 随机下采样 | 限制为 `n_max_structures_per_fragment` |
+| 3 | `build_parallel_reconstruct_fn` → `jit_fn(...)` | 批量重建所有结构 |
+| 4 | `md.Trajectory(...)` + `.save_hdf5(...)` | 使用 mdtraj 拓扑序列化为 HDF5 |
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L217-L268)
+
+## CLI 接口
+
+该脚本作为独立命令调用，运行于搜索阶段生成 `byte_starts.pkl` 之后：
+
+```bash
+python3 scripts/extract_structures_from_foldcomp_database.py \
+  --byte_starts_path /tmp/byte_starts.pkl \
+  --foldcomp_fasta /data/afdb_uniprot_v4.fasta \
+  --foldcomp_db /data/afdb_uniprot_v4 \
+  --outfolder /tmp/fragment_ensembles \
+  --n_max_structures_per_fragment 1000 \
+  --exclude_cis_omega
+```
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `--byte_starts_path` | (必填) | 来自搜索阶段的包含命中元数据的 Pickle 文件 |
+| `--foldcomp_fasta` | `/data/afdb_uniprot_v4.fasta` | Foldcomp 数据库的带偏移量注释 FASTA 文件 |
+| `--foldcomp_db` | `/data/afdb_uniprot_v4` | 二进制 Foldcomp 数据库文件路径 |
+| `--outfolder` | (必填) | 每个片段的 `.h5` 系综文件输出目录 |
+| `--n_max_structures_per_fragment` | `1000` | 每个片段提取的最大结构数 |
+| `--exclude_cis_omega` | `False` | 排除带有顺式肽键的结构 |
+
+当通过 `build_ensemble.py` 调用时，这些参数会由系综构建器的 CLI 参数自动填充，该阶段作为 `fasta_search_in_foldcomp_database.main()` 和 `join_fragments.main()` 之间的第二步运行。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L277-L326), [build_ensemble.py](/scripts/build_ensemble.py#L60-L70)
+
+## 跨流程阶段的数据流
+
+```mermaid
+flowchart LR
+    subgraph Search ["阶段 1: 序列搜索"]
+        S1["foldcomp.fasta"] --> S2["byte_starts.pkl"]
+    end
+    subgraph Reconstruct ["阶段 2: 结构重建"]
+        R1["byte_starts.pkl"] --> R2["Foldcomp DB<br/>[二进制]"]
+        R2 --> R3["片段系综<br/>(每个片段 .h5)"]
+    end
+    subgraph Join ["阶段 3: 片段拼接"]
+        J1["片段系综"] --> J2["全链系综<br/>(.h5/.xtc/.pdb)"]
+    end
+
+    S2 --> R1
+    R3 --> J1
+
+    style Reconstruct fill:#2d3748,color:#fff
+```
+
+重建阶段消费由 [GPU 加速序列搜索](6-gpu-accelerated-sequence-search) 生成的 `byte_starts.pkl` pickle 文件，该文件将每个片段序列映射到一个包含三个数组的元组：`hit_idxs`（FASTA 文件中的字节位置）、`byte_starts`（Foldcomp 数据库中的字节位置）和 `aa_start_index`（匹配条目内的残基偏移量）。它为每个片段生成一个 `.h5` 文件，其中包含所有重建构象的 mdtraj 兼容轨迹，随后该文件将被[层级片段拼接](8-hierarchical-fragment-joining)消费。
+
+<CgxTip>`join_list_of_identical_pytrees` 实用工具函数利用 JAX 的 pytree 展平/展平操作，将多次命中中的异构重建数据元组堆叠为批处理数组。这使得后续的单次调用批处理 JIT 重建成为可能，远比逐结构重建循环高效得多。</CgxTip>
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L209-L214), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L240-L268)
+
+## 后续步骤
+
+在片段系综重建完成并保存为 `.h5` 文件后，流程将进入[层级片段拼接](8-hierarchical-fragment-joining)阶段。在此阶段中，重叠的片段对将在其共享残基上进行对齐，进行空间碰撞验证，并逐步合并为一个全链系综。有关完整的端到端调用，请参阅[快速开始](2-quick-start)；如需专门调整重建阶段的参数，请查阅[命令行配置参考](13-command-line-configuration-reference)。
+
+---
+
+- [深入探究/流水线阶段/层级片段拼接](https://zread.ai/PeptoneLtd/IDP-o/8-hierarchical-fragment-joining)
+
+---
+slug:8-hierarchical-fragment-joining
+blog_type:normal
+---
+
+
+层级片段拼接阶段是 IDP-o 流程的组合核心——它将逐片段的结构系综（从 Foldcomp 重建而来）转换为针对完整目标序列的全局一致系综。系统并非从左到右线性拼接片段，而是将片段列表分解为**2的幂次分段**，通过**平衡二叉树**拼接每个分段，然后**线性组合**生成的超片段。这种层级结构最大限度地减少了比对误差的累积，并在拼接图中更均匀地分布冲突概率，与朴素的顺序拼接相比，能生成结构连贯性更优的系综。
+
+## 从片段到完整序列
+
+拼接过程作用于片段生成策略的输出，该策略将长度为 *L* 的目标序列划分为 `seq_len=6` 个残基、且 `overlap=2` 个残基窗口重叠的片段。步长为 4（`seq_len - overlap`），长度为 *L* 的序列会产生约 ⌈(*L* − 4) / 4⌉ + 1 个片段。每个片段携带一个构象系综（坐标、主链索引以及均匀或派生的概率权重），这些数据从 [Foldcomp 结构重建](7-structure-reconstruction-from-foldcomp) 生成的逐片段 `.h5` 文件中加载。
+
+`generate_fragments` 函数实现了此划分：它在每一步将滑动窗口移动 `seq_len - overlap` 个残基，确保每对相邻片段恰好共享 2 个残基——即执行结构比对的**拼接接口**。长度等于重叠大小的退化尾部片段会被丢弃，因为它不携带新的结构信息。
+
+来源: [fasta_search_in_foldcomp_database.py](/scripts/fasta_search_in_foldcomp_database.py#L147-L152), [join_fragments.py](/scripts/join_fragments.py#L286-L288)
+
+## 两两拼接：比对、验证与接受
+
+在原子层面上，层级结构中的每次拼接都是一个**两两操作**，组合了共享 2 个残基重叠的左片段 *l* 和右片段 *r*。`join_fragments` 函数以类似蒙特卡洛的采样过程来编排此操作：
+
+1. **加权构象采样** — 根据各自的概率分布（`lprobs`、`rprobs`），从每个片段的系综中独立抽取 `n` 个构象索引，生成 `n` 对候选的左右组合。
+2. **向量化比对与验证** — 对于每对组合，通过重叠主链原子将右片段叠加到左片段上，然后检查合并结构是否存在空间冲突。
+3. **过滤** — 只有同时满足 **RMSD 阈值**（重叠主链上 < 0.06 nm = 0.6 Å）和**无冲突条件**的组合才能通过过滤掩码。
+4. **重采样重试** — 如果未找到有效组合，则在回退至单次随机选择前，最多进行 5 次重新抽取新随机索引。
+
+采样数 `n` 向上取整为块大小的倍数，而块大小本身由内存预算启发式算法计算得出：`batch_size = target_GB / (1e-5 × nres²)`，其中 `nres` 是拼接序列中的残基总数。这确保了 GPU 内存利用率保持在模块导入时设定的 96% XLA 分配上限内。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L147-L192)
+
+### 基于 SVD 的重叠比对
+
+将右片段比对到左片段的操作由 `affine_alignment` 执行，它计算**最佳刚体变换**（旋转 + 平移），以最小化两个重叠区域之间的 RMSD。这是用 JAX 实现的经典 Kabsch 算法：
+
+- 通过减去质心来**居中**两个坐标集。
+- **计算**互协方差矩阵 *R* = (*x* − *x̄*)<sup>T</sup>(*y* − *ȳ*)。
+- 通过 SVD **分解** *R*：*R* = *USV*<sup>T</sup>。
+- **修正**反射：如果 det(*UV*<sup>T</sup>) < 0，则翻转 *V*<sup>T</sup> 最后一行的符号。
+- **组合**旋转 *Q* = *UV*<sup>T</sup>。
+
+随后，`align` 函数将此变换应用于整个移动（右侧）坐标集，而不仅仅是重叠部分——这正是将右片段的非重叠部分正确定位在合并帧中的原因。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L38-L57)
+
+### 冲突检测
+
+比对后，合并的坐标数组将由 `check_interactions` 进行测试，该函数计算完整的两两距离矩阵，并标记任何距离小于 `cutoff=0.1` nm（1.0 Å）的非键合原子对。键合对（来自 mdtraj 拓扑）被排除在检查之外。该函数返回一个上三角对布尔掩码，`_join_fragments` 将其简化为每个候选的单个 `no_clash_mask = ~mask.any()`。这种极度严格的截断值仅过滤掉最严重的空间违规——这适用于本质上无序的语境，在此语境下适度的范德华重叠是预期之内且可容忍的。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L60-L69), [join_fragments.py](/scripts/join_fragments.py#L112-L123)
+
+### 核心拼接内核
+
+`_join_fragments` 函数是经 JAX 编译的内循环，用于处理单对采样构象。其逻辑为：
+
+- 从每个片段中提取**重叠主链原子索引**：对于左片段，最后 `overlap=2` 个残基提供其 `(C, O)` 原子；对于右片段，前 2 个残基提供 `(N, CA)` 原子。每侧的这四个原子（共 8 个）构成了肽键拼接接口。
+- 通过 `vmap(align_and_validate)` 对批次进行**向量化**处理，同时生成所有 `n` 个候选的比对位置、冲突掩码和 RMSD。
+- **组合**质量标准：`mask = (rmsds < 0.06) & no_clash_mask`。
+
+`static_context` 元组 `(lhs, rhs)` 标记了合并坐标数组中左右片段之间的原子索引边界——`lhs` 是左片段贡献后的第一个原子索引，`rhs` 是右片段非重叠区域的第一个原子索引。合并位置数组的构造方式为 `concat([lpos[:lhs], rpos_aligned[rhs:]])`，丢弃了右片段中冗余的重叠坐标。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L96-L123)
+
+## 层级拼接策略
+
+`build_ensemble` 函数实现了**层级分解**，这是 IDP-o 拼接区别于简单从左到右累积的关键。该算法分两阶段进行：
+
+**阶段 1 — 2的幂次二叉树拼接。** 片段计数 *N* 被分解为其二进制表示（最多 16 位）。位置 *k* 上的每个置位产生一个包含 2<sup>*k*</sup> 个片段的分段。在每个分段内，拼接在 ⌊log₂(segment_size)⌋ 轮中进行：在第 *i* 轮中，来自第 *i*−1 轮的相邻对进行两两拼接，每一轮将超片段数量减半，直到剩下单个超片段。较小的分段优先拼接（`segments[::-1]` 反转操作），这确保了拼接树在每个 2 的幂次块内是平衡的。
+
+**阶段 2 — 超片段的线性组合。** 来自每个 2 的幂次分段的超片段从左到右依次拼接。仅当 *N* 本身不是 2 的幂次时，才需要此阶段。
+
+```mermaid
+graph TD
+    subgraph "Phase 1: Binary Tree (example: N=6 → 4+2)"
+        direction TB
+        F1["f₁"] --> J12["Join"]
+        F2["f₂"] --> J12
+        F3["f₃"] --> J34["Join"]
+        F4["f₄"] --> J34
+        J12 --> J1234["Join"]
+        J34 --> J1234
+        F5["f₅"] --> J56["Join"]
+        F6["f₆"] --> J56
+    end
+    subgraph "Phase 2: Linear Combine"
+        J1234 --> Jfinal["Join"]
+        J56 --> Jfinal
+    end
+    Jfinal --> Full["Full Sequence Ensemble"]
+```
+
+对于上述包含 6 个片段的示例，4 片段分段在平衡树中拼接（2 轮），2 片段分段在一轮中拼接，然后线性组合生成的两个超片段。
+
+<CgxTip>二进制分解确保了任何拼接链的最大深度为 ⌊log₂(N)⌋ + (number_of_set_bits − 1)，而朴素线性拼接则为 N−1。这极大地减少了累积比对误差的传播。</CgxTip>
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L195-L249)
+
+### 概率传播
+
+每次成功拼接后，生成的超片段会与源自源构象索引的**乘积概率**一起存储在共享的 `data` 字典中。`get_probs` 函数计算源数组中每个唯一构象索引的逆频率权重（为非均匀片段系综实现重要性加权），拼接系综的概率是通过 `jax.tree.map(jnp.multiply, ...)` 计算的左右源概率的逐元素乘积。这确保了从两个片段的高概率区域中提取的构象在拼接系综中更受青睐。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L126-L129), [join_fragments.py](/scripts/join_fragments.py#L218-L223)
+
+### 内存管理
+
+在层级之间会积极回收 GPU 设备内存。一旦拼接轮次完成（当 `i > 1` 时），来自前两层的所有 `jax.Array` 对象都会通过 `.delete()` 显式删除。这至关重要，因为中间超片段的坐标数组与残基数量成比例增长，如果不进行清理，设备在最终拼接之前就会耗尽其 96% 的分配内存。在任何拼接开始之前，XLA 后端的 `live_buffers()` 也会在 `main` 函数开头被清空。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L228-L234), [join_fragments.py](/scripts/join_fragments.py#L289-L292)
+
+## JAX 向量化与分块执行
+
+`jit_chunked_vmap` 函数是 JAX 编译时向量化和运行时内存限制之间的桥梁。它并非对 `n` 个候选的完整批次应用 `vmap`（这将同时具体化为 *n × n_atoms × 3* 的坐标张量和 *n × n_atoms × n_atoms* 的距离张量），而是将输入数组重塑为 `chunk_size` 大小的块，然后在单个编译计算内使用 `jax.lax.scan` 按顺序迭代这些块。这在保留每个块内 XLA 优化性能优势的同时，将峰值内存限制在块大小而非总批次大小范围内。
+
+块大小由 `batch_size` lambda 函数决定，其目标约为 10 GB 的设备内存，并与残基计数的平方成反比缩放（反映了 `check_interactions` 中两两距离计算的 *O(n²)* 开销）。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L132-L144), [join_fragments.py](/scripts/join_fragments.py#L150-L151)
+
+## 拼接后处理：RMSD 排序与氢原子插入
+
+在完整系综组装完成后，会应用两个可选的变换：
+
+1. **基于 RMSD 的轨迹排序** — 启用 `--rmsd_sort` 时，`sort_trajectory` 将所有帧叠加到第 0 帧，计算完整的 RMSD 矩阵，然后通过在 RMSD 空间中的贪心最近邻对帧进行排序。这会生成一个帧间平滑变化的轨迹，这对于在分子查看器中进行视觉检查至关重要。
+
+2. **氢原子插入** — 来自 `nerfax.reduce_utils` 的 `infer_and_insert_hydrogens` 函数根据重原子主链和侧链坐标重建氢原子位置，生成适用于下游 MD 或分析流程的完整全原子轨迹。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L252-L274), [join_fragments.py](/scripts/join_fragments.py#L308-L319)
+
+## 命令行接口
+
+`join_fragments.py` 脚本暴露了以下用于控制拼接过程的参数：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--sequence` | str | *(必需)* | 目标氨基酸序列 |
+| `--fragments_folder` | str | *(必需)* | 逐片段 `.h5` 系综文件的路径 |
+| `--outpath` | str | *(必需)* | 输出轨迹路径（`.h5`、`.xtc`、`.dcd`、`.pdb`） |
+| `--joins_to_attempt_per_pairing` | int | 500000 | 每次拼接中采样的候选构象对数量 |
+| `--max_structures_in_ensemble` | int | 500000 | 最终输出系综中的最大构象数 |
+| `--rmsd_sort` | flag | False | 按 RMSD 对轨迹排序以实现平滑可视化 |
+| `--overwrite` | flag | False | 覆盖现有输出文件 |
+
+请注意，`join_fragments.py` 通常通过 `build_ensemble.py` 间接调用，后者编排完整流程（搜索 → 提取 → 拼接）。当片段系综已被提取且仅需重新运行或调整拼接步骤时，独立调用非常有用。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L323-L347), [build_ensemble.py](/scripts/build_ensemble.py#L71-L80)
+
+## 架构概要
+
+下表总结了层级拼接阶段中的关键计算组件及其作用：
+
+| 组件 | 作用 | 复杂度类别 |
+|---|---|---|
+| `affine_alignment` | 基于 SVD 的最佳刚体叠加 | 每次比对 *O(n)* |
+| `align` | 将旋转/平移应用于完整移动坐标 | 每次比对 *O(n)* |
+| `check_interactions` | 两两空间冲突检测 | 每个候选 *O(n²)* |
+| `_join_fragments` | 向量化比对 + 验证 + 过滤 | *O(batch × n²)* |
+| `jit_chunked_vmap` | 内存分批的 XLA 编译扫描 | *O((n/chunks) × chunk × n²)* |
+| `join_fragments` | 一对组合的采样、拼接、重试循环 | *O(attempts × n_joins × nres²)* |
+| `build_ensemble` | 层级树 + 线性组合 | 拼接深度 *O(log N)* |
+
+<CgxTip>2 残基重叠在整个流程中是硬编码的（`pre_join_fragments` 和 `_join_fragments` 中的 `overlap = 2`）。修改此值需要对 `generate_fragments`、主链索引提取逻辑以及 `_join_fragments` 中的重叠原子选择进行协调变更——这并非简单的参数更改。</CgxTip>
+
+层级片段拼接阶段生成完整的构象系综，该系综将输入至 [JAX 向量化系综计算](10-jax-vectorized-ensemble-computation) 以进行下游分析。有关比对数学和冲突条件的更深入论述，请参阅 [重叠比对与冲突检测](9-overlap-alignment-and-clash-detection)。要了解此阶段如何融入完整流程编排，请查阅 [架构概览](4-architecture-overview)。
+
+---
+
+## 核心算法
+
+- [深入探究/核心算法/重叠比对与冲突检测](https://zread.ai/PeptoneLtd/IDP-o/9-overlap-alignment-and-clash-detection)
+
+---
+slug:9-overlap-alignment-and-clash-detection
+blog_type:normal
+---
+
+
+当两个结构片段共享共同的残基序列时，它们的3D坐标几乎永远不会一致——这些片段源自具有不同主链构象的不同数据库条目。**重叠比对**算法通过计算最佳叠加共享主链原子的刚体变换来解决此问题，而**冲突检测**则拒绝任何导致非键合原子进入物理上不可能的接近程度的最终构象。这两个关卡共同构成了 IDP-o 片段拼接管道核心的质量过滤器，决定哪些候选拼接能够存活并进入最终的系综。
+
+## 重叠区域：肽键锚定
+
+IDP-o 片段的长度均为 6 个残基，相邻片段之间存在 **2 个残基的重叠**。这种重叠并非任意设置——它提供了足够的主链原子来唯一确定两个片段的相对方向。`generate_fragments` 函数通过沿序列移动 `seq_len=6` 的窗口（步长为 `seq_len - overlap = 4`）来生成片段，从而使得每对连续片段分别在位置 `[i-2, i-1]` 和 `[i-2, i-1]` 处共享残基。
+
+```python
+fragments = [s[i * shift : i * shift + seq_len] for i in range((len(s) - seq_len) // shift + 2)]
+```
+
+`pre_join_fragments` 中的断言 `l[-overlap:] == r[:overlap]` 保证在进行任何结构比较之前，重叠残基在序列级别上是匹配的。然后，合并序列被构建为 `l + r[overlap:]`，从而避免共享残基的重复。
+
+来源: [fasta_search_in_foldcomp_database.py](scripts/fasta_search_in_foldcomp_database.py#L146-L150), [join_fragments.py](scripts/join_fragments.py#L88-L93)
+
+## 选择比对锚点原子
+
+IDP-o 并没有在重叠区域中对所有 8 个主链原子（N, CA, C, O × 2 个残基）进行比对，而是选择了一个横跨两个重叠残基之间肽键的 **4 原子子集**：
+
+| 片段 | 重叠残基 | `.ravel()` (8 个原子) | `[2:-2]` 切片 (4 个原子) |
+|----------|-----------------|----------------------|---------------------------|
+| 左侧（最后 2 个残基） | i−1, i | N,CA,C,O,N,CA,C,O | **C**₍ᵢ₋₁₎, **O**₍ᵢ₋₁₎, **N**₍ᵢ₎, **CA**₍ᵢ₎ |
+| 右侧（前 2 个残基） | i−1, i | N,CA,C,O,N,CA,C,O | **C**₍ᵢ₋₁₎, **O**₍ᵢ₋₁₎, **N**₍ᵢ₎, **CA**₍ᵢ₎ |
+
+```python
+l_indices, r_indices = (
+    bb_indices[indexing].ravel()[2:-2]  # (C, O)_i, (N, CA)_(iplus1), join on peptide bond
+    for bb_indices, indexing in [
+        (l_bb_indices, jnp.arange(-overlap, 0)),
+        (r_bb_indices, jnp.arange(overlap)),
+    ]
+)
+```
+
+这是一个深思熟虑的设计选择：C–N 肽键是多肽主链中几何约束最强的特征（部分双键特性限制了其旋转）。通过将比对锚定在该键两侧的原子上——即上游残基的 C 和 O，以及下游残基的 N 和 CA——该算法瞄准了物理上最具信息量的参考系。舍弃外围原子（上游残基的 N 和 CA，以及下游残基的 C 和 O）避免了用构象变化较大的原子稀释比对信号。
+
+<CgxTip>`[2:-2]` 切片并非在剔除异常值——它是在提取物理上定义肽键连接处的 4 个原子。这就是为什么重叠必须恰好是 2 个残基：更少的残基将无法提供足够的主链原子来锚定比对。</CgxTip>
+
+来源: [join_fragments.py](scripts/join_fragments.py#L106-L115)
+
+## Kabsch 比对：仿射配准
+
+`affine_alignment` 函数实现了 **Kabsch 算法**——这是一种闭合解法，用于求出最小化两个配对点集之间 RMSD 的最优旋转矩阵。给定一个移动点集 **P** 和一个参考点集 **Q**，该算法分三个阶段进行：
+
+```mermaid
+flowchart TD
+    A["Center both point sets<br/>P̄ = P − mean(P)<br/>Q̄ = Q − mean(Q)"] --> B["Compute cross-covariance<br/>R = P̄ᵀ · Q̄"]
+    B --> C["Singular Value Decomposition<br/>R = U · S · Vᵀ"]
+    C --> D{"det(U · Vᵀ) < 0?"}
+    D -- Yes --> E["Flip last row of Vᵀ<br/>(prevent reflection)"]
+    D -- No --> F["Keep Vᵀ unchanged"]
+    E --> G["Optimal rotation<br/>R* = U · Vᵀ"]
+    F --> G
+    G --> H["Apply transform<br/>P_aligned = R* · P̄ + mean(Q)"]
+```
+
+**步骤 1 — 中心化：** 两个点集都被平移，使其质心位于原点。平移向量为 `translation_geom = geom.mean(0)` 和 `translation_ref_geom = ref_geom.mean(0)`。中心化解耦了比对的旋转和平移分量，将问题简化为纯旋转。
+
+**步骤 2 — 互协方差与 SVD：** 3×3 互协方差矩阵 `R = (P − P̄)ᵀ · (Q − Q̄)` 编码了两个点集之间的旋转关系。其奇异值分解 `R = U · S · Vᵀ` 将这种关系分解为张成旋转自由度的正交矩阵 U 和 V。
+
+**步骤 3 — 反射处理：** 如果 `det(U · Vᵀ) < 0`，则分解产生了一个非正常旋转（即反射）。算法通过取反 Vᵀ 的最后一行来纠正这一点，确保结果旋转是正常旋转（det = +1）。若无此纠正，病理输入几何可能会产生镜像坐标。
+
+**步骤 4 — 变换应用：** `align` 函数组装完整的仿射变换。移动结构首先中心化（`mobile_pos - pre_trans`），通过爱因斯坦求和旋转（`jnp.einsum("ij,bj", rot, ...)`），然后平移至参考质心（`+ post_trans`）。einsum 表示法通过单次向量化操作，高效地将 3×3 旋转矩阵应用于结构中的每一个原子。
+
+```python
+def align(mobile_pos, ref_pos, mobile_indices, ref_indices):
+    l_bb, r_bb = ref_pos[ref_indices], mobile_pos[mobile_indices]
+    rot, pre_trans, post_trans = affine_alignment(r_bb, l_bb)
+    mobile_pos_aligned = jnp.einsum("ij,bj", rot, mobile_pos - pre_trans) + post_trans
+    return mobile_pos_aligned
+```
+
+来源: [join_fragments.py](scripts/join_fragments.py#L35-L50), [join_fragments.py](scripts/join_fragments.py#L52-L57)
+
+## 冲突检测：空间位阻违规过滤
+
+比对后，合并结构中可能包含被推入物理上不可能的接近程度的原子——即**空间位阻冲突**。`check_interactions` 函数通过穷举的成对距离计算来检测这些违规情况：
+
+```python
+def check_interactions(xyz, bonds=None, cutoff=0.1):
+    distances = jnp.sqrt(((xyz[:, None] - xyz[None, :]) ** 2).sum(-1))
+    mask = distances < cutoff
+    mask = mask.at[tuple(bonds.T)].set(False)   # exclude bonded pairs
+    mask = jnp.triu(mask, k=1)                   # upper triangle only (j > i)
+    return mask
+```
+
+该算法分三步执行：
+
+| 步骤 | 操作 | 原理 |
+|------|-----------|-----------|
+| **距离矩阵** | 对所有原子对计算 `√(Σ(xᵢ - xⱼ)²)` | 完整的成对距离场 |
+| **键排除** | 设置 `mask[bonded_pairs] = False` | 成键原子天然距离很近；它们不得触发违规 |
+| **上三角** | `jnp.triu(mask, k=1)` | 每对原子只出现一次；避免重复计算并排除自距离（k=1 跳过对角线） |
+
+**0.1 nm (1.0 Å) 的截断值**远低于任何原子对的范德华半径。在此阈值下，被标记的相互作用并不代表边缘的空间重叠——它标志着灾难性的几何违规，即两个非键合原子占据了空间中几乎相同的位置。此类构象在物理上是不可能的，必须予以拒绝。
+
+键表派生自 MDTraj 的 `top.create_standard_bonds()`，它为合并后的拓扑生成标准的共价键。这确保了合法的 1–2 和 1–3 键合相互作用（其天然具有较短距离）绝不会被误判为冲突。
+
+来源: [join_fragments.py](scripts/join_fragments.py#L60-L68), [join_fragments.py](scripts/join_fragments.py#L88-L97)
+
+## 组合验证关卡
+
+`_join_fragments` 函数将比对和冲突检测统一为单一的向量化验证管道。对于从左右系综中抽取的每对候选片段结构，它按顺序执行四项操作：
+
+```mermaid
+flowchart LR
+    A["Sample random<br/>structure indices"] --> B["Align right fragment<br/>onto left fragment"]
+    B --> C["Compute RMSD<br/>over overlap atoms"]
+    C --> D["Check steric<br/>clashes"]
+    D --> E{"RMSD < 0.6 Å<br/>AND<br/>no clashes?"}
+    E -- Pass --> F["Accept joined<br/>conformation"]
+    E -- Fail --> G["Reject<br/>conformation"]
+```
+
+```python
+def align_and_validate(rpos, lpos, r_indices, l_indices):
+    rpos_aligned = align(rpos, lpos, r_indices, l_indices)
+    rmsd = compute_rmsd(rpos_aligned[r_indices], lpos[l_indices])
+    pos = jnp.concatenate([lpos[:lhs], rpos_aligned[rhs:]])
+    mask = check_interactions(pos, bonds)
+    no_clash_mask = ~mask.any()
+    return pos, no_clash_mask, rmsd
+```
+
+**比对**产生最优叠加的右侧片段。在 4 个肽键锚点原子上计算 **RMSD** 以量化残余未对齐量——即使经过最优旋转，两个片段的重叠原子也不会完全重合，因为它们源自具有不同主链构象的不同数据库结构。**结构组装**将左侧片段直到重叠边界的原子（`lpos[:lhs]`）与比对后的右侧片段超出重叠的原子（`rpos_aligned[rhs:]`）拼接起来，生成完整的合并坐标数组。随后，**冲突检测**扫描此合并结构以排查空间位阻违规。
+
+最终的接受掩码要求**同时**满足两个标准：
+
+```python
+mask = (rmsds < 0.06) & no_clash_mask  # 0.6 Angstrom RMSD threshold
+```
+
+| 标准 | 阈值 | 物理解释 |
+|-----------|-----------|------------------------|
+| 重叠 RMSD | < 0.06 nm (0.6 Å) | 连接处的主链原子达到亚埃级精度一致 |
+| 无空间位阻冲突 | 0 个非键合原子对 < 0.1 nm | 合并结构中不存在灾难性的原子重叠 |
+
+0.6 Å 的 RMSD 阈值异常严格。作为参考，在 2.0 Å 分辨率下，X 射线晶体学中的典型坐标不确定度约为 0.2 Å，而 NMR 系综成员在局部主链片段上的 RMSD 差异通常为 1–2 Å。如此严苛的阈值确保了只有当两个片段在重叠区域几乎无法区分时，其拼接才会被接受，从而保持了连接处的局部结构完整性。
+
+<CgxTip>如果在 5 次不同随机样本的重试尝试后，仍无候选对能通过两项过滤，算法将降级为接受单次随机拼接（并记录警告日志）。这防止了片段数据库仅提供重叠性较差的结构时，导致管道运行失败。</CgxTip>
+
+来源: [join_fragments.py](scripts/join_fragments.py#L100-L127)
+
+## JAX 向量化：大规模批量验证
+
+验证关卡并非仅执行一次，而是每个片段对执行**数万至数十万次**——`joins_to_attempt_per_pairing` 参数默认为 500,000。这得益于 JAX 的 `vmap`，它将逐对执行的 `align_and_validate` 函数转换为批量操作，在 GPU 上的单个编译 XLA 内核中运行：
+
+```python
+pos, no_clash_mask, rmsds = vmap(align_and_validate, in_axes=(0, 0, None, None))(
+    rpos, lpos, r_indices, l_indices
+)
+```
+
+`in_axes=(0, 0, None, None)` 规范表明 `rpos` 和 `lpos` 沿其第一轴进行批处理（不同的结构样本），而 `r_indices` 和 `l_indices` 是共享常量（所有配对使用相同的重叠原子）。这避免了冗余的索引计算并减少了内存流量。
+
+为防止大型合并结构出现 GPU 内存不足错误，`jit_chunked_vmap` 函数根据预估的内存预算将完整批次分解为块：
+
+```python
+batch_size = lambda nres, target=10: target / (1e-5 * (nres**2))  # target in GB
+```
+
+O(n²) 的缩放比例考虑了 `check_interactions` 中的成对距离矩阵，该矩阵主导了内存使用。每个块通过 `jax.lax.scan` 处理，结果被重新组装为扁平的输出数组。这确保了算法能够扩展到任意长的序列，而不会超出可用的 GPU 内存。
+
+来源: [join_fragments.py](scripts/join_fragments.py#L123-L126), [join_fragments.py](scripts/join_fragments.py#L140-L156), [join_fragments.py](scripts/join_fragments.py#L158-L197)
+
+## 概率加权采样与重试逻辑
+
+片段系综中并非所有结构候选者都具有相同的可能性。`join_fragments` 函数使用**概率加权随机采样**，在抽取候选拼接对时优先选择具有较高统计权重的结构：
+
+```python
+random_indices = tuple(
+    random.choice(key, jnp.arange(len(pos)), shape=(n,), p=probs)
+    for key, pos, probs in ((lkey, lpos, lprobs), (rkey, rpos, rprobs))
+)
+```
+
+概率向量（`probs`）派生自每个结构的源片段在数据库中出现的频率——在多个数据库条目中作为命中出现的结构，通过 `get_probs` 函数获得更高的权重，该函数根据唯一值频率计算逆计数权重。在每次成功拼接后，输出系综的概率被设置为源片段概率的逐元素乘积，从而将统计置信度贯穿层级拼接过程。
+
+如果组合的 RMSD + 冲突过滤器拒绝了某批次中的所有候选者，算法将使用新的 PRNG 密钥重新采样，最多尝试 **5 次**，然后降级接受单次随机拼接。这种优雅的降级确保了即使是数据库覆盖稀疏或质量较差的序列，也能生成系综，而不是彻底失败。
+
+来源: [join_fragments.py](scripts/join_fragments.py#L158-L197), [join_fragments.py](scripts/join_fragments.py#L130-L138)
+
+## 算法复杂度与性能特征
+
+重叠比对和冲突检测管道的计算成本主要由每个候选对的以下两项操作决定：
+
+| 操作 | 每对复杂度 | 备注 |
+|-----------|-------------------|-------|
+| Kabsch 比对 (SVD) | O(1) | 固定的 4×3 点集 → 3×3 SVD |
+| RMSD 计算 | O(1) | 固定的 4 个重叠原子 |
+| 成对距离矩阵 | O(n²) | n = 合并结构中的总原子数 |
+| 键排除 | O(b) | b = 键的数量 |
+
+**O(n²) 距离矩阵**是瓶颈，这就是分块大小公式与 n² 成反比的原因。对于典型的 100 个残基的 IDP（在氢原子推断前约有 1,600 个重原子），距离矩阵需要约 2000 万个条目——这在每块约 400 个候选者的批大小下，完全在 GPU 内存容量之内。针对 500,000 个候选者的整个验证管道被编译为单个 XLA 内核，在现代 GPU 上仅需数秒即可执行完毕。
+
+来源: [join_fragments.py](scripts/join_fragments.py#L60-L68), [join_fragments.py](scripts/join_fragments.py#L159-L162)
+
+---
+
+理解片段如何进行几何验证，是理解管道中下一个算法的关键背景：[JAX 向量化系综计算](10-jax-vectorized-ensemble-computation)涵盖了在所有拼接经过过滤后，完整系综是如何组装和存储的。至于生成进入此算法的片段对的上游机制，请参见[层级片段拼接](8-hierarchical-fragment-joining)。
+
+---
+
+- [深入探究/核心算法/JAX 向量化集成计算](https://zread.ai/PeptoneLtd/IDP-o/10-jax-vectorized-ensemble-computation)
+
+---
+slug:10-jax-vectorized-ensemble-computation
+blog_type:normal
+---
+
+
+IDP-o 利用 JAX 的函数式数组编程模型——特别是 `vmap`、`jit` 和 `jax.lax.scan`——将原本复杂度为 O(N²) 的串行片段连接循环，转换为一条 **GPU 加速、批量向量的系综构建流水线**。核心计算核函数在单个编译的 XLA 计算图中，对每次配对的数千个候选片段连接进行对齐、验证和过滤，消除了 Python 层面的循环开销，实现了每秒数十万次连接尝试的吞吐量。本页将剖析驱动系综构建器的三个 JAX 核函数：**SVD 对齐核**、**向量化冲突检测核**，以及**内存自适应分块 vmap 调度器**。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L1-L348), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L1-L326)
+
+## GPU 内存预留与运行时配置
+
+在任何 JAX 计算开始之前，运行时配置会通过 `XLA_PYTHON_CLIENT_MEM_FRACTION` 环境变量，为 XLA 编译器预留 **96% 的可用 GPU 内存**。这种激进的内存分配策略确保了在向量化连接期间生成的大型批量张量——特别是冲突检测中的 N×N 距离矩阵——能够常驻 GPU 内存，避免触发按需分配的停滞。Docker 镜像基于 `nvcr.io/nvidia/jax:24.10-py3` 构建，其中附带了支持 CUDA 12 的 JAX/XLA 运行时，以及用于内坐标重建和氢原子推断的 `nerfax` 库。
+
+```python
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".96"
+```
+
+在分级系综构建完成之后，主入口函数会对存活的 XLA 缓冲区执行显式清理，以释放 GPU 内存，随后再将最终轨迹写入磁盘：
+
+```python
+backend = jax.lib.xla_bridge.get_backend()
+for buf in backend.live_buffers():
+    buf.delete()
+```
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L22-L22), [join_fragments.py](/scripts/join_fragments.py#L289-L292)
+
+## SVD 对齐核
+
+对齐核使用纯 `jnp` 操作实现了 **Kabsch 算法**，使其完全可微并兼容 `vmap`。给定一个移动几何体和一个参考几何体（均为 N×3 坐标数组），该核函数计算能够最小化两个点集之间 RMSD 的最佳刚体旋转。
+
+```mermaid
+flowchart TD
+    A["移动几何体 (N×3)"] --> B["将两个点集中心化"]
+    C["参考几何体 (N×3)"] --> B
+    B --> D["交叉协方差: R = (geom - t_geom)ᵀ · (ref - t_ref)"]
+    D --> E["SVD: R = U·S·Vᵀ"]
+    E --> F{"det(U·Vᵀ) < 0?"}
+    F -- Yes --> G["翻转 Vᵀ 的最后一行"]
+    F -- No --> H["保持 Vᵀ 不变"]
+    G --> I["旋转矩阵 = U · Vᵀ"]
+    H --> I
+    I --> J["返回 (旋转矩阵, pre_translation, post_translation)"]
+```
+
+该实现使用 `full_matrices=False` 的 `jnp.linalg.svd` 进行瘦分解，然后应用**反射校正**：如果 U·Vᵀ 的行列式为负，则将 Vᵀ 的最后一行取反，以确保得到真正的旋转（行列式 = +1）而非不正确的反射。该校正通过 `jnp.where` 条件实现，在 `jit` 编译下依然可追踪。
+
+随后，`align` 函数使用 `jnp.einsum("ij,bj", rot, mobile_pos - pre_trans) + post_trans` 将仿射变换应用于完整的移动结构（而不仅仅是重叠残基），其中爱因斯坦求和约定高效地表达了批量旋转的应用。
+
+| 组件 | JAX 操作 | 形状 | 目的 |
+|-----------|--------------|-------|---------|
+| 交叉协方差 | `jnp.dot((geom - t).T, (ref - t))` | (3, 3) | 最优旋转目标 |
+| 瘦 SVD | `jnp.linalg.svd(R, full_matrices=False)` | U,S,Vᵀ 各为 (3,3) | 分解旋转 |
+| 反射校正 | `jnp.where(det < 0, Vt.at[-1].multiply(-1), Vt)` | (3, 3) | 确保真正旋转 |
+| 批量旋转 | `jnp.einsum("ij,bj", rot, pos)` | (N, 3) | 应用于所有原子 |
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L38-L57)
+
+## 向量化冲突检测
+
+`check_interactions` 函数计算完整的两两距离矩阵，并识别空间冲突——即距离小于可配置截断距离（默认 0.1 nm = 1.0 Å）且未通过共价键连接的原子。这是连接流水线中内存消耗最大的操作，因为它会具体化出一个 N×N 的距离矩阵。
+
+```python
+distances = jnp.sqrt(((xyz[:, None] - xyz[None, :]) ** 2).sum(-1))
+mask = distances < cutoff
+mask = mask.at[tuple(bonds.T)].set(False)   # 排除成键原子对
+mask = jnp.triu(mask, k=1)                   # 仅取上三角 (j > i)
+```
+
+广播操作 `xyz[:, None] - xyz[None, :]` 无需显式的 Python 循环即可创建两两差分张量。通过以转置后的键表作为索引数组的元组对掩码进行索引，显式排除了成键原子对。`k=1` 的 `jnp.triu` 确保每次违规只被计数一次。然后，在连接核函数中使用 `.any()` 对生成的布尔掩码进行归约，为每个候选连接生成一个单一的 `no_clash_mask`。
+
+<CgxTip>N×N 距离矩阵是主要的内存瓶颈。`join_fragments` 中的 `batch_size` 函数根据 `target_GB / (1e-5 × nres²)` 动态计算分块大小，其中 `target_GB = 10` GB。对于 100 个残基的蛋白质，这会产生约 100 的分块大小，从而将峰值内存保持在 96% 的 GPU 预留量内。</CgxTip>
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L60-L69)
+
+## 向量化连接核：`_join_fragments`
+
+`_join_fragments` 函数是系综构建器的**内部计算循环**。它接收随机采样的左右片段构象对，并在单个由 `vmap` 装饰的函数内，对每一对执行重叠对齐、RMSD 计算、冲突检查，并生成合并后的坐标数组。
+
+```mermaid
+flowchart LR
+    subgraph "每对配对 (vmap 轴)"
+        A["采样 L_pos, R_pos"] --> B["提取重叠索引"]
+        B --> C["在重叠区域将 R 对齐到 L"]
+        C --> D["计算重叠 RMSD"]
+        D --> E["拼接: L[:lhs] ++ R_aligned[rhs:]"]
+        E --> F["对合并结构进行冲突检测"]
+        F --> G["掩码 = (RMSD < 0.06 Å) AND no_clash"]
+    end
+```
+
+关键的架构洞察在于，`vmap` **仅**应用于采样构象的批次维度，而重叠索引（`l_indices`、`r_indices`）在 `in_axes` 中以 `None` 进行广播。这意味着 SVD 对齐和冲突检测只需为特定的重叠模式编译一次，即可在批次中的所有 N 个候选中复用：
+
+```python
+pos, no_clash_mask, rmsds = vmap(align_and_validate, in_axes=(0, 0, None, None))(
+    rpos, lpos, r_indices, l_indices
+)
+mask = (rmsds < 0.06) & no_clash_mask   # 0.6 Å 重叠 RMSD 阈值
+```
+
+**接受掩码**结合了两个标准：重叠 RMSD 必须小于 0.06 nm (0.6 Å)，且合并后的结构不能有空间冲突。这种双重过滤既保证了拼接接缝处的几何一致性，又确保了完整构象的物理合理性。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L96-L123)
+
+## 内存自适应分块 vmap：`jit_chunked_vmap`
+
+对数十万个候选直接应用 `vmap` 会因 N×N 距离矩阵而超出 GPU 内存。`jit_chunked_vmap` 调度器通过**将批次拆分为内存安全的分块**，并使用 `jax.lax.scan` 对其进行迭代来解决此问题，这在每次迭代中维持了固定的内存占用。
+
+```python
+def jit_chunked_vmap(f, args, chunk_size):
+    lengths = jax.tree.flatten(jax.tree.map(lambda x: jnp.shape(x)[0], args))[0]
+    assert len(set(lengths)) == 1
+
+    def _body(_, args):
+        return (None, f(*args))
+
+    _, outputs = jax.lax.scan(
+        _body,
+        init=None,
+        xs=jax.tree.map(lambda x: x.reshape((-1, chunk_size) + x.shape[1:]), args),
+    )
+    return jax.tree.map(lambda x: x.reshape((-1,) + x.shape[2:]), outputs)
+```
+
+该函数分三个阶段运行：**(1)** 将所有输入 pytree 从 `(N, ...)` 重塑为 `(N/chunk_size, chunk_size, ...)`；**(2)** 对主导维度进行扫描，将 `f` 应用于每个分块（其中 `f` 本身包含对该分块批次维度的 `vmap`）；**(3)** 将输出重塑回 `(N, ...)`。由于 `jax.lax.scan` 在迭代间复用相同的 XLA 缓冲区，峰值内存受限于单个分块的代价，而非完整批次。
+
+| 参数 | 公式 | 示例 (100 残基) |
+|-----------|---------|----------------------|
+| 目标内存 | 10 GB | 10 GB |
+| 分块大小 | `10 / (1e-5 × nres²)` | 100 |
+| 总尝试次数 | 向上取整至 chunk_size 的倍数 | 500,000 → 500,000 |
+| 每个分块的峰值内存 | O(chunk_size × nres²) | ~10 GB |
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L132-L144), [join_fragments.py](/scripts/join_fragments.py#L150-L152)
+
+## 概率采样与连接调度
+
+`join_fragments` 函数实现了一个**重要性加权的随机连接**。它并非穷举测试左右构象的所有配对（其复杂度将是 O(M²)，其中 M 为每个片段的构象数），而是使用带有逐结构概率权重的 `jax.random.choice`，从每个片段的构象池中采样索引：
+
+```python
+random_indices = tuple(
+    random.choice(key, jnp.arange(len(pos)), shape=(n,), p=probs)
+    for key, pos, probs in ((lkey, lpos, lprobs), (rkey, rpos, rprobs))
+)
+```
+
+概率权重（`probs`）由 `get_probs` 函数计算，该函数基于每个结构的源索引在池中出现的次数，分配**逆频率权重**。这会对过度代表的构象进行去重，这些构象是由于多个片段来源映射到同一个 Foldcomp 条目而产生的：
+
+```python
+def get_probs(x):
+    _, indices, counts = jnp.unique(x, return_counts=True, return_inverse=True, size=x.shape[0])
+    probs = (1 / counts)[indices]
+    return probs
+```
+
+在连接两个片段时，输出概率是左右概率数组的**逐元素乘积**，通过 `jax.tree.map(jnp.multiply, *map(get_probs, sources))` 计算。这种乘性组合反映了片段构象选择之间的独立性假设。
+
+如果采样后没有连接通过接受掩码，函数将使用新的随机密钥**最多重试 5 次**，每次尝试都会发出警告。5 次失败后，将回退到选择单个随机结构，从而确保流水线始终产生输出而非崩溃。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L147-L192), [join_fragments.py](/scripts/join_fragments.py#L126-L129)
+
+## 分级系综组装：`build_ensemble`
+
+`build_ensemble` 函数为将 N 个片段组合成单一系综编排了**树形归约模式**。它并非线性连接片段（那将累积对齐误差），而是将 N 分解为 2 的幂之和，并在分级树中执行两两连接：
+
+```mermaid
+flowchart TD
+    subgraph "N=7 的 2 的幂分解"
+        F1["f₁"] --> J1["连接"]
+        F2["f₂"] --> J1
+        F3["f₃"] --> J2["连接"]
+        F4["f₄"] --> J2
+        F5["f₅"] --> J3["连接"]
+        F6["f₆"] --> J3
+        J1 --> J4["连接"]
+        J2 --> J4
+        J3 --> J5["连接 (线性)"]
+        F7["f₇"] --> J5
+        J4 --> J6["连接 (线性)"]
+        J5 --> J6
+    end
+```
+
+该分解对片段计数的 32 位无符号整型表示使用 `np.unpackbits` 以提取二进制表示，然后通过被位数组掩码的 `2 ** np.arange(16)[::-1]` 得出 2 的幂分段。对于 N=7，这会产生分段 [4, 2, 1]，并按顺序连接：首先是 4 片段块（两层级两两连接），然后是 2 片段块（一层级），最后是 1 片段单体。
+
+在所有 2 的幂子集独立组装完成后，它们将在最终的顺序遍历中被**线性组合**。这种混合策略最小化了连接树的深度（减少误差传播），同时无需填充即可处理任意片段计数。
+
+**内存管理**被整合到层级结构中：在每层连接完成后（即当 `i > 1` 时），来自之前两层的中间片段数据会使用 `jax.tree.map` 对任何 `jax.Array` 对象调用 `.delete()`，从 `data` 字典中显式删除，从而为下一层连接释放 GPU 内存。
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L195-L249)
+
+## 结构重建中的 JAX (CPU 模式)
+
+当连接流水线在 GPU 上运行时，`extract_structures_from_foldcomp_database.py` 中的结构重建阶段通过 `os.environ["JAX_PLATFORMS"] = "cpu"` 显式强制执行 **CPU 运行**。这种分离之所以存在，是因为重建核函数（`reconstruct_from_internal_coordinates_pure_sequential`）本质上是顺序的——每个残基的位置取决于前一个残基计算出的坐标——并且对于单个结构无法受益于 GPU 并行。
+
+相反，JAX 的 `vmap` **跨批次维度**应用以并行重建多个结构：
+
+```python
+def build_parallel_reconstruct_fn(sequence):
+    return build_reconstruct_fn(sequence, reconstruct_fn=vmap(reconstruct, in_axes=(0, 0, None, 0)))
+```
+
+`in_axes=(0, 0, None, 0)` 规范对离散化器参数、角度/扭转角数组以及侧链角度进行向量化，同时保持氨基酸序列（轴为 `None`）不变——因为片段系综中的所有结构共享相同的序列。内部函数上的 `@jit` 装饰器结合 `jax.ensure_compile_time_eval()`，将氨基酸索引锁定为编译时常量，使 XLA 编译器能够展开特定于该序列的侧链重建逻辑。这种特化相比于非特化路径可产生约 **2000 倍的加速**。
+
+来源: [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L17-L17), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L189-L206)
+
+## JAX 模式总结
+
+下表汇总了系综计算流水线中使用的所有 JAX 模式、其位置及其具体作用：
+
+| JAX 模式 | 位置 | 作用 | 硬件 |
+|-------------|----------|------|----------|
+| `vmap` (批量对齐) | `join_fragments.py#L121` | 对 N 个候选配对进行对齐+验证向量化 | GPU |
+| `vmap` (批量重建) | `extract_structures...py#L206` | 对 M 个结构进行结构重建向量化 | CPU |
+| `jax.lax.scan` (分块 vmap) | `join_fragments.py#L139` | 对分块批次进行内存有界迭代 | GPU |
+| `jnp.linalg.svd` | `join_fragments.py#L43` | Kabsch 对齐旋转 | GPU |
+| `jnp.einsum` | `join_fragments.py#L56` | 批量旋转应用 | GPU |
+| `random.choice` | `join_fragments.py#L166` | 重要性加权随机采样 | GPU |
+| `jax.tree.map` | `join_fragments.py#L222,L231` | 用于概率权重和清理的 Pytree 操作 | GPU |
+| `@jit` + `ensure_compile_time_eval` | `extract_structures...py#L192-L199` | 编译时序列特化 | CPU |
+| `jnp.where` (反射校正) | `join_fragments.py#L44-L48` | 用于真正旋转的可追踪条件 | GPU |
+
+<CgxTip>双硬件策略（GPU 用于连接，CPU 用于重建）并非偶然。连接核的 N×N 距离矩阵和批量 SVD 分解具有高度并行性，极大地受益于 GPU 吞吐量。重建核的顺序依赖链（残基 i+1 依赖于残基 i）使其在 GPU 上受延迟限制，但在 CPU 上是带宽高效的，因为 XLA 的 CPU 后端避免了约 1 GB Foldcomp 数据库读取的 PCIe 传输开销。</CgxTip>
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L28-L33), [join_fragments.py](/scripts/join_fragments.py#L38-L72), [extract_structures_from_foldcomp_database.py](/scripts/extract_structures_from_foldcomp_database.py#L28-L29)
+
+## 计算复杂度与扩展性
+
+系综构建的计算代价由每次分块 vmap 迭代中的冲突检测步骤主导。对于具有 `nres` 个残基的结构上的单次连接尝试：
+
+- **对齐**：O(nres) —— 3×3 矩阵的 SVD 是常数；einsum 为 O(nres)
+- **距离矩阵**：O(nres²) —— 两两广播创建 nres×nres×3 张量
+- **冲突掩码**：O(nres²) —— 比较 + 键排除 + 上三角
+
+对于分块大小为 `C` 的 `N` 次总连接尝试，总代价为 O(N/C × C × nres²) = O(N × nres²)。选择分块大小 `C = 10 / (1e-5 × nres²)` 恰好是为了使每个分块的 O(C × nres²) 内存占用保持在约 10 GB 以内，从而使算法具有**内存可扩展性**：更大的蛋白质会自动减小分块大小，以保持在 GPU 内存预算内。
+
+| 残基数 | 分块大小 | 每块内存 | 尝试次数 | 总代价 |
+|----------|-----------|-----------------|----------|------------|
+| 50 | 400 | ~10 GB | 500K | O(500K × 2500) |
+| 100 | 100 | ~10 GB | 500K | O(500K × 10000) |
+| 200 | 25 | ~10 GB | 500K | O(500K × 40000) |
+| 500 | 4 | ~10 GB | 500K | O(500K × 250000) |
+
+来源: [join_fragments.py](/scripts/join_fragments.py#L150-L152), [join_fragments.py](/scripts/join_fragments.py#L60-L69)
+
+## 与相邻流水线阶段的关系
+
+JAX 向量化系综计算位于两个上游数据流的汇聚点，并馈送给一个下游消费者。[重叠对齐与冲突检测](9-overlap-alignment-and-clash-detection)页涵盖了此 JAX 核函数所实现的 SVD 对齐和基于距离的冲突准则的数学基础。[从 Foldcomp 进行结构重建](7-structure-reconstruction-from-foldcomp)页描述了产生被连接核函数消耗的片段坐标池的 CPU 端 `vmap` 批量重建。[分级片段连接](8-hierarchical-fragment-joining)页解释了在整个片段层级结构中调度 JAX 核函数何时及如何被调用的树形归约策略。
+
+有关控制 JAX 核函数行为（分块大小、尝试次数、系综大小）的完整流水线配置选项，请参见[命令行配置参考](13-command-line-configuration-reference)。
+
+---

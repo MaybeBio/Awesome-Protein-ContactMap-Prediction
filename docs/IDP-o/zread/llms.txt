@@ -1,0 +1,28 @@
+# PeptoneLtd/IDP-o
+
+Source: https://zread.ai/PeptoneLtd/IDP-o
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/Foldcomp 数据库设置](3-foldcomp-database-setup.md)
+
+## 深入探究
+
+- [深入探究/架构概述](4-architecture-overview.md)
+- [深入探究/片段生成策略](5-fragment-generation-strategy.md)
+- [深入探究/批量数据集生成](11-batch-dataset-generation.md)
+- [深入探究/输出格式与下游应用](12-output-formats-and-downstream-use.md)
+- [深入探究/命令行配置参考](13-command-line-configuration-reference.md)
+### 流水线阶段
+
+- [深入探究/流水线阶段/GPU 加速序列搜索](6-gpu-accelerated-sequence-search.md)
+- [深入探究/流水线阶段/基于 Foldcomp 的结构重建](7-structure-reconstruction-from-foldcomp.md)
+- [深入探究/流水线阶段/层级片段拼接](8-hierarchical-fragment-joining.md)
+
+### 核心算法
+
+- [深入探究/核心算法/重叠比对与冲突检测](9-overlap-alignment-and-clash-detection.md)
+- [深入探究/核心算法/JAX 向量化集成计算](10-jax-vectorized-ensemble-computation.md)
+
