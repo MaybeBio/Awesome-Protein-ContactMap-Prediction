@@ -581,17 +581,16 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Code:** https://github.com/zw2x/glinter
 </details>
 
-#### ComplexContact
+--- 
 
 <details>
-<summary>Sequence-based · contact predictor</summary>
+<summary>ComplexContact</summary>
 
-- **Paper:** [ComplexContact: a web server for inter-protein contact prediction using deep learning](https://academic.oup.com/nar/article/46/W1/W432/4999176) (Nucleic Acids Research, 2018)
-- **Docs:** [Read more →](docs/complexcontact/) *to be written*
-- **Input:** two-chain sequences + MSA
-- **Output:** L1×L2 inter-chain contact-probability matrix
+- **Paper:** [ComplexContact: a web server for inter-protein contact prediction using deep learning](https://academic.oup.com/nar/article/46/W1/W432/5001161) (Nucleic Acids Research, 2018)
+- **Docs:** [Read more →](docs/ComplexContact/) *to be written*
 - **Code:** N/A
-- **Web server:** https://complexcontact.cs.ucd.ie/
+- **Web server:** http://raptorx6.uchicago.edu/ComplexContact/
+- **Approach:** DL
 </details>
 
 #### <!-- PLACEHOLDER --> DRN-1D2D_Inter
