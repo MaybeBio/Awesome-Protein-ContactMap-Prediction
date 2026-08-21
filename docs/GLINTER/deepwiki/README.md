@@ -1,0 +1,26 @@
+# zw2x-glinter-DeepWiki
+
+## Content Index
+
+- [Overview](Overview.md)
+- [Getting-Started](Getting-Started.md)
+- [End-to-End-Prediction-Workflow](End-to-End-Prediction-Workflow.md)
+- [Preprocessing-Pipeline](Preprocessing-Pipeline.md)
+- [Molecular-Surface-Generation-(MSMS)](Molecular-Surface-Generation-(MSMS).md)
+- [MSA-Generation-and-Concatenation](MSA-Generation-and-Concatenation.md)
+- [Feature-Tensorization](Feature-Tensorization.md)
+- [Core-Model-Architecture](Core-Model-Architecture.md)
+- [ESM-Protein-Language-Model-Integration](ESM-Protein-Language-Model-Integration.md)
+- [Geometric-Graph-Encoder-(AtomGCN)](Geometric-Graph-Encoder-(AtomGCN).md)
+- [Dataset-and-Data-Loading](Dataset-and-Data-Loading.md)
+- [Inference-and-Scoring](Inference-and-Scoring.md)
+- [Model-Inference](Model-Inference.md)
+- [Score-Post-Processing-and-Evaluation](Score-Post-Processing-and-Evaluation.md)
+- [AlphaFold-Multimer-Integration](AlphaFold-Multimer-Integration.md)
+- [AlphaFold-Feature-Extraction](AlphaFold-Feature-Extraction.md)
+- [AlphaFold-Baseline-Comparison](AlphaFold-Baseline-Comparison.md)
+- [Protein-Utility-Library-(glinter.protein)](Protein-Utility-Library-(glinter.protein).md)
+- [PDB-Parsing-and-Coordinate-Extraction](PDB-Parsing-and-Coordinate-Extraction.md)
+- [Sequence-Encoding-and-Alignment-Utilities](Sequence-Encoding-and-Alignment-Utilities.md)
+- [Training-Data](Training-Data.md)
+- [Glossary](Glossary.md)
