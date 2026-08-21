@@ -1,0 +1,44 @@
+# zw2x/glinter
+
+Source: https://zread.ai/zw2x/glinter
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/预测流程详解](3-prediction-pipeline-walkthrough.md)
+
+## 深入探索
+
+- [深入探索/架构概述](4-architecture-overview.md)
+- [深入探索/AlphaFold-Multimer 集成](20-alphafold-multimer-integration.md)
+### 核心模型
+
+- [深入探索/核心模型/MSAModel 与前向传播](5-msamodel-and-forward-pass.md)
+- [深入探索/核心模型/AtomGCN 多图网络](6-atomgcn-multi-graph-network.md)
+- [深入探索/核心模型/AtomConv 消息传递](7-atomconv-message-passing.md)
+
+### 特征工程
+
+- [深入探索/特征工程/几何图构建](8-geometric-graph-construction.md)
+- [深入探索/特征工程/ESM-MSA 注意力嵌入](9-esm-msa-attention-embedding.md)
+- [深入探索/特征工程/蛋白质表面网格处理](10-protein-surface-mesh-processing.md)
+
+### 数据流水线
+
+- [深入探索/数据流水线/DimerDataset 与特征加载](11-dimerdataset-and-feature-loading.md)
+- [深入探索/数据流水线/MSA 构建与 Henikoff 加权](12-msa-building-and-henikoff-weighting.md)
+- [深入探索/数据流水线/特征配置系统](13-feature-configuration-system.md)
+
+### 预处理阶段
+
+- [深入探索/预处理阶段/PDB 序列提取](14-pdb-sequence-extraction.md)
+- [深入探索/预处理阶段/使用 HHblits 生成 MSA](15-msa-generation-with-hhblits.md)
+- [深入探索/预处理阶段/使用 MSMS 计算表面](16-surface-computation-with-msms.md)
+- [深入探索/预处理阶段/特征张量组装](17-feature-tensor-assembly.md)
+
+### 预测与评分
+
+- [深入探索/预测与评分/异二聚体与同二聚体预测](18-heterodimer-vs-homodimer-prediction.md)
+- [深入探索/预测与评分/接触评分计算](19-contact-score-computation.md)
+
