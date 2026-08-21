@@ -615,45 +615,10 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
-### C. IDR / fuzzy-binding-specific
+### C. IDR-specific
 
 > ⚠️ Binding-site predictors (`fIDPnn / flDPnn`, MoRF) output one scalar per residue — usable only as an outer-product baseline, not the main track.
 
-#### IDP-LZerD
-
-<details>
-<summary>IDR-specific · ensemble</summary>
-
-- **Paper:** [TBD]
-- **Docs:** [Read more →](docs/idp-lzerd/) *to be written*
-- **Input:** [TBD]
-- **Output:** low-resolution template + FFT docking → structural ensemble → contact-probability matrix (ensemble contact frequency)
-- **Code:** https://github.com/aanastasiou/IDP-LZerD
-</details>
-
-#### <!-- PLACEHOLDER --> AlphaFold-IDR (dropout / random-seed multi-conformation)
-
-<details>
-<summary>IDR-specific · ensemble</summary>
-
-- **Paper:** [TBD]
-- **Docs:** [Read more →](docs/alphafold-idr/) *to be written*
-- **Input:** [TBD]
-- **Output:** multiple conformations → integrated contact-probability map
-- **Code:** N/A
-</details>
-
-#### <!-- PLACEHOLDER --> fIDPnn / flDPnn (MoRF binding-site baseline)
-
-<details>
-<summary>IDR-specific · binding-site baseline</summary>
-
-- **Paper:** [TBD]
-- **Docs:** [Read more →](docs/fidpnn/) *to be written*
-- **Input:** [TBD]
-- **Output:** per-residue site probability → outer-product minimal L1×L2 baseline (full-connectivity assumption)
-- **Code:** N/A
-</details>
 
 <!-- More IDR-specific placeholders can be added here -->
 <!-- PLACEHOLDER: coarse-grained docking + short MD optimization framework contact scores -->
@@ -662,10 +627,6 @@ A curated collection of computational tools for `intermolecular interaction pred
 ---
 
 ## Datasets
-
-*To be filled* — Tier 1 (induced-folding complexes, PDB-derived labels) and Tier 2 (fuzzy/dynamic complexes, ensemble-constraint labels from NMR PRE / XL-MS / smFRET).
-
----
 
 <details>
 <summary>Protein Ensemble Database, PED</summary>
