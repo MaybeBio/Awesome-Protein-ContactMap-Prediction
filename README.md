@@ -496,7 +496,9 @@ A curated collection of computational tools for `intermolecular interaction pred
 <details>
 <summary>IDP-o</summary>
 
-- **Paper:** [Advancing Protein Ensemble Predictions Across the Order–Disorder Continuum](https://www.biorxiv.org/content/10.1101/2025.10.18.680935v2) (bioRxiv, 2025)
+> ⚠️ PepTron and IDP-o share the same paper(benchmark) but with a distinct repository and codebase. 
+
+- **Paper:** [Advancing Protein Ensemble Predictions Across the Order–Disorder Continuum](https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3) (bioRxiv, 2025)
 - **Docs:** [Read more →](docs/IDP-o/) *to be written*
 - **Code:** https://github.com/PeptoneLtd/IDP-o
 - **Approach:** DL
@@ -508,9 +510,9 @@ A curated collection of computational tools for `intermolecular interaction pred
 <details>
 <summary>PepTron</summary>
 
-> ⚠️ PepTron and IDP-o 
+> ⚠️ PepTron and IDP-o share the same paper(benchmark) but with a distinct repository and codebase. 
 
-- **Paper:** [Advancing Protein Ensemble Predictions Across the Order–Disorder Continuum](https://www.biorxiv.org/content/10.1101/2025.10.18.680935v2) (bioRxiv, 2025)
+- **Paper:** [Advancing Protein Ensemble Predictions Across the Order–Disorder Continuum](https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3) (bioRxiv, 2025)
 - **Docs:** [Read more →](docs/PepTron/) *to be written*
 - **Code:** https://github.com/PeptoneLtd/PepTron
 - **Approach:** DL
