@@ -569,6 +569,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Geometric Transformers for Protein Interface Contact Prediction](https://arxiv.org/abs/2110.02423) (arXiv, 2022)
 - **Docs:** [Read more →](docs/DeepInteract/) *to be written*
 - **Code:** https://github.com/BioinfoMachineLearning/DeepInteract
+- **Approach:** DL
 </details>
 
 --- 
@@ -579,6 +580,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Paper:** [Deep graph learning of inter-protein contacts](https://academic.oup.com/bioinformatics/article/38/4/947/6424887) (Bioinformatics, 2021)
 - **Docs:** [Read more →](docs/GLINTER/) *to be written*
 - **Code:** https://github.com/zw2x/glinter
+- **Approach:** DL
 </details>
 
 --- 
@@ -692,5 +694,6 @@ Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to 
 - [ ] Update the wiki in docs/, and manually refresh it in sync with the original repository commit date
 - [ ] extract the model architecture for those tools tagged `Approach: DL`, e.g., attention, GNN, flow-matching 
 - [ ] extract DATASET part in these models README
+- [ ] Open another MD file to store the key lab information for each tool, e.g., lab name, PI, email, website, etc.
 
 ## Reference
