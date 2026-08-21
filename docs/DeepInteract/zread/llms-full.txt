@@ -1,0 +1,3917 @@
+# BioinfoMachineLearning/DeepInteract
+
+Source: https://zread.ai/BioinfoMachineLearning/DeepInteract
+
+# 入门
+
+- [入门/概述](https://zread.ai/BioinfoMachineLearning/DeepInteract/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**DeepInteract** 是一个用于预测**蛋白质界面接触**的几何深度学习流水线——即在复合物中两个蛋白质之间形成物理相互作用的残基对。该研究发表于 **ICLR 2022**，它引入了一种 **Geometric Transformer** 架构，将图 Transformer 网络推广以融合丰富的 3D 几何特征，并搭配了一个 **Inter-Graph Node Interaction (GINI)** 模块来建模跨链关系，然后通过 **DeepLabV3+** 视觉解码器将其解码为每对残基的接触概率。
+
+来源: [README.md](/README.md#L1-L30), [setup.py](/setup.py#L1-L12)
+
+## DeepInteract 解决了什么问题？
+
+当两个蛋白质结合形成复合物时，每个蛋白质表面实际上只有一小部分残基发生物理接触。识别这些**界面接触**对于药物设计、蛋白质工程和理解疾病机制至关重要——然而实验测定方法仍然昂贵且缓慢。DeepInteract 将此问题表述为**残基对的二分类问题**：给定两条独立蛋白质链的 3D 结构，预测跨链的哪些残基-残基对会相互接触（通常定义为 Cβ 原子间距在 8Å 以内）。这本质上是一个**几何**问题——氨基酸的空间排布、朝向以及骨架构象均携带决定性信号。
+
+来源: [README.md](/README.md#L15-L18)
+
+## 架构一览
+
+完整的 DeepInteract 流水线通过四个顺序阶段处理蛋白质复合物，每个阶段都实现一种独特的表征转换：
+
+```mermaid
+flowchart TB
+    subgraph Input["1. 蛋白质特征工程"]
+        PDB["PDB 文件<br/>(链 A + 链 B)"] --> Graph["KNN 图构建<br/>(DGL + 几何特征)"]
+        Graph --> NodeFeats["节点特征<br/>(113 维: 残基名, SS, RSA, PSAIA, HSAAC, 序列)"]
+        Graph --> EdgeFeats["边特征<br/>(28 维: 距离 RBF, 方向,<br/>朝向, 酰胺角)"]
+    end
+
+    subgraph GeoTran["2. Geometric Transformer (×L 层)"]
+        EdgeFeats --> EdgeInit["边初始化模块"]
+        EdgeInit --> ConfMod["构象模块<br/>(几何演化)"]
+        NodeFeats --> MHGA["多头几何注意力"]
+        ConfMod --> MHGA
+        MHGA --> NodeReps["学习到的节点表征"]
+        MHGA --> EdgeReps["学习到的边表征"]
+    end
+
+    subgraph GINI["3. 图间节点交互"]
+        NodeReps --> InterTensor["交互张量构建<br/>(外积交错)"]
+        InterTensor --> ResNet2D["膨胀 ResNet + 区域注意力"]
+    end
+
+    subgraph Decode["4. 接触图解码"]
+        ResNet2D --> DeepLab["DeepLabV3+ 解码器<br/>(空洞空间金字塔池化)"]
+        DeepLab --> ContactMap["接触概率图<br/>(N₁ × N₂)"]
+    end
+
+    style Input fill:#e8f4fd,stroke:#2196F3
+    style GeoTran fill:#fff3e0,stroke:#FF9800
+    style GINI fill:#e8f5e9,stroke:#4CAF50
+    style Decode fill:#fce4ec,stroke:#E91E63
+```
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L34-L121), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L500-L650), [vision_modules.py](/project/utils/vision_modules.py#L1-L165)
+
+## 核心架构组件
+
+流水线的每个阶段由一个独立的模块实现，概述如下：
+
+| 阶段 | 模块 | 核心作用 | 位置 |
+|-------|--------|----------|----------|
+| **特征工程** | `GeometricProteinFeatures` | 从 3D 坐标计算 RBF 距离、方向、朝向、四元数旋转、氢键和接触 | `protein_feature_utils.py` |
+| **特征工程** | `prot_df_to_dgl_graph_feats` | 将蛋白质 DataFrames 转换为具有独热编码节点特征的 DGL KNN 图 | `graph_utils.py` |
+| **Geometric Transformer** | `MultiHeadGeometricAttentionLayer` | 使用边特征修正的注意力分数扩展 DGL 图上的标准多头注意力 | `deepinteract_modules.py` |
+| **Geometric Transformer** | `ConformationModule` | 通过残差门控消息传递迭代演化几何边特征（距离、方向、朝向、酰胺） | `deepinteract_modules.py` |
+| **Geometric Transformer** | `InitEdgeModule` | 通过结合节点嵌入与几何及序列边特征来初始化边表征 | `deepinteract_modules.py` |
+| **图间交互** | `LitGINI` | 完整的 Lightning 模块：为每条链编排 Geometric Transformer，构建交互张量，并解码接触图 | `deepinteract_modules.py` |
+| **接触解码** | `DeepLabV3Plus` | 源自语义分割的适配：使用空洞空间金字塔池化将 2D 交互张量解码为接触概率图 | `vision_modules.py` |
+| **接触解码** | `ResNet2DInputWithOptAttention` | 带有可选多头区域注意力的膨胀 ResNet，作用于交互张量 | `deepinteract_modules.py` |
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L34-L265), [protein_feature_utils.py](/project/utils/protein_feature_utils.py#L63-L150), [vision_modules.py](/project/utils/vision_modules.py#L120-L165)
+
+## 几何特征谱系
+
+DeepInteract 的一个标志性特征是其**聚焦几何**的设计。与将边特征视为不透明向量的标准图 Transformer 不同，DeepInteract 将边表征分解为四个几何通道，每个通道都有专用的嵌入路径：
+
+| 特征通道 | 维度 | 描述 | 张量索引范围 |
+|----------------|-----------|-------------|-------------------|
+| **距离 (RBF)** | 18 | 应用于成对平方距离的径向基函数 | `2:20` |
+| **方向** | 3 | 沿边的单位向量（源 → 目标） | `20:23` |
+| **朝向** | 4 | 从源到目标局部坐标系的四元数旋转 | `23:27` |
+| **酰胺平面角** | 1 | 相连残基的酰胺法向量之间的夹角 | `27` |
+
+这些几何特征同时流经 **ConformationModule**（对其进行迭代演化）和 **MultiHeadGeometricAttentionLayer**（利用其调节注意力分数），从而在 3D 结构与学习到的表征之间建立起紧密耦合。
+
+<CgxTip>设置 `disable_geometric_mode=True` 会将 Geometric Transformer 转换为 "A Generalization of Transformer Networks to Graphs" 中的原始图 Transformer——这有助于进行消融实验，以剥离几何特征演化的贡献。</CgxTip>
+
+来源: [deepinteract_constants.py](/project/utils/deepinteract_constants.py#L99-L116), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L267-L334)
+
+## 项目结构
+
+```
+DeepInteract
+├── docker/                          # 容器化推理
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── run_docker.py
+├── img/                             # 架构图
+│   ├── DeepInteract_Architecture.png
+│   └── Geometric_Transformer.png
+├── project/
+│   ├── datasets/                    # 数据加载与处理
+│   │   ├── builder/                 # PDB 解析与特征生成
+│   │   ├── CASP_CAPRI/             # CASP-CAPRI 基准数据集
+│   │   ├── DB5/                    # 对接基准 5
+│   │   ├── DIPS/                   # DIPS-Plus 大规模数据集
+│   │   └── PICP/                   # 统一的 PICP 数据模块
+│   ├── test_data/                   # 用于测试的示例 PDB 文件
+│   ├── utils/                       # 核心模型与实用工具模块
+│   │   ├── deepinteract_modules.py # LitGINI, Geometric Transformer, ResNet, Attention
+│   │   ├── deepinteract_utils.py   # 交互张量, 训练工具, 参数解析
+│   │   ├── deepinteract_constants.py # 特征索引, 限制, 氨基酸映射
+│   │   ├── vision_modules.py       # DeepLabV3+ 编码器/解码器
+│   │   ├── graph_utils.py          # DGL 图构建, 注意力原语
+│   │   ├── protein_feature_utils.py # 几何蛋白质特征提取
+│   │   └── dips_plus_utils.py      # DIPS-Plus 后处理与插补
+│   ├── lit_model_train.py          # PyTorch Lightning 训练入口点
+│   ├── lit_model_test.py           # 测试入口点
+│   ├── lit_model_predict.py        # 预测入口点
+│   └── lit_model_predict_docker.py # Docker 兼容的预测
+├── environment.yml                  # Conda 环境配置
+├── requirements.txt                 # Pip 依赖
+└── setup.py                         # 包安装 (v1.1.0)
+```
+
+来源: [README.md](/README.md#L111-L210), [setup.py](/setup.py#L1-L38)
+
+## 支持的数据集
+
+DeepInteract 在三个规模递增的基准数据集上进行了评估：
+
+| 数据集 | 规模 | 描述 | 数据模块 |
+|---------|-------|-------------|-------------|
+| **DIPS-Plus** | ~17,000 个复合物 | 具有丰富结构特征的大规模蛋白质界面数据集 | `PICPDGLDataModule` |
+| **DB5** | 55 个复合物 | 对接基准 5——标准的小规模对接基准 | `PICPDGLDataModule` |
+| **CASP-CAPRI** | 随轮次变化 | 社区范围的预测挑战靶标 | `PICPDGLDataModule` |
+
+所有数据集都统一在单一的 `PICPDGLDataModule`（Protein Interface Contact Prediction，蛋白质界面接触预测）之下，它负责编排训练/验证/测试集划分、DGL 图批处理和特征生成。模型通常**在 DIPS-Plus 上训练**，并选择**在 DB5 上微调**以进行基准评估。
+
+来源: [lit_model_train.py](/project/lit_model_train.py#L20-L40), [README.md](/README.md#L247-L253)
+
+## 技术栈
+
+| 类别 | 技术 | 用途 |
+|----------|-----------|---------|
+| **深度学习** | PyTorch, PyTorch Lightning | 模型定义，训练循环编排 |
+| **图计算** | DGL (Deep Graph Library) | KNN 图构建，消息传递，图上的注意力 |
+| **视觉解码器** | DeepLabV3+ (via timm) | 语义分割风格的接触图解码 |
+| **序列搜索** | HH-suite3 + BFD/Uniclust30 | 为进化序列特征生成 MSA |
+| **特征生成** | PSAIA, Atom3D, Biopython | 结构特征计算 (RSA, HSE, CN 等) |
+| **实验追踪** | Weights & Biases, TensorBoard | 记录指标、检查点和可视化 |
+| **部署** | Docker + NVIDIA Container Toolkit | GPU 加速的容器化推理 |
+
+来源: [setup.py](/setup.py#L13-L28), [environment.yml](/environment.yml#L1-L50), [docker/Dockerfile](/docker/Dockerfile#L1-L50)
+
+## 发表与引用
+
+本工作发表于 **ICLR 2022**：
+
+> **Geometric Transformers for Protein Interface Contact Prediction**  
+> Alex Morehead, Chen Chen, Jianlin Cheng  
+> *International Conference on Learning Representations (ICLR), 2022*
+
+```bibtex
+@inproceedings{morehead2022geometric,
+  title={Geometric Transformers for Protein Interface Contact Prediction},
+  author={Alex Morehead and Chen Chen and Jianlin Cheng},
+  booktitle={International Conference on Learning Representations},
+  year={2022},
+  url={https://openreview.net/forum?id=CS4463zx6Hi}
+}
+```
+
+来源: [README.md](/README.md#L23-L30)
+
+## 后续阅读
+
+现在你已经对 DeepInteract 的目标和架构有了高层次的了解，请按照以下阅读路径逐步构建更深入的知识：
+
+1. **[快速开始](2-quick-start)** — 通过传统的 Conda 安装在你的机器上运行 DeepInteract
+2. **[Docker 设置](3-docker-setup)** — 使用提供的 Docker 镜像完全跳过手动设置
+3. **[架构概览](4-architecture-overview)** — 深入了解端到端的数据流和模块交互细节
+4. **[多头几何注意力](5-multi-head-geometric-attention)** — 了解几何边特征如何修正注意力分数
+5. **[GINI 模型设计](8-gini-model-design)** — 探索图间交互张量如何捕获跨链关系
+
+---
+
+- [入门/快速入门](https://zread.ai/BioinfoMachineLearning/DeepInteract/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+几分钟内让 DeepInteract 运行起来——从克隆仓库到生成你的第一个蛋白质界面接触概率图。本指南将带你了解两种受支持的安装方式（Docker 和 Conda）、一次性遗传数据库配置，以及你的首次预测。
+
+## 选择你的安装路径
+
+DeepInteract 提供两种安装策略，各自适用于不同的工作流。**Docker 路径**消除了依赖编译的开销，推荐首次使用的用户采用。**Conda 路径**提供了对环境更精细的控制，更适合开发或微调工作流。
+
+| 方面 | Docker 安装 | Conda 安装 |
+|---|---|---|
+| **难度** | 低 — 一个构建命令 | 中 — 需要编译 PSAIA |
+| **磁盘空间** | ~13 GB (镜像) + ~17–86 GB (数据库) | ~17–86 GB (数据库) + PSAIA 源码 |
+| **GPU 支持** | 通过 NVIDIA Container Toolkit | 原生 CUDA toolkit |
+| **最适用场景** | 快速预测、CI/CD 流水线 | 训练、微调、开发 |
+| **详细指南** | [Docker 配置](3-docker-setup) | 见下方第 3 步 |
+
+```mermaid
+flowchart TD
+    A[克隆仓库] --> B{选择路径}
+    B -->|最快配置| C[Docker 安装]
+    B -->|完全控制| D[Conda 安装]
+    C --> C1[构建 Docker 镜像]
+    C1 --> C2[安装 run_docker.py 依赖]
+    D --> D1[创建 Conda 环境]
+    D1 --> D2[编译 PSAIA]
+    D2 --> D3[安装 pip 依赖]
+    C2 --> E[下载遗传数据库]
+    D3 --> E
+    E --> F[下载检查点]
+    F --> G[运行预测]
+```
+
+## 第 1 步 — 克隆仓库
+
+```bash
+git clone https://github.com/BioinfoMachineLearning/DeepInteract
+cd DeepInteract/
+DI_DIR=$(pwd)
+```
+
+这会将 `DI_DIR` 设置为一个便捷变量，在后续所有命令中都会引用它。
+
+来源：[README.md](/README.md#L239-L245)
+
+## 第 2 步 — 下载预训练检查点
+
+DeepInteract 在 Zenodo 上提供了两个训练好的模型检查点。请将它们都下载到 checkpoints 目录中：
+
+```bash
+mkdir -p project/checkpoints
+wget -P project/checkpoints https://zenodo.org/record/6671582/files/LitGINI-GeoTran-DilResNet.ckpt
+wget -P project/checkpoints https://zenodo.org/record/6671582/files/LitGINI-GeoTran-DilResNet-DB5-Fine-Tuned.ckpt
+```
+
+| 检查点 | 描述 |
+|---|---|
+| `LitGINI-GeoTran-DilResNet.ckpt` | 在 DIPS-Plus 上训练的主模型 |
+| `LitGINI-GeoTran-DilResNet-DB5-Fine-Tuned.ckpt` | 用于对接基准评估的 DB5-Plus 微调变体 |
+
+来源：[README.md](/README.md#L462-L470)
+
+## 第 3 步 — 配置环境
+
+### 选项 A：Docker（推荐首次使用的用户）
+
+确保已安装 [Docker](https://www.docker.com/) 和 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)，然后验证 GPU 可见性：
+
+```bash
+docker run --rm --gpus all nvidia/cuda:11.2.2-cudnn8-runtime-ubuntu20.04 nvidia-smi
+```
+
+构建镜像（需要约 13 GB）并安装轻量级 Docker 启动器依赖：
+
+```bash
+docker build -f docker/Dockerfile -t deepinteract .
+pip3 install -r docker/requirements.txt
+mkdir -p project/datasets/Input
+```
+
+Docker 镜像内置了 PSAIA、HH-suite3、CUDA 11.2、PyTorch 1.7.1 以及所有 Python 依赖——无需手动编译。有关完整的 Docker 操作流程，请参见 [Docker 配置](3-docker-setup)。
+
+来源：[README.md](/README.md#L212-L275), [docker/Dockerfile](/docker/Dockerfile#L1-L101), [docker/requirements.txt](/docker/requirements.txt#L1-L3)
+
+### 选项 B：Conda（推荐用于开发）
+
+根据提供的规范文件创建并激活 Conda 环境：
+
+```bash
+conda env create --name DeepInteract -f environment.yml
+conda activate DeepInteract
+pip3 install -r requirements.txt
+```
+
+<CgxTip>PSAIA 编译是 Conda 路径中最容易出错的步骤。它需要 GCC 10 和 QT4——这两者在 Ubuntu 20.04 上都需要自定义 PPA。如果编译失败，Docker 路径通过内置预编译的 PSAIA 二进制文件可以完全避免此问题。</CgxTip>
+
+该 Conda 环境提供了 **Python 3.8**、**PyTorch 1.7.1**、**CUDA 11.2**、**DGL 0.6** 和 **PyTorch Lightning 1.4.8**。你还必须从源码编译 PSAIA（需要 GCC 10 和 QT4）——完整的 PSAIA 构建说明请参考 [README](https://github.com/BioinfoMachineLearning/DeepInteract)，并记得在 `project/datasets/builder/psaia_config_file_input.txt` 中替换为你本地的仓库路径。
+
+来源：[README.md](/README.md#L305-L398), [environment.yml](/environment.yml#L1-L29), [requirements.txt](/requirements.txt#L1-L15), [setup.py](/setup.py#L1-L38)
+
+## 第 4 步 — 下载遗传数据库
+
+DeepInteract 需要一个兼容 HH-suite3 的序列数据库来计算进化特征。请根据你的可用磁盘空间选择一个：
+
+| 数据库 | 磁盘空间（解压后） | 推荐适用对象 |
+|---|---|---|
+| **Small BFD** | ~17 GB | 首次使用的用户、存储空间有限 |
+| **Uniclust30** | ~86 GB | 质量与大小的平衡之选 |
+| **BFD** | ~1.7 TB | 追求最高特征质量 |
+
+**Small BFD** 下载最快，且对大多数预测工作流已足够使用：
+
+```bash
+DOWNLOAD_DIR="~/Data/Databases"
+ROOT_DIR="${DOWNLOAD_DIR}/small_bfd"
+mkdir -p ~/Data "$DOWNLOAD_DIR" "$ROOT_DIR"
+SOURCE_URL="https://storage.googleapis.com/alphafold-databases/reduced_dbs/bfd-first_non_consensus_sequences.fasta.gz"
+aria2c "${SOURCE_URL}" --dir="${ROOT_DIR}"
+pushd "${ROOT_DIR}" && gunzip "${ROOT_DIR}/bfd-first_non_consensus_sequences.fasta.gz" && popd
+```
+
+解压后，预测时所用的 `--hhsuite_db` 参数应指向：
+
+```
+~/Data/Databases/small_bfd/bfd-first_non_consensus_sequences.fasta
+```
+
+<CgxTip>`aria2c` 下载工具已包含在 Conda 环境（`aria2==1.34.0`）和 Docker 镜像中。如果在 Conda 路径下未使用完整环境，请单独安装：`sudo apt install aria2`。</CgxTip>
+
+来源：[README.md](/README.md#L37-L109)
+
+## 第 5 步 — 运行你的首次预测
+
+### 通过 Docker
+
+```bash
+python3 docker/run_docker.py \
+  --left_pdb_filepath "$DI_DIR"/project/test_data/4heq_l_u.pdb \
+  --right_pdb_filepath "$DI_DIR"/project/test_data/4heq_r_u.pdb \
+  --input_dataset_dir "$DI_DIR"/project/datasets/Input \
+  --ckpt_name "$DI_DIR"/project/checkpoints/LitGINI-GeoTran-DilResNet.ckpt \
+  --hhsuite_db ~/Data/Databases/small_bfd/bfd-first_non_consensus_sequences.fasta \
+  --num_gpus 0
+```
+
+将 `--num_gpus 0` 替换为 `--num_gpus 1` 即可启用 GPU 加速推理。
+
+来源：[README.md](/README.md#L276-L304), [docker/run_docker.py](/docker/run_docker.py#L32-L48)
+
+### 通过 Conda
+
+```bash
+cd project
+python3 lit_model_predict.py \
+  --left_pdb_filepath "$DI_DIR"/project/test_data/4heq_l_u.pdb \
+  --right_pdb_filepath "$DI_DIR"/project/test_data/4heq_r_u.pdb \
+  --ckpt_dir "$DI_DIR"/project/checkpoints \
+  --ckpt_name LitGINI-GeoTran-DilResNet.ckpt \
+  --hhsuite_db ~/Data/Databases/small_bfd/bfd-first_non_consensus_sequences.fasta
+cd ..
+```
+
+要查看所有可用的命令行参数，请运行 `python3 lit_model_predict.py --help`。
+
+来源：[README.md](/README.md#L477-L486), [project/lit_model_predict.py](/project/lit_model_predict.py#L264-L298)
+
+## 理解输出
+
+完成后，DeepInteract 会将 NumPy 数组文件写入输入数据目录（对于本示例，即 `test_data/`）。对于 4HEQ 测试复合物，你将找到：
+
+| 输出文件 | 内容 | 形状 |
+|---|---|---|
+| `4heq_contact_prob_map.npy` | 预测的界面接触概率图 | (chain₁_residues × chain₂_residues) |
+| `4heq_graph1_node_feats.npy` | 链 1 的学习节点表征 | (chain₁_residues × hidden_dim) |
+| `4heq_graph1_edge_feats.npy` | 链 1 的学习边表征 | (chain₁_edges × hidden_dim) |
+| `4heq_graph2_node_feats.npy` | 链 2 的学习节点表征 | (chain₂_residues × hidden_dim) |
+| `4heq_graph2_edge_feats.npy` | 链 2 的学习边表征 | (chain₂_edges × hidden_dim) |
+
+在 Python 中加载接触概率图：
+
+```python
+import numpy as np
+contact_prob_map = np.load('4heq_contact_prob_map.npy')
+print(f"Map shape: {contact_prob_map.shape}")
+print(f"Max probability: {contact_prob_map.max():.4f}")
+```
+
+接触概率图对跨两条链的每个残基对进行了编码，表示模型认为该残基对形成**界面接触**的置信度。越接近 **1.0** 的值表示高置信度的接触预测。
+
+来源：[project/lit_model_predict.py](/project/lit_model_predict.py#L236-L261)
+
+## 快速开始流程总结
+
+```mermaid
+flowchart LR
+    A["PDB 链 A<br/>(例如, 4heq_l_u.pdb)"] --> C[DeepInteract]
+    B["PDB 链 B<br/>(例如, 4heq_r_u.pdb)"] --> C
+    C --> D["接触概率图<br/>(.npy)"]
+    C --> E["学习节点嵌入<br/>(.npy)"]
+    C --> F["学习边嵌入<br/>(.npy)"]
+```
+
+预测流水线内部依次执行：(1) 将每条 PDB 链解析为包含 **113 个节点特征**和 **27 个边特征**的 DGL 图，(2) 通过 **LitGINI** 模型运行 Geometric Transformer 编码器，(3) 跨链表征构建交互张量，(4) 通过 **DeepLabV3+** 风格的接触解码器解码接触概率。这些阶段的每一个都在[架构概览](4-architecture-overview)中进行了深入说明。
+
+来源：[project/lit_model_predict.py](/project/lit_model_predict.py#L147-L200)
+
+## 接下来去哪里
+
+现在你已经能够预测接触图了，可以探索以下主题以加深你的理解：
+
+- **[Docker 配置](3-docker-setup)** — 完整的 Docker 配置详情、GPU 调优和卷挂载
+- **[架构概览](4-architecture-overview)** — 了解 Geometric Transformer、GINI 模块和接触解码器如何组成完整的流水线
+- **[预测工作流](18-prediction-workflow)** — 高级推理选项、自定义 PDB 输入和输出解释
+- **[Lightning 训练流水线](17-lightning-training-pipeline)** — 在你自己的蛋白质复合物数据上训练或微调 DeepInteract
+- **[从 PDB 构建图](11-graph-construction-from-pdb)** — 了解原始 PDB 文件如何转化为几何图输入
+
+---
+
+- [入门/Docker 配置](https://zread.ai/BioinfoMachineLearning/DeepInteract/3-docker-setup)
+
+---
+slug:3-docker-setup
+blog_type:normal
+---
+
+
+DeepInteract 的 Docker 配置提供了一个**完全自包含的预测环境** — 将 CUDA 运行时、PSAIA、HH-suite3、PyTorch、DGL 以及所有 Python 依赖项打包到单个可复现的镜像中。这消除了传统安装所需的复杂手动编译步骤，是在新蛋白质复合物上运行推理的**推荐途径**。
+
+## 前提条件
+
+在构建 DeepInteract 镜像之前，你的宿主系统必须满足三个要求。每一项都不可妥协：镜像依赖于 NVIDIA 的 CUDA 运行时基础，而启动脚本 (`run_docker.py`) 依赖 Docker Python SDK 来编排容器的创建和卷挂载。
+
+| 要求 | 用途 | 验证命令 |
+|---|---|---|
+| **Docker 引擎** | 构建并运行容器 | `docker --version` |
+| **NVIDIA Container Toolkit** | 在容器内暴露宿主 GPU | `docker run --rm --gpus all nvidia/cuda:11.2.2-cudnn8-runtime-ubuntu20.04 nvidia-smi` |
+| **宿主 Python ≥ 3.8** | 执行 `run_docker.py` 启动脚本 | `python3 --version` |
+
+如果 GPU 验证命令列出了你的可用 GPU，则说明工具包已正确安装。如果失败，请查阅 [NVIDIA Container Toolkit 安装指南](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) 或 [NVIDIA Docker issue #1447](https://github.com/NVIDIA/nvidia-docker/issues/1447#issuecomment-801479573) 进行故障排除。
+
+<CgxTip>`run_docker.py` 脚本运行**在你的宿主机上** — 它不在容器内部执行。它使用 Docker Python SDK 来创建容器、挂载卷并将日志流式传输回你的终端。这就是为什么 `docker/requirements.txt` 仅包含 `absl-py` 和 `docker` 的原因 — 这些仅是宿主侧的依赖项。</CgxTip>
+
+来源: [README.md](/README.md#L216-L236), [docker/requirements.txt](/docker/requirements.txt#L1-L3)
+
+## 逐步设置工作流
+
+以下流程图展示了从克隆仓库到生成接触概率图预测的完整设置过程：
+
+```mermaid
+flowchart TD
+    A["1. 克隆仓库"] --> B["2. 下载检查点"]
+    B --> C["3. 构建 Docker 镜像<br/>(~13 GB)"]
+    C --> D["4. 安装宿主依赖<br/>pip install -r docker/requirements.txt"]
+    D --> E["5. 创建输出目录<br/>project/datasets/Input"]
+    E --> F["6. 下载 HH-suite3 数据库"]
+    F --> G["7. 运行预测<br/>python3 docker/run_docker.py ..."]
+    G --> H["输出: 接触概率图<br/>+.npz 文件"]
+
+    style A fill:#e8f5e9
+    style C fill:#fff3e0
+    style G fill:#e3f2fd
+    style H fill:#fce4ec
+```
+
+### 步骤 1 — 克隆仓库
+
+```bash
+git clone https://github.com/BioinfoMachineLearning/DeepInteract
+cd DeepInteract/
+DI_DIR=$(pwd)
+```
+
+在后续步骤中，`DI_DIR` 变量用于构建卷挂载的绝对路径。
+
+来源: [README.md](/README.md#L239-L245)
+
+### 步骤 2 — 下载模型检查点
+
+DeepInteract 提供了两个托管在 Zenodo 上的预训练检查点。请将它们放置在指定的目录中：
+
+```bash
+mkdir -p project/checkpoints
+wget -P project/checkpoints https://zenodo.org/record/6671582/files/LitGINI-GeoTran-DilResNet.ckpt
+wget -P project/checkpoints https://zenodo.org/record/6671582/files/LitGINI-GeoTran-DilResNet-DB5-Fine-Tuned.ckpt
+```
+
+| 检查点 | 描述 |
+|---|---|
+| `LitGINI-GeoTran-DilResNet.ckpt` | 在 DIPS-Plus 上训练的基础模型 |
+| `LitGINI-GeoTran-DilResNet-DB5-Fine-Tuned.ckpt` | 针对基准规模复合物的 DB5 微调变体 |
+
+来源: [README.md](/README.md#L247-L253)
+
+### 步骤 3 — 构建 Docker 镜像
+
+```bash
+docker build -f docker/Dockerfile -t deepinteract .
+```
+
+**此构建需要大约 13 GB 的磁盘空间**，根据网络速度可能需要 15–30 分钟。镜像标签 `deepinteract` 必须与 `run_docker.py` 中 `--docker_image_name` 标志的默认值相匹配。
+
+来源: [README.md](/README.md#L255-L259), [docker/Dockerfile](/docker/Dockerfile#L1-L101)
+
+### 步骤 4 — 安装宿主侧 Python 依赖
+
+```bash
+pip3 install -r docker/requirements.txt
+```
+
+这仅安装两个包 — `absl-py`（用于命令行标志解析）和 `docker`（用于容器编排的 Python SDK）。你可以选择将它们隔离在[虚拟环境](https://docs.python.org/3/tutorial/venv.html)中，以避免与系统 Python 产生冲突。
+
+来源: [docker/requirements.txt](/docker/requirements.txt#L1-L3), [README.md](/README.md#L261-L268)
+
+### 步骤 5 — 创建输出目录
+
+```bash
+mkdir -p project/datasets/Input
+```
+
+此目录将通过 Docker 绑定挂载接收生成的特征和最终的预测输出（接触概率图、学习到的节点/边表示）。
+
+来源: [README.md](/README.md#L270-L274)
+
+### 步骤 6 — 下载兼容 HH-suite3 的数据库
+
+DeepInteract 在特征生成期间需要遗传序列数据库用于 HH-suite3 配置文件搜索。提供三个选项，按大小列出：
+
+| 数据库 | 未解压大小 | 下载命令 |
+|---|---|---|
+| **BFD** (完整) | ~1.7 TB | 完整脚本见 [快速入门](2-quick-start) |
+| **Small BFD** | ~17 GB | 推荐大多数用户使用 |
+| **Uniclust30** | ~86 GB | 折中选项 |
+
+**推荐 — Small BFD**（下载最快，对大多数预测足够）：
+
+```bash
+DOWNLOAD_DIR="~/Data/Databases"
+ROOT_DIR="${DOWNLOAD_DIR}/small_bfd"
+mkdir -p "$DOWNLOAD_DIR" "$ROOT_DIR"
+SOURCE_URL="https://storage.googleapis.com/alphafold-databases/reduced_dbs/bfd-first_non_consensus_sequences.fasta.gz"
+BASENAME=$(basename "${SOURCE_URL}")
+aria2c "${SOURCE_URL}" --dir="${ROOT_DIR}"
+pushd "${ROOT_DIR}"
+gunzip "${ROOT_DIR}/${BASENAME}"
+popd
+# 生成的 --hhsuite_db 路径:
+# ~/Data/Databases/small_bfd/bfd-first_non_consensus_sequences.fasta
+```
+
+<CgxTip>如果 Docker 镜像构建已成功完成，容器内部将提供 `aria2c`。但是，必须在运行 `run_docker.py` 之前**在宿主机上**下载数据库，因为它在运行时被绑定挂载到容器中 — 而不是打包到镜像内。这保持镜像大小可控，并允许在多次运行中共享同一个数据库。</CgxTip>
+
+来源: [README.md](/README.md#L69-L109)
+
+## 运行预测
+
+一切准备就绪后，使用必需的标志执行 `run_docker.py`：
+
+```bash
+python3 docker/run_docker.py \
+  --left_pdb_filepath "$DI_DIR"/project/test_data/4heq_l_u.pdb \
+  --right_pdb_filepath "$DI_DIR"/project/test_data/4heq_r_u.pdb \
+  --input_dataset_dir "$DI_DIR"/project/datasets/Input \
+  --ckpt_name "$DI_DIR"/project/checkpoints/LitGINI-GeoTran-DilResNet.ckpt \
+  --hhsuite_db ~/Data/Databases/small_bfd/bfd-first_non_consensus_sequences.fasta
+```
+
+此示例使用 DIPS-Plus 中附带的测试目标 `4HEQ`。替换为你自己的 PDB 链文件即可进行自定义预测。
+
+来源: [README.md](/README.md#L276-L286)
+
+## 命令行标志参考
+
+`run_docker.py` 脚本接受以下标志，通过 absl-py 库解析：
+
+| 标志 | 必需 | 默认值 | 描述 |
+|---|---|---|---|
+| `--left_pdb_filepath` | ✅ | — | 左侧（第一个）PDB 链文件的绝对路径 |
+| `--right_pdb_filepath` | ✅ | — | 右侧（第二个）PDB 链文件的绝对路径 |
+| `--input_dataset_dir` | ✅ | — | 存储生成特征和输出的目录 |
+| `--ckpt_name` | ✅ | — | 模型检查点文件的绝对路径 |
+| `--hhsuite_db` | ✅ | — | 宿主机上 HH-suite3 数据库的路径 |
+| `--use_gpu` | 否 | `True` | 启用 NVIDIA 运行时以访问 GPU |
+| `--gpu_devices` | 否 | `all` | 逗号分隔的 GPU 设备 ID（例如，`0,1`） |
+| `--num_gpus` | 否 | `0` | 用于预测的 GPU 数量（`0` = 仅限 CPU） |
+| `--docker_image_name` | 否 | `deepinteract` | 构建的 Docker 镜像的名称/标签 |
+| `--psaia_dir` | 否 | `/home/Programs/PSAIA_1.0_source/bin/linux/psa` | PSA 二进制文件的路径（容器内部） |
+| `--psaia_config` | 否 | `/app/DeepInteract/.../psaia_config_file_input_docker.txt` | PSAIA 配置文件（容器内部） |
+
+### GPU 选择
+
+默认情况下，`--num_gpus=0` 会在**仅限 CPU** 上运行预测。要启用 GPU 推理：
+
+```bash
+python3 docker/run_docker.py \
+  --num_gpus 1 \
+  --gpu_devices 0 \
+  ... # 其他标志
+```
+
+来源: [docker/run_docker.py](/docker/run_docker.py#L32-L48), [README.md](/README.md#L288-L303)
+
+## Docker 镜像是如何构建的
+
+了解镜像的分层架构有助于排查构建失败的原因，并解释为什么某些依赖项出现在镜像中，却不在宿主侧的 `requirements.txt` 中。
+
+```mermaid
+flowchart BT
+    subgraph Layer1["基础层"]
+        A["nvidia/cuda:11.2.2-cudnn8-runtime-ubuntu20.04"]
+    end
+    subgraph Layer2["系统包"]
+        B["build-essential, cmake, git, wget"]
+    end
+    subgraph Layer3["PSAIA 编译"]
+        C["GCC 10 + QT4 → PSAIA / PSA / PIA"]
+    end
+    subgraph Layer4["HH-suite3 编译"]
+        D["hh-suite v3.3.0 (cmake build)"]
+    end
+    subgraph Layer5["Miniconda + Conda 包"]
+        E["Python 3.8, PyTorch 1.7.1, CUDA 11.2<br/>Biopython, scikit-learn, DSSP, MSMS, etc."]
+    end
+    subgraph Layer6["应用 + Pip 包"]
+        F["DeepInteract 源码 (editable install)<br/>DGL cu110, pytorch-lightning, etc."]
+    end
+    subgraph Layer7["入口点"]
+        G["/app/run_deepinteract.sh<br/>→ ldconfig + lit_model_predict_docker.py"]
+    end
+
+    Layer1 --> Layer2 --> Layer3 --> Layer4 --> Layer5 --> Layer6 --> Layer7
+```
+
+### 关键镜像细节
+
+| 方面 | 细节 |
+|---|---|
+| **基础镜像** | `nvidia/cuda:11.2.2-cudnn8-runtime-ubuntu20.04` |
+| **Python 版本** | 3.8 |
+| **PyTorch 版本** | 1.7.1 搭带 CUDA 11.2 工具包 |
+| **DGL 版本** | `dgl_cu110-0.6` (CUDA 11.0 wheel) |
+| **PSAIA 位置** | `/home/Programs/PSAIA_1.0_source/` |
+| **HH-suite 位置** | `/opt/hhsuite/` (软链接至 `/usr/bin/`) |
+| **应用目录** | `/app/DeepInteract/` |
+| **入口点** | `/app/run_deepinteract.sh` — 运行 `ldconfig`，然后运行 `lit_model_predict_docker.py` |
+
+入口点脚本中的 `ldconfig` 调用是针对 Debian 怪异问题的**必要变通方法**，如果没有它，GPU 可见性将无法正确建立。详情请参阅 [NVIDIA/nvidia-docker#1399](https://github.com/NVIDIA/nvidia-docker/issues/1399)。
+
+来源: [docker/Dockerfile](/docker/Dockerfile#L1-L101)
+
+## 卷挂载架构
+
+`run_docker.py` 脚本创建**绑定挂载**，将宿主文件系统路径桥接到容器的 `/mnt/` 目录中。这种设计使镜像保持无状态 — 所有输入数据和输出都通过挂载流动，从不存储在容器内部。
+
+| 宿主路径 (通过标志) | 容器挂载目标 | 读/写 | 用途 |
+|---|---|---|---|
+| `--left_pdb_filepath` 目录 | `/mnt/input_pdbs/` | 读-写 | 左侧 PDB 链文件 |
+| `--right_pdb_filepath` 目录 | *(与左侧挂载相同)* | 读-写 | 右侧 PDB 链文件 |
+| `--input_dataset_dir` | `/mnt/Input/` | 读-写 | 特征生成 + 输出存储 |
+| `--ckpt_name` 目录 | `/mnt/checkpoints/` | 只读 | 模型检查点 |
+| `--hhsuite_db` 目录 | `/mnt/hhsuite_db/` | 只读 | HH-suite3 数据库 |
+
+`_create_mount` 辅助函数解析绝对路径，构建 `docker.types.Mount` 对象，并将宿主路径转换为其 `/mnt/` 对应路径，然后将它们作为命令参数传递给容器的入口点脚本。
+
+来源: [docker/run_docker.py](/docker/run_docker.py#L51-L117)
+
+## 容器内部：预测流水线
+
+容器启动后，入口点脚本将使用转换后的挂载路径执行 `lit_model_predict_docker.py`。此脚本与标准的 `lit_model_predict.py` 有两个重要区别：
+
+1. **硬编码的 Docker 路径** — `--psaia_dir` 和 `--psaia_config` 的默认值指向容器内部的位置（`/home/Programs/...` 和 `/app/DeepInteract/...`），而不是宿主机本地路径。
+2. **Docker 特定的 PSAIA 配置** — 文件 `psaia_config_file_input_docker.txt` 使用 `/app/DeepInteract/` 作为其基础路径，使用 `/mnt/Input/` 作为其输出目录，以匹配容器的文件系统布局。
+
+容器内的预测流水线遵循以下序列：
+
+```mermaid
+flowchart LR
+    A["读取挂载的<br/>PDB 链"] --> B["通过 process_pdb_into_graph()<br/>将 PDB 处理为<br/>DGL 图"]
+    B --> C["加载 LitGINI<br/>模型检查点"]
+    C --> D["使用 DataParallel<br/>运行 trainer.predict()"]
+    D --> E["计算接触<br/>概率图<br/>(softmax)"]
+    E --> F["将 .npy 文件保存<br/>至 /mnt/Input/"]
+```
+
+**输出文件**以 NumPy `.npy` 数组格式保存到输入数据集目录：
+
+| 输出文件 | 形状 | 内容 |
+|---|---|---|
+| `{PDB}_contact_prob_map.npy` | `(L₁, L₂)` | 每对残基的接触概率 |
+| `{PDB}_graph1_node_feats.npy` | `(L₁, d_node)` | 学习到的节点表示，链 1 |
+| `{PDB}_graph1_edge_feats.npy` | `(E₁, d_edge)` | 学习到的边表示，链 1 |
+| `{PDB}_graph2_node_feats.npy` | `(L₂, d_node)` | 学习到的节点表示，链 2 |
+| `{PDB}_graph2_edge_feats.npy` | `(E₂, d_edge)` | 学习到的边表示，链 2 |
+
+其中 `L₁`/`L₂` 是每条链的残基数，`E₁`/`E₂` 是边数，`d_node`/`d_edge` 是特征维度。
+
+来源: [project/lit_model_predict_docker.py](/project/lit_model_predict_docker.py#L17-L298), [project/datasets/builder/psaia_config_file_input_docker.txt](/project/datasets/builder/psaia_config_file_input_docker.txt#L1-L18)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| `docker: Error response from daemon: could not select device driver` | 未安装 NVIDIA Container Toolkit | 根据 [NVIDIA 文档](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)安装 |
+| `nvidia-smi` 在容器内返回空 | Docker 运行时无法看到 GPU | 在宿主机上运行 `ldconfig`；检查 [issue #1399](https://github.com/NVIDIA/nvidia-docker/issues/1399) |
+| `run_docker.py` 报 `ImageNotFound` 错误 | 镜像标签不匹配 | 确保已运行 `docker build -t deepinteract .`，或传递 `--docker_image_name` |
+| 在 PSAIA `qmake-qt4` 处构建失败 | QT4 PPA 不可用或网络问题 | 重试构建；验证构建期间的互联网访问 |
+| 在 HH-suite3 `cmake` 处构建失败 | 缺少 `build-essential` 或 `cmake` | 这些已在 Dockerfile 中安装；检查 Docker 构建缓存损坏 (`docker builder prune`) |
+| 尽管设置了 `--num_gpus 1`，预测仍在 CPU 上运行 | `--use_gpu` 为 `False` 或 `--gpu_devices` 为空 | 验证 `--use_gpu True` 和 `--gpu_devices` 均已设置 |
+| 输出目录上的 `PermissionError` | 绑定挂载目标不可被容器写入 | 确保宿主目录具有适当的权限 |
+
+来源: [docker/Dockerfile](/docker/Dockerfile#L93-L100), [docker/run_docker.py](/docker/run_docker.py#L118-L128)
+
+---
+
+**下一步**: 既然你已经可以通过 Docker 运行预测，接下来可以在[预测工作流](18-prediction-workflow)中了解模型如何生成预测，或者在[架构概览](4-architecture-overview)中探索完整的系统设计。
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/BioinfoMachineLearning/DeepInteract/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+DeepInteract 实现了**用于蛋白质界面接触预测的几何 Transformer**（ICLR 2022），这是一个几何深度学习流水线，用于预测两个蛋白质表面上哪些残基对会在蛋白质-蛋白质界面形成物理接触。该架构融合了针对单个蛋白质结构的**几何感知图注意力**、**图间交互建模**以及**语义分割解码器**，从而生成逐残基的接触概率图——这一公式化表达将蛋白质对接重新诠释为针对交互张量的 2D 分割问题。
+
+![DeepInteract 架构](https://github.com/BioinfoMachineLearning/DeepInteract/blob/main/img/DeepInteract_Architecture.png)
+
+![几何 Transformer](https://github.com/BioinfoMachineLearning/DeepInteract/blob/main/img/Geometric_Transformer.png)
+
+来源: [README.md](/README.md#L1-L50), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L1-L30)
+
+## 系统级数据流
+
+端到端流水线接收一对蛋白质结构（PDB 文件），将每个结构编码为具有丰富几何和生化特征的 k-近邻残基图，通过 Geometric Transformer 独立优化它们的表征，从两个图嵌入构建联合交互张量，并通过 DeepLabV3+ 分割头解码出二值接触图。下图展示了这一核心数据流：
+
+```mermaid
+flowchart TB
+    subgraph Input["蛋白质对输入"]
+        P1["PDB 结构 A"]
+        P2["PDB 结构 B"]
+    end
+
+    subgraph Featurization["特征工程"]
+        G1["图构建<br/>(KNN + 节点/边特征)"]
+        G2["图构建<br/>(KNN + 节点/边特征)"]
+    end
+
+    subgraph GeoTrans["几何 Transformer (×N 层)"]
+        direction TB
+        IEM["InitEdgeModule<br/>(边初始化)"]
+        CM["ConformationModule<br/>(几何更新)"]
+        MHA["多头几何<br/>注意力层"]
+    end
+
+    subgraph Interaction["图间交互"]
+        IT["交互张量<br/>构建"]
+    end
+
+    subgraph Decode["接触图解码器"]
+        DL["DeepLabV3+<br/>(ASPP + 解码器)"]
+    end
+
+    Output["接触概率<br/>图 M × N"]
+
+    P1 --> G1
+    P2 --> G2
+    G1 --> IEM
+    G2 --> IEM
+    IEM --> CM
+    CM --> MHA
+    MHA --> IT
+    IT --> DL
+    DL --> Output
+```
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L1630-L1750), [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L103-L130)
+
+## 三阶段架构
+
+DeepInteract 的架构可清晰地解耦为三个功能迥异的阶段，每个阶段均实现为可组合的 PyTorch 模块，由 `LitGINI` Lightning 模块统一编排。这种分离反映了一个深思熟虑的设计决策：**图内表征学习**（阶段 1）与**图间推理**（阶段 2）和**空间解码**（阶段 3）解耦，从而支持在每个边界进行独立的消融实验和模块替换。
+
+| 阶段 | 模块 | 输入 | 输出 | 目的 |
+|-------|--------|-------|--------|---------|
+| **1. 几何 Transformer** | `DGLGeometricTransformer` | DGLGraph（节点 + 边） | 优化后的 DGLGraph | 学习每个蛋白质的几何感知残基表征 |
+| **2. 交互张量** | `construct_interact_tensor` | 图 A 和 B 的节点特征 | 4D 张量 `(B, C, M, N)` | 联合编码所有跨蛋白质残基对 |
+| **3. 接触解码器** | `DeepLabV3Plus` 或 `ResNet2DInputWithOptAttention` | 交互张量 | 接触图 `(B, 2, M, N)` | 在 2D 空间中分割接触与非接触区域 |
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L1610-L1700), [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L103-L130), [vision_modules.py](/project/utils/vision_modules.py#L200-L280)
+
+## 阶段 1: 几何 Transformer 堆叠
+
+**几何 Transformer** 是本工作的核心创新——它通过显式的几何边更新路径扩展了 Dwivedi & Bresson (2020) 的图 Transformer 架构。每个蛋白质表示为一个 DGLGraph，其中节点为残基，边连接 3D 空间中的 k-近邻（默认 k=20）。该 Transformer 堆叠由一个 `InitEdgeModule` 及随后的多个 `GeometricTransformerModule` 层组成，每层在内部将一个 `ConformationModule` 与一个 `MultiHeadGeometricAttentionLayer` 组合。
+
+### InitEdgeModule
+
+`InitEdgeModule` 从原始几何特征（距离、方向、取向帧和酰胺平面法向量角度）引导边表征的生成——具体方式为：嵌入源节点和目标节点索引，通过带有 SiLU 激活的专用线性层投影每个几何特征通道，然后通过学习到的组合表征对投影进行门控，最后重组为初始化的边特征。该模块确保**注意力机制从第一层起即可访问几何结构**，而非仅仅依赖拓扑结构。
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L92-L230)
+
+### ConformationModule
+
+`ConformationModule` 是该架构独有的几何演化组件。它通过 DGL 消息传递聚合相邻边特征，通过独立的投影路径嵌入原始几何特征（距离、方向、取向、酰胺），应用带有批归一化/层归一化的残差前和残差后 `ResBlock` 序列，并通过残差跳跃连接重新接入，从而迭代更新边表征。该模块显式地**通过网络传播 3D 几何约束**，确保残基间的空间关系随注意力驱动的更新逐步精细化。
+
+### 多头几何注意力层
+
+`MultiHeadGeometricAttentionLayer` 使用节点特征上的标准 Q/K/V 投影计算图边上的注意力分数，但关键在于，它通过逐元素相乘 (`imp_exp_attn`) 用**显式边特征**修改隐式（拓扑）注意力分数。这种混合注意力机制——即几何调制拓扑——是区分几何 Transformer 与标准图 Transformer 的决定性特征。前向传播过程为：(1) 计算 Q·K^T 点积分数，(2) 缩放与截断，(3) 乘以投影后的边特征，(4) 应用 softmax，(5) 将加权值聚合到目标节点。
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L36-L90), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L310-L500), [graph_utils.py](/project/utils/graph_utils.py#L13-L50)
+
+### GeometricTransformerModule（单层）
+
+每个 `GeometricTransformerModule` 层应用 **Pre-LN Transformer 模式**：归一化 → 几何注意力 → 残差 → 归一化 → MLP → 残差。单层的完整前向传播过程为：
+
+1. **ConformationModule** — 使用几何消息传递更新边特征
+2. **归一化** — 对节点和边特征应用 LayerNorm 或 BatchNorm
+3. **多头注意力** — 计算几何调制注意力并更新节点/边特征
+4. **首次残差连接** — 将输入加至注意力输出
+5. **MLP** — 带有 SiLU 激活和 dropout 的双层前馈网络
+6. **第二次残差连接** — 将 MLP 前的表征加至 MLP 输出
+
+`DGLGeometricTransformer` 堆叠 N 个此类层（可通过 `num_gnn_layers` 配置），中间层同时更新节点和边特征，最后一层仅更新节点特征以供下游使用。
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L500-L700), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L1350-L1500)
+
+## 阶段 2: 交互张量构建
+
+在两个蛋白质图各自独立通过几何 Transformer 处理后，其节点表征通过 `construct_interact_tensor` 组合为一个**联合交互张量**。给定两图的节点特征矩阵 **X_A** ∈ ℝ^(M×C) 和 **X_B** ∈ ℝ^(N×C)，交互张量通过以下方式交织它们：
+
+1. 将 **X_A** 和 **X_B** 分别重塑为维度 `(1, C, M)` 和 `(1, C, N)` 的 3D 张量
+2. 沿 N 维度重复 **X_A**，沿 M 维度重复 **X_B**
+3. 沿通道维度拼接，生成形状为 `(1, 2C, M, N)` 的张量
+
+该 4D 交互张量将**所有 M×N 个残基对交互**编码为 2D 特征图——这与图像直接类似——从而支持在阶段 3 中使用卷积和分割架构。对于超过残基数量限制（默认 256）的蛋白质，`construct_subsequenced_interact_tensors` 通过在两个维度上滑动窗口，将交互张量划分为可管理的子序列块。
+
+来源: [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L103-L130), [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L77-L102)
+
+## 阶段 3: 接触图解码器
+
+交互张量被解码为二值接触概率图，其方式是将问题视为**语义分割**——这是一个关键的架构洞见。DeepInteract 支持两种解码器变体：
+
+### DeepLabV3+（主解码器）
+
+`DeepLabV3Plus` 模块应用 ResNet34 编码器（为适应任意输入通道修补了首层卷积），随后是速率为 (12, 24, 36) 的**空洞空间金字塔池化 (ASPP)** 模块、双线性上采样、来自编码器第 2 阶段的低级特征融合，以及投影到 2 类（接触 / 非接触）的 1×1 分割头。ASPP 模块通过三个速率的并行空洞卷积加上全局平均池化来捕获多尺度上下文，拼接后进行投影——这对于同时捕获局部界面块和远程界面模式至关重要。
+
+### 带可选区域注意力的空洞 ResNet（备选解码器）
+
+`ResNet2DInputWithOptAttention` 模块提供了一种备选解码器，使用带有挤压激励块的自定义空洞 `ResNet`，以及可选的 `MultiHeadRegionalAttention` 机制，该机制通过 3D 扩展卷积在局部空间区域内计算注意力。此变体支持可配置的空洞循环（默认 [1, 2, 4, 8]）以实现受控的感受野扩张。
+
+| 属性 | DeepLabV3+ | 空洞 ResNet + 注意力 |
+|----------|-----------|----------------------|
+| 编码器 | ResNet34 (timm) | 带有 SE 块的自定义 ResNet |
+| 多尺度 | ASPP (速率 12, 24, 36) | 空洞循环 [1, 2, 4, 8] |
+| 注意力 | 无（通过 ASPP 隐式实现） | 可选的区域多头注意力 |
+| 低级跳跃连接 | 有（编码器第 2 阶段） | 无 |
+| 归一化 | BatchNorm | InstanceNorm |
+
+来源: [vision_modules.py](/project/utils/vision_modules.py#L200-L330), [vision_modules.py](/project/utils/vision_modules.py#L333-L400), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L1000-L1200)
+
+## LitGINI: 编排与训练
+
+`LitGINI`（几何聚焦的图间节点交互）`LightningModule` 是顶层编排器，负责连接所有三个阶段并管理训练、验证和测试。其 `shared_step` 方法实现了前向传播：(1) 可选地嵌入节点特征，(2) 将每个蛋白质图通过几何 Transformer，(3) 构建交互张量，(4) 解码为接触 logits，(5) 移除填充并重塑。训练使用支持类权重加权的 `CrossEntropyLoss`、带有 `CosineAnnealingWarmRestarts` 调度器的 `AdamW` 优化器，并跟踪一套全面的指标，包括 Accuracy、Precision、Recall、F1、AUROC、AUPRC，以及在具有生物学意义的阈值（L/5, L/10, L/2）下的 top-k 精确率/召回率。
+
+<CgxTip>`disable_geometric_mode` 标志通过用简单的线性投影替换 `ConformationModule`，将几何 Transformer 转换为原始的图 Transformer——这有助于进行消融研究以隔离显式几何更新的贡献。</CgxTip>
+
+<CgxTip>大蛋白质的交互张量会自动进行子序列批处理 (max_len=256) 以适应 GPU 内存，解码后的 logits 将通过 `remove_subsequenced_input_padding` 重新组装。</CgxTip>
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L1610-L1800), [lit_model_train.py](/project/lit_model_train.py#L30-L100)
+
+## 特征工程流水线
+
+该架构将蛋白质结构作为 DGLGraph 摄取，DGLGraph 由 `prot_df_to_dgl_graph_feats` 构建，该函数从残基 Cα 坐标创建 k-近邻图，并通过 `FEAT_COLS` 和 `ALLOWABLE_FEATS` 中定义的特征列，经由独热编码和标量编码对节点特征进行编码。特征索引模式——编纂在 `FEATURE_INDICES` 中——将拼接的节点和边特征张量划分为命名切片：
+
+| 特征类型 | 节点索引范围 | 边索引范围 | 描述 |
+|-------------|-----------------|-----------------|-------------|
+| 位置编码 | `[0]` | `[0]` | 图结构位置 |
+| 几何特征 | `[1:7]` | — | 坐标衍生的节点特征 |
+| DIPS-Plus 特征 | `[7:113]` | — | 生化残基属性 |
+| 边权重 | — | `[1]` | 边权重 / 距离 |
+| 距离特征 | — | `[2:20]` | 18 维距离编码 |
+| 方向特征 | — | `[20:23]` | 3D 单位方向向量 |
+| 取向特征 | — | `[23:27]` | 坐标系旋转编码 |
+| 酰胺角 | — | `[27]` | 酰胺平面法向量角 |
+
+节点特征涵盖残基标识（20 维独热编码）、二级结构（8 维）、相对溶剂可及性、残基深度、PSAIA 列（6 个特征）、半球氨基酸组成（42 维）、配位数、序列特征（27 维，来自 MSA）以及酰胺法向量。边特征编码残基对之间的完整几何关系：距离、方向、取向帧和酰胺平面角——这正是 ConformationModule 独立处理的四个几何通道。
+
+来源: [deepinteract_constants.py](/project/utils/deepinteract_constants.py#L50-L117), [graph_utils.py](/project/utils/graph_utils.py#L65-L127)
+
+## 项目结构
+
+```
+project/
+├── utils/
+│   ├── deepinteract_modules.py   ← 核心模型: MHA, Conformation, GeoTrans, LitGINI
+│   ├── deepinteract_utils.py     ← 交互张量、指标、初始化、整理
+│   ├── deepinteract_constants.py ← 特征索引、残基限制、允许值
+│   ├── vision_modules.py         ← DeepLabV3+, ASPP, ResNet 编码器/解码器
+│   ├── graph_utils.py            ← KNN 图构建、注意力原语
+│   ├── protein_feature_utils.py  ← 几何蛋白质特征计算
+│   └── dips_plus_utils.py        ← DIPS-Plus 数据集后处理工具
+├── datasets/
+│   ├── builder/                  ← 数据集构建和预处理
+│   ├── DIPS/                     ← DIPS 数据集模块和原始/处理后的数据
+│   ├── DB5/                      ← 对接基准测试 5 数据集
+│   ├── CASP_CAPRI/               ← CASP-CAPRI 评估数据集
+│   └── PICP/                     ← 蛋白质界面接触预测数据模块
+├── lit_model_train.py            ← 训练入口点 (Lightning Trainer)
+├── lit_model_predict.py          ← 推理入口点
+├── lit_model_test.py             ← 仅测试入口点
+└── test_data/                    ← 用于测试的样本数据
+```
+
+来源: [README.md](/README.md#L60-L120)
+
+## 后续阅读
+
+架构概述确立了宏观设计。每个子系统值得进一步深入探讨：
+
+- **几何 Transformer 内部机制**：从[多头几何注意力](5-multi-head-geometric-attention)开始，理解几何调制注意力机制，然后阅读[构象模块](6-conformation-module)了解边更新路径，以及[边初始化模块](7-edge-initialization-module)了解几何特征如何引导 Transformer。
+
+- **图间交互**：[GINI 模型设计](8-gini-model-design)解释了完整的 LitGINI 编排，[交互张量构建](9-interaction-tensor-construction)详述了张量交织的数学原理，[DeepLabV3+ 接触解码器](10-deeplabv3-contact-decoder)涵盖了分割解码器。
+
+- **特征工程**：[从 PDB 构建图](11-graph-construction-from-pdb) → [几何蛋白质特征](12-geometric-protein-features) → [特征常量和索引](13-feature-constants-and-indices)。
+
+- **实际应用**：[Lightning 训练流水线](17-lightning-training-pipeline) 和 [预测工作流](18-prediction-workflow) 用于端到端运行系统。
+
+---
+
+## 几何 Transformer 核心
+
+- [深入解析/几何 Transformer 核心/多头几何注意力](https://zread.ai/BioinfoMachineLearning/DeepInteract/5-multi-head-geometric-attention)
+
+---
+slug:5-multi-head-geometric-attention
+blog_type:normal
+---
+
+
+**多头几何注意力层**是 DeepInteract 几何 Transformer 中的核心神经机制，它通过融合*隐式*节点间交互与*显式*几何边特征，来计算蛋白质图上的注意力分数。标准的 Transformer 注意力机制基于序列或词元的邻接关系运行，而本层则不同，它在 DGL 图上运行，其中的边携带了丰富的结构信息——距离、方向、取向和酰胺平面角——这些信息会直接修正注意力分布。本页将深入剖析该层的架构、五步注意力传播流水线，以及它在更宏观的几何 Transformer 技术栈中的集成方式。
+
+## 架构上下文
+
+`MultiHeadGeometricAttentionLayer` 位于每个 `GeometricTransformerModule` 和 `FinalGeometricTransformerModule` 的核心位置。它在构象模块演化出几何边特征，并且应用了批次/层归一化之后被调用。随后，该注意力层生成更新后的节点表示和（可选的）边表示，这些表示将经过输出投影和带有残差连接的前馈 MLP。
+
+```mermaid
+flowchart TD
+    subgraph GeometricTransformerModule
+        direction TB
+        CM[Conformation Module] --> N1[Normalization 1]
+        N1 --> MHA["MultiHeadGeometricAttentionLayer"]
+        MHA --> DP[Dropout]
+        DP --> OP["Output Projections<br/>O_node, O_edge"]
+        OP --> RC1[Residual Connection 1]
+        RC1 --> N2[Normalization 2]
+        N2 --> MLP["FFN MLPs<br/>(node + edge)"]
+        MLP --> RC2[Residual Connection 2]
+    end
+
+    subgraph MHA_internals["MultiHeadGeometricAttentionLayer Internals"]
+        direction TB
+        Q_proj["Q = Linear(node_feats)"] --> Reshape1["Reshape → [N, H, d]"]
+        K_proj["K = Linear(node_feats)"] --> Reshape2["Reshape → [N, H, d]"]
+        V_proj["V = Linear(node_feats)"] --> Reshape3["Reshape → [N, H, d]"]
+        E_proj["E_proj = Linear(edge_feats)"] --> Reshape4["Reshape → [E, H, d]"]
+        Reshape1 & Reshape2 & Reshape3 & Reshape4 --> Prop["propagate_attention()"]
+        Prop --> Agg["Aggregation:<br/>h_out = wV / (z + ε)"]
+    end
+
+    MHA -.-> MHA_internals
+```
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L500-L732), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L735-L951)
+
+## 层规格
+
+`MultiHeadGeometricAttentionLayer` 由五个参数构建，这些参数决定了其容量与行为：
+
+| 参数 | 类型 | 描述 |
+|-----------|------|-------------|
+| `num_input_feats` | `int` | 输入节点和边特征的维度（通常为 `num_hidden_channels`） |
+| `num_output_feats` | `int` | 每个头的输出维度，计算方式为 `num_hidden_channels // num_heads` |
+| `num_heads` | `int` | 并行注意力头的数量（默认：4） |
+| `using_bias` | `bool` | Q/K/V/E 投影是否包含偏置项（仅当输入 ≠ 输出尺寸时为 `True`） |
+| `update_edge_feats` | `bool` | 是否提取并返回更新后的边特征（中间层为 `True`，最终层为 `False`） |
+
+该层实例化了**四个线性投影**，将共享的输入维度映射到完整的多头输出空间：
+
+- **Q**: `Linear(num_input_feats → num_output_feats × num_heads)` — 源节点的查询投影
+- **K**: `Linear(num_input_feats → num_output_feats × num_heads)` — 目标节点的键投影
+- **V**: `Linear(num_input_feats → num_output_feats × num_heads)` — 源节点的值投影
+- **edge_feats_projection**: `Linear(num_input_feats → num_output_feats × num_heads)` — 显式边特征的投影
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L34-L51)
+
+## 参数初始化
+
+所有可学习参数均采用缩放因子为 2.0 的 **Glorot-正交方案** 进行初始化。`glorot_orthogonal` 函数首先对权重张量应用正交初始化，然后按照以下公式进行缩放：
+
+```
+scale_adjusted = scale / ((fan_in + fan_out) × variance)
+weight *= sqrt(scale_adjusted)
+```
+
+当启用偏置时，所有偏置向量均初始化为零。这种初始化策略能够在早期训练阶段促进多头注意力机制中梯度的稳定流动，考虑到该层深处于几何 Transformer 技术栈内部，这一点至关重要。
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L55-L74), [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L47-L52)
+
+## 五步注意力传播流水线
+
+`propagate_attention` 方法实现了一个经过精心排序的五步流水线，将原始的节点和边表示转换为具备几何感知的注意力分布。每一步均作为 DGL 的 `apply_edges` 或 `send_and_recv` 操作实现，从而确保在图结构上进行高效的消息传递。
+
+### 第 1 步：隐式注意力分数计算 — `src_dot_dst`
+
+```python
+graph.apply_edges(src_dot_dst('K_h', 'Q_h', 'score'))
+```
+
+此步计算源节点的键表示与目标节点的查询表示在每个头上的逐元素乘积：`score = K_h(src) ⊙ Q_h(dst)`。结果是一个形状为 `[E, H, d]` 的逐边张量，其中 `E` 是边数，`H` 是头数，`d` 是每个头的特征维度。这是**隐式**注意力信号——它仅基于学习到的表示来捕获哪些节点对是相关的，类似于标准的点积注意力。
+
+### 第 2 步：缩放与截断 — `scaling`
+
+```python
+graph.apply_edges(scaling('score', np.sqrt(self.num_output_feats), 5.0))
+```
+
+隐式分数被除以 `√d`（标准的缩放注意力除数），然后被截断至 `[-5.0, 5.0]` 范围内。缩放可防止在特征维度较大时发生 softmax 饱和，而截断则通过防止后续指数步骤中的溢出来确保数值稳定性。
+
+### 第 3 步：边特征注入 — `imp_exp_attn`
+
+```python
+graph.apply_edges(imp_exp_attn('score', 'proj_e'))
+```
+
+这是几何注意力的**核心创新**：投影后的边特征 `proj_e` 与缩放后的注意力分数进行逐元素相乘：`score = score ⊙ proj_e`。这意味着编码在边中的每一个几何属性——残基间距离、单位方向向量、取向特征和酰胺平面角——都会直接调节哪些边能获得注意力权重。如果某条边的几何特征与学习到的查询-键模式无关，其注意力分数将被抑制；而几何上有意义的边则会被放大。
+
+### 第 4 步：Softmax 准备 — `exp`
+
+```python
+graph.apply_edges(exp('score', 5.0))
+```
+
+此步计算每条边和每个头在特征维度上注意力分数之和的指数，并通过截断至 `[-5.0, 5.0]` 来保证数值稳定性：`score = exp(sum(score, dim=-1).clamp(-5, 5))`。这是未归一化的 softmax 分子。截断操作必不可少，因为第 3 步的边特征注入可能会产生幅值很大的分数，从而导致 `exp` 溢出。
+
+### 第 5 步：加权值聚合
+
+```python
+e_ids = graph.edges()
+graph.send_and_recv(e_ids, fn.u_mul_e('V_h', 'score', 'V_h'), fn.sum('V_h', 'wV'))
+graph.send_and_recv(e_ids, fn.copy_e('score', 'score'), fn.sum('score', 'z'))
+```
+
+两个并行的消息传递操作在每个目标节点处聚合信息： **(a)** `wV` 累加所有入边的分数加权值向量 `Σ(score × V_h)`， **(b)** `z` 累加所有入边的原始分数 `Σ(score)`，作为 softmax 的分母。最终的归一化输出在 `forward` 方法中计算如下：
+
+```python
+h_out = wV / (z + ε)    # 其中 ε = 1e-6 以保证数值安全
+```
+
+这是作为除法执行的**显式 softmax 归一化**，而非使用内置的 softmax，因为注意力分布是通过 `apply_edges` 逐边计算的，而不是作为一个整体的矩阵运算。
+
+```mermaid
+flowchart LR
+    A["Step 1:<br/>K ⊙ Q<br/>(implicit scores)"] --> B["Step 2:<br/>Scale by √d,<br/>clip to ±5"]
+    B --> C["Step 3:<br/>⊙ proj_e<br/>(edge injection)"]
+    C --> D["Step 4:<br/>exp(Σ·clip)<br/>(softmax prep)"]
+    D --> E["Step 5:<br/>Σ(score×V) / Σ(score)<br/>(aggregation)"]
+
+    style A fill:#e8f4fd,stroke:#2563eb
+    style C fill:#fef3c7,stroke:#d97706
+    style E fill:#dcfce7,stroke:#16a34a
+```
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L76-L96), [graph_utils.py](/project/utils/graph_utils.py#L21-L63)
+
+## 前向传播编排
+
+`forward` 方法在 `graph.local_scope()` 上下文中将投影和传播步骤连接在一起，以确保中间图数据（Q_h, K_h, V_h, proj_e, score, wV, z）不会在调用结束后持续存在：
+
+1. 通过 Q、K、V **投影**节点特征，并通过 `edge_feats_projection` **投影**边特征
+2. 将所有投影从 `[N, H×d]` **重塑**为 `[N, H, d]`，并作为图节点/边数据存储
+3. 通过五步流水线**传播**注意力
+4. 将 `wV` 除以 `z + ε` 进行**归一化**，以产生注意力加权的节点输出
+5. 当 `update_edge_feats=True` 时，**可选提取**边输出（`e_out`）
+
+`(h_out, e_out)` 的双重返回使得中间几何 Transformer 层能够同时更新节点和边表示，而最终层则通过设置 `update_edge_feats=False` 来丢弃边输出。
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L98-L121)
+
+## DGL 边级原语参考
+
+注意力传播流水线依赖于定义在 `graph_utils.py` 中的四个可组合边级原语。每个原语返回一个在 DGL `EdgeBatch` 对象上操作的闭包：
+
+| 原语 | 签名 | 操作 | 目的 |
+|-----------|-----------|-----------|---------|
+| `src_dot_dst` | `(src_field, dst_field, out_field)` | `src[src_field] ⊙ dst[dst_field]` | 隐式查询-键交互 |
+| `scaling` | `(field, scale_constant, clip_constant)` | `(data[field] / scale_constant).clamp(-clip, clip)` | 带稳定性的缩放注意力 |
+| `imp_exp_attn` | `(implicit_attn, explicit_edge)` | `data[implicit_attn] ⊙ data[explicit_edge]` | 几何边特征注入 |
+| `exp` | `(field, clip_constant)` | `exp(sum(data[field], dim=-1).clamp(-clip, clip))` | 数值稳定的 softmax 分子 |
+
+`out_edge_features` 原语 —— `(edge_feat)` → `{e_out: data[edge_feat]}` —— 当 `update_edge_feats=True` 时，将当前的注意力分数复制到单独的字段中，以供下游边 MLP 处理。
+
+来源: [graph_utils.py](/project/utils/graph_utils.py#L21-L63)
+
+## 集成：中间层与最终层
+
+`MultiHeadGeometricAttentionLayer` 的实例化方式取决于其在 `DGLGeometricTransformer` 技术栈中的位置：
+
+| 方面 | 中间层（`GeometricTransformerModule`） | 最终层（`FinalGeometricTransformerModule`） |
+|--------|---------------------------------------------------|------------------------------------------------|
+| `update_edge_feats` | `True` — 边特征被更新并返回 | `False` — 边特征被丢弃 |
+| 输出投影 | 同时包含 `O_node_feats` 和 `O_edge_feats` | 仅包含 `O_node_feats` |
+| FFN MLPs | 同时包含 `node_feats_MLP` 和 `edge_feats_MLP` | 仅包含 `node_feats_MLP` |
+| 残差连接 | 应用于节点和边特征 | 仅应用于节点特征 |
+| 二次归一化 | 应用于节点和边特征 | 仅应用于节点特征 |
+| 返回值 | `(node_feats, edge_feats)` | 仅 `node_feats` |
+
+这种不对称设计是有意为之：中间层需要不断演化的边表示来为后续层的构象模块提供输入，而最终层则将所有结构信息整合到节点表示中，供下游的 GINI 图间交互模块消费。
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L615-L621), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L853-L859), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L1367-L1416)
+
+## 几何注意力与标准图注意力的对比
+
+多头几何注意力与标准图注意力机制（如 GAT、GraphTransformer）的关键区别在于**第 3 步：边特征注入**。下表对比了它们的计算流水线：
+
+| 属性 | 标准图注意力 | 多头几何注意力 |
+|----------|------------------------|-------------------------------|
+| 分数计算 | `softmax(LeakyReLU(aᵀ[Wh_i ‖ Wh_j]))` | `K_h ⊙ Q_h`（逐元素乘积） |
+| 边影响 | 无（边通过邻接关系隐式体现） | `score ⊙ proj_e`（显式几何调节） |
+| 使用的几何特征 | — | 距离、方向、取向、酰胺角 |
+| 归一化 | 内置 `softmax` | 通过消息传递手动计算 `wV / (z + ε)` |
+| 数值稳定性 | LeakyReLU 边界 | 对分数和指数进行缩放 + 截断至 ±5.0 |
+| 边更新路径 | 不支持 | 可选的 `e_out` 用于边 FFN |
+
+<CgxTip>第 3 步中的边特征注入（`score ⊙ proj_e`）是 3D 蛋白质几何直接控制注意力流的机制。如果没有这一步，注意力机制将退化为标准的图 Transformer——这正是设置 `disable_geometric_mode=True` 时所发生的情况，它将完整的几何 Transformer 转换为原始的图 Transformer 基线。</CgxTip>
+
+<CgxTip>`using_bias` 参数仅在 `num_input_feats ≠ num_output_feats × num_heads` 时被设置为 `True`。在默认配置中，`num_output_feats = num_hidden_channels // num_heads`，总输出维度等于输入维度，因此偏置通常被禁用。这减少了参数量，并且与在带有后续归一化的注意力层中无偏置投影效果良好这一观察相一致。</CgxTip>
+
+来源: [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L34-L121), [graph_utils.py](/project/utils/graph_utils.py#L21-L63)
+
+## 继续探索
+
+多头几何注意力层并非孤立运行——它依赖于由[构象模块](6-conformation-module)演化的几何边特征，以及由[边初始化模块](7-edge-initialization-module)构建的初始边表示。其输出的节点表示将被[GINI 模型设计](8-gini-model-design)消费，用于图间交互预测。如需了解更宏观的架构图景，请参阅[架构概述](4-architecture-overview)。
+
+---
+
+- [深入解析/几何 Transformer 核心/构象模块](https://zread.ai/BioinfoMachineLearning/DeepInteract/6-conformation-module)
+
+---
+slug:6-conformation-module
+blog_type:normal
+---
+
+
+**构象模块**（Conformation Module）是 DeepInteract 的几何演化边精炼引擎——这是一个定制化的消息传递子网络，它通过聚合相邻几何上下文、应用顺序几何门控，以及通过残差连接增强学习到的更新，来迭代演化边表示。正是该组件将 DeepInteract 的 Geometric Transformer 与标准 Graph Transformer 区分开来：在多头注意力机制触发之前，构象模块已经改写了每条边的特征，以反映蛋白质图的**局部构象景观**。
+
+## 架构角色
+
+在每个 `GeometricTransformerModule` 层中，构象模块占据着极具策略性的关键位置——它在归一化和多头几何注意力**之前**执行，这意味着所有下游的注意力分数都是基于构象感知边而非原始输入边计算得出的。这确保了注意力机制所推理的边已经编码了蛋白质的几何邻域结构，而不仅仅是成对的节点关系。
+
+```mermaid
+flowchart TD
+    subgraph GTLayer["GeometricTransformerModule Layer"]
+        direction TB
+        CM["ConformationModule<br/><i>geometry-evolving edge update</i>"]
+        N1["Normalization<br/>(BatchNorm / LayerNorm)"]
+        MHA["MultiHeadGeometricAttentionLayer"]
+        RES1["Residual Connection #1"]
+        N2["Normalization"]
+        MLP["Node & Edge MLPs"]
+        RES2["Residual Connection #2"]
+        
+        CM --> N1 --> MHA --> RES1 --> N2 --> MLP --> RES2
+    end
+    
+    OrigEdge["orig_edge_feats<br/>(raw geometric features)"] --> CM
+    Graph["DGLGraph<br/>(node & edge topology)"] --> CM
+```
+
+当 `disable_geometric_mode=True` 时，构象模块会退化为单一的 `nn.Linear`，从而有效地将架构还原为原始的 Graph Transformer——这是一个实用的消融控制手段。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L669-L731), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L584-L599)
+
+## 几何特征分解
+
+构象模块在从每条边通过 [`get_geo_feats_from_edges`](project/utils/deepinteract_utils.py#L70-L76) 提取出的四个独立几何特征通道上进行操作。这些通道由 `FEATURE_INDICES` 常量定义，对应于具有物理意义的蛋白质结构属性：
+
+| 特征通道 | 索引范围 | 维度 | 物理意义 |
+|---|---|---|---|
+| **距离** | `[2, 20)` | 18 | 残基间距离特征 |
+| **方向** | `[20, 23)` | 3 | 残基间的单位方向向量 |
+| **取向** | `[23, 27)` | 4 | 相对取向（源自四元数） |
+| **酰胺角** | `[27]` | 1 | 酰胺平面-酰胺平面法向量夹角 |
+
+每个通道通过一个专用的双层瓶颈结构（`linear_0` → `linear_1`）进行嵌入，且具有不同的中间尺寸，这使得网络能够在各几何模态通过门控交互之前，为其学习到专门的表示。
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L99-L116), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L70-L76)
+
+## 内部架构
+
+构象模块的 `conformation_module_message_func` 实现了一个六阶段流水线，通过邻域聚合、几何门控、残差精炼和输出门控来逐步优化边表示：
+
+```mermaid
+flowchart TD
+    subgraph Phase1["Phase 1: Neighborhood Aggregation"]
+        NA1["Gather src_nbr_e_ids<br/>and dst_nbr_e_ids"]
+        NA2["Concatenate neighboring<br/>edge features"]
+        NA3["Apply nbr_linear<br/>+ activation"]
+        NA1 --> NA2 --> NA3
+    end
+    
+    subgraph Phase2["Phase 2: Sequential Geometric Gating"]
+        GG1["Gate by distance<br/>embedding"]
+        GG2["downward_proj<br/>(reduce dim)"]
+        GG3["Gate by direction<br/>embedding"]
+        GG4["Gate by orientation<br/>embedding"]
+        GG5["Gate by amide angle<br/>embedding"]
+        GG1 --> GG2 --> GG3 --> GG4 --> GG5
+    end
+    
+    subgraph Phase3["Phase 3: Sum Aggregation"]
+        SA1["Sum over all<br/>neighboring edges"]
+        SA2["upward_proj<br/>(restore dim)"]
+        SA1 --> SA2
+    end
+    
+    subgraph Phase4["Phase 4: Residual Refinement"]
+        RR1["orig_msg_linear(res_edge_feats)<br/>+ nbr_edge_feats"]
+        RR2["Pre-residual ResBlocks"]
+        RR3["Residual reconnection:<br/>res_edge_feats + <br/>activ(res_connect_linear(·))"]
+        RR4["Post-residual ResBlocks"]
+        RR1 --> RR2 --> RR3 --> RR4
+    end
+    
+    subgraph Phase5["Phase 5: Output Gating"]
+        OG1["Gate by each original<br/>geometric feature channel"]
+        OG2["Sum gated representations"]
+        OG3["Final residual reconnection:<br/>res_edge_feats +<br/>activ(final_linear(·))"]
+        OG1 --> OG2 --> OG3
+    end
+    
+    Phase1 --> Phase2 --> Phase3 --> Phase4 --> Phase5
+```
+
+### 阶段 1 — 邻域聚合
+
+对于每条边 $e = (u, v)$，该模块检索与源节点 $u$ 关联的所有边索引（`src_nbr_e_ids`）以及与目标节点 $v$ 关联的所有边索引（`dst_nbr_e_ids`）。这些邻接边特征被拼接起来，并通过带有 SiLU 激活函数的 `nbr_linear` 进行投影，从而生成初始的邻域表示。
+
+### 阶段 2 — 顺序几何门控
+
+这是该模块的标志性机制。邻域表示按照固定的顺序，被每个几何特征嵌入**顺序门控**：
+
+1. **距离门控**: `nbr_edge_feats *= dist_linear_1(dist_linear_0(dist_feats))`
+2. **降维**: `nbr_edge_feats = downward_proj(nbr_edge_feats)` — 从 `num_hidden_channels` 投影至 `shared_embed_size`
+3. **方向门控**: `nbr_edge_feats *= dir_linear_1(dir_linear_0(dir_feats))`
+4. **取向门控**: `nbr_edge_feats *= orient_linear_1(orient_linear_0(orient_feats))`
+5. **酰胺角门控**: `nbr_edge_feats *= amide_linear_1(amide_linear_0(amide_feats))`
+
+每个门控步骤执行逐元素乘法（`*`），允许几何特征调制来自邻接边的信息流。中间的 `downward_proj` 确保方向、取向和酰胺角门控在压缩的 `shared_embed_size` 维空间中操作，然后再进行维度恢复。
+
+### 阶段 3 — 求和聚合与维度恢复
+
+所有邻接边表示通过 `torch.sum` 在邻居维度上进行聚合（每条边在某种程度上是其邻居的总和），然后通过 `upward_proj` 恢复至 `num_hidden_channels` 维度。
+
+### 阶段 4 — 残差精炼
+
+原始边特征通过 `orig_msg_linear` 重新引入，并加至聚合后的邻域表示上。该组合信号随后通过 `num_pre_res_blocks` 个 `ResBlock` 实例，接着进行一次**残差重连**，将缓存的原始边特征相加：`edge_feats = res_edge_feats + activ(res_connect_linear(edge_feats))`。然后，再通过 `num_post_res_blocks` 个额外的 `ResBlock` 实例进一步精炼该表示。
+
+### 阶段 5 — 输出几何门控
+
+精炼后的边表示分别通过 `final_dist_linear`、`final_dir_linear`、`final_orient_linear` 和 `final_amide_linear`，由每个原始几何特征通道独立门控。这四个门控表示被求和后传入 `final_linear`，并进行最后一次与原始边特征的残差重连。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L373-L447)
+
+## 构造函数参数
+
+| 参数 | 类型 | 描述 |
+|---|---|---|
+| `num_dist_feats` | `int` | 距离特征的维度（根据 FEATURE_INDICES 为 18） |
+| `num_dir_feats` | `int` | 方向特征的维度（根据 FEATURE_INDICES 为 3） |
+| `num_orient_feats` | `int` | 取向特征的维度（根据 FEATURE_INDICES 为 4） |
+| `num_amide_feats` | `int` | 酰胺角特征的维度（根据 FEATURE_INDICES 为 1） |
+| `dist_embed_size` | `int` | 距离瓶颈的中间嵌入大小 |
+| `dir_embed_size` | `int` | 方向瓶颈的中间嵌入大小 |
+| `orient_embed_size` | `int` | 取向瓶颈的中间嵌入大小 |
+| `amide_embed_size` | `int` | 酰胺角瓶颈的中间嵌入大小 |
+| `shared_embed_size` | `int` | `downward_proj` / `upward_proj` 的压缩维度 |
+| `num_hidden_channels` | `int` | 模块内部的主隐藏通道大小 |
+| `num_pre_res_blocks` | `int` | 残差重连前的 ResBlocks 数量 |
+| `num_post_res_blocks` | `int` | 残差重连后的 ResBlocks 数量 |
+| `activ_fn` | `Module` | 激活函数（默认: `nn.SiLU()`） |
+| `norm_to_apply` | `str` | ResBlocks 中的归一化方式: `'batch'` 或 `'layer'` |
+| `feature_indices` | `dict` | 特征切片索引（默认: `FEATURE_INDICES`） |
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L267-L334)
+
+## ResBlock 子模块
+
+每个 `ResBlock` 实现了一个三层的线性通路，每步均包含归一化和激活，最后接上一个跳跃连接：
+
+```
+ResBlock(x) = x + [Linear → Norm → Activ → Linear → Norm → Activ → Linear → Norm → Activ](x)
+```
+
+归一化层可通过 `norm_to_apply` 参数在 `nn.BatchNorm1d` 和 `nn.LayerNorm` 之间选择。所有线性层均使用 Glorot 正交缩放进行初始化；在参数初始化期间会跳过归一化层和激活层。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L458-L497)
+
+## 参数初始化
+
+构象模块中的所有线性层均通过 [`glorot_orthogonal`](project/utils/deepinteract_utils.py#L47-L52) 工具使用 **Glorot 正交初始化**，该工具首先应用 `torch.nn.init.orthogonal_`，然后以 `scale=2.0` 按 `sqrt(scale / ((fan_in + fan_out) * var))` 进行缩放。带有偏置的层（`nbr_linear`、`orig_msg_linear`、`res_connect_linear`、`final_linear`）将偏置初始化为零。双层几何瓶颈（`linear_0`、`linear_1`）均无偏置。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L336-L371), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L47-L52)
+
+## 前向传播签名
+
+```python
+def forward(self, graph: dgl.DGLGraph, orig_edge_feats: torch.Tensor) -> torch.Tensor
+```
+
+该模块接收完整的 `DGLGraph`（用于拓扑和通过 `graph.apply_edges` 访问邻居边索引）以及**原始几何边特征** `orig_edge_feats`（在任何注意力更新之前缓存）。它在 `graph.local_scope()` 内运行以避免改变输入图，并将 `orig_edge_feats` 存储在 `graph.edata['orig_f']` 中，以便在 DGL 消息函数中访问。更新后的边特征以形状为 `[num_edges, num_hidden_channels]` 的张量返回。
+
+<CgxTip>`orig_edge_feats` 参数至关重要：它保留了来自初始边表示的原始几何特征（距离、方向、取向、酰胺角），确保几何门控始终引用真实的结构几何，而不是那些可能跨层丢失几何可解释性的注意力改写特征。</CgxTip>
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L449-L455)
+
+## 与 Transformer 层的集成
+
+构象模块在 `GeometricTransformerModule` 和 `FinalGeometricTransformerModule` 中均有实例化。在标准的 `GeometricTransformerModule` 中，当 `disable_geometric_mode=False` 时条件性地创建，并在 `run_gt_layer` 开始时作为 `edge_feats = self.conformation_module(graph, orig_edge_feats)` 调用。`FinalGeometricTransformerModule` 遵循相同的模式，但当 `disable_geometric_mode=True` 时，额外支持一个线性回退，即用单一的 `nn.Linear` 替代完整模块，将原始边特征直接映射至 `num_hidden_channels`。
+
+<CgxTip>设置 `disable_geometric_mode=True` 提供了一个严格的消融基线：架构变为了源自 "A Generalization of Transformer Networks to Graphs" 的原始 Graph Transformer，从而能够对几何边演化与静态边特征进行受控比较。</CgxTip>
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L584-L599), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L815-L837), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L676-L677)
+
+## 设计原理
+
+构象模块体现了蛋白质结构感知图学习的两个关键原则。**首先**，几何门控确保边更新始终以残基间的实际物理关系为条件——距离控制影响的强度，方向和取向编码旋转几何，酰胺角捕获骨架二面角上下文。**其次**，双重残差架构（内部的 `res_connect_linear` 重连与外部的输出门控重连）确保该模块充当的是**精炼算子**而非替代品：原始边特征始终保留在输出中，学习到的几何校正值被叠加其上。这使得即使在几何特征有噪声或部分缺失时训练也能保持稳定，因为模型可以回退至其残差路径。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L428-L443)
+
+---
+
+**下一步**: 了解输入至构象模块的初始边表示是如何构建的，请参阅 [边初始化模块](7-edge-initialization-module)；或探索消费其输出的注意力机制，请参阅 [多头几何注意力](5-multi-head-geometric-attention)。
+
+---
+
+- [深入解析/几何 Transformer 核心/边初始化模块](https://zread.ai/BioinfoMachineLearning/DeepInteract/7-edge-initialization-module)
+
+---
+slug:7-edge-initialization-module
+blog_type:normal
+---
+
+
+**边缘初始化模块**（`InitEdgeModule`）是 DeepInteract 的几何 Transformer 中的基础组件，负责将原始边缘特征（距离、方向、方向朝向及酰胺平面角度信号）与节点身份嵌入转换为一个统一的、可学习的边缘表示。它作为蛋白质图的几何特征张量与下游[构象模块](6-conformation-module)和[多头几何注意力](5-multi-head-geometric-attention)层之间的关键桥梁，确保 KNN 图中的每条边在开始其计算旅程时，都拥有既忠实于几何特性又适合基于梯度优化的表示。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L128-L264), [deepinteract_constants.py](project/utils/deepinteract_constants.py#L99-L116)
+
+## 架构上下文
+
+`InitEdgeModule` 在几何 Transformer 的前向传播中占据着明确的位置：它在任何注意力或构象计算**之前**被调用，将包含索引几何特征的原始 `graph.edata['f']` 张量转换为已初始化的隐藏通道表示。若无此模块，构象模块和注意力层将接收到异构且维度不一致的特征信号。
+
+```mermaid
+flowchart TB
+    subgraph Input["Input Signals"]
+        NE["Node Embedding<br/>(nn.Embedding)"]
+        EM["Edge Messages<br/>(pos_enc, weights)"]
+        DF["Distance Features<br/>[2:20]"]
+        DR["Direction Features<br/>[20:23]"]
+        OF["Orientation Features<br/>[23:27]"]
+        AF["Amide Angle Features<br/>[27]"]
+    end
+
+    subgraph Stage1["Stage 1 — Feature Extraction & Combination"]
+        L0_1["edge_messages_linear_0"]
+        L0_2["dist_linear_0 + SiLU"]
+        L0_3["dir_linear_0 + SiLU"]
+        L0_4["orient_linear_0 + SiLU"]
+        L0_5["amide_linear_0 + SiLU"]
+        CL0["combined_linear_0 + SiLU<br/>7 × hidden_channels → hidden_channels"]
+    end
+
+    GATE["Gating Vector<br/>(combined_edge_logits)"]
+
+    subgraph Stage2["Stage 2 — Gated Projection & Refinement"]
+        L1_1["edge_messages_linear_1 × gate"]
+        L1_2["dist_linear_1 × gate"]
+        L1_3["dir_linear_1 × gate"]
+        L1_4["orient_linear_1 × gate"]
+        L1_5["amide_linear_1 × gate"]
+        SUM["Element-wise Sum"]
+        CL1["combined_linear_1<br/>hidden_channels → combined_out"]
+        CL2["combined_linear_2<br/>combined_out → hidden_channels"]
+    end
+
+    OUTPUT["Initialized Edge Features"]
+
+    NE --> CL0
+    EM --> L0_1 --> CL0
+    DF --> L0_2 --> CL0
+    DR --> L0_3 --> CL0
+    OF --> L0_4 --> CL0
+    AF --> L0_5 --> CL0
+    CL0 --> GATE
+
+    GATE --> L1_1
+    EM --> L1_1
+    GATE --> L1_2
+    DF --> L1_2
+    GATE --> L1_3
+    DR --> L1_3
+    GATE --> L1_4
+    OF --> L1_4
+    GATE --> L1_5
+    AF --> L1_5
+
+    L1_1 --> SUM
+    L1_2 --> SUM
+    L1_3 --> SUM
+    L1_4 --> SUM
+    L1_5 --> SUM
+    SUM --> CL1 --> CL2 --> OUTPUT
+```
+
+该模块实现了**门控两阶段**架构：阶段 1 从所有特征通道生成联合门控信号，阶段 2 利用该门控在将特征特定的线性投影折叠为单一隐藏通道输出之前对其进行调制。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L128-L264)
+
+## 构造函数与参数清单
+
+`InitEdgeModule` 构造函数接受以下参数，每个参数各管控边缘初始化过程的不同维度：
+
+| 参数 | 类型 | 作用 |
+|---|---|---|
+| `node_count_limit` | `int` | `nn.Embedding` 的词表大小；节点索引的上限 |
+| `num_edge_feats` | `int` | 原始边缘消息特征的维度（pos_enc + weights = 2） |
+| `num_dist_feats` | `int` | 距离特征的维度（默认为 18，索引 2–20） |
+| `num_dir_feats` | `int` | 方向特征的维度（默认为 3，索引 20–23） |
+| `num_orient_feats` | `int` | 方向朝向特征的维度（默认为 4，索引 23–27） |
+| `num_amide_feats` | `int` | 酰胺角度特征的维度（默认为 1，索引 27） |
+| `num_hidden_channels` | `int` | 所有中间表示与输出表示的通用隐藏通道大小 |
+| `activ_fn` | `nn.Module` | 线性投影后应用的激活函数（默认：`nn.SiLU`） |
+| `feature_indices` | `dict` | 用于切分几何特征的 `graph.edata['f']` 索引映射 |
+
+构造函数实例化了 **12 个线性层**和 **1 个嵌入层**，它们被组织为两个对称的投影组（阶段 0 和阶段 1）以及两个组合层。值得注意的是，**所有线性层均无偏置**（`bias=False`），这一设计选择减少了参数量，并依赖门控机制来提供表征的灵活性。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L131-L174)
+
+## 两阶段门控计算
+
+### 阶段 1：特征提取与门控
+
+消息函数 `init_edge_module_message_func` 首先通过 `self.node_embedding` 嵌入源节点和目标节点的身份，为每条边生成两个 `hidden_channels` 维的向量。同时，它利用 `FEATURE_INDICES` 中定义的索引范围，从原始边缘特征张量中提取五个几何特征通道：
+
+| 特征通道 | 索引范围 | 维度 | 提取方式 |
+|---|---|---|---|
+| 边缘位置编码 | `[0]` | 1 | 通过 `feature_indices['edge_pos_enc']` 直接切片 |
+| 边缘权重 | `[1]` | 1 | 通过 `feature_indices['edge_weights']` 直接切片 |
+| 距离特征 | `[2:20]` | 18 | 通过 `edge_dist_feats_start:end` 切片 |
+| 方向特征 | `[20:23]` | 3 | 通过 `edge_dir_feats_start:end` 切片 |
+| 方向朝向特征 | `[23:27]` | 4 | 通过 `edge_orient_feats_start:end` 切片 |
+| 酰胺角度 | `[27]` | 1 | 通过 `edge_amide_angles` 切片 |
+
+每个几何通道依次通过其专属的阶段 0 线性层和激活函数。边缘消息通道（pos_enc 与 weights 拼接为 2 维）通过 `edge_messages_linear_0` 时不经过激活。所有七个向量——两个节点嵌入加上五个投影后的特征通道——被拼接成一个 `7 × num_hidden_channels` 维的向量，随后经带有 SiLU 激活的 `combined_linear_0` 压缩，最终生成**门控向量** `combined_edge_logits`。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L198-L236), [deepinteract_constants.py](project/utils/deepinteract_constants.py#L99-L116), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L70-L76)
+
+### 阶段 2：门控投影与精炼
+
+在第二阶段，每个特征通道独立地通过其阶段 1 线性层进行重新投影，然后与门控向量进行**逐元素相乘**。这种门控机制允许联合表示针对每条边动态地抑制或放大单个几何通道——这是一种输入依赖的特征选择形式，比简单的拼接具有更强的表达能力：
+
+```
+edge_messages_1 = edge_messages_linear_1(edge_init) * combined_edge_logits
+dist_feats_1    = SiLU(dist_linear_1(dist))     * combined_edge_logits
+dir_feats_1     = SiLU(dir_linear_1(dir))       * combined_edge_logits
+orient_feats_1  = SiLU(orient_linear_1(orient)) * combined_edge_logits
+amide_feats_1   = SiLU(amide_linear_1(amide))   * combined_edge_logits
+```
+
+这五个门控向量被**求和**（而非拼接），产生一个单一的 `num_hidden_channels` 维中间表示。此和随后通过两个连续的线性投影进行精炼：`combined_linear_1` 从 `num_hidden_channels` 扩展至 `combined_out_channels`（所有原始特征维度的总和），而 `combined_linear_2` 再将其投影回 `num_hidden_channels`。这种瓶颈-扩展-收缩模式使得模块能够在返回到规范隐藏大小之前，于高维空间中学习跨通道的交互。
+
+<CgxTip>阶段 2 中基于乘法的门控模式在功能上等价于特征级线性调制层，其中 `combined_edge_logits` 充当逐边的缩放因子。这是全注意力特征混合的一种轻量级替代方案，它通过在聚合前于每个特征通道内独立操作来保留几何归纳偏置。</CgxTip>
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L238-L253)
+
+## 前向传播与 DGL 集成
+
+`forward` 方法直接在 `dgl.DGLGraph` 上运行，使用 DGL 的 `apply_edges` API 并行地对所有边调用消息函数：
+
+```python
+def forward(self, graph: dgl.DGLGraph):
+    with graph.local_scope():
+        nodes = graph.nodes()
+        num_nodes = len(nodes)
+        graph.ndata['i'] = nodes
+        graph.ndata['i_all'] = torch.cat((nodes, nodes.repeat(num_nodes - 1))).reshape(num_nodes, num_nodes)
+        graph.apply_edges(self.init_edge_module_message_func)
+        edge_feats = graph.edata['f']
+    return edge_feats
+```
+
+`graph.local_scope()` 上下文管理器确保中间节点数据（`i`、`i_all`）不会在前向调用结束后持续存在。`i_all` 张量以重复模式缓存所有节点索引，以支持 UDF 内的嵌入查找。`apply_edges` 调用同时在每条边上分派 `init_edge_module_message_func`，将结果写回 `graph.edata['f']`，随后将其作为初始化的边缘表示返回。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L255-L264)
+
+## 参数初始化策略
+
+所有可学习参数均通过 `reset_parameters` 进行初始化，该方法应用了两种不同的方案：
+
+| 参数 | 初始化 |
+|---|---|
+| `node_embedding.weight` | 均匀分布 √3: `U(−√3, √3)` |
+| 所有 `*_linear_*.weight` | 缩放为 2.0 的 Glorot 正交初始化 |
+
+**Glorot 正交**方案首先通过 `torch.nn.init.orthogonal_` 生成一个正交矩阵，然后按 `√(scale / ((fan_in + fan_out) × var))` 进行缩放，以确保无论层宽如何，输出的初始方差都受到控制。嵌入表的均匀初始化遵循了 `nn.Embedding` 的标准默认值，为节点身份向量提供了合理的初始分布。
+
+<CgxTip>Glorot 正交初始化中的 `scale = 2.0` 因子实际上将期望的权重大小较标准 Glorot 翻倍，这通过产生更大的初始梯度加速了早期训练。这对于门控机制尤为重要，因为若初始 `combined_edge_logits` 值过小，将导致阶段 2 的门控投影趋于零，从而停滞学习过程。</CgxTip>
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L176-L196), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L47-L52)
+
+## 几何特征提取工具
+
+该模块将几何特征的切片操作委托给 `get_geo_feats_from_edges`，这是一个纯索引函数，通过读取 `FEATURE_INDICES` 来对原始边缘特征张量进行分区：
+
+```python
+def get_geo_feats_from_edges(orig_edge_feats, feature_indices):
+    dist_feats   = orig_edge_feats[:, feature_indices['edge_dist_feats_start']:feature_indices['edge_dist_feats_end']]
+    dir_feats    = orig_edge_feats[:, feature_indices['edge_dir_feats_start']:feature_indices['edge_dir_feats_end']]
+    o_feats      = orig_edge_feats[:, feature_indices['edge_orient_feats_start']:feature_indices['edge_orient_feats_end']]
+    amide_feats  = orig_edge_feats[:, feature_indices['edge_amide_angles']]
+    return dist_feats, dir_feats, o_feats, amide_feats
+```
+
+此函数在 `InitEdgeModule` 和[构象模块](6-conformation-module)之间共享，确保了几何 Transformer 各处理阶段间特征解读的一致性。`FEATURE_INDICES` 字典充当了边缘特征张量字节级布局的唯一事实来源。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L70-L76), [deepinteract_constants.py](project/utils/deepinteract_constants.py#L99-L116)
+
+## 设计原理与模式
+
+`InitEdgeModule` 体现了若干深思熟虑的架构决策，对于希望扩展或修改几何 Transformer 的开发者而言，这些决策值得注意：
+
+| 设计决策 | 原理 |
+|---|---|
+| **无偏置线性层** | 减少参数量；门控机制提供逐边的偏移能力 |
+| **两阶段门控架构** | 将“关注什么”（阶段 1 门控）与“如何变换”（阶段 2 投影）解耦 |
+| **基于求和的门控特征聚合** | 在不引发拼接维度爆炸的情况下维持 `hidden_channels` 维度；鼓励加性特征组合 |
+| **瓶颈-扩展-收缩精炼** | `combined_linear_1` → `combined_linear_2` 创建了一个中间的过参数化空间，用于跨特征交互 |
+| **通过 `nn.Embedding` 进行节点嵌入** | 为每个残基提供可学习的位置身份，以序列顺序感知补充几何特征 |
+| **SiLU 激活** | 自门控线性单元提供平滑、非单调的门控及非零均值梯度，相比 ReLU 改善了优化地形 |
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L128-L264)
+
+## 后续内容
+
+在 `InitEdgeModule` 生成初始化的边缘表示后，几何 Transformer 将其输入到[构象模块](6-conformation-module)中，该模块通过邻居感知门控和残差连接迭代演化几何边缘特征。构象模块的输出随后进入[多头几何注意力](5-multi-head-geometric-attention)层，在此处显式边缘特征将对隐式注意力分数进行调制。如需了解更广泛的系统上下文，请参阅[架构概览](4-architecture-overview)。
+
+---
+
+## 图间交互
+
+- [深入解析/图间交互/GINI 模型设计](https://zread.ai/BioinfoMachineLearning/DeepInteract/8-gini-model-design)
+
+---
+slug:8-gini-model-design
+blog_type:normal
+---
+
+
+**聚焦几何的图间节点交互** 模块是 DeepInteract 的核心架构支柱——DeepInteract 是一种孪生神经网络，可将成对的蛋白质结构图转换为逐残基接触概率图。GINI 桥接了两种计算范式：一是通过 Geometric Transformer 独立从每个蛋白质中提取 3D 结构语义的**图内表征学习**，二是通过 2D 卷积解码器将跨蛋白质的配对表征融合为联合交互表面的**图间交互推理**。本页将解析 `LitGINI` 模块的设计理念、架构拓扑与数据流机制。
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1478-L1583)
+
+## 架构概述
+
+GINI 采用了**孪生设计**，即一个共享的 GNN 模块使用相同的权重处理两个蛋白质图，确保节点表征在公共潜空间中生成。随后，两个独立的图输出被组合成一个**交互张量**——一个空间维度对应于各蛋白质残基数量的 2D 特征图——并经由**交互模块**（膨胀 ResNet 或 DeepLabV3+ 解码器）预测逐残基对的接触概率。
+
+```mermaid
+flowchart TB
+    subgraph Siamese["孪生 GNN 分支 (共享权重)"]
+        G1["蛋白质图 1<br/>(DGLGraph)"] --> GNN["DGLGeometricTransformer"]
+        G2["蛋白质图 2<br/>(DGLGraph)"] --> GNN
+    end
+
+    GNN --> NF1["节点特征 1<br/>[N₁ × C]"]
+    GNN --> NF2["节点特征 2<br/>[N₂ × C]"]
+
+    NF1 --> IT["交互张量<br/>构建"]
+    NF2 --> IT
+
+    IT --> TENSOR["交互张量<br/>[2C × N₁ × N₂]"]
+
+    TENSOR --> IM{"交互模块?"}
+
+    IM -->|"dil_resnet"| DRN["膨胀 ResNet<br/>+ SE 模块"]
+    IM -->|"deeplab"| DLP["DeepLabV3+<br/>接触解码器"]
+
+    DRN --> LOGITS["接触 Logits<br/>[2 × N₁ × N₂]"]
+    DLP --> LOGITS
+
+    LOGITS --> SOFTMAX["Softmax →<br/>接触概率图"]
+```
+
+该架构可清晰地分解为三个阶段，每个阶段由 `LitGINI` 中独立的方法控制：
+
+| 阶段 | 方法 | 输入 → 输出 | 目的 |
+|-------|--------|----------------|---------|
+| 图内编码 | `gnn_forward()` | `DGLGraph` → `List[Tensor]` | 学习逐节点结构嵌入 |
+| 跨图组合 | `construct_interact_tensor()` | `(Tensor, Tensor)` → `Tensor` | 从配对嵌入构建 2D 交互表面 |
+| 交互解码 | `interact_forward()` | `Tensor` → `Tensor` | 预测逐残基对接触 logits |
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1478-L1583), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1660-L1685)
+
+## 模块构建
+
+`LitGINI.__init__` 方法负责协调所有子模块的装配及其超参数绑定。构建遵循特定的顺序：**参数记录 → GNN 模块构建 → 交互模块构建 → 损失/指标声明 → 参数初始化**。
+
+### 超参数拓扑
+
+GINI 的构造函数接受丰富的超参数集合，这些参数可清晰地划分为四个逻辑组：
+
+| 组别 | 关键参数 | 默认值 | 作用 |
+|-------|---------------|---------|------|
+| **GNN 架构** | `gnn_layer_type`, `num_gnn_layers`, `num_gnn_hidden_channels`, `num_gnn_attention_heads`, `knn` | `'geotran'`, 2, 128, 4, 20 | 控制图内表征的深度与容量 |
+| **交互架构** | `interact_module_type`, `num_interact_layers`, `num_interact_hidden_channels`, `use_interact_attention`, `num_interact_attention_heads` | `'dil_resnet'`, 14, 128, False, 4 | 控制图间解码器的深度与容量 |
+| **训练机制** | `lr`, `weight_decay`, `dropout_rate`, `pn_ratio`, `weight_classes`, `num_epochs` | 1e-3, 1e-2, 0.2, 0.1, False, 50 | 调节优化动力学与类别不平衡 |
+| **基础设施** | `pad`, `max_num_residues`, `fine_tune`, `ckpt_path`, `use_wandb_logger` | False, 100, False, None, True | 内存管理、检查点、日志记录 |
+
+<CgxTip>`disable_geometric_mode` 标志可将整个 Geometric Transformer 流水线转换为标准的 Graph Transformer——剥离所有几何特征条件化（距离、方向、朝向、酰胺门控）。这对于隔离 3D 几何归纳偏置贡献的**消融研究**极具价值。</CgxTip>
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1481-L1583)
+
+### GNN 模块装配
+
+`build_gnn_module()` 方法根据 `gnn_layer_type` 选择器来编组图内编码层。存在两种路径：
+
+- **`'gcn'`**：堆叠 `num_gnn_layers` 个来自 DGL 的基础 `GraphConv` 层——这是一个轻量级基线，通过边权重调制执行消息传递，但不涉及几何推理。
+- **`'geotran'`**（默认）：实例化一个单一的 `DGLGeometricTransformer`，其内部组合了一个 `InitEdgeModule`、`num_layers - 1` 个中间 `GeometricTransformerModule` 块以及一个 `FinalGeometricTransformerModule`。Geometric Transformer 在内部管理自身的深度，因此即使 `num_gnn_layers > 1`，`nn.ModuleList` 中也只会放置**一个** `DGLGeometricTransformer`。
+
+可选的**节点输入嵌入**（`node_in_embedding`）会在输入特征维度与隐藏通道宽度不同时，将原始节点特征投影到 `num_gnn_hidden_channels`，从而确保与下游 Geometric Transformer 层的维度兼容性。
+
+```python
+# 简化的构建逻辑
+if self.using_gcn:
+    gnn_layers = [GraphConv(...) for _ in range(self.num_gnn_layers)]
+else:
+    gnn_layers = [DGLGeometricTransformer(
+        num_hidden_channels=self.num_gnn_hidden_channels,
+        num_attention_heads=self.num_gnn_attention_heads,
+        num_layers=self.num_gnn_layers,
+        ...
+    )]
+self.gnn_module = nn.ModuleList(gnn_layers)
+```
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1591-L1625)
+
+### 交互模块装配
+
+`build_interaction_module()` 方法负责选择在交互张量上运行的 2D 解码器。`get_interact_module()` 工厂支持两种架构：
+
+| 架构 | 选择器 | 核心特征 |
+|---|---|---|
+| **膨胀 ResNet + SE** | `'dil_resnet'` | 通过膨胀周期 [1,2,4,8] 实现多尺度感受野；squeeze-and-excitation 通道注意力；可选的区域多头注意力块 |
+| **DeepLabV3+** | `'deeplab'` | 速率为 (12,24,36) 的空洞空间金字塔池化；具有 ResNet34 骨干的编码器-解码器结构；4× 上采样解码器 |
+
+这两个模块均接收形状为 `[2 × num_gnn_hidden_channels, N₁, N₂]` 的交互张量，并输出形状为 `[2, N₁, N₂]` 的 logits——每个类别（非接触/接触）对应一个通道。膨胀 ResNet 将其正类上的最终偏置项初始化为 −7.0，以确保初始 sigmoid 输出约为 0.001——这是针对高度不平衡的接触预测的一个数值稳定的起点。
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1627-L1655)
+
+## 前向传播：孪生流水线
+
+完整的前向流水线由 `shared_step()` 编排，该方法接收两个蛋白质图并生成逐复合物接触 logit 张量的列表。该方法封装了三个连续阶段：
+
+### 阶段 1 — 图内编码
+
+```python
+graph1_node_feats = self.gnn_forward(graph1)   # List[Tensor]: 批次中每个图对应一个张量
+graph2_node_feats = self.gnn_forward(graph2)
+```
+
+`gnn_forward()` 方法首先应用可选的节点嵌入，然后沿 GNN 模块列表进行传播。对于 Geometric Transformer，每层返回一个更新后的 `DGLGraph`，其 `ndata['f']` 和 `edata['f']` 携带了演化的表征。编码完成后，批次图通过 `dgl.unbatch()` 解批为单独的图节点特征张量，生成一个每个元素形状为 `[Nᵢ, C]` 的列表。
+
+### 阶段 2 — 交互张量构建
+
+来自两个蛋白质的节点特征通过 `construct_interact_tensor()` 被组合成 2D 交互张量。当任一图超过 `max_num_residues` 时，**子序列化**策略会将交互张量划分为可处理的分块，独立处理后重新组装 logits——从而防止大型复合物出现 GPU 内存不足错误。
+
+```python
+interact_tensors = [
+    construct_interact_tensor(g1_feats, g2_feats, pad=self.pad, max_len=self.max_num_residues)
+    for g1_feats, g2_feats in zip(graph1_node_feats, graph2_node_feats)
+]
+```
+
+### 阶段 3 — 交互解码
+
+每个交互张量独立通过交互模块进行解码：
+
+```python
+logits_list = [self.interact_forward(tensor) for tensor in interact_tensors]
+```
+
+当启用填充时，张量在解码前会被批量处理，并在解码后通过 `remove_padding()` 剥离填充，从而提升变长复合物的吞吐量。
+
+```mermaid
+sequenceDiagram
+    participant G1 as 图 1
+    participant G2 as 图 2
+    participant GNN as 共享 GNN
+    participant IT as 交互张量
+    participant IM as 交互模块
+
+    G1->>GNN: gnn_forward(graph1)
+    GNN-->>GNN: "节点特征 [N₁ × C]"
+    G2->>GNN: gnn_forward(graph2)
+    GNN-->>GNN: "节点特征 [N₂ × C]"
+    GNN->>IT: construct_interact_tensor()
+    IT-->>IT: "张量 [2C × N₁ × N₂]"
+    IT->>IM: interact_forward()
+    IM-->>IM: "Logits [2 × N₁ × N₂]"
+```
+
+<CgxTip>子序列化守卫条件（`both_graphs_within_limit is False and batch_size == 1 and high_mem_model`）当前默认 `high_mem_model = False`，实际上即使对于超大型复合物也禁用了子序列化。要为膨胀 ResNet 路径激活内存安全的分块处理，请在 `shared_step()` 中设置 `high_mem_model = True`。</CgxTip>
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1687-L1745), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1660-L1679)
+
+## 微调策略
+
+GINI 通过 `fine_tune` 和 `ckpt_path` 参数支持结构化的微调路径。当 `fine_tune=True` 时，构造函数从指定检查点加载预训练的 `LitGINI`，并**冻结交互模块**，同时保持 GNN 模块可训练：
+
+```python
+if self.fine_tune:
+    lit_gini = LitGINI.load_from_checkpoint(self.ckpt_path, ...)
+    self.gnn_module, self.interact_module = lit_gini.gnn_module, lit_gini.interact_module
+    for param in self.interact_module.parameters():
+        param.requires_grad = False
+```
+
+这种非对称冻结反映了这样的设计直觉：**交互解码器编码了可迁移的跨蛋白质推理**（即如何从交互张量中解读接触图），而 **GNN 编码器捕获了领域特定的结构先验**，当跨越具有不同特征组合或结构分辨率的数据集进行迁移时，可能需要进行适应。
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1546-L1557)
+
+## 类别不平衡处理
+
+蛋白质界面预测具有内在的不平衡性——只有极小一部分残基对形成真实接触。GINI 通过两种互补机制来解决此问题：
+
+1. **训练时下采样**（`downsample_examples()`）：随机打乱训练样本，然后采样足够数量的负对以达到目标 `pn_ratio`（正负比），默认为 0.1（即负样本数量是正样本的 10 倍）。
+
+2. **类别加权**（`weight_classes=True`）：应用手动的 `CrossEntropyLoss` 权重，其中 `neg_class_weight=1.0` 且 `pos_class_weight=5.0`，在梯度计算时对稀疏正类进行加权。
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L1747-L1754), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1781-L1789)
+
+## 设计原理与核心关联
+
+GINI 模型的架构体现了一种刻意的关注点分离：**Geometric Transformer**（详见 [Multi-Head Geometric Attention](5-multi-head-geometric-attention) 与 [Conformation Module](6-conformation-module)）处理每个蛋白质内部的所有 3D 几何推理，而**交互模块**处理跨蛋白质的所有 2D 空间推理。交互张量（详见 [Interaction Tensor Construction](9-interaction-tensor-construction)）作为连接这两种计算范式的信息瓶颈，将无序的图表征转换为适用于卷积的结构化 2D 场。解码器的选择——膨胀 ResNet 对比 DeepLabV3+（见 [DeepLabV3+ Contact Decoder](10-deeplabv3-contact-decoder)）——决定了如何在交互表面上聚合多尺度上下文。
+
+要理解输入 GNN 编码器的几何特征，请参阅 [Geometric Protein Features](12-geometric-protein-features) 与 [Graph Construction from PDB](11-graph-construction-from-pdb)。有关驱动此模块的训练基础设施，请查阅 [Lightning Training Pipeline](17-lightning-training-pipeline)。
+
+---
+
+- [深入解析/图间交互/交互张量构建](https://zread.ai/BioinfoMachineLearning/DeepInteract/9-interaction-tensor-construction)
+
+---
+slug:9-interaction-tensor-construction
+blog_type:normal
+---
+
+
+**交互张量**是核心数据结构，它将 DeepInteract 的两个独立的几何图 Transformer 与其成对接触解码器连接起来。它将每个蛋白质的节点表征（每个表征编码单条链的内部结构）转换为一个统一的 4D 张量，该张量捕获两个相互作用蛋白质之间的**所有残基-残基配对**。这一构造是**图间节点交互（GINI）**原则的数学实现：预测蛋白质-蛋白质接触需要一种显式枚举跨链配对的表征，而不仅仅是拼接的单链嵌入。
+
+## 数学公式
+
+给定两个蛋白质图 $\mathcal{G}_1$ 和 $\mathcal{G}_2$，其学习到的节点特征矩阵为 $\mathbf{X}_A \in \mathbb{R}^{N_1 \times D}$ 和 $\mathbf{X}_B \in \mathbb{R}^{N_2 \times D}$（其中 $N_1, N_2$ 为残基数量，$D$ 为隐藏通道维度），交互张量 $\mathcal{T}$ 的构造如下：
+
+$$\mathcal{T} = \text{cat}\Big(\text{repeat}(\mathbf{X}_A^\top, N_2\text{ times along dim 3}),\;\text{repeat}(\mathbf{X}_B^\top, N_1\text{ times along dim 2})\Big)$$
+
+这会生成 $\mathcal{T} \in \mathbb{R}^{1 \times 2D \times N_1 \times N_2}$，其中前 $D$ 个通道编码每个位置的受体残基，后 $D$ 个通道编码配体残基。因此，张量中的每个空间单元 $(i, j)$ 都包含拼接的特征对 $(\mathbf{x}_A^{(i)}, \mathbf{x}_B^{(j)})$——这是跨越界面的残基对的完整描述符。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L151-L165)
+
+## 核心构造：`construct_interact_tensor`
+
+函数 `construct_interact_tensor` 实现了上述交错操作。其逻辑通过三个精确的步骤进行：
+
+**步骤 1 — 转置与升维。** 两个输入特征矩阵都被从形状 $[N, D]$ 置换为 $[1, D, N]$，引入批次维度以保持张量代数运算的一致性：
+
+```python
+x_a, x_b = graph1_feats.permute(1, 0).unsqueeze(0), graph2_feats.permute(1, 0).unsqueeze(0)
+```
+
+**步骤 2 — 可选填充。** 当 `pad=True` 时，两个张量都沿着节点维度进行零填充以达到 `max_len`（默认 256），从而确保与下游卷积解码器兼容的固定空间分辨率：
+
+```python
+x_a = F.pad(x_a, (0, x_a_num_zeros, 0, 0, 0, 0))
+x_b = F.pad(x_b, (0, x_b_num_zeros, 0, 0, 0, 0))
+```
+
+**步骤 3 — 通过重复交错与拼接进行交错。** 受体特征沿着新的第 4 维度重复 $N_2$ 次，配体特征沿着新的第 3 维度重复 $N_1$ 次。沿通道维度进行拼接，生成最终的 4D 交互张量：
+
+```python
+interact_tensor = torch.cat(
+    (torch.repeat_interleave(x_a.unsqueeze(3), repeats=len_2, dim=3),
+     torch.repeat_interleave(x_b.unsqueeze(2), repeats=len_1, dim=2)),
+    dim=1
+)
+```
+
+生成的张量形状为 $[1, 2D, N_1, N_2]$（填充时为 $[1, 2D, \text{max\_len}, \text{max\_len}]$），可直接解释为具有 $2D$ 个通道且空间分辨率为 $N_1 \times N_2$ 的 2D 图像。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L151-L165)
+
+## 大蛋白质的子序列分区
+
+真实的蛋白质复合物经常超过默认的 `max_len=256` 残基限制。DeepInteract 没有选择截断或降采样，而是将每个蛋白质的节点特征划分为长度为 `max_len` 的连续子序列，并使用 `construct_subsequenced_interact_tensors` 为**所有成对的子序列组合**构造交互张量。
+
+分区策略的工作原理如下：给定具有 $N_1$ 个残基的 $\mathbf{X}_A$，它会被拆分为 $\lceil N_1 / 256 \rceil$ 个子序列块。$\mathbf{X}_B$ 也进行同样处理。这些块集合的笛卡尔积决定了必须构造的所有交互张量分块。对于具有 400 个残基的受体和具有 300 个残基的配体，这将产生 $\lceil 400/256 \rceil \times \lceil 300/256 \rceil = 2 \times 2 = 4$ 个交互张量分块，每个分块的形状为 $[1, 2D, 256, 256]$。
+
+```python
+subseq_batch_combos = list(itertools.product(g1_subseq_batches, g2_subseq_batches))
+interact_tensors = [
+    construct_interact_tensor(g1_feats, g2_feats, pad=pad, max_len=max_len)
+    for g1_feats, g2_feats in subseq_batch_combos
+]
+```
+
+每个分块由接触解码器独立处理，生成的逻辑值通过 `insert_interact_tensor_logits` 重新组合成全分辨率的接触图。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L115-L148)
+
+## 填充移除与逻辑值重组
+
+在接触解码器为每个（可能已填充、可能已子序列化的）交互张量分块生成逻辑值后，两个互补的后处理函数会将结果恢复到原始的残基对维度。
+
+### `remove_padding`
+
+当交互张量经过零填充以达到 `max_len` 时，此函数将逻辑值沿空间维度切片回真实的残基数：
+
+```python
+sliced_logits = logits[i, :, :g1_nf.shape[0], :g2_nf.shape[0]]
+```
+
+这是一个基于索引的直接裁剪操作，沿空间维度应用于批次中的每个样本。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L168-L174)
+
+### `remove_subsequenced_input_padding` 和 `insert_interact_tensor_logits`
+
+这两个函数构成了子序列分区流水线的逆操作。`remove_subsequenced_input_padding` 剥离每个子序列化逻辑值分块的零填充，生成大小可变的输出切片。随后，`insert_interact_tensor_logits` 使用有状态的索引遍历算法，将这些切片拼接回单个全分辨率交互张量的正确空间位置，该算法在递增 $N_1$（行）之前优先遍历 $N_2$（列）索引——这与分区期间建立的笛卡尔积顺序相呼应。
+
+插入逻辑跟踪溢出量、迭代计数器和遍历状态标志，以将每个分块正确放置到输出张量的指定区域：
+
+```python
+interact_tensor[:, :, start_index_1: end_index_1, start_index_2: end_index_2] = logits
+```
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L177-L229), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L232-L301)
+
+## 数据流架构
+
+交互张量位于 DeepInteract 信息漏斗的最窄点——将两个独立的图 Transformer 输出压缩为接触解码器可以使用的单个 4D 结构：
+
+```mermaid
+flowchart TD
+    G1["Geometric Transformer<br/>Graph₁ → Node Feats X_A"]
+    G2["Geometric Transformer<br/>Graph₂ → Node Feats X_B"]
+    
+    G1 --> IT{"Interaction Tensor<br/>Construction"}
+    G2 --> IT
+    
+    IT -->|N₁, N₂ ≤ 256| P["construct_interact_tensor<br/>+ optional padding"]
+    IT -->|N₁ or N₂ > 256| S["construct_subsequenced_interact_tensors<br/>→ tile × tile Cartesian product"]
+    
+    P --> D["Contact Decoder<br/>(DeepLabV3+ / ResNet2D)"]
+    S --> D
+    
+    D -->|single tile| RP["remove_padding"]
+    D -->|multiple tiles| RSP["remove_subsequenced_input_padding"]
+    
+    RSP --> INS["insert_interact_tensor_logits<br/>→ full-resolution contact map"]
+    RP --> CM["Contact Map<br/>N₁ × N₂"]
+    INS --> CM
+```
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L115-L165), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1478-L1489)
+
+## 张量形状变换
+
+下表追溯了交互张量流水线在标准路径和子序列化路径中的精确形状变换：
+
+| 阶段 | 标准路径 | 子序列化路径 |
+|-------|--------------|-------------------|
+| 输入：Graph₁ 节点特征 | $[N_1, D]$ | $[N_1, D]$ 其中 $N_1 > 256$ |
+| 输入：Graph₂ 节点特征 | $[N_2, D]$ | $[N_2, D]$ 其中 $N_2 > 256$ |
+| `permute` + `unsqueeze` 之后 | $[1, D, N_1]$ | 拆分为 $\lceil N_i/256 \rceil$ 个块 |
+| `repeat_interleave` 之后 (每个) | $[1, D, N_1, N_2]$ | 每个分块 $[1, D, 256, 256]$ |
+| **交互张量** | $[1, 2D, N_1, N_2]$ | 每个分块 $[1, 2D, 256, 256]$ |
+| `pad=True` 时 | $[1, 2D, 256, 256]$ | 已为 256 |
+| 接触解码器之后 | $[1, C, 256, 256]$ | 每个分块 $[1, C, 256, 256]$ |
+| 移除填充之后 | $[1, C, N_1, N_2]$ | 重组为 $[1, C, N_1, N_2]$ |
+
+其中 $D$ = `num_hidden_channels`（默认 128），$C$ = `num_classes`（默认 2），256 = `max_len`。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L151-L165)
+
+## 设计原理与权衡
+
+**为什么选择交错而不是外积？** `torch.repeat_interleave` + `torch.cat` 策略在每个空间位置生成一个通道拼接对 $(\mathbf{x}_A^{(i)}, \mathbf{x}_B^{(j)})$，而不是外积 $\mathbf{x}_A^{(i)} \otimes \mathbf{x}_B^{(j)}$。这一选择保留了每条链特征的标识，允许下游卷积解码器学习在对称外积中会丢失的非对称交互模式（例如，疏水-极性互补性）。它还将通道数从 $D^2$ 减半至 $2D$，将内存和计算量减少了 $D/2$ 倍。
+
+**为什么选择子序列分块而不是自适应分辨率？** 固定的 256×256 空间维度允许接触解码器使用标准的卷积架构（ResNet、DeepLabV3+），而无需针对每种输入尺寸修改架构。笛卡尔积分块策略确保**没有信息丢失**——每个残基对恰好出现在一个分块中——同时保持 GPU 内存有界。权衡代价是每个复合物需要 $O(\lceil N_1/L \rceil \times \lceil N_2/L \rceil)$ 次解码器前向传播，其中 $L = \text{max\_len}$。
+
+**内存缩放。** 对于各有 $N$ 个残基和 $D$ 个隐藏通道的两个蛋白质，交互张量需要 $2DN^2$ 个浮点数。当 $N=256, D=128$（float32）时，约为 67 MB——远在 GPU 限制之内。无论蛋白质总大小如何，子序列化路径都将每个分块保持在此界限内。
+
+<CgxTip>交互张量的 4D 形状 $[1, 2D, N_1, N_2]$ 刻意设计为与 PyTorch 的 `Conv2d` 接口兼容——在传递给接触解码器之前无需重塑。使用子序列分块时，请确保使用*原始*（子序列化之前）交互张量形状作为目标来调用 `insert_interact_tensor_logits`，而不是填充后的分块形状。</CgxTip>
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L115-L165), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L20-L22)
+
+## 与 GINI 模型的集成
+
+在 `LitGINI` 中，交互张量的构造在两个几何 Transformer 都生成最终节点表征后被调用。`construct_interact_tensor` 和 `construct_subsequenced_interact_tensors` 函数直接在模块级别被导入：
+
+```python
+from project.utils.deepinteract_utils import construct_interact_tensor, \
+    construct_subsequenced_interact_tensors, insert_interact_tensor_logits, \
+    remove_padding, remove_subsequenced_input_padding
+```
+
+交互模块类型（`interact_module_type`）参数决定哪个解码器消费该张量——`'dil_resnet'` 对应 ResNet2D 路径，或 `'deeplabv3plus'` 对应 DeepLabV3+ 路径——但张量构造本身是**解码器无关的**，充当图 Transformer 骨干网络和任何 2D 卷积接触预测器之间的通用桥梁。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L20-L22), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1478-L1489)
+
+## 导航
+
+交互张量向下游流入接触解码器以进行最终预测。要理解完整的图间交互流水线：
+
+- **上游**：[GINI 模型设计](8-gini-model-design) —— 完整的 LitGINI 模块如何协调图 Transformer 和交互张量构造
+- **下游**：[DeepLabV3+ 接触解码器](10-deeplabv3-contact-decoder) —— 4D 张量如何转换为每残基对的接触概率图
+
+---
+
+- [深入解析/图间交互/DeepLabV3+ 接触解码器](https://zread.ai/BioinfoMachineLearning/DeepInteract/10-deeplabv3-contact-decoder)
+
+---
+slug:10-deeplabv3-contact-decoder
+blog_type:normal
+---
+
+
+DeepLabV3+ 接触解码器将最先进的语义分割架构重新应用于蛋白质-蛋白质接触预测。它并非将像素分类到语义类别中，而是将 2D **交互张量** 中的残基-残基相互作用对分类为接触或非接触类别。这种从空间到结构的类比正是使 DeepLabV3+ 在密集接触图解码中格外有效的架构洞察：交互张量中的每个空间位置都编码了一个成对残基关系，而空洞卷积层级则捕获了多尺度的相互作用模式——从局部的邻近接触到长程的结构域间界面。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L525-L610), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L24-L24)
+
+## 架构原理：从分割到接触预测
+
+最初的 DeepLabV3+ 专为语义图像分割而设计（Chen et al., 2018, arXiv:1802.02611v3），其中编码器提取多尺度空间特征，解码器恢复细粒度的边界细节。DeepInteract 通过精确的结构对应关系，将这一范式映射到接触预测问题上：
+
+| 分割概念 | 接触预测类比 |
+|---|---|
+| 输入图像 (H × W × 3) | 交互张量 (N × M × C) |
+| 像素类别 (道路, 建筑, …) | 接触类别 (接触, 非接触) |
+| 物体边界 | 接触图界面 |
+| 多尺度空间上下文 | 多尺度残基相互作用模式 |
+| 编码器特征层级 | 多分辨率成对特征图 |
+
+交互张量由 [交互张量构建](9-interaction-tensor-construction) 模块构建，提供了一个 2D 特征图，其中轴 0 索引蛋白质 A 的残基，轴 1 索引蛋白质 B 的残基。每个通道编码一个独立的成对几何特征或学习特征。随后，DeepLabV3+ 解码器对该图执行密集的逐位置分类，为每个残基对生成接触概率。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L525-L558), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1478-L1489)
+
+## 端到端数据流
+
+完整的正向传播链包含三个阶段：**编码** → **解码** → **分割头**。下图展示了典型配置（ResNet34 编码器，输出步长 16，128 个输入通道）下各阶段的张量形状：
+
+```mermaid
+flowchart TD
+    subgraph Input
+        IT["交互张量<br/>(B, 128, N, M)"]
+    end
+
+    subgraph Encoder["ResNet34 编码器 (5 个阶段)"]
+        E0["阶段 0: 恒等映射<br/>(B, 128, N, M)"]
+        E1["阶段 1: conv1+bn+relu<br/>(B, 64, N, M)"]
+        E2["阶段 2: maxpool+layer1<br/>(B, 64, N/2, M/2)"]
+        E3["阶段 3: layer2<br/>(B, 128, N/4, M/4)"]
+        E4["阶段 4: layer3<br/>(B, 256, N/8, M/8)"]
+        E5["阶段 5: layer4 (膨胀)<br/>(B, 512, N/16, M/16)"]
+    end
+
+    subgraph Decoder["DeepLabV3+ 解码器"]
+        ASPP["ASPP 模块<br/>(B, 256, N/16, M/16)"]
+        UP["上采样 4×<br/>(B, 256, N/4, M/4)"]
+        LF["低级特征 1×1 卷积<br/>(B, 48, N/4, M/4)"]
+        CAT["拼接<br/>(B, 304, N/4, M/4)"]
+        FUSE["可分离卷积 3×3 + ReLU<br/>(B, 256, N/4, M/4)"]
+    end
+
+    subgraph Head["分割头"]
+        SH["卷积 1×1 + 上采样<br/>(B, 2, N, M)"]
+    end
+
+    IT --> E0
+    E0 --> E1 --> E2 --> E3 --> E4 --> E5
+    E5 --> ASPP --> UP
+    E1 --> LF
+    UP --> CAT
+    LF --> CAT
+    CAT --> FUSE --> SH
+```
+
+`SegmentationModel.forward` 方法编排了这一流程：它首先通过 `self.encoder(x)` 提取多尺度特征，然后将所有特征图传递给 `self.decoder(*features)`，最后应用 `self.segmentation_head(decoder_output)` 生成每个类别的接触 logits。一个关键细节是**边界切片**逻辑——由于变长交互张量可能产生略大于原始空间维度的上采样输出，正向传播会切除多余的行和列，以保持精确的输出对齐。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L193-L217), [vision_modules.py](project/utils/vision_modules.py#L560-L610)
+
+## ASPP：空洞空间金字塔池化
+
+**ASPP** 模块是 DeepLabV3+ 的标志性组件。它对最深层编码器特征应用五个并行特征提取分支，每个分支在不同尺度上捕获空间上下文：
+
+| 分支 | 操作 | 感受野 | 目的 |
+|---|---|---|---|
+| 1 | 1×1 卷积 + ReLU | 1 | 逐点通道混合 |
+| 2 | 3×3 卷积 (rate=12) + ReLU | 25 | 中程上下文 |
+| 3 | 3×3 卷积 (rate=24) + ReLU | 49 | 长程上下文 |
+| 4 | 3×3 卷积 (rate=36) + ReLU | 73 | 超长程上下文 |
+| 5 | 自适应平均池化 → 1×1 卷积 → 双线性上采样 | 全局 | 图像/张量级全局上下文 |
+
+前四个分支使用**可分离卷积**（深度可分离 + 逐点可分离），将每个标准卷积分解为一个仅空间滤波器和一个仅通道滤波器——在保持表征能力的同时，大幅减少了参数量。第五个分支应用全局平均池化以捕获张量级统计信息，然后通过双线性上采样恢复至输入空间分辨率。所有五个分支的输出沿通道维度进行拼接，并通过一个带有 ReLU 和 0.5 dropout 的 1×1 卷积进行投影，生成最终的 ASPP 输出。
+
+<CgxTip>对于接触预测，默认的空洞率 (12, 24, 36) 尤为适用：它们分别捕获沿每条蛋白质链大约 12、24 和 36 个残基间隔的相互作用模式，对应于局部二级结构接触、中程环接触和长程结构域间接触。</CgxTip>
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L290-L367), [vision_modules.py](project/utils/vision_modules.py#L370-L398)
+
+## 解码器：多尺度特征融合
+
+`DeepLabV3PlusDecoder` 实现了编码器-解码器融合策略，这也正是 DeepLabV3+ 相比原版 DeepLabV3 的 "+" 增益所在。融合操作按顺序分为三步：
+
+**步骤 1 — ASPP 处理**：最深层编码器特征（`features[-1]`，分辨率为 1/16 或 1/8）经过 ASPP 模块及随后的带 ReLU 的可分离 3×3 卷积，在低分辨率下生成丰富的多尺度表征。
+
+**步骤 2 — 双线性上采样**：ASPP 输出通过双线性插值上采样 4 倍（输出步长为 16 时）或 2 倍（输出步长为 8 时），使其与低级编码器特征图的分辨率对齐。
+
+**步骤 3 — 低级特征拼接与精炼**：浅层编码器特征（`features[-4]`，分辨率为 1/4）通过 1×1 卷积投影至 **48 个通道**——这是原论文的一项设计选择，激进地压缩低级细节以防止其掩盖经过精炼的 ASPP 特征。上采样后的 ASPP 特征（256 通道）与压缩后的低级特征（48 通道）进行拼接（共 304 通道），随后通过一个带 ReLU 的可分离 3×3 卷积进行精炼，生成最终的 256 通道解码器输出。
+
+解码器正向方法中的边界切片保护机制确保了当双线性上采样生成的特征图略大于低级特征图（由奇数空间维度引起）时，在拼接前切除多余的行和列。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L235-L287)
+
+## 编码器架构与空洞卷积策略
+
+编码器是一个 **ResNet34** 骨干网络，通过 `EncoderMixin` 和 `ResNetEncoder` 类适配了任意输入通道。该编码器生成一系列空间分辨率逐步降低的特征图层级，组织为六个阶段：
+
+| 阶段 | 模块 | 输出形状 (对于 N×M 输入) | 通道数 |
+|---|---|---|---|
+| 0 | 恒等映射 | (B, 128, N, M) | 128 |
+| 1 | conv1 + bn + relu | (B, 64, N, M) | 64 |
+| 2 | maxpool + layer1 | (B, 64, N/2, M/2) | 64 |
+| 3 | layer2 | (B, 128, N/4, M/4) | 128 |
+| 4 | layer3 | (B, 256, N/8, M/8) | 256 |
+| 5 | layer4 | (B, 512, N/16, M/16) | 512 |
+
+两种机制使该编码器适用于密集接触预测：
+
+**通道修补** — `patch_first_conv` 函数将标准的 3 通道输入卷积替换为接受 `in_channels=128`（交互张量通道数）的卷积。当通道数大于 3 时，它执行周期性权重复制，并按 `default_in_channels / new_in_channels` 进行缩放，从而保留了预训练权重分布的统计特性。
+
+**膨胀策略** — 当 `output_stride=16` 时，`make_dilated` 方法在阶段 5 中用膨胀代替步长（rate=2）。当 `output_stride=8` 时，阶段 4 和 5 均被膨胀（膨胀率分别为 2 和 4）。此策略在不增加池化操作数量的情况下保留了特征图的全空间分辨率，确保每个空间位置上的细粒度接触模式都能保留在编码器输出中。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L59-L118), [vision_modules.py](project/utils/vision_modules.py#L120-L153), [vision_modules.py](project/utils/vision_modules.py#L487-L522)
+
+## 分割与分类头
+
+**SegmentationHead** 应用最终的 1×1 卷积，将 256 通道解码器输出投影至 `classes=2` 个通道（接触与非接触的 logits），随后进行可选的双线性上采样和激活。对于 DeepInteract，上采样因子设为 4，以将输出恢复至原始交互张量分辨率，并且不应用激活函数——原始 logits 在训练期间直接供二元交叉熵损失函数使用。
+
+**ClassificationHead**（辅助输出）是可选的，它通过自适应平均池化、展平、dropout 和线性层提供全局的蛋白质对分类。当 `aux_params=None`（默认值）时，该头被禁用，模型仅返回接触图。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L433-L452), [vision_modules.py](project/utils/vision_modules.py#L596-L609)
+
+## 配置参考
+
+`DeepLabV3Plus` 类暴露了以下可配置参数，其默认值已针对接触预测任务进行了调优：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `encoder_name` | `"resnet34"` | 骨干编码器架构 |
+| `encoder_depth` | `5` | 编码器阶段数 (范围 [3, 5]) |
+| `encoder_weights` | `None` | 预训练权重集 (None = 随机初始化) |
+| `encoder_output_stride` | `16` | 输出步长；控制膨胀策略 (8 或 16) |
+| `decoder_channels` | `256` | ASPP 和解码器中的卷积滤波器数量 |
+| `decoder_atrous_rates` | `(12, 24, 36)` | ASPP 空洞卷积的膨胀率 |
+| `in_channels` | `128` | 输入通道数 (交互张量特征深度) |
+| `classes` | `2` | 输出类别 (接触 / 非接触) |
+| `activation` | `None` | 最终激活函数 (None = 原始 logits) |
+| `upsampling` | `4` | 匹配输入分辨率的最终上采样因子 |
+| `aux_params` | `None` | 辅助分类头参数 |
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L560-L573)
+
+## 权重初始化协议
+
+解码器与头遵循不同的初始化策略，分别通过 `initialize_decoder` 和 `initialize_head` 实现：
+
+**解码器初始化**对 `Conv2d` 层使用 **Kaiming 均匀分布**（fan-in 模式，ReLU 非线性），对 `Linear` 层使用 **Xavier 均匀分布**，偏置初始化为零。该方案通过维持层间激活方差，专为 ReLU 激活的卷积网络进行了优化。
+
+**头初始化**对 `Conv2d` 和 `Linear` 层均使用带零偏置的 **Xavier 均匀分布**——这是一种更保守的方案，适用于最终投影层，因为初始化时稳定的梯度流对早期训练收敛至关重要。
+
+`SegmentationModel.initialize` 方法在模型构建期间被调用时，会按顺序执行这些初始化。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L171-L198), [vision_modules.py](project/utils/vision_modules.py#L193-L198)
+
+## 在 GINI 流水线中的集成
+
+在 [GINI 模型设计](8-gini-model-design) 中，`DeepLabV3Plus` 被实例化为两种可用交互模块类型之一（由 `LitGINI` 中的 `interact_module_type` 参数控制，默认为 `'dil_resnet'`）。当选中时，由 [交互张量构建](9-interaction-tensor-construction) 生成的交互张量将直接作为 `DeepLabV3Plus.forward()` 方法的输入，该方法返回全分辨率的 2 通道接触图。模型的 `predict()` 方法封装了正向传播，并切换至自动评估模式及 `torch.no_grad()` 上下文以进行推理。
+
+另一种交互模块 (`'resnet'`) 使用 `ResNet2DInputWithOptAttention` 类——这是一个带有可选多头区域注意力的自定义 ResNet——它遵循不同的架构理念（带有挤压-激励门控的同质残差块），但发挥着相同的接触解码作用。
+
+<CgxTip>DeepLabV3+ 解码器的多尺度 ASPP 分支使其对具有异质接触密度的交互张量尤为有效：密集的局部接触簇（常见于 beta-折叠界面）由低膨胀率分支捕获，而稀疏的长程接触（结构域间界面的特征）则由高膨胀率分支和全局池化分支捕获。</CgxTip>
+
+来源：[deepinteract_modules.py](project/utils/deepinteract_modules.py#L24-L24), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1478-L1489), [vision_modules.py](project/utils/vision_modules.py#L219-L232)
+
+## 可分离卷积实现
+
+`SeparableConv2d` 模块在 ASPP 和解码器中被广泛使用，以降低计算成本。它将标准卷积分解为两个顺序操作：
+
+1. **深度可分离卷积** — 独立应用于每个输入通道（`groups=in_channels`）的空间卷积，捕获每个通道的空间模式而不进行跨通道混合。
+2. **逐点可分离卷积** — 执行深度可分离输出通道线性组合的 1×1 卷积。
+
+这种分解将参数量从 O(C_in × C_out × K²) 降至 O(C_in × K² + C_in × C_out)，为 ASPP（膨胀率 12, 24, 36）和解码器精炼块中使用的 3×3 卷积带来了显著的参数节省。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L370-L398)
+
+## Timm 通用编码器支持
+
+除了内置的 ResNet34 编码器外，`get_encoder` 工厂函数还通过 `"tu-"` 前缀约定（例如 `"tu-efficientnet_b4"`）支持来自 **timm** 库的任何编码器。`TimmUniversalEncoder` 封装器将 timm 模型配置为仅提取特征，并支持指定的输入通道、深度和输出步长，返回解码器所期望的相同多阶段特征列表接口。这种可扩展性允许在保留完整 DeepLabV3+ 解码器流水线的同时，对现代高效架构进行实验。
+
+来源：[vision_modules.py](project/utils/vision_modules.py#L455-L522)
+
+## 后续步骤
+
+- 了解交互张量在到达此解码器之前是如何构建的：[交互张量构建](9-interaction-tensor-construction)
+- 探索编排编码器-解码器流水线的完整 GINI 模型：[GINI 模型设计](8-gini-model-design)
+- 查看 Lightning 训练循环如何优化此解码器：[Lightning 训练流水线](17-lightning-training-pipeline)
+
+---
+
+## 蛋白质特征工程
+
+- [深入解析/蛋白质特征工程/从 PDB 构建图](https://zread.ai/BioinfoMachineLearning/DeepInteract/11-graph-construction-from-pdb)
+
+---
+slug:11-graph-construction-from-pdb
+blog_type:normal
+---
+
+
+DeepInteract 将原始 PDB 蛋白质结构文件转换为特征丰富的 **DGL (Deep Graph Library) 图**，其中每个节点代表一个残基，边通过 k 近邻算法编码空间邻域关系。本页将解释完整的处理流水线——从原子记录的 DataFrame 到在每一个节点和边上承载位置、几何、结构和拓扑信号的全注释图。
+
+## 从 DataFrame 到 KNN 图骨架
+
+图构建的入口是 [`prot_df_to_dgl_graph_feats()`](/project/utils/graph_utils.py#L69-L110)，它接收一个仅过滤保留 Cα 原子的 `pandas.DataFrame` 形式的蛋白质结构。该函数按顺序执行三项职责：**独热节点特征编码**、**坐标提取** 和 **k 近邻边定义**。
+
+节点特征通过迭代声明的特征列（`FEAT_COLS`）及其对应的允许值集合（`ALLOWABLE_FEATS`）来组装。每个特征列经由 [`one_of_k_encoding_unk()`](/project/utils/graph_utils.py#L113-L127) 进行编码，该函数根据三种编码机制进行分派：
+
+| 特征类型 | 条件 | 编码策略 | 示例 |
+|---|---|---|---|
+| **类别型** | 非空扁平列表 | 追加未知类别的独热编码 | `resname` (20种氨基酸), `ss_value` (8种 DSSP 编码) |
+| **标量型** | 空列表 `[]` | 原样传递原始值 | `rsa_value`, `rd_value`, PSAIA 列, `cn_value` |
+| **向量型** | 双重嵌套空列表 `[[]]` | 传递向量，并带有缺失值默认值 | `hsaac` (42维), `sequence_feats` (27维), `amide_norm_vec` (3维) |
+
+边通过 DGL 内置的 `dgl.knn_graph()` 建立，该函数在 3D 笛卡尔空间中将每个残基与其 `knn` 个最近邻连接（默认 `knn=20`）。同时通过 `dgl.nn.pytorch.pairwise_squared_distance` 提取成对平方距离，然后进行 top-k 选择以仅保留 KNN 距离。该函数返回一个 4 元组：`(knn_graph, pairwise_dists, node_coords, node_feats)`。
+
+来源: [graph_utils.py](/project/utils/graph_utils.py#L69-L127), [deepinteract_constants.py](/project/utils/deepinteract_constants.py#L64-L96)
+
+## 完整图组装流水线
+
+编排函数 [`convert_df_to_dgl_graph()`](/project/utils/deepinteract_utils.py#L379-L548) 将 KNN 图骨架包装以几何特征、位置编码和边邻域元数据。下图展示了完整的数据流：
+
+```mermaid
+flowchart TD
+    A["PDB → DataFrame<br/>(所有原子)"] --> B["过滤至 Cα 原子"]
+    A --> C["过滤至骨架原子<br/>(N, CA, C, O)"]
+    B --> D["prot_df_to_dgl_graph_feats()<br/>KNN 图 + 独热特征"]
+    C --> E["重塑为<br/>(1, num_res, 4, 3) 坐标"]
+    D --> F["DGL KNN 图<br/>node_feats, node_coords"]
+    E --> G["GeometricProteinFeatures<br/>forward()"]
+    D --> G
+    G --> H["几何节点特征<br/>(二面角, 6维)"]
+    G --> I["几何边特征<br/>(RBF + 方向, 25维)"]
+    F --> J["组装 ndata 和 edata"]
+    H --> J
+    I --> J
+    K["位置编码"] --> J
+    L["边权重 &<br/>酰胺-酰胺角"] --> J
+    M["边邻域 ID<br/>(src_nbr, dst_nbr)"] --> J
+    J --> N["DGLGraph<br/>(全特征)"]
+```
+
+### 阶段 1：KNN 图与骨架坐标
+
+该函数首先将输入 DataFrame 分离为两个视图：仅包含 Cα 原子的 `struct_df`（用于图拓扑和节点特征），以及包含所有四个骨架原子 N、CA、C、O 的 `all_atom_struct_df`（用于推导几何特征）。KNN 图通过 `prot_df_to_dgl_graph_feats()` 从 `struct_df` 构建。自环视情况被移除，而孤立节点将触发异常，因为它们表明存在退化结构。
+
+来源: [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L423-L447)
+
+### 阶段 2：几何特征推导
+
+骨架原子坐标被重塑为形状为 `(1, num_residues, 4, 3)` 的张量——每个残基四个原子，每个原子具有 x/y/z 坐标。当缺失骨架原子时，[`substitute_missing_atoms()`](/project/utils/deepinteract_utils.py#L304-L376) 会用可用原子的随机偏移副本替换它们。NaN 坐标被掩码为零，并在具有全有限坐标的残基上计算有效性掩码。
+
+[`GeometricProteinFeatures`](/project/utils/protein_feature_utils.py#L63-L377) 模块（以 `features_type='full'` 和 `num_rbf=18` 实例化）随后推导出：
+
+- **节点特征** — 骨架二面角 (φ, ψ, ω) 通过 `(cos, sin)` 提升为圆周表示，每个残基产生 6 个维度
+- **边特征** — 基于成对距离的 18 个径向基函数与 7 维方向特征（3 维局部方向 + 4 维四元数）拼接，每条边产生 25 个维度
+
+几何边特征从 `(1, num_res, knn, 25)` 重塑为 `(num_edges, 25)` 以匹配 DGL 的边主序存储，然后拆分为 `edge_dist_feats` (18维)、`edge_dir_feats` (3维) 和 `edge_orient_feats` (4维)。
+
+来源: [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L449-L483), [protein_feature_utils.py](/project/utils/protein_feature_utils.py#L322-L377)
+
+### 阶段 3：节点数据组装
+
+节点特征按顺序拼接至 `graph.ndata['f']`：
+
+| 特征组件 | 维度 | 索引范围 | 描述 |
+|---|---|---|---|
+| 位置编码 | 1 | `[0:1]` | 经最大最小归一化的节点 ID |
+| 几何特征 | 6 | `[1:7]` | 二面角圆周嵌入 |
+| DIPS-Plus 特征 | 106 | `[7:113]` | 独热/标量/向量结构特征 |
+
+此外，`graph.ndata['x']` 存储了原始 Cα 笛卡尔坐标 `(num_residues, 3)`，用于下游的距离计算。
+
+来源: [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L485-L493), [deepinteract_constants.py](/project/utils/deepinteract_constants.py#L99-L116)
+
+### 阶段 4：边数据组装
+
+边特征按顺序拼接至 `graph.edata['f']`：
+
+| 特征组件 | 维度 | 索引范围 | 描述 |
+|---|---|---|---|
+| 位置编码 | 1 | `[0:1]` | `sin(src_id - dst_id)` |
+| 边权重 | 1 | `[1:2]` | 经最大最小归一化的欧氏距离平方 |
+| 距离 (RBF) | 18 | `[2:20]` | 基于成对距离的径向基函数 |
+| 方向 | 3 | `[20:23]` | 局部坐标系相对方向向量 |
+| 方位 | 4 | `[23:27]` | 四元数旋转表示 |
+| 酰胺-酰胺角 | 1 | `[27:28]` | 酰胺平面法线间的夹角 |
+
+**酰胺-酰胺角** 通过提取每条边的源残基和目标残基的预计算 `amide_norm_vec`（肽平面的 3D 法向量），然后计算它们点积的反余弦来获得。该角度捕获了肽平面之间的相对倾斜——纯距离和方位特征无法编码的信息。
+
+来源: [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L495-L523)
+
+### 阶段 5：边邻域构建
+
+除了逐边特征外，图还存储了 **边邻域元数据**，供 Geometric Transformer 的边初始化模块使用。对于每条边 *e*，系统分别检索 *e* 的源节点和目标节点的所有入射边，将它们重塑为 `(num_edges, knn, 2)` 批次，随机打乱每个批次，然后截断至 `geo_nbrhd_size` 个条目（默认为 2）。生成的边 ID 存储为：
+
+- `graph.edata['src_nbr_e_ids']` — 形状 `(num_edges, geo_nbrhd_size)`：与每条边的源节点相邻的边的 ID
+- `graph.edata['dst_nbr_e_ids']` — 形状 `(num_edges, geo_nbrhd_size)`：与每条边的目标节点相邻的边的 ID
+
+这种邻域结构使得[边初始化模块](7-edge-initialization-module)在计算初始边表示时，能够聚合来自局部连接边的信息。
+
+来源: [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L525-L547)
+
+## 特征编码分派逻辑
+
+[`one_of_k_encoding_unk()`](/project/utils/graph_utils.py#L113-L127) 函数实现了一个三路分派，将 `ALLOWABLE_FEATS` 模式映射到具体的张量编码。正是这种分派机制，使得同一次 `prot_df_to_dgl_graph_feats()` 调用能够处理异构特征类型——类别型残基名称、标量型溶剂可及性值以及向量型半球暴露统计——而无需单独的代码路径。
+
+<CgxTip>当添加新的节点特征列时，你必须更新 `deepinteract_constants.py` 中的三个同步结构：将列名追加到 `FEAT_COLS`，将其允许值列表追加到 `ALLOWABLE_FEATS`（标量使用 `[]`，向量使用 `[[]]`），并使用新的索引范围更新 `FEATURE_INDICES`。`FEAT_COLS` 与 `ALLOWABLE_FEATS` 长度的不匹配将在图构建时引发异常。</CgxTip>
+
+来源: [graph_utils.py](/project/utils/graph_utils.py#L113-L127), [deepinteract_constants.py](/project/utils/deepinteract_constants.py#L64-L116)
+
+## 缺失原子处理
+
+由于低分辨率或无序性，来自 PDB 文件的蛋白质结构经常缺失骨架原子。[`substitute_missing_atoms()`](/project/utils/deepinteract_utils.py#L304-L376) 函数检测少于四个骨架原子的残基，并通过复制可用原子（绝不复制 Cα 本身）的坐标并加上每个笛卡尔分量在 `[-1, 1]` Å 范围内的随机均匀偏移来合成替换。这确保了 `(1, num_res, 4, 3)` 坐标张量始终可以无误差地重塑，同时下游的有效性掩码会使退化残基的几何特征归零，而不是传播 NaN 值。
+
+来源: [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L304-L376)
+
+## 数据集流水线中的图构建
+
+`process_complexes_into_dicts.py` 构建器脚本在数据集规模上编排完整的 PDB 到图的转换。它读取原始的 `.dill` 对文件（每个包含两个蛋白质 DataFrame 及其相互作用标签），然后为每个复合物调用 [`process_complex_into_dict()`](/project/utils/deepinteract_utils.py)（从 `deepinteract_utils` 导入）。关键的配置参数为：
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| `knn` | 20 | 每个节点的最近邻数量 |
+| `geo_nbrhd_size` | 2 | Geometric Transformer 的边邻域大小 |
+| `self_loops` | True | 是否在 KNN 图中保留自环 |
+
+构建器通过 `submit_jobs()` 支持并行执行，跨可用 CPU 处理多个复合物，并跳过其输出 `.dill` 文件已存在的任何复合物——从而实现增量数据集构建。
+
+来源: [process_complexes_into_dicts.py](/project/datasets/builder/process_complexes_into_dicts.py#L1-L73)
+
+## 特征索引参考
+
+[`deepinteract_constants.py`](/project/utils/deepinteract_constants.py#L99-L116) 中的 `FEATURE_INDICES` 字典提供了从语义特征名称到张量切片位置的集中映射。模型的前向传播和特征提取工具（例如 `get_geo_feats_from_edges()`）均引用此字典而非硬编码索引，确保特征重排或插入能够正确传播至整个代码库。
+
+<CgxTip>总节点特征维度为 113（1 个位置 + 6 个几何 + 106 个 DIPS-Plus），总边特征维度为 28（1 个位置 + 1 个权重 + 18 个 RBF + 3 个方向 + 4 个方位 + 1 个酰胺角）。这些维度必须与 `FEATURE_INDICES` 和 `GeometricProteinFeatures` 配置（`num_rbf=18`、`features_type='full'`）保持一致。</CgxTip>
+
+来源: [deepinteract_constants.py](/project/utils/deepinteract_constants.py#L99-L116)
+
+## 接下来是什么
+
+理解了图构建流水线后，以下页面将详细说明填充节点和边张量的特定特征类别：
+
+- [几何蛋白质特征](12-geometric-protein-features) — 深入探讨 `GeometricProteinFeatures` 中的二面角、RBF、四元数和氢键计算
+- [特征常量与索引](13-feature-constants-and-indices) — `FEAT_COLS`、`ALLOWABLE_FEATS` 和 `FEATURE_INDICES` 的完整目录及逐特征文档
+
+---
+
+- [深入解析/蛋白质特征工程/几何蛋白质特征](https://zread.ai/BioinfoMachineLearning/DeepInteract/12-geometric-protein-features)
+
+---
+slug:12-geometric-protein-features
+blog_type:normal
+---
+
+
+DeepInteract 将蛋白质的空间结构编码为一组丰富的**几何节点与边特征**，这些特征直接由骨架原子坐标推导而来。`GeometricProteinFeatures` 模块将原始 3D 坐标 (N, CA, C, O) 转换为具有数学基础的表示——二面角、径向基函数、相对方向和氢键统计量——这些表示构成了 Geometric Transformer 消费的结构词汇表。本页将解释每个特征通道、生成它们的数学运算，以及它们是如何拼接到蛋白质图中的。
+
+## 特征生成流水线
+
+`GeometricProteinFeatures` 类通过一次 `forward` 调用即可编排所有几何特征的推导。其输入为骨架原子坐标、成对平方距离、K近邻边索引以及有效性掩码。其输出为**节点特征张量**（每个残基）和**边特征张量**（每个残基对），二者均由多个几何通道组合而成。
+
+```mermaid
+flowchart TD
+    A["Backbone Atom Coords<br/>(N, CA, C, O)"] --> B["GeometricProteinFeatures.forward()"]
+    C["Pairwise Squared Dists"] --> B
+    D["KNN Edge Indices"] --> B
+    E["Validity Mask"] --> B
+
+    B --> F_out["Node Features"]
+    B --> G_out["Edge Features"]
+
+    subgraph F_sub["Node Feature Channels"]
+        F1["Dihedral Angles<br/>(φ, ψ, ω) → 6-dim"]
+    end
+
+    subgraph G_sub["Edge Feature Channels"]
+        G1["RBF Distance<br/>(18-dim)"]
+        G2["Relative Direction<br/>(3-dim)"]
+        G3["Quaternion Orientation<br/>(4-dim)"]
+        G4["Amide Angle<br/>(1-dim, added downstream)"]
+    end
+```
+
+`forward` 方法会分派至由 `features_type` 控制的四种特征模式之一。在生产环境中，DeepInteract 始终使用 `features_type='full'`，该模式将**二面角**分配给节点，并将 **RBF + 方向**特征分配给边。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L322-L377), [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L466-L470)
+
+## 节点特征：骨架二面角
+
+`get_dihedrals` 方法根据 N、CA 和 C 原子坐标计算三个标准骨架二面角——**phi (φ)**、**psi (ψ)** 和 **omega (ω)**。该方法将每个残基的前三个骨架原子重组为一个扁平的坐标序列，然后沿骨架链计算连续的单位向量。相邻单位向量的叉积产生**骨架法向量** (n₂, n₁)，这些法向量之间的有符号角度即为各个二面角：
+
+- **cos D** = (n₂ · n₁)，截断至 [−1+ε, 1−ε] 以保证数值稳定性
+- **D** = sign((u₂ · n₁)) · arccos(cos D)
+
+所得角度经过填充（移除 φ₀, ψₙ, ωₙ）、重组为逐残基的 (φ, ψ, ω) 三元组，并通过 `[cos(D), sin(D)]` **提升至圆周**以避免在 ±π 处的不连续性。这为每个残基生成了一个 **6 维**的节点特征向量。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L276-L320)
+
+## 边特征：径向基函数
+
+`compute_rbfs` 静态方法通过高斯径向基函数将成对平方距离编码为平滑的固定维度表示。给定成对距离 **D**，该方法在范围 [D_min, D_max] = [0, 20] Å 内放置 **D_count** 个等间距中心 μ，带宽 σ = (D_max − D_min) / D_count：
+
+**RBF(D)** = exp( −((D − μ) / σ)² )
+
+在默认 `num_rbf=18` 的情况下，这会产生一个 **18 维**的边特征，在多个尺度上捕获每个残基对之间的距离。高斯基确保了平滑的梯度，并使距离表示适用于下游的线性投影学习。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L82-L101)
+
+## 边特征：相对方向
+
+`get_coarse_orientation_feats` 方法是几何上最复杂的组件。它通过在每个残基处构建局部参考系并比较相邻参考系，计算两组特征——**骨架角度-方向特征 (AD_features)** 和 **相对方向特征 (O_features)**。
+
+### 局部参考系构建
+
+从连续的骨架单位向量 u₂, u₁, u₀ 中，该方法推导出：
+
+1. **骨架法向量**：n₂ = normalize(u₂ × u₁), n₁ = normalize(u₁ × u₀)
+2. **键角**：A = arccos(−u₁ · u₀)
+3. **法向量间的二面角**：D = sign(u₂ · n₁) · arccos(n₂ · n₁)
+4. **AD_features** = [cos(A), sin(A)·cos(D), sin(A)·sin(D)] — 一个 3 维的逐节点特征，编码局部骨架几何信息
+5. **局部坐标系基**：o₁ = normalize(u₂ − u₁)，然后 O = [o₁, n₂, o₁ × n₂] — 一个 3×3 旋转矩阵，将全局坐标系映射到每个残基的局部坐标系
+
+### 相对方向 (3 维)
+
+对于每条边 (i, j)，位移向量 **dX = X_j − X_i** 被旋转至节点 i 的局部坐标系中：**dU = O_i · dX**，随后进行归一化。这产生了一个 3 维单位向量，表示**从节点 i 的局部坐标系指向邻居 j 的方向**——一种 SE(3) 等变表示。
+
+### 四元数方向 (4 维)
+
+关联 i 和 j 局部参考系的旋转为：**R = O_iᵀ · O_j**。该 3×3 旋转矩阵通过 `convert_rotations_into_quaternions` 转换为单位四元数 **Q**，产生一个紧凑的 4 维表示。转换过程使用了基于迹的方法：实部 w = √(relu(1 + trace(R))) / 2，虚部 通过非对角线元素推导并配合适当的符号解析，最后进行 L2 归一化。
+
+### 组合方向特征
+
+**O_features** = concat(dU, Q) — 一个 **7 维**的边特征（3 维方向 + 4 维四元数）。当 `features_type='full'` 时，完整的边特征为 concat(RBF, O_features) = **25 维**（18 维 RBF + 3 维方向 + 4 维四元数）。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L201-L273), [protein_feature_utils.py](/project/utils/protein_feature_utils.py#L104-L149)
+
+## 特征类型模式
+
+`features_type` 参数控制生成哪些特征通道。下表总结了所有四种模式：
+
+| `features_type` | 节点特征 | 边特征 | 用例 |
+|---|---|---|---|
+| `full` (默认) | 二面角 (6 维) | RBF (18) + 方向 (3) + 四元数 (4) = 25 维 | 生产训练与推理 |
+| `coarse` | AD_features (3 维) | RBF (18) + 方向 (3) + 四元数 (4) = 25 维 | 简化骨架编码 |
+| `hbonds` | 掩码常量 (3 维) | 接触图 + 氢键 (20 维) | 氢键驱动的注意力 |
+| `dist` | 二面角 (6 维) | RBF (18 维) | 仅距离基线 |
+
+`hbonds` 模式额外通过 `get_hbonds` 使用 DSSP 真空静电学模型计算**氢键统计量**，并通过 `get_contacts` 使用 8 Å 截断值计算**接触图**。两者均使用 dropout 进行正则化。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L343-L370), [protein_feature_utils.py](/project/utils/protein_feature_utils.py#L152-L199)
+
+## 氢键与接触图
+
+当 `features_type='hbonds'` 时，会计算两个额外的物理相互作用特征：
+
+**氢键** (`get_hbonds`) 使用 DSSP 真空静电学模型。沿 (N − C_prev) 和 (N − CA) 的角平分线放置一个虚拟氢原子 H。静电能 U 计算如下：
+
+**U** = 0.084 × 332 × (1/d(O,N) + 1/d(C,H) − 1/d(O,H) − 1/d(C,N))
+
+当 U < −0.5 kcal/mol 时存在氢键。二值 HB 矩阵沿 KNN 边聚集并进行掩码处理。
+
+**接触图** (`get_contacts`) 应用距离截断：当成对距离 D < 8 Å 时存在接触。二值接触矩阵同样被掩码至 KNN 邻域。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L158-L199), [protein_feature_utils.py](/project/utils/protein_feature_utils.py#L152-L157)
+
+## 集成至蛋白质图
+
+`deepinteract_utils.py` 中的 `convert_df_to_dgl_graph` 函数是原始 PDB 数据与几何特征流水线之间的桥梁。它执行以下序列操作：
+
+1. 提取骨架原子 (N, CA, C, O) 并通过 `prot_df_to_dgl_graph_feats` 构建 KNN 图
+2. 将全原子坐标重组为 `[1, num_residues, 4, 3]`（批次 × 残基 × 原子 × xyz）
+3. 掩码 NaN 坐标并计算有效性掩码
+4. 实例化 `GeometricProteinFeatures(num_rbf=18, features_type='full')` 并调用 `forward`
+5. 将生成的边特征解析为距离 (18)、方向 (3) 和方向 (4) 子张量
+6. 计算残基对之间的**酰胺法向量夹角**作为额外的 1 维边特征
+7. 将所有通道拼接到 `graph.ndata['f']` 和 `graph.edata['f']` 中，并在前面添加位置编码
+
+<CgxTip>当 `features_type='full'` 时，最终的边特征张量布局与 `FEATURE_INDICES` 字典完全匹配：索引 2–20 为 RBF 距离，20–23 为方向，23–27 为四元数方向，索引 27 为酰胺角。这种对齐对于 `get_geo_feats_from_edges` 在 ConformationModule 和 InitEdgeModule 中正确切片特征至关重要。</CgxTip>
+
+来源：[deepinteract_utils.py](/project/utils/deepinteract_utils.py#L379-L548), [deepinteract_constants.py](/project/utils/deepinteract_constants.py#L99-L116)
+
+## 酰胺法向量夹角
+
+除了 `GeometricProteinFeatures` 生成的特征外，图构建流水线还附加了一个几何边特征：相邻残基的**酰胺平面法向量之间的夹角**。对于每条边 (i, j)，残基 i 和 j 处肽平面的法向量进行点积，其归一化点积的反余弦即为平面间夹角。此 1 维特征经过最小-最大归一化且对 NaN 安全（在未定义处置零），生成索引 27 处的最终边特征。
+
+来源：[deepinteract_utils.py](/project/utils/deepinteract_utils.py#L506-L523)
+
+## 特征索引映射
+
+`deepinteract_constants.py` 中的 `FEATURE_INDICES` 字典定义了所有下游模块消费的规范张量布局。此映射确保 ConformationModule 和 InitEdgeModule 能够独立访问每个几何通道：
+
+| 特征通道 | 张量键 | 起始索引 | 结束索引 | 维度 |
+|---|---|---|---|---|
+| 节点位置编码 | `ndata['f']` | 0 | 1 | 1 |
+| 节点几何特征 (二面角) | `ndata['f']` | 1 | 7 | 6 |
+| 节点 DIPS+ 特征 (独热编码, RSA 等) | `ndata['f']` | 7 | 113 | 106 |
+| 边位置编码 | `edata['f']` | 0 | 1 | 1 |
+| 边权重 (归一化距离) | `edata['f']` | 1 | 2 | 1 |
+| 边 RBF 距离特征 | `edata['f']` | 2 | 20 | 18 |
+| 边方向特征 | `edata['f']` | 20 | 23 | 3 |
+| 边方向特征 (四元数) | `edata['f']` | 23 | 27 | 4 |
+| 边酰胺角 | `edata['f']` | 27 | 28 | 1 |
+
+<CgxTip>`get_geo_feats_from_edges` 实用函数根据 `FEATURE_INDICES` 对边特征进行切片，返回独立的 `(dist_feats, dir_feats, orient_feats, amide_feats)` 张量。这种解耦允许 ConformationModule 在重新组合之前，对每个几何通道应用独立的线性投影和门控。</CgxTip>
+
+来源：[deepinteract_constants.py](/project/utils/deepinteract_constants.py#L99-L116), [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L70-L76)
+
+## 实用操作：收集节点与边
+
+两个底层实用函数支持几何特征计算：
+
+- **`gather_nodes(nodes, neighbor_idx)`** — 在邻居索引处收集节点特征。给定特征 `[B, N, C]` 和索引 `[B, N, K]`，返回邻居特征 `[B, N, K, C]`。用于获取 KNN 邻居的坐标和局部参考系。
+
+- **`gather_edges(edges, neighbor_idx)`** — 在邻居索引处收集边特征。给定特征 `[B, N, N, C]` 和索引 `[B, N, K]`，返回邻居边特征 `[B, N, K, C]`。用于将成对特征（氢键、接触图）掩码至 KNN 邻域。
+
+两者均适配 PyTorch 的 `torch.gather` 以实现带有适当形状重组的批量多索引选择。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L10-L27)
+
+## 位置编码
+
+`PositionalEncodings` 模块使用原始 Transformer 频率方案，为边连接的残基对提供正弦位置编码。给定边索引 `E_idx`，它计算相对位置偏移 `d = E_idx − i` 并应用标准角频率：
+
+**frequency_k** = exp(−k · log(10000) / num_embeddings)
+
+**E** = concat(cos(d · freq), sin(d · freq))
+
+这会产生一个 `num_embeddings` 维的编码（默认为 20），捕获沿蛋白质链的序列距离，以序列位置信息补充几何特征。
+
+来源：[protein_feature_utils.py](/project/utils/protein_feature_utils.py#L30-L60)
+
+## 下游消费
+
+此处生成的几何特征由三个下游模块消费：
+
+1. **[InitEdgeModule](7-edge-initialization-module)** — 通过独立的线性层投影每个几何通道（距离、方向、方向、酰胺），然后对组合表示进行门控，以初始化 Geometric Transformer 的边消息。
+
+2. **[ConformationModule](6-conformation-module)** — 独立嵌入每个几何通道，应用残差块，并重构更新后的几何特征，这些特征表示蛋白质结构的*构象演化*（geometry-evolved）状态。
+
+3. **`get_geo_feats_from_edges`** — 切片实用程序，从完整边特征张量中提取 `(dist, dir, orient, amide)` 子张量，使上述模块能够在单个几何通道上操作。
+
+```mermaid
+flowchart LR
+    GPF["GeometricProteinFeatures"] -->|"node: dihedrals<br/>edge: RBF+dir+orient"| Graph["DGLGraph<br/>ndata['f'], edata['f']"]
+    Graph -->|"edata['f'] sliced<br/>by FEATURE_INDICES"| GFE["get_geo_feats_from_edges"]
+    GFE --> IEM["InitEdgeModule"]
+    GFE --> CM["ConformationModule"]
+    Graph --> MHGA["MultiHeadGeometricAttentionLayer"]
+```
+
+来源：[deepinteract_modules.py](/project/utils/deepinteract_modules.py#L128-L264), [deepinteract_modules.py](/project/utils/deepinteract_modules.py#L267-L334), [deepinteract_utils.py](/project/utils/deepinteract_utils.py#L70-L76)
+
+---
+
+**下一步**：要了解这些几何特征是如何被索引和配置的，请参阅 [Feature Constants and Indices](13-feature-constants-and-indices)。要查看在特征提取之前如何从 PDB 文件组装蛋白质图，请参阅 [Graph Construction from PDB](11-graph-construction-from-pdb)。要探索在 Geometric Transformer 内部如何消费几何特征，请参阅 [Multi-Head Geometric Attention](5-multi-head-geometric-attention) 和 [Conformation Module](6-conformation-module)。
+
+---
+
+- [深入解析/蛋白质特征工程/特征常量与索引](https://zread.ai/BioinfoMachineLearning/DeepInteract/13-feature-constants-and-indices)
+
+---
+slug:13-feature-constants-and-indices
+blog_type:normal
+---
+
+
+DeepInteract 的特征流水线由 `deepinteract_constants.py` 中的两个集中注册表管控：**结构常量**用于限制计算复杂度并定义默认填充值，**特征索引映射**用于规定每个节点和边特征通道的精确张量切片位置。这两个注册表共同构成了数据预处理、图构建和模型推理之间的契约——索引与实际拼接张量布局之间的任何偏移，都会悄无声息地破坏几何注意力。本页将剖析这两个注册表，追踪它们在图构建和模型层中的消费路径，并阐明使系统保持连贯的维度算术。
+
+## 结构常量与限制
+
+`deepinteract_constants.py` 的顶部定义了限制输入图大小和控制 KNN 稀疏性的硬性上限。这些并非针对每次实验调整的超参数，而是决定整个流水线中张量分配形状的**架构不变量**。
+
+| 常量 | 值 | 用途 |
+|---|---|---|
+| `ATOM_COUNT_LIMIT` | 2048 | 原子级编码（DIPS-Plus）中每个复合物的最大原子数 |
+| `RESIDUE_COUNT_LIMIT` | 256 | 每条链的最大残基数；根据经验调整以保证训练稳定 |
+| `NODE_COUNT_LIMIT` | 2304 | Geometric Transformer 节点数的上限（≈ 9 批大小 × 256 残基） |
+| `KNN` | 20 | 图消息传递边的默认最近邻数量 |
+| `HSAAC_DIM` | 42 | 半球氨基酸组成维度：2 + (2 × 20) |
+| `NUM_ALLOWABLE_NANS` | 5 | 触发零填充前每列允许的 NaN 阈值 |
+
+`NODE_COUNT_LIMIT = 2304` 由 `9 × 256` 计算得出，可在单个批次中容纳多达 9 个残基层图，且不会在 Geometric Transformer 的 O(N²K) 注意力复杂度下超出 GPU 内存。`HSAAC_DIM = 42` 则涵盖了在两个半球中计数的 20 种标准氨基酸，外加未知残基符号 `'-'` 的两个条目。
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L9-L55)
+
+## 氨基酸与序列编码常量
+
+残基标识通过一个有序的 21 字符字母表（20 种标准氨基酸 + 缺口符号）以及三字母码和单字母码之间的双向映射来管理。
+
+```python
+AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY-'
+AMINO_ACID_IDX = dict(zip(AMINO_ACIDS, range(len(AMINO_ACIDS))))  # 例如 'A'→0, 'C'→1, ..., '-'→20
+```
+
+`D3TO1` 字典提供了从 PDB 三字母残基码（例如 `'CYS'`）到单字母码（例如 `'C'`）的 20 项映射，在构建残基层 DataFrame 进行 PDB 解析时被使用。`AMINO_ACIDS` 中的缺口符号 `'-'` 至关重要：它作为独热编码的**未知分箱**——任何不在允许集合中的残基类型都会被映射到此最终位置，遵循 `one_of_k_encoding_unk` 约定。
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L39-L61)
+
+## 特征列模式与允许值
+
+`FEAT_COLS` 列表声明了从每个残基的 DataFrame 行中提取的特征列的有序序列，而 `ALLOWABLE_FEATS` 指定了每列的编码策略。两者的长度必须完全匹配——不匹配将在 `prot_df_to_dgl_graph_feats` 中引发异常。
+
+| 索引范围 | 列 | 编码策略 | 维度 |
+|---|---|---|---|
+| [7:27] | `resname` | 20 种标准残基上的独热编码 | 20 |
+| [27:35] | `ss_value` | 8 种 DSSP 编码 (H,B,E,G,I,T,S,-) 上的独热编码 | 8 |
+| [35:36] | `rsa_value` | 标量（相对溶剂可及性） | 1 |
+| [36:37] | `rd_value` | 标量（残基深度） | 1 |
+| [37:43] | PSAIA 6 列 | 各为标量（凸包统计量） | 6 |
+| [43:85] | `hsaac` | 向量（半球氨基酸组成） | 42 |
+| [85:86] | `cn_value` | 标量（接触数） | 1 |
+| [86:113] | `sequence_feats` | 向量（预计算的序列特征） | 27 |
+| — | `amide_norm_vec` | 单独存储的向量（不在节点特征中） | 3 |
+
+**DIPS-Plus 特征总维度**为 106（索引 7–113），在其前面拼接 7 维几何节点特征（索引 1–7）和 1 维位置编码（索引 0），即可得到完整的节点特征张量宽度 **113**。
+
+`ALLOWABLE_FEATS` 中的编码策略遵循三种模式：
+- **填充的扁平列表**（例如 20 个残基名称）：独热编码，将未知值映射至最后一个元素。
+- **空的扁平列表** `[]`（例如 `rsa_value`）：标量原样传递，不作修改。
+- **双重嵌套的空列表** `[[]]`（例如 `hsaac`, `sequence_feats`）：完整向量原样传递；空向量将触发 `DEFAULT_MISSING_HSAAC` 填充。
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L64-L96), [graph_utils.py](project/utils/graph_utils.py#L69-L127)
+
+## 缺失特征默认值
+
+当 PDB 解析或外部工具计算（PSAIA、DSSP）对某个残基失败时，系统将回退到层级式的默认填充值：
+
+| 常量 | 值 | 用途 |
+|---|---|---|
+| `DEFAULT_MISSING_FEAT_VALUE` | `np.nan` | 所有缺失标量/向量的基础填充值 |
+| `DEFAULT_MISSING_SS` | `'-'` | 未知二级结构（在独热编码中映射到缺口分箱） |
+| `DEFAULT_MISSING_RSA` | `np.nan` | 缺失的相对溶剂可及性 |
+| `DEFAULT_MISSING_RD` | `np.nan` | 缺失的残基深度 |
+| `DEFAULT_MISSING_PROTRUSION_INDEX` | `[np.nan] × 6` | 缺失的 PSAIA 突出指数向量 |
+| `DEFAULT_MISSING_HSAAC` | `[np.nan] × 42` | 缺失的半球氨基酸组成 |
+| `DEFAULT_MISSING_CN` | `np.nan` | 缺失的接触数 |
+| `DEFAULT_MISSING_SEQUENCE_FEATS` | `np.array([np.nan] × 27)` | 缺失的预计算序列特征 |
+| `DEFAULT_MISSING_NORM_VEC` | `[np.nan] × 3` | 缺失的酰胺平面法向量 |
+
+`NUM_ALLOWABLE_NANS = 5` 常量控制着后处理插补步骤：如果某一列在整个数据集中包含 5 个或更少的 NaN 值，这些 NaN 将被插补为零；否则，该列将被标记以引起注意。此阈值在保留信息与防止稀疏 NaN 向下游注意力层传播的风险之间取得了平衡。
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L42-L55)
+
+## 特征索引注册表：张量切片契约
+
+`FEATURE_INDICES` 字典是对拼接的节点和边特征张量进行切片的**唯一事实来源**。它被 `InitEdgeModule`、`ConformationModule` 和 `get_geo_feats_from_edges` 消费，以提取几何子张量而无需使用魔法数字。
+
+```python
+FEATURE_INDICES = {
+    # 节点特征索引
+    'node_pos_enc': 0,                  # 位置编码 (1维)
+    'node_geo_feats_start': 1,          # 几何二面角特征起始
+    'node_geo_feats_end': 7,            # 几何二面角特征结束 (6维: φ,ψ,ω 的 cos/sin)
+    'node_dips_plus_feats_start': 7,    # DIPS-Plus 残基特征起始
+    'node_dips_plus_feats_end': 113,    # DIPS-Plus 残基特征结束 (106维)
+    # 边特征索引
+    'edge_pos_enc': 0,                  # 正弦边位置编码 (1维)
+    'edge_weights': 1,                  # 归一化欧氏距离权重 (1维)
+    'edge_dist_feats_start': 2,         # RBF 距离特征起始
+    'edge_dist_feats_end': 20,          # RBF 距离特征结束 (18维, 对应 18 个 RBF)
+    'edge_dir_feats_start': 20,         # 相对方向特征起始
+    'edge_dir_feats_end': 23,           # 相对方向特征结束 (3维)
+    'edge_orient_feats_start': 23,      # 四元数方向特征起始
+    'edge_orient_feats_end': 27,        # 四元数方向特征结束 (4维)
+    'edge_amide_angles': 27             # 酰胺平面法向量夹角 (1维)
+}
+```
+
+下图展示了特征张量的组装和索引方式：
+
+```mermaid
+flowchart LR
+    subgraph Node Features ["ndata['f'] — 113 维"]
+        direction TB
+        N0["[0] pos_enc"]:::pos
+        N1["[1:7] geo_feats"]:::geo
+        N2["[7:113] dips_plus_feats"]:::dips
+    end
+
+    subgraph Edge Features ["edata['f'] — 28 维"]
+        direction TB
+        E0["[0] edge_pos_enc"]:::pos
+        E1["[1] edge_weight"]:::weight
+        E2["[2:20] RBF dist"]:::dist
+        E3["[20:23] direction"]:::dir
+        E4["[23:27] orientation"]:::orient
+        E5["[27] amide_angle"]:::amide
+    end
+
+    classDef pos fill:#4A90D9,color:#fff
+    classDef geo fill:#7B68EE,color:#fff
+    classDef dips fill:#9370DB,color:#fff
+    classDef weight fill:#D4A574,color:#fff
+    classDef dist fill:#E8A87C,color:#fff
+    classDef dir fill:#85CDCA,color:#fff
+    classDef orient fill:#6B8E23,color:#fff
+    classDef amide fill:#C0392B,color:#fff
+```
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L98-L116)
+
+## 模型层中的索引消费
+
+`FEATURE_INDICES` 字典被直接导入并用于 `InitEdgeModule`（以及扩展的 `ConformationModule`）中，以将原始边特征张量 `edata['f']` 分解为其几何子分量。辅助函数 `get_geo_feats_from_edges` 执行切片操作：
+
+```python
+def get_geo_feats_from_edges(orig_edge_feats, feature_indices):
+    dist_feats   = orig_edge_feats[:, feature_indices['edge_dist_feats_start']:feature_indices['edge_dist_feats_end']]    # [2:20]
+    dir_feats    = orig_edge_feats[:, feature_indices['edge_dir_feats_start']:feature_indices['edge_dir_feats_end']]        # [20:23]
+    o_feats      = orig_edge_feats[:, feature_indices['edge_orient_feats_start']:feature_indices['edge_orient_feats_end']]  # [23:27]
+    amide_feats  = orig_edge_feats[:, feature_indices['edge_amide_angles']]                                                  # [27]
+    return dist_feats, dir_feats, o_feats, amide_feats
+```
+
+在 `InitEdgeModule.init_edge_module_message_func` 内部，边位置编码和权重通过标量索引单独提取（`edge_pos_enc = edges.data['f'][:, 0]`，`edge_weights = edges.data['f'][:, 1]`），然后其余几何特征通过 `get_geo_feats_from_edges` 进行切片。每个子张量都通过各自的线性层（`dist_linear`、`dir_linear`、`orient_linear`、`amide_linear`）进行投影，激活后由组合的边 logit 门控，最后求和——这是一种**分解-门控-组合**模式，既保留了几何可解释性，又允许模型独立调节每个特征通道。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L70-L76), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L19-L22), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L128-L250)
+
+## 维度验证：节点特征组装
+
+节点特征张量在 `convert_df_to_dgl_graph` 中通过三个连续拼接步骤组装，这些步骤必须与 `FEATURE_INDICES` 完全对齐：
+
+| 步骤 | 操作 | 形状贡献 | 累计索引范围 |
+|---|---|---|---|
+| 1 | 位置编码：`min_max_normalize_tensor(graph.nodes())` | `[N, 1]` | [0:1] |
+| 2 | 几何特征：`geo_node_feats`（通过 `get_dihedrals` 获取二面角） | `[N, 6]` | [1:7] |
+| 3 | DIPS-Plus 特征：`node_feats`（来自 `prot_df_to_dgl_graph_feats`） | `[N, 106]` | [7:113] |
+
+**步骤 2** 产生 6 维二面角特征，因为 `get_dihedrals` 通过 `torch.cat((torch.cos(D), torch.sin(D)), 2)` 将三个主链角度 (φ, ψ, ω) 提升为圆周表示，从而为每个残基生成 3 × 2 = 6 个值。**步骤 3** 根据 `FEAT_COLS`/`ALLOWABLE_FEATS` 编码累积 106 个 DIPS-Plus 特征：20 (resname) + 8 (SS) + 1 (RSA) + 1 (RD) + 6 (PSAIA) + 42 (HSAAC) + 1 (CN) + 27 (sequence_feats) = 106。`amide_norm_vec` 被刻意从节点特征中排除，而是单独存储，用于边级酰胺角计算。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L485-L493), [protein_feature_utils.py](project/utils/protein_feature_utils.py#L276-L320)
+
+## 维度验证：边特征组装
+
+边特征张量通过六个拼接步骤组装：
+
+| 步骤 | 操作 | 形状贡献 | 累计维度 | 索引范围 |
+|---|---|---|---|---|
+| 1 | 正弦位置编码：`sin(src - dst)` | `[E, 1]` | 1 | [0:1] |
+| 2 | 边权重：归一化欧氏距离 | `[E, 1]` | 2 | [1:2] |
+| 3 | RBF 距离：使用 `num_rbf=18` 的 `compute_rbfs` | `[E, 18]` | 20 | [2:20] |
+| 4 | 相对方向：`dU`（局部坐标系中的单位向量） | `[E, 3]` | 23 | [20:23] |
+| 5 | 方向：来自旋转矩阵的四元数 `Q` | `[E, 4]` | 27 | [23:27] |
+| 6 | 酰胺角：法向量点积的反余弦 | `[E, 1]` | 28 | [27:28] |
+
+**边特征总维度：28。** 步骤 3–5 源自 `GeometricProteinFeatures.forward` 且 `features_type='full'`，它将 RBF 特征与方向特征 `(dU, Q)` 拼接为 `geo_edge_feats`。酰胺角（步骤 6）在 `GeometricProteinFeatures` 外部计算，通过直接访问残基 DataFrame 中的 `amide_norm_vec` 列，并为每条边计算 `arccos(dot(n₁, n₂) / (‖n₁‖·‖n₂‖))`，其中 NaN 值通过 `np.nan_to_num` 置零。
+
+<CgxTip>`FEATURE_INDICES` 契约是脆弱的：如果节点或边拼接序列中的任何步骤被重新排序或调整大小，则必须同步更新相应的索引条目。当前没有运行时断言来验证维度对齐——悄无声息的不匹配将产生损坏的注意力分数，而不会抛出任何错误。</CgxTip>
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L495-L523), [protein_feature_utils.py](project/utils/protein_feature_utils.py#L322-L377)
+
+## PSAIA 特征列
+
+六个 PSAIA（蛋白质结构与交互分析器）列代表基于凸包的溶剂可及性统计量，这些统计量在外部计算并在后处理期间合并到残基 DataFrame 中：
+
+| 列 | 描述 |
+|---|---|
+| `avg_cx` | 残基中所有原子的平均凸包值 |
+| `s_avg_cx` | 凸包值的标准差 |
+| `s_ch_avg_cx` | 链平均凸包值 |
+| `s_ch_s_avg_cx` | 链平均凸包值的标准差 |
+| `max_cx` | 残基中的最大凸包值 |
+| `min_cx` | 残基中的最小凸包值 |
+
+它们被视为标量特征（`ALLOWABLE_FEATS` 条目为空），不经独热编码直接传递。缺失的 PSAIA 值回退至 `DEFAULT_MISSING_FEAT_VALUE` (NaN)，随后由插补流水线处理。
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L36-L36)
+
+## 默认数据集统计记录器
+
+`DEFAULT_DATASET_STATISTICS` 字典初始化一个后处理记录器，用于跟踪整个数据集的特征完整性。其键枚举了每个可能包含缺失值的特征通道，并按链（`df0` / `df1`）进行划分：
+
+```
+num_of_valid_df0_ss_values, num_of_valid_df1_ss_values,
+num_of_valid_df0_rsa_values, num_of_valid_df1_rsa_values,
+num_of_valid_df0_rd_values, num_of_valid_df1_rd_values,
+num_of_valid_df0_protrusion_indices, num_of_valid_df1_protrusion_indices,
+num_of_valid_df0_hsaacs, num_of_valid_df1_hsaacs,
+num_of_valid_df0_cn_values, num_of_valid_df1_cn_values,
+num_of_valid_df0_sequence_feats, num_of_valid_df1_sequence_feats,
+num_of_valid_df0_amide_normal_vecs, num_of_valid_df1_amide_normal_vecs
+```
+
+此字典在数据集后处理期间递增（参见构建器目录中的 `collect_dataset_statistics.py` 和 `log_dataset_statistics.py`），并为决定对给定特征列是进行插补还是排除提供诊断依据。
+
+来源: [deepinteract_constants.py](project/utils/deepinteract_constants.py#L19-L29)
+
+## 下一步
+
+既然特征常量和索引注册表现已映射完毕，自然的进展是追踪这些常量如何流入调用 `convert_df_to_dgl_graph` 和 `prot_df_to_dgl_graph_feats` 的**数据集构建流水线**。有关端到端数据流水线，请参见 [DIPS 和 DB5 数据集](14-dips-and-db5-datasets)，或者回顾 [几何蛋白质特征](12-geometric-protein-features)，了解填充索引 1–7（节点）和 2–27（边）的几何特征通道的数学推导。
+
+---
+
+## 数据集流水线
+
+- [深入解析/数据集流水线/DIPS 与 DB5 数据集](https://zread.ai/BioinfoMachineLearning/DeepInteract/14-dips-and-db5-datasets)
+
+---
+slug:14-dips-and-db5-datasets
+blog_type:normal
+---
+
+
+DeepInteract 附带了两个精选的蛋白质-蛋白质相互作用数据集——**DIPS-Plus**（大规模结合物训练语料库）和 **DB5-Plus**（用于评估的标准 Docking Benchmark 5）——每个数据集均实现为配对的 DGL 数据集和 PyTorch Lightning `DataModule`。两者共同构成了主要的训练-验证-测试流水线：DIPS-Plus 提供海量的训练信号，而 DB5-Plus 则为泛化测试提供严格的不结合基准。
+
+## 数据集概述与划分统计
+
+两个数据集均继承自 DGL 的 `DGLDataset` 基类，并共享相同的输出约定——一个包含两个 DGLGraph、一个标签张量以及元数据的字典——但它们在生物学设定和规模上存在根本差异。
+
+| 属性 | DIPS-Plus (`DIPSDGLDataset`) | DB5-Plus (`DB5DGLDataset`) |
+|---|---|---|
+| **复合物类型** | 结合物结构 | 不结合结构 |
+| **训练样本** | 15,618 | 140 |
+| **验证样本** | 3,548 | 35 |
+| **测试样本** | 32 | 55 |
+| **总样本数** | 19,198 | 230 |
+| **每个复合物的链数** | 2 | 2 |
+| **默认 `mode`** | `'train'` | `'test'` |
+| **节点特征** | 113 | 113 |
+| **边特征** | 27 | 27 |
+| **Zenodo URL** | `…/final_processed_dips.tar.gz.partaa` | `…/final_processed_db5.tar.gz` |
+| **DGLDataset 名称** | `'DIPS-Plus'` | `'DB5-Plus'` |
+
+DIPS-Plus 的规模比 DB5-Plus **大近 83 倍**，这反映了其作为主训练语料库的定位。DB5-Plus 默认 `mode='test'`，因为它的主要用途是在不结合对接结构上评估已训练的模型，而非从头开始训练。
+
+来源：[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L19-L74)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L13-L64)
+
+## 架构流水线
+
+下图展示了从原始 PDB 对到图构建，再到模型消费的批量输出的端到端数据流：
+
+```mermaid
+flowchart TD
+    A["Raw PDB Pairs<br/>(.dill files in final/raw/)"] --> B["Filename Frame<br/>(pairs-postprocessed-{mode}.txt)"]
+    B --> C{"Filename Sampling?<br/>(percent_to_use < 1.0)"}
+    C -->|Yes| D["Random Sample<br/>of Filenames"]
+    C -->|No| E["Full Filenames DataFrame"]
+    D --> F["DIPSDGLDataset / DB5DGLDataset<br/>.__init__()"]
+    E --> F
+    F --> G{"process_complexes?"}
+    G -->|Yes| H["process_complex_into_dict()<br/>for each unprocessed pair"]
+    G -->|No| I["Skip processing"]
+    H --> J["Processed .dill files<br/>(final/processed/)"]
+    I --> J
+    J --> K["__getitem__(idx)<br/>pickle.load → complex dict"]
+    K --> L{"input_indep?"}
+    L -->|Yes| M["zero_out_complex_features()"]
+    L -->|No| N["Return complex dict"]
+    M --> N
+    N --> O["DataModule.setup()<br/>→ train/val/test DIPSDGLDataset instances"]
+    O --> P["DataLoader<br/>(collate_fn=dgl_picp_collate)"]
+    P --> Q["Batched Output:<br/>(batched_graph1, batched_graph2,<br/> examples_list, complex_filepaths)"]
+```
+
+来源：[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L76-L147)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L66-L126)，[deepinteract_utils.py](project/utils/deepinteract_utils.py#L61-L67)
+
+## 数据集类内部机制
+
+### 文件名解析与采样
+
+两个数据集首先解析文件名清单——一个列出给定划分（例如 `pairs-postprocessed-train.txt`）所有复合物的纯文本文件。工具函数 `construct_filenames_frame_txt_filenames` 根据 `mode`、`percent_to_use` 和 `root` 目录拼接路径。当 `percent_to_use` 严格介于 0 和 1 之间时，数据集会从文件名帧中随机采样该比例的文件名，将采样子集写入新的 `.txt` 文件，并将其用于所有后续操作。这允许在不修改原始划分文件的情况下，对数据集子集进行快速原型设计。
+
+来源：[deepinteract_utils.py](project/utils/deepinteract_utils.py#L87-L100)，[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L105-L134)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L90-L119)
+
+### `process()` 方法——按需复合物处理
+
+当 `process_complexes=True` 时，`process()` 方法会遍历清单中的每个文件名，并通过 `process_complex_into_dict` 将每个原始 `.dill` 对转换为处理后的 `.dill` 字典。处理过程是**幂等**的：如果处理后的文件已存在于 `processed_filepath`，则会跳过。这种设计意味着首次运行会产生一次性的预处理开销，此后的运行将直接加载缓存的字典。
+
+`process_complex_into_dict` 函数编排了完整的转换流程：(1) 通过 `pd.read_pickle` 加载原始 `Pair` 对象；(2) 从每条链的 DataFrame 中分离出 CA 原子；(3) 可选地针对原始 FASTA 验证残基序列；(4) 通过 `convert_df_to_dgl_graph` 将全原子 DataFrame 转换为 DGLGraph；(5) 通过 `build_examples_tensor` 组装链间标签张量；(6) 序列化包含 `graph1`、`graph2`、`examples` 和 `complex` 键的最终字典。
+
+来源：[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L170-L183)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L148-L161)，[deepinteract_utils.py](project/utils/deepinteract_utils.py#L912-L954)
+
+### `__getitem__()` 方法——复合物检索
+
+对任一数据集进行索引操作时，会对相应的已处理 `.dill` 文件执行反序列化，并返回具有以下结构的字典：
+
+| 键 | 类型 | 描述 |
+|---|---|---|
+| `graph1` | `dgl.DGLGraph` | 链 1 的图（M 个节点），具有 `ndata['f']`（113 维）、`ndata['x']`（3D 坐标）、`edata['f']`（27 维）、`edata['src_nbr_e_ids']`、`edata['dst_nbr_e_ids']` |
+| `graph2` | `dgl.DGLGraph` | 链 2 的图（N 个节点），特征模式与 `graph1` 相同 |
+| `examples` | `torch.Tensor` | 形状为 `(M×N, 3)`——每行为 `(chain_0_res_id, chain_1_res_id, interaction_label)` |
+| `complex` | `str` | 复合物代码及原始 PDB 文件名 |
+| `filepath` | `str` | 已处理 `.dill` 文件的路径（在检索时添加） |
+
+如果 `input_indep=True`，则通过 `zero_out_complex_features` 将两个图的节点和边特征张量清零，从而实现 Karpathy 的输入无关健全性检查基线。
+
+<CgxTip>`train_viz` 参数（仅限 DIPS-Plus）将单个复合物复制 5,532 次，以支持在需要每个 rank 至少一个验证样本的大型多 GPU 设置上进行可视化。这由 `DIPSDGLDataset.__init__` 内部的 `n = 5532` 常量控制。</CgxTip>
+
+来源：[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L196-L249)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L174-L223)，[deepinteract_utils.py](project/utils/deepinteract_utils.py#L956-L962)
+
+## DataModule 集成
+
+每个数据集都有一个配套的 `LightningDataModule`，它将三个数据划分（`train`、`val`、`test`）连接到 PyTorch 的 `DataLoader` 实例中。这些 DataModule 是轻量级的编排层——它们在 `setup()` 中分别实例化相应的 `DGLDataset` 三次（每个划分一次），并暴露标准的 `train_dataloader()`、`val_dataloader()` 和 `test_dataloader()` 钩子。
+
+### DIPS-Plus DataModule 参数
+
+| 参数 | 类型 | 描述 |
+|---|---|---|
+| `data_dir` | `str` | 原始/处理后文件的根目录 |
+| `batch_size` | `int` | 每批样本数 |
+| `num_dataloader_workers` | `int` | 用于并行加载的 CPU 线程数 |
+| `knn` | `int` | 每个节点的 K 近邻边数（默认 20） |
+| `self_loops` | `bool` | 节点是否自连 |
+| `pn_ratio` | `float` | 训练时的正负标签比例 |
+| `percent_to_use` | `float` | 每个划分的加载比例 |
+| `process_complexes` | `bool` | 按需处理未处理的配对 |
+| `input_indep` | `bool` | 为基线清零特征 |
+
+### DB5-Plus DataModule 参数
+
+| 参数 | 类型 | 描述 |
+|---|---|---|
+| `data_dir` | `str` | 原始/处理后文件的根目录 |
+| `batch_size` | `int` | 每批样本数 |
+| `num_dataloader_workers` | `int` | 用于并行加载的 CPU 线程数 |
+| `knn` | `int` | 每个节点的 K 近邻边数（默认 20） |
+| `self_loops` | `bool` | 节点是否自连 |
+| `percent_to_use` | `float` | 每个划分的加载比例 |
+| `process_complexes` | `bool` | 按需处理未处理的配对 |
+| `input_indep` | `bool` | 为基线清零特征 |
+
+请注意，**DIPS-Plus 暴露了 `pn_ratio`**（用于在训练期间控制正负类别的平衡），而 **DB5-Plus 则没有**——该基准评估在其原生类别分布下进行。
+
+<CgxTip>所有三个 DataLoader 都使用 `dgl_picp_collate` 整理函数，该函数通过 `dgl.batch()` 分别批处理两个图，并收集每个复合物的样本列表和文件路径。这保留了 GINI 交互模块所需的图间结构。</CgxTip>
+
+来源：[dips_dgl_data_module.py](project/datasets/DIPS/dips_dgl_data_module.py#L15-L61)，[db5_dgl_data_module.py](project/datasets/DB5/db5_dgl_data_module.py#L10-L61)
+
+## 整理策略
+
+共享的 `dgl_picp_collate` 函数接收一个复合物字典列表，并生成一个 4 元组：
+
+```
+(batched_graph1, batched_graph2, examples_list, complex_filepaths)
+```
+
+- **`batched_graph1`** / **`batched_graph2`**：由 `dgl.batch()` 创建的 DGL 异构批次图，该函数会拼接节点/边张量并调整内部索引映射。
+- **`examples_list`**：每个复合物标签张量的 Python 列表——**未**拼接成单个张量——因为每个复合物具有不同的 `(M × N)` 标签矩阵大小。
+- **`complex_filepaths`**：标识批次中每个复合物的字符串 Python 列表，用于下游的日志记录和指标归属。
+
+来源：[deepinteract_utils.py](project/utils/deepinteract_utils.py#L61-L67)
+
+## 下载与缓存
+
+两个数据集都实现了用于远程数据检索的 `DGLDataset` 约定。`download()` 方法从 Zenodo 获取 `.tar.gz` 归档文件，验证其 SHA-1 哈希值，并将其解压到原始目录中。`has_cache()` 方法检查文件名清单中列出的每个复合物是否都有对应的已处理 `.dill` 文件；如果缺少任何文件，则会抛出 `FileNotFoundError` 并附带提示性消息。
+
+| 数据集 | 归档文件 | SHA-1 已验证 |
+|---|---|---|
+| DIPS-Plus | `final_processed_dips.tar.gz.partaa` | 是 |
+| DB5-Plus | `final_processed_db5.tar.gz` | 是 |
+
+来源：[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L149-L194)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L127-L172)
+
+## 特征维度约定
+
+两个数据集强制执行相同的特征维度，从而确保无论哪个数据集提供批次，模型架构都能保持兼容：
+
+| 特征类别 | 存储 | 维度 | 索引范围 |
+|---|---|---|---|
+| 节点位置编码 | `ndata['f'][:, 0]` | 1 | 0–1 |
+| 几何节点特征 | `ndata['f'][:, 1:7]` | 6 | 1–7 |
+| DIPS-Plus/DB5-Plus 节点特征 | `ndata['f'][:, 7:113]` | 106 | 7–113 |
+| **总节点特征** | `ndata['f']` | **113** | 0–113 |
+| 边位置编码 | `edata['f'][:, 0]` | 1 | 0–1 |
+| 边权重 | `edata['f'][:, 1]` | 1 | 1–2 |
+| 边距离 (RBF) | `edata['f'][:, 2:20]` | 18 | 2–20 |
+| 边方向 | `edata['f'][:, 20:23]` | 3 | 20–23 |
+| 边取向 | `edata['f'][:, 23:27]` | 4 | 23–27 |
+| 边酰胺角 | `edata['f'][:, 27]` | 1 | 27 |
+| **总边特征** | `edata['f']` | **27+1=28** | 0–28 |
+
+此外，每个图还存储了 `ndata['x']`（3D 笛卡尔坐标）、`edata['src_nbr_e_ids']` 和 `edata['dst_nbr_e_ids']`，用于几何 Transformer 的边邻域。
+
+来源：[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L262-L269)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L239-L247)，[deepinteract_utils.py](project/utils/deepinteract_utils.py#L401-L421)
+
+## 核心差异总结
+
+| 方面 | DIPS-Plus | DB5-Plus |
+|---|---|---|
+| 生物学状态 | 结合（共结晶） | 不结合（独立单体） |
+| 主要角色 | 训练与验证 | 基准评估 |
+| `pn_ratio` 参数 | 可用（默认 0.1） | 不可用 |
+| `train_viz` 参数 | 可用（可视化模式） | 不可用 |
+| 默认 `mode` | `'train'` | `'test'` |
+| 规模 | 19,198 个复合物 | 230 个二聚体 |
+| 下载归档 | 多部分（`.partaa`） | 单个 `.tar.gz` |
+| 日志风格 | `logging.info()` | `print()` |
+
+来源：[dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L19-L280)，[db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L13-L258)
+
+---
+
+**下一步**：通过 [Graph Construction from PDB](11-graph-construction-from-pdb) 了解如何从原始 PDB 数据构建图结构，在 [Geometric Protein Features](12-geometric-protein-features) 中探索几何特征计算，或查看这些数据集如何在 [Lightning Training Pipeline](17-lightning-training-pipeline) 中接入训练循环。
+
+---
+
+- [深入解析/数据集流水线/CASP-CAPRI 基准测试](https://zread.ai/BioinfoMachineLearning/DeepInteract/15-casp-capri-benchmark)
+
+---
+slug:15-casp-capri-benchmark
+blog_type:normal
+---
+
+
+**CASP-CAPRI 基准测试**是 DeepInteract 专用的分布外测试集，用于评估模型在未见结构目标上的蛋白质-蛋白质界面接触预测性能。该基准数据来源于第 13 和 14 轮预测相互作用关键评估（CAPRI）社区实验（嵌入在 CASP 结构预测周期中），包含 **19 个结合态蛋白质二聚体**（14 个同源二聚体和 5 个异源二聚体），作为严格的泛化探针，与从 DIPS 或 DB5 中提取的训练和验证复合物完全不同。由于 CASP-CAPRI 目标是竞赛期间 PDB 中不存在的新结构，它们提供了对现实世界预测性能的无偏估计，使其成为 DeepInteract 中最终模型评估的黄金标准。
+
+来源: [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L13-L61), [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L48-L50)
+
+## 数据集统计与结构
+
+CASP-CAPRI 数据集是一个**仅限测试**的集合——没有训练或验证划分。这种设计选择是刻意的：该基准仅用于衡量在结构不相关复合物（DIPS 或 DB5）上训练的模型向新目标的迁移能力。该数据集展示以下不变属性：
+
+| 属性 | 值 |
+|---|---|
+| **测试同源二聚体** | 14 |
+| **测试异源二聚体** | 5 |
+| **二聚体总数** | 19 |
+| **每个复合物的链数** | 2 |
+| **类别（相互作用 / 非相互作用）** | 2 |
+| **每个残基的节点特征** | 113 |
+| **每个残基对的边特征** | 27 |
+| **可用模式** | 仅 `test` |
+
+每个复合物存储为一个**序列化字典**（`.dill` 格式），包含两个 DGLGraph 结构、一个链间标签张量和元数据。`__getitem__` 方法返回包含以下键的字典：
+
+| 键 | 类型 | 描述 |
+|---|---|---|
+| `complex['graph1']` | `dgl.DGLGraph` | 链 1 的图，包含节点/边特征（M 个节点） |
+| `complex['graph2']` | `dgl.DGLGraph` | 链 2 的图，包含节点/边特征（N 个节点） |
+| `complex['examples']` | `torch.Tensor` | 链间残基对的标签张量，形状为 `(M × N) × 3` |
+| `complex['complex']` | `str` | 复合物代码及原始 PDB 文件名 |
+| `complex['filepath']` | `str` | 处理后复合物的文件路径 |
+
+来源: [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L16-L61), [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L171-L200), [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L226-L244)
+
+## 数据管线架构
+
+CASP-CAPRI 管线遵循 DGLDataset 契约，包含三个生命周期阶段——**下载**、**处理**和**缓存验证**——由 `CASPCAPRIDGLDataset` 类统筹协调。从原始 PDB 数据到模型就绪字典的整体流程如下所示：
+
+```mermaid
+flowchart TD
+    A["Zenodo Archive<br/>final_processed_casp_capri.tar.gz"] -->|"download()"| B["final/raw/<br/>Raw .dill pair files"]
+    B -->|"process()"| C["final/processed/<br/>Processed .dill dict files"]
+    C -->|"__getitem__()"| D["Complex Dictionary<br/>{graph1, graph2, examples, complex}"]
+    D -->|"input_indep=True?"| E{"Zero-out<br/>features?"}
+    E -->|Yes| F["zero_out_complex_features()<br/>All node/edge feats → 0"]
+    E -->|No| G["Return original<br/>complex dictionary"]
+    F --> G
+
+    style A fill:#e8f4fd,stroke:#2980b9
+    style C fill:#d5f5e3,stroke:#27ae60
+    style D fill:#fef9e7,stroke:#f39c12
+```
+
+### 下载阶段
+
+当 `raw_dir` 为空时，`download()` 从 **Zenodo**（`https://zenodo.org/record/6299835/files/final_processed_casp_capri.tar.gz`）检索预打包的 TAR 存档，通过 SHA-1 哈希校验验证其完整性，并将其解压到 `raw_dir` 的父目录中。这确保了可复现性——每位研究人员都能获得位级一致的原始数据。
+
+来源: [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L124-L143), [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L251-L254)
+
+### 处理阶段
+
+`process()` 方法遍历文件名列表中列出的每个复合物，并对每个未处理的原始 `.dill` 文件调用 `process_complex_into_dict()`。此核心转换函数执行以下操作：
+
+1. **加载结合态复合物** —— 反序列化原始 `Pair` 对象，该对象包含两条链的原子级 DataFrame 及其正相互作用索引（`pos_idx`）。
+2. **过滤至 Cα 原子** —— 从每条链的 DataFrame 中分离出 α 碳原子，以定义图节点（每个残基一个节点）。
+3. **可选序列验证** —— 当 `check_sequence=True` 时，逐字符验证每个 DataFrame 的残基序列是否与原始 FASTA 序列匹配（CASP-CAPRI 通过 `check_sequence=False` 禁用此功能）。
+4. **转换为 DGLGraph** —— 调用 `convert_df_to_dgl_graph()`，构建 k 近邻图，并编码 **113 维节点特征**（位置编码 + 6 个几何特征 + 106 个 DIPS+ 特征）和 **27 维边特征**（位置编码 + 权重 + 18 个 RBF 距离 + 3 个方向 + 4 个取向 + 1 个酰胺角）。
+5. **构建标签张量** —— 通过 `build_examples_tensor()` 构建形状为 `(M × N) × 3` 的 `examples` 张量，编码链间残基-残基接触（1 = 相互作用，0 = 非相互作用）。
+6. **序列化** —— 将生成的字典序列化保存到 `processed/` 目录。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L912-L953), [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L145-L158), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L379-L548)
+
+### 缓存验证
+
+`has_cache()` 方法验证文件名列表中引用的每个复合物是否都有对应的已处理 `.dill` 文件。若缺少任何文件，将抛出附带描述信息的 `FileNotFoundError`——这可防止在此关键基准测试评估期间发生静默失败。
+
+来源: [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L160-L169)
+
+## 配置参数
+
+`CASPCAPRIDGLDataset` 构造函数接受以下参数，每个参数控制数据加载或图构建的不同方面：
+
+| 参数 | 类型 | 默认值 | 用途 |
+|---|---|---|---|
+| `mode` | `str` | `'test'` | 数据集划分——CASP-CAPRI 仅支持 `'test'` |
+| `raw_dir` | `str` | `'final/raw'` | 包含原始 `.dill` 对文件的目录 |
+| `knn` | `int` | `20` | 图边的 K 近邻连接数 |
+| `geo_nbrhd_size` | `int` | `2` | 几何特征更新的边邻域大小 |
+| `self_loops` | `bool` | `True` | 是否在每个节点包含自环边 |
+| `percent_to_use` | `float` | `1.00` | 要加载的数据集比例 (0.0 < x ≤ 1.0) |
+| `process_complexes` | `bool` | `True` | 加载时是否处理未处理的复合物 |
+| `input_indep` | `bool` | `False` | 将所有特征置零，用于输入独立基线 |
+| `force_reload` | `bool` | `False` | 无论缓存如何，强制重新加载数据集 |
+| `verbose` | `bool` | `False` | 打印进度信息 |
+
+`percent_to_use` 参数启用**分层二次采样**：当设置为严格介于 0 和 1 之间的值时，数据集从基础文件名文件中随机采样该比例的复合物，并将采样子集写入专用的 `.txt` 文件（例如，`pairs-postprocessed-test-50%-sampled.txt`），该文件在后续加载时复用，以确保子集选择的确定性。
+
+<CgxTip>在 CASP-CAPRI 上评估时，务必在 DataLoader 中设置 `batch_size=1`。这些复合物可能很大（每条链有数百个残基），由于 M×N 相互作用张量的构建，将它们批量组合可能会超出 GPU 内存。</CgxTip>
+
+来源: [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L63-L121)
+
+## Lightning DataModule 集成
+
+`CASPCAPRIDGLDataModule` 将数据集封装到 PyTorch Lightning 的 `LightningDataModule` 中，提供标准化的 `DataLoader` 访问器。然而，其设计揭示了一个重要细微差别：由于 CASP-CAPRI 是**仅限测试的基准测试**，所有三个数据加载器方法（`train_dataloader`、`val_dataloader`、`test_dataloader`）都返回基于**同一测试划分**的 DataLoader。此模块主要用于独立的 CASP-CAPRI 评估运行；对于完整的训练与评估管线，则改用 [PICP Data Module](16-picp-data-module)。
+
+```python
+# 独立的 CASP-CAPRI 评估
+data_module = CASPCAPRIDGLDataModule(
+    data_dir='final/raw',
+    batch_size=1,
+    num_dataloader_workers=4,
+    knn=20,
+    self_loops=True,
+    percent_to_use=1.00,
+    process_complexes=True,
+    input_indep=False
+)
+data_module.setup()
+```
+
+合并函数 `dgl_picp_collate` 将多个复合物字典批量组合成一个单一元组 `(batched_graph1, batched_graph2, examples_list, complex_filepaths)`，使用 `dgl.batch()` 合并各个 DGLGraph，同时保留各图的边界。
+
+来源: [casp_capri_dgl_data_module.py](project/datasets/CASP_CAPRI/casp_capri_dgl_data_module.py#L15-L54), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L61-L67)
+
+## 与 PICP 管线的集成
+
+在生产评估工作流中，CASP-CAPRI 通过 `PICPDGLDataModule` 访问，该模块将 DIPS、DB5 和 CASP-CAPRI 聚合到统一接口中。CASP-CAPRI 数据集仅在 `testing_with_casp_capri=True` 时有条件地实例化，并且**仅用作测试数据集**——绝不用于训练或验证。当启用 `testing_with_casp_capri` 时，`PICPDGLDataModule.test_dataloader()` 路由至 `casp_capri_test`，并强制 `batch_size=1` 以保障内存安全。
+
+```mermaid
+flowchart LR
+    subgraph PICP["PICPDGLDataModule"]
+        direction TB
+        DIPS_tr["DIPS train/val"]
+        DB5_tr["DB5 train/val/test"]
+        CC_test["CASP-CAPRI test"]
+    end
+
+    DIPS_tr -->|"training_with_db5=False"| Train["Training Loop"]
+    DB5_tr -->|"training_with_db5=True"| Train
+    CC_test -->|"testing_with_casp_capri=True"| Eval["Final Evaluation"]
+    DIPS_tr -->|"default fallback"| Eval
+
+    style CC_test fill:#fef9e7,stroke:#f39c12,stroke-width:2px
+    style Eval fill:#d5f5e3,stroke:#27ae60
+```
+
+此架构确保了用于参数优化的数据（DIPS/DB5）与用于无偏性能估计的数据（CASP-CAPRI）之间的严格分离，这是基准评估在方法论上正确的做法。
+
+来源: [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L64-L149), [lit_model_test.py](project/lit_model_test.py#L30-L46)
+
+## 输入独立基线
+
+`input_indep` 标志实现了 Karpathy 的输入独立基线策略：启用时，`zero_out_complex_features()` 将所有节点和边特征张量替换为形状相同的零值张量，同时保留图拓扑和坐标。这允许你衡量模型性能中有多少归因于学习到的特征，而非结构归纳偏置（架构先验、位置编码等）。使用 `input_indep=True` 运行 CASP-CAPRI 评估可提供强有力的诊断：如果模型仍能达到非平凡的准确率，则表明架构本身编码了强大的结构先验。
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L956-L962), [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L197-L198)
+
+## 数据构建器工具
+
+`project/datasets/builder/` 目录提供了从头准备 CASP-CAPRI 数据的 CLI 工具。该基准的关键脚本是 `process_complexes_into_dicts.py`，它接受 `--source_type casp_capri` 将原始对处理为数据集类期望的字典格式。管线阶段如下：
+
+| 构建器脚本 | 功能 | CASP-CAPRI 相关性 |
+|---|---|---|
+| `process_complexes_into_dicts.py` | 将原始 `.dill` 对转换为已处理的字典 `.dill` 文件 | **主要** —— 使用 `source_type='casp_capri'` |
+| `partition_dataset_filenames.py` | 写入训练/验证/测试文件名 `.txt` 文件 | 生成 `pairs-postprocessed-test.txt` |
+| `collect_dataset_statistics.py` | 聚合残基/特征统计信息 | 后处理质量控制 |
+| `impute_missing_feature_values.py` | 用零/插值填充 NaN 特征值 | 处理缺失的 PSAIA/HSAAC 数据 |
+
+<CgxTip>为 CASP-CAPRI 运行 `process_complexes_into_dicts.py` 时，请设置 `--check_sequence False`（数据集类在其 `process()` 方法中已传入 `check_sequence=False`）。CASP-CAPRI 结构可能包含会导致序列验证失败的非标准残基。</CgxTip>
+
+来源: [process_complexes_into_dicts.py](project/datasets/builder/process_complexes_into_dicts.py#L16-L65), [partition_dataset_filenames.py](project/datasets/builder/partition_dataset_filenames.py#L27-L110)
+
+## 下一步
+
+在将 CASP-CAPRI 基准测试理解为评估端点后，顺理成章的进展是探索它如何融入更广泛的数据生态系统以及消费它的推理工作流：
+
+- **[PICP Data Module](16-picp-data-module)** —— 了解 CASP-CAPRI 如何在统一评估管线中与 DIPS 和 DB5 协同调度。
+- **[DIPS and DB5 Datasets](14-dips-and-db5-datasets)** —— 了解生成将在 CASP-CAPRI 上评估的模型的训练数据。
+- **[Prediction Workflow](18-prediction-workflow)** —— 学习如何使用训练好的检查点在 CASP-CAPRI 目标上运行推理。
+- **[Feature Constants and Indices](13-feature-constants-and-indices)** —— 查阅 113 维节点和 27 维边特征张量的完整特征索引映射。
+
+---
+
+- [深入解析/数据集流水线/PICP 数据模块](https://zread.ai/BioinfoMachineLearning/DeepInteract/16-picp-data-module)
+
+---
+slug:16-picp-data-module
+blog_type:normal
+---
+
+
+**PICP（蛋白质界面接触预测）数据模块**是 DeepInteract 的统一数据编排层——作为一个 `LightningDataModule`，它将三个结构异构的蛋白质-蛋白质相互作用数据集（DIPS-Plus、DB5-Plus 和 CASP-CAPRI-Plus）聚合到单一的、模式感知的训练/验证/测试流程中。PICP 没有将每个数据集视为孤立的孤岛，而是通过布尔开关（`training_with_db5`、`testing_with_casp_capri`）将它们组合起来，在每个生命周期阶段选择正确的数据来源，从而实现了在 DIPS 上的大规模训练、DB5 上的基准验证以及 CASP-CAPRI 上的零样本泛化测试之间的无缝切换——所有这些均可通过一个 `DataModule` 接口完成。
+
+## 架构角色
+
+PICP 数据模块位于 DeepInteract 的三个单数据集 `DGLDataset` 实现与 `LitGINI` 训练循环之间的**组合边界**。它是训练入口点直接使用的唯一 `LightningDataModule`，入口点会实例化该模块、调用 `setup()`，并将其传递给 `trainer.fit()`。这种设计将所有数据集路由逻辑集中在一个类中，使训练器无需感知每个批次由哪个底层数据集提供。
+
+```mermaid
+graph TB
+    subgraph "PICP 数据模块 (组合层)"
+        PICP[PICPDGLDataModule]
+    end
+
+    subgraph "组成 DGLDatasets"
+        DIPS["DIPSDGLDataset<br/>Bound complexes<br/>19,198 total"]
+        DB5["DB5DGLDataset<br/>Unbound complexes<br/>230 total"]
+        CASP["CASPCAPRIDGLDataset<br/>Homodimers + Heterodimers<br/>19 total"]
+    end
+
+    subgraph "整理"
+        COLLATE["dgl_picp_collate<br/>Batched DGLGraph pairs<br/>+ examples + filepaths"]
+    end
+
+    subgraph "DataLoader 输出"
+        TRAIN["train_dataloader<br/>→ dict: train_batch + val_batch"]
+        VAL[val_dataloader]
+        TEST[test_dataloader]
+    end
+
+    PICP -->|"setup(): mode=train/val"| DIPS
+    PICP -->|"setup(): if training_with_db5"| DB5
+    PICP -->|"setup(): if testing_with_casp_capri"| CASP
+
+    DIPS --> COLLATE
+    DB5 --> COLLATE
+    CASP --> COLLATE
+
+    COLLATE --> TRAIN
+    COLLATE --> VAL
+    COLLATE --> TEST
+
+    TRAIN -->|"trainer.fit()"| LITGINI[LitGINI Model]
+    VAL -->|"trainer.fit()"| LITGINI
+    TEST -->|"trainer.test()"| LITGINI
+```
+
+该模块的 `setup()` 方法会根据条件实例化每个数据集分区，然后其 dataloader 方法会基于激活的布尔标志在这些分区中进行选择。这意味着同一个 `PICPDGLDataModule` 对象可以服务于完整的 DIPS 训练运行、DB5 微调运行或 CASP-CAPRI 评估运行，而无需修改代码。
+
+来源: [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L1-L150), [lit_model_train.py](project/lit_model_train.py#L28-L48)
+
+## 构造函数与配置参数
+
+`PICPDGLDataModule.__init__` 接受 **15 个参数**，这些参数被组织为四个逻辑组：数据路径、图构建、数据集采样和流程控制。
+
+| 参数 | 类型 | 用途 |
+|---|---|---|
+| `casp_capri_data_dir` | `str` | CASP-CAPRI 原始/处理后数据的根目录 |
+| `db5_data_dir` | `str` | DB5 原始/处理后数据的根目录 |
+| `dips_data_dir` | `str` | DIPS 原始/处理后数据的根目录 |
+| `batch_size` | `int` | DIPS 训练/验证 DataLoaders 的批次大小 |
+| `num_dataloader_workers` | `int` | 并行 DataLoader 工作进程数 |
+| `knn` | `int` | 图构建中每个节点的 K 近邻边数 |
+| `self_loops` | `bool` | 是否为每个节点添加自环边 |
+| `pn_ratio` | `float` | 正负类样本采样比率（仅限 DIPS） |
+| `casp_capri_percent_to_use` | `float` | 要加载的 CASP-CAPRI 划分比例 |
+| `testing_with_casp_capri` | `bool` | 启用 CASP-CAPRI 作为测试集 |
+| `db5_percent_to_use` | `float` | 要加载的 DB5 划分比例 |
+| `training_with_db5` | `bool` | 在 DB5-Plus 而非 DIPS-Plus 上进行训练 |
+| `dips_percent_to_use` | `float` | 要加载的 DIPS 划分比例 |
+| `process_complexes` | `bool` | 在加载时处理未处理的复合物 |
+| `input_indep` | `bool` | 将特征置零以用于输入无关基线 |
+
+三个 `*_percent_to_use` 参数支持**数据集按比例加载**——这对于快速原型设计或内存受限环境至关重要。当设置为严格介于 0.0 和 1.0 之间的值时，每个组成数据集会触发文件名采样，随机选择指定比例的文件并将选择结果缓存到磁盘。
+
+来源: [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L24-L45)
+
+## `setup()` 中的数据集组合
+
+`setup()` 方法是**条件初始化的核心**——它仅实例化当前激活配置所需的数据集分区，从而避免不必要的 I/O 和内存分配。
+
+### DIPS-Plus（始终实例化）
+
+DIPS-Plus 是**主要训练语料库**，无论标志如何设置，它都会被实例化。它会创建四个分区：
+
+| 属性 | 模式 | 用途 |
+|---|---|---|
+| `dips_train` | `'train'` | 主训练数据（15,618 个复合物） |
+| `dips_val` | `'val'` | 用于轮次级指标的验证（3,548 个复合物） |
+| `dips_val_viz` | `'val'` 且 `train_viz=True` | 训练期间的可视化子集 |
+| `dips_test` | `'test'` | 保留的测试集（32 个复合物） |
+
+`dips_val_viz` 分区是一个特殊变体：它以 `train_viz=True` 加载验证划分，这会将文件名帧限制为单个复合物重复 5,532 次——这种设计支持跨最多 5,532 个 GPU 的分布式可视化，其中每个秩检查相同的验证样本。
+
+### DB5-Plus（条件实例化：`training_with_db5`）
+
+当 `training_with_db5=True` 时，所有三个 DB5 划分都会被实例化。DB5-Plus 提供了 **230 个未结合蛋白质复合物**，划分为 140 训练 / 35 验证 / 55 测试。该数据集既可用作替代训练源，也可用作基准验证集。当激活 DB5 进行训练时，dataloader 中的批次大小会被**强制设为 1**，这反映了这些未结合复合物大小可变的特性。
+
+### CASP-CAPRI-Plus（条件实例化：`testing_with_casp_capri`）
+
+当 `testing_with_casp_capri=True` 时，仅实例化 CASP-CAPRI 的测试划分——来自第 13 和 14 届 CASP-CAPRI 挑战的 **19 个二聚体**（14 个同源二聚体 + 5 个异源二聚体）。该数据集专用于**零样本泛化基准测试**；它没有训练或验证分区。
+
+```mermaid
+flowchart TD
+    SETUP["setup(stage)"] --> DIPS_ALWAYS["DIPS: train, val, val_viz, test<br/>(始终)"]
+    SETUP -->|"training_with_db5 = True"| DB5_COND["DB5: train, val, test<br/>(条件)"]
+    SETUP -->|"testing_with_casp_capri = True"| CASP_COND["CASP-CAPRI: 仅 test<br/>(条件)"]
+
+    style DIPS_ALWAYS fill:#2d6a4f,color:#fff
+    style DB5_COND fill:#40916c,color:#fff
+    style CASP_COND fill:#52b788,color:#fff
+```
+
+来源: [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L47-L82), [dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L43-L115)
+
+## Dataloader 路由逻辑
+
+每个 dataloader 方法都实现了**标志驱动的数据集选择**，根据激活的训练机制选择正确的底层分区和批次大小。此路由是 PICP 模块的核心行为契约。
+
+### `train_dataloader()` —— 返回字典
+
+与返回单个 `DataLoader` 的标准 LightningDataModules 不同，`train_dataloader()` 返回一个包含两个键的**字典**：`'train_batch'` 和 `'val_batch'`。这使 `LitGINI` 训练步能够在训练的同时执行每批次验证可视化，这种模式要求将两个 dataloader 共同交付给训练循环。
+
+| 标志 | 训练数据集 | 训练批次大小 | 验证可视化数据集 |
+|---|---|---|---|
+| `training_with_db5=True` | `db5_train` | **1**（强制） | `dips_val_viz` |
+| `training_with_db5=False` | `dips_train` | `self.batch_size` | `dips_val_viz` |
+
+验证可视化 dataloader 始终使用 `dips_val_viz`，并设置 `batch_size=1`、`shuffle=False` 和 `num_workers=1`——这是一种为单样本检查而非吞吐量优化的最小配置。两个 dataloader 都设置了 `drop_last=True`，以确保各步骤间的损失计算保持一致。
+
+### `val_dataloader()` —— 标准轮次级验证
+
+| 标志 | 验证数据集 | 验证批次大小 |
+|---|---|---|
+| `training_with_db5=True` | `db5_val` | **1**（强制） |
+| `training_with_db5=False` | `dips_val` | `self.batch_size` |
+
+### `test_dataloader()` —— 三向路由
+
+测试 dataloader 实现了最复杂的路由，具有一个**三向条件判断**：
+
+| 优先级 | 标志 | 测试数据集 | 测试批次大小 |
+|---|---|---|---|
+| 1 | `training_with_db5=True` | `db5_test` | **1** |
+| 2 | `testing_with_casp_capri=True` | `casp_capri_test` | **1** |
+| 3 | 默认 (DIPS) | `dips_test` | **1** |
+
+请注意，**所有测试 dataloader 均强制 `batch_size=1`**，且未设置 `drop_last`（默认为 `False`），从而确保无论数据集大小是否可整除，每个测试样本都会被评估。所有 dataloader 均设置了 `pin_memory=True` 标志，以优化 GPU 传输。
+
+来源: [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L84-L150)
+
+## 整理：`dgl_picp_collate`
+
+PICP 模块将所有批次整理工作委托给 `dgl_picp_collate`，这是一个自定义函数，可将按复合物划分的字典列表转换为批处理的 DGL 结构。此整理契约在所有三个组成数据集间共享——每个 `__getitem__` 都返回一个包含键 `graph1`、`graph2`、`examples` 和 `filepath` 的字典。
+
+```python
+def dgl_picp_collate(complex_dicts: List[dict]):
+    batched_graph1 = dgl.batch([d['graph1'] for d in complex_dicts])
+    batched_graph2 = dgl.batch([d['graph2'] for d in complex_dicts])
+    examples_list  = [d['examples'] for d in complex_dicts]
+    complex_filepaths = [d['filepath'] for d in complex_dicts]
+    return batched_graph1, batched_graph2, examples_list, complex_filepaths
+```
+
+整理操作产生一个 4 元组：
+
+| 返回位置 | 类型 | 描述 |
+|---|---|---|
+| `batched_graph1` | `dgl.DGLGraph` | 受体链的批处理图（批次中总计 M 个节点） |
+| `batched_graph2` | `dgl.DGLGraph` | 配体链的批处理图（批次中总计 N 个节点） |
+| `examples_list` | `List[Tensor]` | 每个复合物的接触标签，形状各为 `(M_i × N_i) × 3` |
+| `complex_filepaths` | `List[str]` | 每个复合物的文件标识符，用于可追溯性 |
+
+这两个图使用 `dgl.batch()` 独立批处理，该函数沿批次维度合并节点/边张量，同时保持读出边界。`examples_list` 和 `complex_filepaths` 仍保留为 Python 列表，因为它们的元素在各复合物间具有**可变大小**——这种结构性约束阻止了简单的张量堆叠。
+
+<CgxTip>`graph1` 和 `graph2` 的独立批处理在架构上具有重要意义：它保留了 GINI 图间交互模块所需的**双图表示**，该模块在构建交互张量之前会分别消费这两个图。切勿将它们合并为单个非连通图，因为图间拓扑必须与图内边保持区别。</CgxTip>
+
+来源: [deepinteract_utils.py](project/utils/deepinteract_utils.py#L52-L58)
+
+## 组成数据集契约
+
+所有三个组成数据集——`DIPSDGLDataset`、`DB5DGLDataset` 和 `CASPCAPRIDGLDataset`——都通过其 `__getitem__` 方法实现了**相同的输出契约**，返回具有以下结构的字典：
+
+| 键 | 类型 | 形状 | 描述 |
+|---|---|---|---|
+| `graph1` | `dgl.DGLGraph` | M 个节点 | 受体链，包含 `ndata['f']`（113 维）、`ndata['x']`（3D 坐标）、`edata['f']`（27 维） |
+| `graph2` | `dgl.DGLGraph` | N 个节点 | 配体链，特征模式同上 |
+| `examples` | `torch.Tensor` | `(M×N, 3)` | 链间残基对标签：`[res_i, res_j, contact_label]` |
+| `complex` | `str` | — | 复合物标识代码与 PDB 文件名 |
+| `filepath` | `str` | — | 处理后 `.dill` 文件的路径 |
+
+这种统一的契约使得 PICP 组合成为可能——整理函数和下游模型无需针对特定数据集进行分支。每个数据集还暴露了 `num_node_features`（113）、`num_edge_features`（27）、`num_classes`（2）和 `num_chains`（2）作为类属性，训练脚本从 `picp_data_module.dips_test` 中读取这些属性，以配置模型的输入维度。
+
+### 数据集统计摘要
+
+| 数据集 | 训练集 | 验证集 | 测试集 | 总计 | 复合物类型 |
+|---|---|---|---|---|---|
+| DIPS-Plus | 15,618 | 3,548 | 32 | 19,198 | Bound |
+| DB5-Plus | 140 | 35 | 55 | 230 | Unbound |
+| CASP-CAPRI-Plus | — | — | 19 | 19 | Bound (同源二聚体 + 异源二聚体) |
+
+来源: [dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L200-L280), [db5_dgl_dataset.py](project/datasets/DB5/db5_dgl_dataset.py#L200-L258), [casp_capri_dgl_dataset.py](project/datasets/CASP_CAPRI/casp_capri_dgl_dataset.py#L200-L255)
+
+## 输入无关基线
+
+当 `input_indep` 参数设置为 `True` 时，会在每个加载的复合物上调用 `zero_out_complex_features()`，将所有节点和边特征置零，同时保留图拓扑。这实现了 **Karpathy 的输入无关健全性检查**：如果模型在特征置零后仍能取得相当的性能，则说明学习到的表示并未有意义地利用输入数据。该标志在 `setup()` 中统一传播到所有三个组成数据集，确保在整个流程中实现一致的消融。
+
+来源: [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L43-L44), [dips_dgl_dataset.py](project/datasets/DIPS/dips_dgl_dataset.py#L230-L232)
+
+## 训练流程集成
+
+PICP 数据模块仅在训练入口点被实例化和使用。集成遵循以下精确序列：
+
+1. **构造** —— 使用映射到构造函数参数的所有 CLI 参数创建 `PICPDGLDataModule`
+2. **设置** —— 显式调用 `picp_data_module.setup()`（不延迟至 Trainer），初始化所有组成数据集
+3. **模型配置** —— 读取数据集属性（`dips_test.num_node_features`、`dips_test.num_edge_features`、`dips_test.num_classes`）以配置 `LitGINI` 的输入维度
+4. **训练** —— `trainer.fit(model=model, datamodule=picp_data_module)` 将所有 dataloader 访问委托给该模块
+
+<CgxTip>由于 `setup()` 在模型构造之前被显式调用，因此数据集属性必定可用于维度计算。如果你将设置延迟至 Trainer（通过 `trainer.fit(datamodule=...)` 而不预先调用 `setup()`），在 Trainer 初始化之前访问 `picp_data_module.dips_test.num_node_features` 将在仍为 `None` 的数据集属性上引发 `AttributeError`。</CgxTip>
+
+来源: [lit_model_train.py](project/lit_model_train.py#L28-L48), [lit_model_train.py](project/lit_model_train.py#L55-L72)
+
+## 设计模式与权衡
+
+PICP 数据模块体现了多项刻意的设计决策，理解这些决策对于扩展或调试至关重要：
+
+| 模式 | 实现 | 原理 |
+|---|---|---|
+| **组合优于继承** | 聚合 3 个 `DGLDataset` 对象，而非子类化其中任何一个 | 数据集具有异构的划分/模式；继承将强制使用最小公分母接口 |
+| **标志驱动路由** | 布尔开关按生命周期阶段选择数据集 | 单一配置对象即可控制完整的训练/验证/测试机制，无需在训练器中进行代码分支 |
+| **字典训练 dataloader** | `train_dataloader()` 返回 `dict` 而非 `DataLoader` | 实现训练和可视化批次向 `LitGINI.training_step()` 的共同交付 |
+| **强制 batch_size=1** | DB5 和 CASP-CAPRI 始终使用 batch_size=1 | 复合物大小可变阻碍了有意义的批处理；单样本处理避免了填充开销 |
+| **共享整理契约** | 所有数据集使用 `dgl_picp_collate` | 统一的 `__getitem__` 输出模式支持跨所有数据源使用单一整理函数 |
+| **内存缓存** | `has_cache()` 在训练前验证所有 `.dill` 文件是否存在 | 预处理成本高昂；缓存验证可防止轮次中期的 `FileNotFoundError` |
+
+来源: [picp_dgl_data_module.py](project/datasets/PICP/picp_dgl_data_module.py#L1-L150)
+
+## 后续步骤
+
+- 若要详细了解 DIPS-Plus 和 DB5-Plus 数据集，请参阅 [DIPS and DB5 Datasets](14-dips-and-db5-datasets)
+- 有关 CASP-CAPRI 基准评估协议，请参阅 [CASP-CAPRI Benchmark](15-casp-capri-benchmark)
+- 若要查看批处理图对如何流入 GINI 模型，请参阅 [Lightning Training Pipeline](17-lightning-training-pipeline)
+- 有关整理的下游消费者（交互张量构建），请参阅 [Interaction Tensor Construction](9-interaction-tensor-construction)
+
+---
+
+## 训练与推理
+
+- [深入解析/训练与推理/Lightning 训练流水线](https://zread.ai/BioinfoMachineLearning/DeepInteract/17-lightning-training-pipeline)
+
+---
+slug:17-lightning-training-pipeline
+blog_type:normal
+---
+
+
+DeepInteract 的训练流水线基于 **PyTorch Lightning** 构建，提供了一种声明式、回调驱动的编排机制，将数据准备、模型构建、优化配置和训练执行拆分为独立且可配置的阶段。入口文件 `lit_model_train.py` 将 `PICPDGLDataModule`、`LitGINI` LightningModule 以及功能完备的 `pl.Trainer` 串联起来——内置支持学习率查找、检查点保存、早停机制、WandB/TensorBoard 日志记录，以及通过 DDP 实现的分布式多 GPU 训练。
+
+来源：[lit_model_train.py](project/lit_model_train.py#L1-L224)
+
+## 流水线架构
+
+训练流水线遵循严格的顺序初始化顺序，其中每个阶段依赖于前一阶段的输出。这并非随意设定——**数据模块必须首先建立**，以暴露模型构造器所需的 `num_node_features`、`num_edge_features` 和 `num_classes`；并且**必须在模型实例化之前解析检查点路径**，以便 `load_from_checkpoint` 能够按需恢复权重。下图展示了完整的初始化与执行流程：
+
+```mermaid
+flowchart TD
+    A[CLI 参数解析] --> B[collect_args + add_model_specific_args]
+    B --> C[process_args: 重映射至 Trainer 字段]
+    C --> D[PICPDGLDataModule.setup]
+    D --> E{是否提供检查点？}
+    E -->|是| F[解析 ckpt_path]
+    E -->|否| G[实例化 LitGINI]
+    F --> G
+    G --> H[构建 pl.Trainer]
+    H --> I{find_lr 标志？}
+    I -->|是| J[trainer.tuner.lr_find → 绘图 + 保存]
+    I -->|否| K[构建 pl_logger]
+    J --> K
+    K --> L[组装回调]
+    L --> M{需要 WandB 恢复？}
+    M -->|是| N[下载 artifact 检查点]
+    M -->|否| O[trainer.fit]
+    N --> O
+    O --> P[trainer.test]
+```
+
+来源：[lit_model_train.py](project/lit_model_train.py#L20-L179)
+
+## 阶段 1：参数收集与处理
+
+流水线采用**两轮参数解析**策略启动。第一轮通过 `collect_args()` 收集所有基础参数，构建一个包含数据集路径、训练超参数及 Lightning 特定标志的 `ArgumentParser`。第二轮通过 `LitGINI.add_model_specific_args(parser)` 注入模型专属参数，包括 GNN 层类型、交互模块类型、几何模式开关及所有架构维度参数。两轮解析完成后，原始的 CLI 命名空间将被**重映射**为 `pl.Trainer.from_argparse_args` 所期望的字段名：
+
+| CLI 参数 | Trainer 字段 | 用途 |
+|---|---|---|
+| `num_epochs` | `max_epochs` | 训练轮数上限 |
+| `max_hours` / `max_minutes` | `max_time` | 实际时钟训练时间限制 (字典) |
+| `multi_gpu_backend` | `accelerator` | GPU 后端 (如 `ddp`, `dp`) |
+| `num_gpus` | `gpus` | GPU 设备数量 |
+| `num_compute_nodes` | `num_nodes` | 多节点分布 |
+| `gpu_precision` | `precision` | 数值精度 (16 或 32) |
+| `accum_grad_batches` | `accumulate_grad_batches` | 梯度累积步数 |
+| `grad_clip_val` / `grad_clip_algo` | `gradient_clip_val` / `gradient_clip_algo` | 梯度裁剪配置 |
+| `stc_weight_avg` | `stochastic_weight_avg` | 随机权重平均开关 |
+| `profiler_method` | `profiler` | 性能分析后端 |
+
+两个关键的后处理步骤标志着此阶段的完成：为确保可复现性，**强制执行确定性训练** (`args.deterministic = True`)；同时附带设置了 `find_unused_parameters=False` 的 **DDPPlugin**，以防止 Geometric Transformer 的边初始化模块创建未在每次前向传播中触及的参数而引发死锁错误。
+
+来源：[lit_model_train.py](project/lit_model_train.py#L182-L223), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L8-L10)
+
+## 阶段 2：数据模块初始化
+
+`PICPDGLDataModule` 由所有数据集目录、采样百分比及图构建参数构建而成。其 `setup()` 调用会触发 DIPS、DB5 及 CASP-CAPRI 数据集的训练/验证/测试集划分准备，随后测试集划分的 `num_node_features`、`num_edge_features` 及 `num_classes` 属性将作为模型输入维度的**契约**。从训练脚本传递的关键数据模块参数包括：
+
+| 参数 | 作用 |
+|---|---|
+| `casp_capri_data_dir`, `db5_data_dir`, `dips_data_dir` | 三个基准数据集的路径 |
+| `casp_capri_percent_to_use`, `db5_percent_to_use`, `dips_percent_to_use` | 数据集部分采样比例 (0.0–1.0) |
+| `training_with_db5`, `testing_with_casp_capri` | 切换跨数据集的训练/测试机制 |
+| `knn` | 用于图边构建的 K 近邻参数 |
+| `self_loops` | DGL 图中是否包含自环 |
+| `pn_ratio` | 类别平衡的正负标签比例 |
+| `process_complexes`, `input_indep` | 控制复合体处理及独立链输入模式 |
+
+来源：[lit_model_train.py](project/lit_model_train.py#L24-L40)
+
+## 阶段 3：模型实例化与检查点解析
+
+`LitGINI` 模型基于**双源配置**构建：结构维度来源于数据模块 (`num_node_input_feats`、`num_edge_input_feats`、`num_classes`)，而架构超参数则来源于解析后的 CLI 命名空间。该模型的 `__init__` 接收超过 25 个参数，涵盖 GNN 配置、交互模块配置、几何模式、优化设置及日志标志。
+
+**检查点解析**遵循一条优先级链。首先，从 `args.ckpt_dir` 和 `args.ckpt_name` 组装出本地 `ckpt_path`。若检查点存在且未请求微调，模型将通过 `LitGINI.load_from_checkpoint()` 重新实例化——这会恢复所有架构权重，同时允许覆盖 `lr`、`batch_size`、`weight_decay` 及 `dropout_rate`。当请求微调时，检查点路径转而存入模型的 `ckpt_path` 属性，以便在 `trainer.fit()` 期间延迟加载，同时激活学习率监控回调以追踪调度器行为。
+
+若未显式提供，**实验名称**将根据关键架构维度自动生成，遵循 `LitGINI-b{batch}-gl{gnn_layers}-n{gnn_hidden}-e{gnn_hidden}-il{interact_layers}-i{interact_hidden}` 模式，确保 WandB/TensorBoard 运行记录易于区分。
+
+来源：[lit_model_train.py](project/lit_model_train.py#L44-L109)
+
+## 阶段 4：训练器、日志器与回调组装
+
+### 训练器构建
+
+`pl.Trainer` 通过 `from_argparse_args(args)` 构建，该方法吸收了阶段 1 中设置的所有 Lightning 专属字段。随后，训练器将通过日志器和回调进行后置配置。
+
+### 日志器选择
+
+`construct_pl_logger(args)` 工厂方法检查 `args.logger_name` 并返回 `TensorBoardLogger` 或 `WandbLogger`。选择 WandB 时，日志器还会启用**基于 artifact 的检查点恢复**：若提供了检查点名称但本地不存在该文件，训练器将使用 `{entity}/{project}/model-{run_id}:best` 引用格式从 WandB artifact 注册表下载，然后从下载的 `model.ckpt` 加载模型。
+
+### 回调配置
+
+组装三个回调，其监控指标与模式由 `args.metric_to_track` 派生：
+
+| 回调 | 配置 | 条件 |
+|---|---|---|
+| **EarlyStopping** | 监控 `metric_to_track`，模式自动检测（交叉熵为 `min`，其余为 `max`），耐心值及 `min_delta` 来源于参数 | 始终激活 |
+| **ModelCheckpoint** | 监控相同指标，保存最新及 Top-3 检查点，文件名模板：`LitGINI-{epoch:02d}-{metric:.3f}` | 始终激活 |
+| **LearningRateMonitor** | 逐步记录 LR 及动量追踪 | 仅微调模式 |
+
+检查点文件名模板内嵌保留 3 位小数精度的被监控指标，生成如 `LitGINI-epoch=14-val_f1=0.837.ckpt` 的文件。注意代码注释警告，在多 GPU 调用 `trainer.test()` 时，此模板文件名可能导致**竞态条件**。
+
+来源：[lit_model_train.py](project/lit_model_train.py#L114-L168)
+
+## 阶段 5：学习率查找器
+
+当 `args.find_lr` 为 `True` 时，流水线会在训练循环开始前调用 `trainer.tuner.lr_find()`。这将利用数据模块运行一次简短的指数 LR 扫描，绘制损失与 LR 曲线（保存为 `optimal_lr.pdf`），并用建议值**覆盖** `model.hparams.lr`。此功能对 GINI 模型尤为实用，因其学习率敏感性随架构深度及几何模式的不同而存在显著差异。
+
+<CgxTip>每种架构配置运行一次 LR 查找器即可——建议的 LR 取决于 `num_gnn_layers`、`num_interact_layers` 及 `disable_geometric_mode`，因此更改其中任何一项后重新运行是必不可少的。</CgxTip>
+
+来源：[lit_model_train.py](project/lit_model_train.py#L119-L125)
+
+## 阶段 6：训练与测试
+
+流水线以两次顺序调用收尾：
+
+1. **`trainer.fit(model=model, datamodule=picp_data_module)`** —— 在所有已配置的回调、日志记录及分布式后端下执行完整训练循环。微调时，`ckpt_path` 通过模型构造器传递，以利用 Lightning 内置的检查点恢复机制。
+
+2. **`trainer.test()`** —— 使用训练期间保存的最佳检查点（由 `ModelCheckpoint` 的监控指标决定）在测试集上评估模型。此处无需显式传入 datamodule 参数，因为 Lightning 保留了来自 `fit()` 的引用。
+
+来源：[lit_model_train.py](project/lit_model_train.py#L173-L179)
+
+## 训练配置速查
+
+下表汇总了最具影响力的训练超参数、其 CLI 名称及架构作用：
+
+| 超参数 | CLI 标志 | 架构作用 |
+|---|---|---|
+| GNN 层类型 | `--gnn_layer_type` | 选择 Geometric Transformer 或基线 GNN |
+| GNN 深度 | `--num_gnn_layers` | 每个蛋白质图的 Geometric Transformer 层数 |
+| GNN 宽度 | `--num_gnn_hidden_channels` | GNN 节点/边表示的隐藏维度 |
+| 注意力头数 | `--num_gnn_attention_heads` | 多头几何注意力中的并行头数 |
+| 交互层数 | `--num_interact_layers` | GINI 图间交互模块的深度 |
+| 交互宽度 | `--num_interact_hidden_channels` | 交互层内的隐藏维度 |
+| 交互注意力 | `--use_interact_attention`, `--num_interact_attention_heads` | 切换并配置交互模块中的注意力 |
+| 几何模式 | `--disable_geometric_mode` | 禁用 Conformation Module (退化为 Graph Transformer) |
+| 学习率 | `--lr` | AdamW 基础学习率 (若 LR 查找器激活则被覆盖) |
+| 权重衰减 | `--weight_decay` | AdamW L2 正则化强度 |
+| Dropout | `--dropout_rate` | Geometric Transformer MLP 中的 Dropout 概率 |
+| 正类阈值 | `pos_prob_threshold=0.5` | 二分类接触预测的决策边界 |
+| 类别加权 | `--weight_classes` | 调整损失以应对正负类不平衡 |
+
+来源：[lit_model_train.py](project/lit_model_train.py#L58-L90)
+
+## 后续内容
+
+现在你已了解训练流水线如何编排数据、模型与优化，自然的进阶方向是探索训练后的模型如何应用于新的蛋白质复合物：
+
+- **[预测工作流](18-prediction-workflow)** —— 如何在未知的蛋白质对上执行推理，包括基于 Docker 的预测
+- **[检查点与微调](19-checkpoint-and-fine-tuning)** —— 跨数据集的检查点保存、加载与微调的完整生命周期
+
+---
+
+- [深入解析/训练与推理/预测工作流](https://zread.ai/BioinfoMachineLearning/DeepInteract/18-prediction-workflow)
+
+---
+slug:18-prediction-workflow
+blog_type:normal
+---
+
+
+预测工作流将一对蛋白质 PDB 链文件转换为**残基级接触概率图**和一组学习到的图表示。DeepInteract 提供了两个入口点——本地执行脚本和针对 Docker 优化的变体——两者协调着相同的五阶段流水线：**输入解析 → 图构建 → 检查点加载 → 前向推理 → 结果序列化**。理解此工作流对于在新型蛋白质复合物上部署训练好的模型并解释其界面预测至关重要。
+
+## 流水线架构
+
+预测流水线遵循由 PyTorch Lightning 的 `Trainer.predict()` 循环协调的严格顺序执行模型。每个阶段都是确定性的（无乱序，单工作线程 DataLoader），并以 1 的批量大小运行，以确保接触图的维度能够清晰地映射回原始的残基数量。
+
+```mermaid
+flowchart TD
+    A["PDB Chain Pair<br/>(left + right)"] --> B["InputDataset<br/>DGLDataset subclass"]
+    B -->|"process()"| C["process_pdb_into_graph()<br/>Feature extraction + k-NN graph"]
+    C --> D["DataLoader<br/>batch_size=1, dgl_picp_collate"]
+    D --> E["LitGINI.load_from_checkpoint()<br/>model.freeze()"]
+    E --> F["Trainer.predict()<br/>→ predict_step()"]
+    F --> G["shared_step()<br/>return_representations=True"]
+    G --> H["gnn_forward(graph1)<br/>gnn_forward(graph2)"]
+    H --> I["Interaction Tensor<br/>+ Contact Decoder"]
+    I --> J["Post-processing:<br/>softmax → reshape → numpy"]
+    J --> K["Save .npy artifacts:<br/>contact_prob_map + learned features"]
+```
+
+来源: [lit_model_predict.py](project/lit_model_predict.py#L147-L262), [lit_model_predict_docker.py](project/lit_model_predict_docker.py#L163-L310)
+
+## 阶段 1：输入数据准备
+
+`InputDataset` 类扩展了 DGL 的 `DGLDataset`，以将一对 PDB 文件转换为准备用于预测的字典。它精确处理**一个复合物**（`__len__` 始终返回 `1`），包含两个蛋白质链图和元数据键。
+
+核心转换发生在 `process()` 方法中，该方法委托给 `process_pdb_into_graph()`。此函数在将结果打包成具有以下结构的字典之前，处理完整的特征工程流水线——PSAIA 结构注释、HH-suite 序列保守性、几何特征计算和 k-NN 图组装：
+
+| 字典键 | 类型 | 描述 |
+|---|---|---|
+| `graph1` | `dgl.DGLGraph` | 左链的残基级图（节点 = 残基，边 = k-NN） |
+| `graph2` | `dgl.DGLGraph` | 右链的残基级图 |
+| `examples` | `torch.Tensor` | 空张量（在预测期间未使用——没有真实标签） |
+| `complex` | `str` | 左 PDB 文件路径（仅元数据，在 `predict_step` 中未使用） |
+| `filepath` | `str` | 左 PDB 文件路径（仅元数据，在 `predict_step` 中未使用） |
+
+该数据集公开了固定的特征维度属性——**113 个节点特征**和**27 个边特征**——模型构造器消耗这些属性以正确调整其输入层的大小。
+
+```python
+input_dataset = InputDataset(
+    left_pdb_filepath=args.left_pdb_filepath,
+    right_pdb_filepath=args.right_pdb_filepath,
+    input_dataset_dir=args.input_dataset_dir,
+    psaia_dir=args.psaia_dir,
+    hhsuite_db=args.hhsuite_db,
+    knn=20,
+    geo_nbrhd_size=2,
+    self_loops=True
+)
+input_dataloader = DataLoader(input_dataset, batch_size=1, shuffle=False,
+                              num_workers=0, collate_fn=dgl_picp_collate)
+```
+
+注意 `dgl_picp_collate` 整理函数：它通过 `dgl.batch()` 分别批处理两个链图，并收集样本列表和文件路径，产生 Lightning 传递给 `predict_step` 的四元组 `(batched_graph1, batched_graph2, examples_list, complex_filepaths)`。
+
+来源: [lit_model_predict.py](project/lit_model_predict.py#L22-L160), [deepinteract_utils.py](project/utils/deepinteract_utils.py#L61-L67)
+
+## 阶段 2：模型构建与检查点加载
+
+模型被实例化为一个 `LitGINI` (Lightning GINI) 模块，其架构超参数源自命令行参数。两个关键标志在预测时被硬编码：**`fine_tune=False`** 和 **`ckpt_path=None`**——这些确保在从检查点加载权重之前构建一个全新的模型外壳。
+
+构建之后，加载检查点并冻结模型：
+
+```python
+ckpt_path = os.path.join(args.ckpt_dir, args.ckpt_name)
+assert ckpt_provided and os.path.exists(ckpt_path), 'A valid checkpoint filepath must be provided'
+model = model.load_from_checkpoint(ckpt_path,
+                                   use_wandb_logger=False,
+                                   batch_size=args.batch_size,
+                                   lr=args.lr,
+                                   weight_decay=args.weight_decay,
+                                   dropout_rate=args.dropout_rate)
+model.freeze()
+```
+
+`model.freeze()` 调用禁用所有参数的梯度计算，这既是内存优化（不分配梯度张量），也是正确性保障（推理期间不会意外更新参数）。`load_from_checkpoint` 方法从序列化的 `.ckpt` 文件中重建完整的 `LitGINI` 状态——GNN 模块权重、交互模块权重和所有超参数。
+
+<CgxTip>检查点加载会覆盖四个在训练期间保存的超参数（`use_wandb_logger`、`batch_size`、`lr`、`weight_decay`、`dropout_rate`）。这允许在不重新训练的情况下调整推理的日志记录和批量设置。确保检查点的架构超参数（层数、隐藏通道数等）与参数默认值匹配，否则模型将无法正确反序列化。</CgxTip>
+
+来源: [lit_model_predict.py](project/lit_model_predict.py#L165-L221)
+
+## 阶段 3：通过 predict_step 进行前向推理
+
+Lightning 的 `Trainer.predict()` 调用为每个批次调用 `LitGINI.predict_step()`。此方法从批次中提取两个图结构，并以 `return_representations=True` 委托给 `shared_step()`：
+
+```python
+def predict_step(self, batch, batch_idx, dataloader_idx=None):
+    graph1, graph2 = batch[0], batch[1]
+    logits_list, g1_nf, g1_ef, g2_nf, g2_ef = self.shared_step(graph1, graph2, return_representations=True)
+    return logits_list, g1_nf, g1_ef, g2_nf, g2_ef
+```
+
+`shared_step()` 方法执行完整的孪生前向传递：
+
+1. **GNN 前向** (`gnn_forward`)：每个链图独立通过 Geometric Transformer (或 GCN) 堆栈，通过几何注意力更新节点和边特征
+2. **交互张量构建**：两个链的节点表示使用 `construct_interact_tensor()` 交错成 3D 张量，对于大型复合物则使用 `construct_subsequenced_interact_tensors()`
+3. **接触解码**：交互张量通过 DeepLabV3+ (或膨胀 ResNet) 解码器，产生形状为 `(batch_size, num_channels, len_graph1, len_graph2)` 的每对残基的逻辑值
+
+当 `return_representations=True` 时，该方法额外返回两个链图中**学习到的节点特征**（`g1_nf`、`g2_nf`）和**学习到的边特征**（`g1_ef`、`g2_ef`），从而能够对模型学到的关于每个蛋白质结构的知识进行下游分析。
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L2178-L2184), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1687-L1699)
+
+## 阶段 4：接触概率图后处理
+
+来自 `predict_step` 的原始逻辑值经过确定性的后处理序列以生成最终的接触概率图：
+
+| 步骤 | 操作 | 输入形状 | 输出形状 |
+|---|---|---|---|
+| 1 | `logits.squeeze()` | `(1, 2, M, N)` | `(2, M, N)` |
+| 2 | `torch.flatten(start_dim=1)` | `(2, M, N)` | `(2, M×N)` |
+| 3 | `.transpose(1, 0)` | `(2, M×N)` | `(M×N, 2)` |
+| 4 | `torch.softmax(dim=1)[:, 1]` | `(M×N, 2)` | `(M×N,)` |
+| 5 | `.reshape(M, N)` | `(M×N,)` | `(M, N)` |
+
+softmax 将双通道逻辑值（非接触 vs. 接触）转换为概率，索引 `[:, 1]` 提取每个残基对的**正类（接触）概率**。生成的 `(M, N)` 矩阵是一个密集的接触概率图，其中条目 `(i, j)` 表示模型对链 1 中残基 `i` 接触链 2 中残基 `j` 的置信度。
+
+```python
+predict_payload = trainer.predict(model=model, dataloaders=input_dataloader)[0]
+logits = predict_payload[0][0].squeeze()
+g1_nf, g1_ef, g2_nf, g2_ef = predict_payload[1:]
+
+graph_1_len, graph_2_len = logits.shape[1:]
+flattened_logits = torch.flatten(logits, start_dim=1).transpose(1, 0)
+contact_prob_map = torch.softmax(flattened_logits, dim=1)[:, 1]
+contact_prob_map = torch.reshape(contact_prob_map, (graph_1_len, graph_2_len)).cpu().numpy()
+```
+
+来源: [lit_model_predict.py](project/lit_model_predict.py#L232-L240)
+
+## 阶段 5：输出序列化
+
+所有预测产物都作为 NumPy `.npy` 文件保存在与输入 PDB 文件相同的目录中。PDB 代码使用 `atom3` 库的 `get_complex_pdb_codes()` 函数提取，以构造一致的文件名：
+
+| 输出文件 | 内容 | 形状 |
+|---|---|---|
+| `{pdb_code}_contact_prob_map.npy` | 接触概率图 | `(M, N)` — 链 1 中的残基 × 链 2 中的残基 |
+| `{pdb_code}_graph1_node_feats.npy` | 链 1 学习到的节点特征 | `(M, hidden_channels)` |
+| `{pdb_code}_graph1_edge_feats.npy` | 链 1 学习到的边特征 | `(E₁, feat_dim)` |
+| `{pdb_code}_graph2_node_feats.npy` | 链 2 学习到的节点特征 | `(N, hidden_channels)` |
+| `{pdb_code}_graph2_edge_feats.npy` | 链 2 学习到的边特征 | `(E₂, feat_dim)` |
+
+学习到的特征数组支持**表示级分析**：节点特征可以被聚类以识别结构相似的残基，而边特征捕获模型发现对界面预测最具信息量的几何关系。
+
+来源: [lit_model_predict.py](project/lit_model_predict.py#L245-L261)
+
+## 本地 vs. Docker 执行
+
+DeepInteract 提供了两个预测脚本，它们在参数解析和默认路径上有所不同，但共享相同的推理逻辑：
+
+| 方面 | `lit_model_predict.py` | `lit_model_predict_docker.py` |
+|---|---|---|
+| **参数框架** | 通过 `collect_args()` 使用 `argparse` | `absl.flags` + `argparse` 混合 |
+| **必需标志** | 通过 argparse 默认值隐式指定 | 显式 `flags.mark_flags_as_required()` |
+| **检查点路径** | `args.ckpt_dir` + `args.ckpt_name` | `FLAGS.ckpt_dir` + `FLAGS.ckpt_name` |
+| **默认 ckpt_dir** | 来自 argparse | `/mnt/checkpoints` |
+| **默认 psaia_dir** | `~/Programs/PSAIA_1.0_source/bin/linux/psa` | `/home/Programs/PSAIA_1.0_source/bin/linux/psa` |
+| **默认 psaia_config** | `datasets/builder/psaia_config_file_input.txt` | `/app/DeepInteract/project/datasets/builder/psaia_config_file_input_docker.txt` |
+| **GPU 控制** | `args.num_gpus`（来自 argparse） | `FLAGS.num_gpus`（来自 absl 标志） |
+| **输出路径前缀** | `os.path.join(*args.left_pdb_filepath.split(os.sep)[:-1])` | `os.sep + os.path.join(...)`（绝对路径） |
+| **入口点** | argparse 后的 `main(args)` | absl 后的 `app.run(main)` |
+
+<CgxTip>Docker 变体对输出文件使用**绝对路径前缀**（以 `os.sep` 为前缀），确保产物写入容器文件系统根相对路径。本地变体使用**相对路径前缀**，将输出写在输入 PDB 文件旁边。在 Docker 中挂载卷时，确保输出目录可写并映射到主机路径以便检索产物。</CgxTip>
+
+来源: [lit_model_predict.py](project/lit_model_predict.py#L264-L298), [lit_model_predict_docker.py](project/lit_model_predict_docker.py#L313-L330)
+
+## 用于推理的 Trainer 配置
+
+两个脚本都使用为预测优化的特定设置来配置 PyTorch Lightning `Trainer`：
+
+| 参数 | 值 | 理由 |
+|---|---|---|
+| `accelerator` | `'dp'` | 数据并行（非 DDP）——避免预测模式下的多进程错误 |
+| `num_nodes` | `1` | 强制单节点推理 |
+| `gpus` | 用户指定 | `0` = CPU, `1+` = GPU(s) |
+| `batch_size` | `1` | 确保后处理期间清晰的逻辑值到残基映射 |
+| `shuffle` | `False` | 确定性排序以实现可复现的输出 |
+| `num_workers` | `0` | 主线程数据加载避免序列化问题 |
+
+`Trainer` 通过 `pl.Trainer.from_argparse_args(args)` 构建，它从解析的命令行吸收所有 Lightning 特定的参数（精度、梯度裁剪、分析器等）。虽然其中一些（梯度裁剪、累积）仅用于训练，但它们被一致设置以保持与训练脚本的参数奇偶一致性。
+
+来源: [lit_model_predict.py](project/lit_model_predict.py#L280-L292), [lit_model_predict_docker.py](project/lit_model_predict_docker.py#L179-L194)
+
+## 后续步骤
+
+- 在 [检查点与微调](19-checkpoint-and-fine-tuning) 中了解检查点如何管理以及微调如何配置
+- 回顾产生此处消耗的检查点的训练循环：[Lightning 训练流水线](17-lightning-training-pipeline)
+- 理解馈入 `InputDataset` 的图构建：[从 PDB 构建图](11-graph-construction-from-pdb)
+
+---
+
+- [深入解析/训练与推理/检查点与微调](https://zread.ai/BioinfoMachineLearning/DeepInteract/19-checkpoint-and-fine-tuning)
+
+---
+slug:19-checkpoint-and-fine-tuning
+blog_type:normal
+---
+
+
+DeepInteract 实现了三种模式的检查点生命周期——**恢复训练**、**在新数据集上微调**和**仅推理加载**——每种模式都有独特的参数冻结策略和优化器配置。系统利用 PyTorch Lightning 的 `ModelCheckpoint` 回调进行持久化状态管理，并可选地集成 Weights & Biases (WandB) 基于制品的检查点恢复，以实现分布式实验跟踪。
+
+来源: [lit_model_train.py](project/lit_model_train.py#L1-L224), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1478-L1583)
+
+## 检查点架构
+
+检查点子系统由两个控制标志——`ckpt_name` 和 `fine_tune`——控制，它们的组合决定了激活哪条加载路径。解析逻辑首先构建检查点路径，验证其在本地文件系统上的存在性，然后有条件地分派到 `LitGINI.__init__` 中的三种加载策略之一。
+
+```mermaid
+flowchart TD
+    A[ckpt_name provided?] -->|Yes| B{fine_tune flag?}
+    A -->|No| F[Train from scratch]
+    B -->|true| C[Load checkpoint inside LitGINI.__init__\nFreeze interact_module\nKeep gnn_module trainable]
+    B -->|false| D[Load checkpoint via load_from_checkpoint\nOverride lr, weight_decay, dropout_rate\nResume full training]
+    C --> E[trainer.fit with LR monitor callback]
+    D --> E2[trainer.fit with early stop + ckpt callbacks]
+    F --> E2
+    
+    style C fill:#e8f5e9,stroke:#2e7d32
+    style D fill:#e3f2fd,stroke:#1565c0
+    style F fill:#fff3e0,stroke:#e65100
+```
+
+检查点路径由 `args.ckpt_dir` 和 `args.ckpt_name` 组装而成，并在任何加载尝试之前执行存在性验证：`ckpt_path = os.path.join(args.ckpt_dir, args.ckpt_name)`，随后执行 `ckpt_path_exists = os.path.exists(ckpt_path)`。复合守卫 `ckpt_provided = args.ckpt_name != '' and ckpt_path_exists` 控制着恢复训练路径，而微调则将加载委托给模型构造函数本身。
+
+来源: [lit_model_train.py](project/lit_model_train.py#L44-L109), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1546-L1559)
+
+## ModelCheckpoint 回调配置
+
+在训练期间，Lightning 的 `ModelCheckpoint` 回调被配置为持久化按监控指标排名的前 3 个模型，以及最近（最后一个）的检查点。检查点文件名模板编码了周期和追踪指标值，以确保可追溯性。
+
+| 参数 | 值 | 用途 |
+|-----------|-------|---------|
+| `monitor` | `args.metric_to_track` | 驱动检查点选择的指标（例如 `val_ce`） |
+| `mode` | `'min'` if `'ce'` in metric, else `'max'` | 改进方向 |
+| `save_last` | `True` | 始终持久化最近周期的检查点 |
+| `save_top_k` | `3` | 按指标保留三个最佳检查点 |
+| `filename` | `LitGINI-{epoch:02d}-{metric:.3f}` | 包含周期和指标的结构化文件名 |
+
+`EarlyStopping` 回调共享相同的 `monitor` 和 `mode`，并具有用户可配置的 `min_delta` 和 `patience`。当微调激活时，`LearningRateMonitor` 回调将被附加到回调列表中——从而实现对学习率和动量轨迹的逐步记录，这对于诊断微调收敛行为至关重要。
+
+来源: [lit_model_train.py](project/lit_model_train.py#L136-L154)
+
+## 恢复训练模式
+
+当 `fine_tune=False` 且提供了有效的检查点（`ckpt_provided=True`）时，系统在 `LitGINI` 构造函数**外部**调用 Lightning 的 `load_from_checkpoint` 类方法。这会恢复完整的模型状态——所有权重、优化器状态和调度器状态——同时选择性地覆盖训练超参数：
+
+```python
+model = model.load_from_checkpoint(ckpt_path,
+                                   use_wandb_logger=use_wandb_logger,
+                                   batch_size=args.batch_size,
+                                   lr=args.lr,
+                                   weight_decay=args.weight_decay,
+                                   dropout_rate=args.dropout_rate)
+```
+
+此设计允许在恢复先前中断的训练运行时，使用与原始运行**不同的学习率、权重衰减或 dropout**——当目标仅仅是在同一数据集上以调整后的超参数继续训练时，这是替代完整微调的一种轻量级方案。如果未提供检查点（`ckpt_provided=False`），则新构建的模型将从随机初始化开始训练。
+
+来源: [lit_model_train.py](project/lit_model_train.py#L103-L109)
+
+## 微调模式
+
+微调是架构上截然不同的加载路径，当 `fine_tune=True` 时激活。与在外部调用 `load_from_checkpoint` 不同，`LitGINI` 构造函数本身会加载预训练模型并应用**选择性冻结策略**：
+
+```python
+if self.fine_tune:
+    lit_gini = LitGINI.load_from_checkpoint(self.ckpt_path,
+                                            use_wandb_logger=use_wandb_logger,
+                                            batch_size=self.batch_size,
+                                            lr=self.lr,
+                                            weight_decay=self.weight_decay,
+                                            dropout_rate=self.dropout_rate)
+    self.gnn_module, self.interact_module = lit_gini.gnn_module, lit_gini.interact_module
+    # Freeze the interaction module during fine-tuning
+    for param in self.interact_module.parameters():
+        param.requires_grad = False
+else:
+    self.build_gnn_module(), self.build_interaction_module()
+```
+
+冻结策略是出于架构动机：**交互模块**（Dilated ResNet 或 DeepLabV3+）在构建的交互张量上操作，以预测每个残基的接触概率，而 **GNN 模块**（Geometric Transformer）则学习蛋白质结构表示。冻结交互模块保留了其学习到的接触预测模式，同时允许 GNN 模块使其几何特征提取适应新数据集的结构分布。
+
+```mermaid
+flowchart LR
+    subgraph LitGINI Fine-Tuning State
+        direction TB
+        GNN["GNN Module\n(Geometric Transformer)\n✅ Trainable"]
+        INTER["Interaction Module\n(DilResNet / DeepLabV3+)\n🔒 Frozen"]
+    end
+    GNN -->|"node\nrepresentations"| INTER
+    INTER -->|"contact\nprobabilities"| OUT[Contact Map]
+    
+    style GNN fill:#e8f5e9,stroke:#2e7d32
+    style INTER fill:#ffebee,stroke:#c62828
+```
+
+这种非对称冻结意味着优化器仅接收来自 `gnn_module` 和 `node_in_embedding` 的参数，使得微调在计算上更便宜，并且不易发生对预训练交互解码器权重的灾难性遗忘。`LearningRateMonitor` 回调仅在微调期间激活，以追踪此机制中通常使用的较小学习率。
+
+<CgxTip>在微调时，GNN 模块的 `reset_parameters()` **不会**被调用——来自 `lit_gini.gnn_module` 的预训练权重将被直接转移。然而，`node_in_embedding` **会**通过在 `__init__` 末尾调用的 `reset_parameters()` 被重新初始化，这意味着即使在微调期间，输入投影层也会从 Glorot 正交初始化开始。如果你想保留预训练嵌入，请重写 `reset_parameters` 或设置 `num_node_input_feats == num_gnn_hidden_channels` 以使用 `nn.Identity`。</CgxTip>
+
+来源: [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1546-L1559), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1585-L1589), [lit_model_train.py](project/lit_model_train.py#L152-L154)
+
+## 推理检查点加载
+
+测试流水线（`lit_model_test.py`）和预测流水线（`lit_model_predict.py`）在模型构建期间均将 `fine_tune=False` 和 `ckpt_path=None` 硬编码，然后在实例化后从外部加载检查点。这确保了没有部分微调状态泄漏到推理中。
+
+### 测试流水线
+
+测试流水线**断言**必须提供检查点文件名（`assert ckpt_provided, 'A checkpoint filename must be provided'`），并支持与训练相同的 WandB 制品回退。`load_from_checkpoint` 调用将 `batch_size` 覆盖为 1（针对大型 DB5-Plus 复合物强制执行），同时覆盖 `lr`、`weight_decay` 和 `dropout_rate`：
+
+```python
+model = model.load_from_checkpoint(ckpt_path,
+                                   use_wandb_logger=use_wandb_logger,
+                                   batch_size=test_batch_size,
+                                   lr=args.lr,
+                                   weight_decay=args.weight_decay,
+                                   dropout_rate=args.dropout_rate)
+```
+
+### 预测流水线
+
+预测流水线更进一步，在加载检查点后调用 `model.freeze()`，这会将**所有**参数的 `requires_grad` 设置为 `False`——完全禁用梯度计算以实现最大推理吞吐量。检查点断言更严格，要求同时提供且在文件系统中存在：`assert ckpt_provided and os.path.exists(ckpt_path), 'A valid checkpoint filepath must be provided'`。
+
+来源: [lit_model_test.py](project/lit_model_test.py#L88-L138), [lit_model_predict.py](project/lit_model_predict.py#L200-L221)
+
+## WandB 制品恢复
+
+当 WandB 记录器处于活动状态，且提供了检查点名称但文件在本地不存在时，系统会自动从 WandB 服务器下载检查点制品：
+
+```python
+if use_wandb_logger and args.ckpt_name != '' and not os.path.exists(ckpt_path):
+    checkpoint_reference = f'{args.entity}/{args.project_name}/model-{args.run_id}:best'
+    artifact = trainer.logger.experiment.use_artifact(checkpoint_reference, type='model')
+    artifact_dir = artifact.download()
+    model = model.load_from_checkpoint(Path(artifact_dir) / 'model.ckpt', ...)
+```
+
+制品引用遵循 WandB 约定 `{entity}/{project}/model-{run_id}:best`，目标是 WandB 内部指标追踪确定的最佳检查点。此回退机制支持跨分布式训练环境无缝共享检查点，无需手动文件传输。训练和测试流水线均以相同的制品引用格式实现了此恢复逻辑。
+
+来源: [lit_model_train.py](project/lit_model_train.py#L159-L168), [lit_model_test.py](project/lit_model_test.py#L120-L130)
+
+## 模式比较总结
+
+| 方面 | 恢复训练 | 微调 | 推理 (测试/预测) |
+|--------|----------------|-------------|--------------------------|
+| **触发条件** | `ckpt_name` 已设置, `fine_tune=False` | `fine_tune=True` | `ckpt_name` 已设置 (断言) |
+| **加载位置** | 外部 `load_from_checkpoint` | `LitGINI.__init__` 内部 | 外部 `load_from_checkpoint` |
+| **GNN 模块** | 来自 ckpt 的所有权重 | 来自 ckpt, **可训练** | 来自 ckpt 的所有权重 |
+| **交互模块** | 来自 ckpt 的所有权重 | 来自 ckpt, **冻结** | 来自 ckpt 的所有权重 |
+| **完全冻结** | 否 | 否 | 是 (`model.freeze()`) |
+| **LR 监控** | 否 | 是 | 否 |
+| **WandB 恢复** | 是 | 不适用 (需要本地 ckpt) | 是 |
+| **可覆盖超参数** | `lr`, `weight_decay`, `dropout_rate` | `lr`, `weight_decay`, `dropout_rate` | `lr`, `weight_decay`, `dropout_rate` |
+
+<CgxTip>`fine_tune` 标志不仅改变了**什么**被冻结，还改变了检查点加载发生在**哪里**。恢复加载发生在模型构建之后（`lit_model_train.py` 第 104 行），替换整个模型。微调加载发生在构造函数内部（`deepinteract_modules.py` 第 1548 行），仅将 `gnn_module` 和 `interact_module` 精确移植到新构建的外壳中。这种区别对 Lightning 的 `save_hyperparameters()` 调用很重要——恢复模式保留检查点中的原始超参数，而微调模式记录当前 `LitGINI` 实例的**新**超参数。</CgxTip>
+
+来源: [lit_model_train.py](project/lit_model_train.py#L44-L174), [deepinteract_modules.py](project/utils/deepinteract_modules.py#L1535-L1583), [lit_model_test.py](project/lit_model_test.py#L88-L138), [lit_model_predict.py](project/lit_model_predict.py#L200-L221)
+
+## 后续步骤
+
+- 有关生成这些检查点的完整训练循环，请参见 [Lightning 训练流水线](17-lightning-training-pipeline)
+- 有关已加载检查点的推理用法，请参见 [预测工作流](18-prediction-workflow)
+- 有关正在被检查点化的模型架构，请参见 [GINI 模型设计](8-gini-model-design)
+
+---
