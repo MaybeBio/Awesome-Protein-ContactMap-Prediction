@@ -1,0 +1,3670 @@
+# PeptoneLtd/PepTron
+
+Source: https://zread.ai/PeptoneLtd/PepTron
+
+# 入门
+
+- [入门/概述](https://zread.ai/PeptoneLtd/PepTron/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+PepTron 是一个**序列到集合的生成模型**，能够预测蛋白质在整个有序-无序连续体上的结构集合。与单结构预测器（AlphaFold2, ESMFold）不同，PepTron 为每条序列生成多个构象，从而捕捉多结构域蛋白质和固有无序蛋白质（IDPs）的内在柔性——这是现代治疗药物中最常见的靶标类别。
+
+![Demo](https://github.com/PeptoneLtd/PepTron/blob/main/assets/peptron.gif?raw=true)
+
+来源: [README.md](/README.md#L1-L10)
+
+## PepTron 解决的问题
+
+传统结构预测器只能生成**单一静态构象**，这对于具有显著无序性的蛋白质而言是远远不够的。PepTron 通过将冻结的 **ESM2 蛋白质语言模型编码器**、可训练的**折叠主干**以及**连续流匹配**引擎相结合来解决此问题；该引擎将调和先验样本去噪为符合物理现实的构象。最终结果是：仅凭氨基酸序列，PepTron 便能生成包含多种多样且合理的三维结构的集合——在推理时无需 MSA 或模板。
+
+| 能力 | 单结构预测器 | PepTron |
+|---|---|---|
+| 输出 | 单一静态构象 | 构象集合 |
+| 有序结构域 | ✓ | ✓ |
+| 无序区域 | ✗ (坍缩或缺失) | ✓ (物理多样的样本) |
+| 多结构域蛋白质 | 部分 | ✓ (全覆盖无序性) |
+| 输入要求 | MSA + 模板 (通常) | 仅序列 |
+
+来源: [README.md](/README.md#L8-L11), [peptron/model/flow.py](/peptron/model/flow.py#L42-L69)
+
+## 架构概览
+
+PepTron 的架构是一个三阶段的流水线：**序列编码** → **成对表示 + 主干** → **流匹配推理**。该模型继承自 NVIDIA 的 BioNeMo ESM2 实现，并通过流匹配结构生成对其进行了扩展。
+
+```mermaid
+graph TD
+    A["Amino Acid Sequence"] --> B["ESM2 Encoder<br/>(Frozen)"]
+    B --> C["Sequence Embeddings<br/>B × L × C"]
+    C --> D["Input Pair Stack<br/>(Distogram + Time Embed)"]
+    D --> E["FoldingTrunk<br/>(Triangular Self-Attn Blocks)"]
+    E --> F["Structure Module<br/>(OpenFold)"]
+    F --> G["Predicted Coordinates"]
+
+    H["Harmonic Prior<br/>(Gaussian Chain)"] --> I["Continuous Flow Matching"]
+    G --> I
+    I --> J["Self-Conditioning<br/>(Iterative Refinement)"]
+    J --> I
+    I --> K["Ensemble of<br/>Conformations"]
+
+    style B fill:#4a90d9,color:#fff
+    style E fill:#e07b39,color:#fff
+    style I fill:#50b87e,color:#fff
+    style K fill:#d94a4a,color:#fff
+```
+
+**阶段 1 — 序列编码**：ESM2 蛋白质语言模型（48 层，15B 参数级别）生成每个残基的嵌入。在 PepTron 训练期间，该编码器被**冻结**——仅训练结构头——从而实现了从预训练 PDB 检查点进行高效微调。
+
+**阶段 2 — 折叠主干**：ESM2 嵌入被投影到序列（`c_s = 384`）和成对（`c_z = 128`）状态维度。`FoldingTrunk` 应用**三角自注意力块**（三角注意力 + 乘法更新）来更新这两种表示，随后通过 OpenFold 的 `StructureModule` 进行原子级坐标预测。
+
+**阶段 3 — 流匹配引擎**：在推理时，PepTron 从**调和先验**（一种弹簧常数调整为主链键长约 3.8Å 的高斯链模型）中初始化样本，然后通过学习到的速度场，在 `steps` 积分步骤中对其进行迭代去噪，并可选择使用**自条件化**（将先前的预测作为输入反馈回去）。
+
+来源: [peptron/model/model.py](/peptron/model/model.py#L56-L99), [peptron/model/trunk.py](/peptron/model/trunk.py#L70-L110), [peptron/model/flow.py](/peptron/model/flow.py#L42-L69), [peptron/model/flowmoco.py](/peptron/model/flowmoco.py#L72-L82)
+
+## 项目结构
+
+```
+PepTron/
+├── peptron/                    # 核心模型和训练逻辑
+│   ├── model/
+│   │   ├── config.py           # 所有模型/训练/推理配置
+│   │   ├── model.py            # ESMFoldSeqModel + StructureHead
+│   │   ├── trunk.py            # FoldingTrunk (三角注意力 + 结构模块)
+│   │   ├── flow.py             # 带手动 HarmonicPrior 的流匹配
+│   │   ├── flowmoco.py         # 通过 BioNeMo MoCo 框架实现的流匹配
+│   │   ├── tri_self_attn_block.py  # TriangularSelfAttentionBlock
+│   │   ├── input_stack.py      # 用于成对特征的 InputPairStack
+│   │   ├── loss.py             # 多头损失函数
+│   │   └── layers.py           # GaussianFourierProjection, Attention 等
+│   ├── data/                   # 数据加载、管道和特征处理
+│   ├── train.py                # 训练入口点
+│   ├── infer.py                # 推理入口点
+│   └── utils/                  # 回调、日志记录、张量工具
+├── esm2/                       # ESM2 模型、分词器和训练脚本
+├── dataprep/                   # 数据准备 (MSA 生成, PDB/IDRome 处理)
+├── splits/                     # 训练/验证集划分的 CSV 文件 (IDRome + CAMEO2022)
+├── run_peptron_train.sh        # 单节点训练脚本
+├── run_peptron_distributed_train.sh  # 多节点训练脚本
+└── run_peptron_infer.sh        # 推理脚本
+```
+
+来源: [peptron/model/config.py](/peptron/model/config.py#L1-L30), [peptron/train.py](/peptron/train.py#L1-L53), [peptron/infer.py](/peptron/infer.py#L1-L63)
+
+## 核心技术栈
+
+| 组件 | 技术 | 角色 |
+|---|---|---|
+| 语言模型 | ESM2 (通过 BioNeMo) | 冻结的序列编码器 |
+| 折叠引擎 | OpenFold | 结构模块 + 三角基元 |
+| 流匹配 | BioNeMo MoCo | 连续流匹配 + 调和先验 |
+| 分布式训练 | NVIDIA Megatron + NeMo2 | 张量/流水线并行 |
+| 精度 | bf16-mixed | 硬件高效的混合精度 |
+| 等变性 | cuEquivariance 0.8.0 | SE(3)-等变注意力/乘法更新 |
+| 容器 | NVIDIA Clara BioNeMo 2.7.1 | 基础 Docker 镜像 |
+
+<CgxTip>PepTron 的流匹配使用两个可互换的后端：`flow.py` 手动实现了 `HarmonicPrior` 和插值，而 `flowmoco.py` 则委托给 BioNeMo 的 `ContinuousFlowMatcher` 和 `LinearHarmonicPrior`。基于 MoCo 的后端（`flowmoco.py`）是生产训练和推理的默认选项。</CgxTip>
+
+<CgxTip>`peptron_o_mixed` 训练预设方案在 PDB (30%) 和 IDRome (70%) 混合数据上进行训练，其中 `noise_prob=0.5` 且 `self_cond_prob=0.5`，这对于同时学习有序和无序构象至关重要。</CgxTip>
+
+来源: [Dockerfile](/Dockerfile#L1-L40), [peptron/model/flowmoco.py](/peptron/model/flowmoco.py#L72-L82), [peptron/model/config.py](/peptron/model/config.py#L125-L132)
+
+## 两个预训练检查点
+
+PepTron 在 [Zenodo](https://zenodo.org/records/17306061) 上提供了两个检查点：
+
+- **PepTron-base**：仅在 PDB 上预训练。将其作为自定义微调的起点。
+- **PepTron**：在混合的 PDB + IDRome-o 数据集上微调。**在整个蛋白质组上表现最佳**——这是推荐大多数用户使用的检查点。
+
+来源: [README.md](/README.md#L33-L37)
+
+## 后续步骤
+
+从实际的环境设置开始，然后深入了解你感兴趣的架构概念：
+
+1. **[快速开始](2-quick-start)** — 安装、配置并运行你的首次推理
+2. **[预训练模型](3-pre-trained-models)** — 下载并使用官方检查点
+3. **[架构概览](4-architecture-overview)** — 端到端的数据流和模块交互
+4. **[连续流匹配](5-continuous-flow-matching)** — PepTron 如何生成多样的集合
+5. **[调和先验采样](6-harmonic-prior-sampling)** — 基于物理启发的噪声分布
+6. **[自条件化与推理调度](7-self-conditioning-and-inference-schedule)** — 推理时的迭代优化
+7. **[ESM2 序列编码器](8-esm2-sequence-encoder)** — 冻结的语言模型表示
+8. **[混合 PDB-IDRome 训练策略](12-mixed-pdb-idrome-training-strategy)** — 在有序 + 无序数据上进行训练
+9. **[配置参考](16-configuration-reference)** — 完整的配置参数参考
+
+---
+
+- [入门/快速上手](https://zread.ai/PeptoneLtd/PepTron/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+几分钟内让 PepTron 运行起来 —— 从 Docker 配置到生成你的第一个蛋白质结构系综。本指南将引导你完成三个核心工作流：**安装**、**推理**（从序列生成系综）和**训练**（在你的自有数据上进行微调）。
+
+![PepTron Demo](https://github.com/PeptoneLtd/PepTron/blob/main/assets/peptron.gif?raw=true)
+
+来源: [README.md](/README.md#L1-L12)
+
+## 前提条件
+
+PepTron 需要 NVIDIA GPU，并依赖于 BioNeMo 框架。在继续操作之前，请确保你的环境满足以下要求：
+
+| 要求 | 规格 |
+|---|---|
+| **GPU** | 支持 CUDA 12 的 NVIDIA GPU |
+| **Docker** | 已安装 NVIDIA Container Toolkit |
+| **磁盘** | 约 50 GB（用于 Docker 镜像 + 检查点存储） |
+
+来源: [Dockerfile](/Dockerfile#L1-L40)
+
+## 步骤 1 — 安装 PepTron
+
+PepTron 以 Docker 容器的形式发布，该容器基于 NVIDIA 的 BioNeMo 框架镜像构建。克隆仓库并构建容器：
+
+```bash
+# 克隆仓库
+git clone https://github.com/PeptoneLtd/peptron.git
+cd peptron
+
+# 构建 Docker 容器
+docker build -t peptron:latest .
+
+# 运行容器并启用 GPU 访问
+docker run --gpus all -it --rm peptron:latest
+```
+
+该 Dockerfile 基于 `nvcr.io/nvidia/clara/bionemo-framework:2.7.1` 构建，安装了 cuEquivariance (`0.8.0`)，并编译了支持 TRT cuEquivariance 的自定义 OpenFold 分支。构建过程还会下载结构模块所需的立体化学属性。
+
+来源: [Dockerfile](/Dockerfile#L1-L40), [README.md](/README.md#L17-L29)
+
+## 步骤 2 — 下载预训练检查点
+
+预训练检查点托管在 Zenodo 上。请在运行推理之前下载并解压：
+
+```bash
+# 从 Zenodo 下载
+wget https://zenodo.org/records/17306061/files/PepTron.tar.gz
+
+# 解压 — 这将创建 peptron-checkpoint 目录
+tar -xzf PepTron.tar.gz
+```
+
+提供了两个检查点：
+
+| 检查点 | 描述 | 适用场景 |
+|---|---|---|
+| **PepTron** | 在整个蛋白质组上具有最佳性能 | 生产推理 |
+| **PepTron-base** | 仅在 PDB 上预训练 | 微调的起点 |
+
+来源: [README.md](/README.md#L32-L37)
+
+## 步骤 3 — 准备你的输入序列
+
+PepTron 通过 **CSV 文件** 接受蛋白质序列，该文件包含两列：`name` 和 `seqres`。创建你的输入文件：
+
+```csv
+name,seqres
+protein1,MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQA
+protein2,MSHHWGYGKHNGPEHWHKDFPIAKGERQSPVDID
+```
+
+`name` 列用作输出目录的标识符。`seqres` 列包含单字母编码的氨基酸序列。序列的数量或长度没有硬性限制，但较长的序列会消耗更多的 GPU 显存。
+
+来源: [README.md](/README.md#L52-L58)
+
+## 步骤 4 — 运行推理
+
+推理管线遵循清晰的流程 — 从 CSV 输入，经过流匹配采样，到压缩的轨迹输出：
+
+```mermaid
+flowchart LR
+    A["📄 sequences.csv"] --> B["🔍 ESM2 编码器"]
+    B --> C["🔄 流匹配采样器"]
+    C --> D["🧬 PDB 结构"]
+    D --> E["⚙️ 压缩与过滤"]
+    E --> F["📦 topology.pdb + trajectory.xtc"]
+```
+
+### 使用便捷脚本
+
+`run_peptron_infer.sh` 脚本同时处理采样和后处理。通过命令行选项传递你的路径：
+
+```bash
+sh run_peptron_infer.sh \
+  --input /path/to/sequences.csv \
+  --checkpoint /path/to/peptron-checkpoint \
+  --results /path/to/results \
+  --filter-unphysical
+```
+
+### 底层运行机制
+
+该脚本分两个阶段执行。**阶段 1** 使用 `peptron_o_inference` 配置预设调用 `peptron.infer`，这会禁用模板，将循环迭代次数设置为零，并运行连续流匹配采样器。**阶段 2** 遍历每个蛋白质结果目录，并运行 `petron.compress_ensemble` 将单个 PDB 文件转换为紧凑的 `topology.pdb` + `trajectory.xtc` 对，同时在此过程中过滤掉非物理帧（断裂的骨架几何结构、空间位阻冲突）。
+
+来源: [run_peptron_infer.sh](/run_peptron_infer.sh#L1-L82), [peptron/infer.py](/peptron/infer.py#L58-L63), [peptron/compress_ensemble.py](/peptron/compress_ensemble.py#L12-L51)
+
+### 推理参数
+
+关键参数控制系综大小、采样质量和 GPU 利用率。你可以通过便捷脚本覆盖它们，或者编辑 `peptron/model/config.py`：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `samples` | 10 | 要生成的系综构象数量 |
+| `steps` | 10 | 流匹配去噪步数 |
+| `max_batch_size` | 1 | 每个系综并行生成的结构数 |
+| `num_gpus` | 1 | 要使用的 GPU 数量（必须 ≤ 输入序列的数量） |
+| `tmax` | 1.0 | 采样调度终点（1.0 = 完整，<1.0 = 截断） |
+
+<CgxTip>**显存管理**：`max_batch_size=1` 是避免 OOM（显存溢出）的安全默认值。仅在你的 GPU 显存和序列长度允许时才增加该值 — `max_batch_size × 序列长度` 的乘积决定了峰值 VRAM。对于长无序序列，请保持该值为 1。</CgxTip>
+
+<CgxTip>**cuEquivariance 回退**：如果生成的结构未通过物理接受测试，请在 `config.py` 中设置 `use_cuequivariance=False` 来停用 cuEquivariance。这将回退到标准的注意力和乘法更新实现。</CgxTip>
+
+来源: [peptron/model/config.py](/peptron/model/config.py#L822-L847), [run_peptron_infer.sh](/run_peptron_infer.sh#L64-L77), [README.md](/README.md#L183-L195)
+
+### 输出结构
+
+推理完成后，你的结果目录将为每个输入蛋白质包含一个子文件夹：
+
+```
+results/
+├── protein1/
+│   ├── topology.pdb          # 参考结构
+│   └── trajectory.xtc        # 系综构象（已过滤）
+├── protein2/
+│   ├── topology.pdb
+│   └── trajectory.xtc
+└── params.json               # 完整的推理配置转储
+```
+
+每个 `trajectory.xtc` 保存物理上有效的构象。`params.json` 记录了用于可复现性的完整配置。
+
+来源: [peptron/compress_ensemble.py](/peptron/compress_ensemble.py#L12-L50), [peptron/infer.py](/peptron/infer.py#L310-L312)
+
+## 步骤 5 — 训练（可选）
+
+训练 PepTron 同时需要 PDB 和 IDRome-o 数据集。这是一个高级工作流 — 完整详情请参阅专门的深入讲解页面。以下是高级流程：
+
+```mermaid
+flowchart TD
+    A["1. 下载与预处理数据集"] --> B["2. 生成 MSA"]
+    B --> C["3. 配置训练参数"]
+    C --> D["4. 启动训练"]
+    D --> E["5. 通过 Weights & Biases 监控"]
+```
+
+### 数据集准备（摘要）
+
+| 数据集 | 步骤 | 关键命令 |
+|---|---|---|
+| **PDB** | 下载 mmCIF → 提取 → 生成 MSA → 解压为 NPZ → 聚类 | `dataprep.unpack_mmcif`, `dataprep.cluster_chains` |
+| **IDRome-o** | 从 Zenodo 下载 → 预处理轨迹 → 生成 MSA | `dataprep.prep_idrome` |
+
+来源: [README.md](/README.md#L82-L109)
+
+### 配置训练
+
+编辑 `peptron/model/config.py` 中的 `training` 部分。`peptron_o_mixed` 预设配置了混合 PDB+IDRome 策略，其中 `dataset_prob_pdb=0.3`，`dataset_prob_idp=0.7`：
+
+```python
+# 在 peptron/model/config.py — training 部分
+"training": {
+    "experiment_dir": "/path/to/experiment",
+    "experiment_name": "my-peptron-run",
+    "n_steps_train": 2500,
+    "micro_batch_size": 8,
+    "devices": 8,
+    "precision": "bf16-mixed",
+    "dataset_prob_pdb": 0.3,
+    "dataset_prob_idp": 0.7,
+    # ... 数据路径 ...
+}
+```
+
+来源: [peptron/model/config.py](/peptron/model/config.py#L770-L818), [README.md](/README.md#L111-L166)
+
+### 启动训练
+
+```bash
+# 单节点，8 GPU
+sh run_peptron_train.sh
+
+# 多节点分布式训练（请先编辑 PYTHONPATH）
+sh run_peptron_distributed_train.sh
+```
+
+单节点脚本设置 `TORCHDYNAMO_SUPPRESS_ERRORS=1` 和 `CUDA_LAUNCH_BLOCKING=1` 以保证稳定性，然后运行 `python -m peptron.train`。分布式变体使用 `torchrun --nproc_per_node=8`。
+
+来源: [run_peptron_train.sh](/run_peptron_train.sh#L1-L5), [run_peptron_distributed_train.sh](/run_peptron_distributed_train.sh#L1-L8), [peptron/train.py](/peptron/train.py#L51-L53)
+
+## 故障排除
+
+| 问题 | 原因 | 解决方案 |
+|---|---|---|
+| **CUDA 显存溢出** | 对于序列长度，`max_batch_size` 过大 | 设置 `max_batch_size=1`；减小 `micro_batch_size` |
+| **cuEquivariance 导入错误** | 未安装 `cuequivariance-torch` | 忽略 torchdynamo 警告；或设置 `use_cuequivariance=False` |
+| **检查点加载错误** | 路径不匹配或配置不兼容 | 验证检查点路径是否与模型配置预设匹配 |
+| **非物理轨迹** | cuEquivariance 数值精度问题 | 在 `config.py` 中设置 `use_cuequivariance=False` |
+| **训练收敛问题** | 数据路径或 CSV 格式错误 | 验证 `training` 部分中的所有路径；检查 CSV 是否包含 `name,seqres` 列 |
+
+来源: [README.md](/README.md#L216-L229), [peptron/utils/filter_unphysical_traj.py](/peptron/utils/filter_unphysical_traj.py#L82-L106)
+
+## 接下来去哪
+
+既然你已经能够生成系综，接下来可以探索架构和高级特性：
+
+1. **[预训练模型](3-pre-trained-models)** — 详细的检查点规格与预期性能基准
+2. **[架构概述](4-architecture-overview)** — ESM2、FoldingTrunk 和流匹配如何连接
+3. **[连续流匹配](5-continuous-flow-matching)** — 系综采样背后的生成引擎
+4. **[推理与系综生成](15-inference-and-ensemble-generation)** — 高级推理配置与多 GPU 策略
+5. **[配置参考](16-configuration-reference)** — 所有配置部分的完整参数文档
+
+---
+
+- [入门/预训练模型](https://zread.ai/PeptoneLtd/PepTron/3-pre-trained-models)
+
+---
+slug:3-pre-trained-models
+blog_type:normal
+---
+
+
+PepTron 附带两类预训练检查点：**ESM2 序列编码器**（继承自 BioNeMo）和 **PepTron 结构模型**本身（带有流匹配头的 ESMFoldSeqModel）。在运行预测或微调之前，理解这些检查点如何组合成完整的推理流水线至关重要。
+
+## 模型架构组合
+
+每个 PepTron 检查点都是一个**两阶段架构**——一个冻结的 ESM2 骨干网络用于生成逐残基嵌入，随后是一个可训练的 `StructureHead`，通过连续流匹配将这些嵌入转换为 3D 坐标。该组合在 `ESMFoldSeqModel` 类中表达，它继承自 `ESM2Model` 并在后处理流水线阶段附加了结构头。
+
+```mermaid
+graph LR
+    A["氨基酸序列"] --> B["ESM2 编码器<br/>(冻结)"]
+    B --> C["逐残基嵌入<br/>[B, L, Layers, C]"]
+    C --> D["esm_s_combine + esm_s_mlp"]
+    D --> E["StructureHead"]
+    E --> F["FoldingTrunk<br/>(48 块)"]
+    F --> G["流匹配<br/>速度预测"]
+    G --> H["3D 坐标<br/>(伪 beta)"]
+    style B fill:#4a6fa5,color:#fff
+    style E fill:#c0392b,color:#fff
+    style G fill:#27ae60,color:#fff
+```
+
+编码器**默认冻结**（`encoder_frozen: True`），意味着训练期间仅更新 `StructureHead` 的参数。此设计将序列理解（ESM2 的预训练知识）与结构生成（PepTron 学习到的流匹配动态）分离开来。
+
+来源: [model.py](peptron/model/model.py#L56-L149), [config.py](peptron/model/config.py#L815-L817)
+
+## ESM2 骨干网络变体
+
+PepTron 基于 **ESM2-3B** 变体构建，但 BioNeMo 框架提供了三种 ESM2 预训练规模。每个变体在训练基础设施中被定义为一种配方（recipe），并决定了输入到 `StructureHead` 的序列嵌入维度。
+
+| 变体 | 层数 | 隐藏层大小 | 注意力头数 | FFN 隐藏层 | 近似参数量 | 张量并行 |
+|---------|--------|-------------|-----------------|------------|----------------|-----------------|
+| **ESM2-8M** | 6 | 320 | 20 | 1,280 | ~8M | 1 |
+| **ESM2-650M** | 33 | 1,280 | 20 | 5,120 | ~650M | 1 |
+| **ESM2-3B** | 36 | 2,560 | 40 | 10,240 | ~3B | 2 |
+
+**ESM2-3B** 是 PepTron 中使用的默认骨干网络，如模型配置 `model.esm2` 中的设置：`feats: 2560`、`num_layers: 36`、`attention_heads: 40`。此变体在分布式训练时至少需要为 2 的张量模型并行度。配置中的 `esm_type` 字段被设置为 `"esm2_3B"`。
+
+<CgxTip>加载 PepTron 检查点时，ESM2 编码器权重从同一检查点文件中加载——无需提供单独的 ESM2 检查点。训练配置中的 `initial_ckpt_path` 指向包含编码器和结构头权重的单个 `.nemo` 或 Megatron 检查点。</CgxTip>
+
+来源: [recipes.py](esm2/run/recipes.py#L115-L227), [config.py](peptron/model/config.py#L571-L578)
+
+## PepTron 配置预设
+
+`peptron/model/config.py` 中的 `get_config()` 函数定义了命名预设，用于为不同的训练机制和推理配置模型。每个预设都会修改基础 `config` 字典，以设置模板使用方式、流匹配概率、裁剪大小和损失权重。
+
+### 训练预设
+
+| 预设 | 模板 | 裁剪大小 | 噪声概率 | 自条件概率 | 额外输入概率 | 用途 |
+|--------|-----------|-----------|------------|----------------|------------------|---------|
+| `initial_training` | ✅ | 256 | 0.5 | 0.5 | 0.5 | 基础 AF2 风格初始化 |
+| `finetuning` | ✅ | 384 | 0.5 | 0.5 | 0.5 | 带冲突损失的标准微调 |
+| `finetuning_ptm` | ✅ | 384 | 0.5 | 0.5 | 0.5 | 启用 TM 头的微调 |
+| `idp_finetuning_no_templ` | ❌ | 384 | 0.5 | 0.5 | 0.5 | 侧重 IDP 的微调，无模板 |
+| `peptron_o_mixed` | ❌ | 512 | 0.5 | 0.5 | 0.5 | **混合 PDB+IDRome 训练** |
+| `peptron_o_pdb_idrome` | ❌ | 512 | 0.9 | 0.0 | 0.5 | 高噪声 PDB+IDRome |
+| `peptron_o_pdb_idrome_violation` | ❌ | 512 | 0.9 | 0.0 | 0.5 | 上述 + 冲突损失 |
+
+### 推理预设
+
+| 预设 | 模板 | 循环迭代次数 | 用途 |
+|--------|-----------|-----------------|---------|
+| `peptron_o_inference` | ❌ | 0 | **标准 PepTron 推理** |
+| `peptron_o_pdb` | ❌ | 0 | 仅 PDB 推理 |
+| `peptron_o_idp` | ❌ | 0 | 仅 IDP 推理 (noise_prob=0.9, self_cond=0.0) |
+| `peptron_o_pdb_last_steps` | ❌ | 0 | 带冲突 + TM 损失的 PDB 推理 |
+
+**默认训练预设**为 `peptron_o_mixed`（在 `peptron/train.py` 中引用），**默认推理预设**为 `peptron_o_inference`（在 `peptron/infer.py` 中引用）。所有 PepTron 预设均禁用模板（`template.enabled: False`）并设置 `max_recycling_iters: 0`，这体现了 PepTron 的流匹配设计，即用基于 ODE 的采样替代迭代循环。
+
+来源: [config.py](peptron/model/config.py#L67-L261), [train.py](peptron/train.py#L51), [infer.py](peptron/infer/infer.py#L60)
+
+## 流匹配推理参数
+
+使用预训练的 PepTron 检查点运行推理时，流匹配 ODE 求解器由三个关键参数控制，它们决定了生成结构的质量和多样性：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `samples` | 10 | 每条序列的独立结构采样数 |
+| `steps` | 10 | 每个样本的 ODE 离散化步数 |
+| `tmax` | 1.0 | 最大积分时间；控制从噪声到结构的调度 |
+
+推理调度被构建为 `np.linspace(tmax, 0, steps + 1)`，从 `tmax` 到 0 进行反向积分。当 `0 < tmax < 1.0` 时，会在 `t=1.0` 处前置一个热启动步，允许模型先从纯噪声进行预测，然后再从中间的 `tmax` 状态进行细化。
+
+```mermaid
+graph LR
+    subgraph "采样流水线 (每条序列)"
+        N["调和先验<br/>x₀ ~ N(0, Σ)"] --> S1["样本 1"]
+        N --> S2["样本 2"]
+        N --> SN["样本 N"]
+        S1 --> ODE1["ODE 求解器<br/>(steps=10)"]
+        S2 --> ODE2["ODE 求解器<br/>(steps=10)"]
+        SN --> ODEN["ODE 求解器<br/>(steps=10)"]
+        ODE1 --> P1["结构 1"]
+        ODE2 --> P2["结构 2"]
+        ODEN --> PN["结构 N"]
+    end
+    P1 --> E["集成<br/>压缩"]
+    P2 --> E
+    PN --> E
+    E --> F["过滤后的 PDB<br/>集成"]
+    style N fill:#8e44ad,color:#fff
+    style E fill:#e67e22,color:#fff
+```
+
+生成所有样本后，PepTron 会运行带有 `--filter-unphysical` 参数的 `peptron.compress_ensemble`，以移除具有非物理几何结构的结构，从而生成最终过滤后的集成结果。
+
+来源: [infer.py](peptron/infer.py#L189-L196), [run_peptron_infer.sh](run_peptron_infer.sh#L64-L81)
+
+## 使用预训练检查点运行推理
+
+推理 shell 脚本 `run_peptron_infer.sh` 提供了运行预测的规范接口。它接受三个必需参数：
+
+| 标志 | 描述 |
+|------|-------------|
+| `--input` / `-i` | 包含输入序列的 CSV 文件路径 |
+| `--checkpoint` / `-c` | PepTron `.nemo` 检查点的路径 |
+| `--results` / `-r` | 预测结构的输出目录 |
+| `--filter-unphysical` / `-f` | 启用非物理轨迹过滤 |
+
+**示例调用：**
+
+```bash
+./run_peptron_infer.sh \
+    --input sequences.csv \
+    --checkpoint /path/to/peptron-checkpoint \
+    --results predictions/
+```
+
+在底层，这会使用以下默认并行度和采样设置调用 `python -m peptron.infer`：单节点单 GPU 推理，微批次大小为 1，每条序列 10 个样本，10 个 ODE 步数，以及 `tmax=1.0`。所有参数均可通过 `--config.*` 标志命名空间进行覆盖。
+
+来源: [run_peptron_infer.sh](run_peptron_infer.sh#L1-L82), [infer.py](peptron/infer.py#L72-L97)
+
+## 模型维度摘要
+
+完整的 PepTron 模型具有以下关键维度参数，它们在配置中被定义为字段引用，以便在所有子模块中一致地传播：
+
+| 符号 | 值 | 作用 |
+|--------|-------|------|
+| `c_z` | 128 | 成对（z-pair）状态维度 |
+| `c_m` | 256 | MSA（m-pair）状态维度 |
+| `c_s` | 384 | 单序列状态维度 |
+| `c_e` | 64 | 额外 MSA 嵌入维度 |
+| `c_t` | 64 | 模板嵌入维度 |
+
+`FoldingTrunk` 在 48 个 Transformer 块中以 `sequence_state_dim: 1024` 和 `pairwise_state_dim: 128` 运行。`StructureHead` 通过学习的 `esm_s_combine` softmax 加权和 `esm_s_mlp` 投影（2560 → 1024）组合 ESM2 嵌入（来自 37 层的 2560 维），在进入主干网络之前，将序列表示与成对距离嵌入和高斯傅里叶时间投影相融合。
+
+来源: [config.py](peptron/model/config.py#L264-L277), [config.py](peptron/model/config.py#L599-L629), [model.py](peptron/model/model.py#L181-L209)
+
+## 检查点加载与配置类
+
+PepTron 支持两种用于检查点加载的配置类，通过 `config.inference.config_class` 字段指定：
+
+| 配置类 | 模块 | 用例 |
+|-------------|--------|----------|
+| `ESMFoldSeqConfig` | `peptron.model.model` | **完整 PepTron 模型**——加载 ESM2 编码器 + StructureHead + 流匹配 |
+| `ESM2Config` | `esm2.model.model` | 仅 ESM2——仅加载序列编码器用于提取嵌入 |
+
+默认为 `ESMFoldSeqConfig`。加载检查点时，`get_esmfoldconfig()` 函数会构建完整的模型配置，通过 `initial_ckpt_path` 传递检查点路径，并设置 `pretrained_structure_head_path` 以便在需要时单独加载特定于结构的权重。编码器权重在加载后被冻结（`encoder_frozen: True`），而结构头默认保持可训练（`structure_frozen: False`）。
+
+<CgxTip>在推理期间，`initial_ckpt_skip_keys_with_these_prefixes` 参数默认设置为空列表，这意味着检查点中的所有键都会被加载。如果在从使用不同配置预设训练的检查点进行微调时遇到键不匹配的情况，你可以使用此参数跳过不兼容的键，而不是默默地失败。</CgxTip>
+
+来源: [infer.py](peptron/infer.py#L66-L69), [infer.py](peptron/infer.py#L174-L182), [config.py](peptron/model/config.py#L844-L846)
+
+## 下一步
+
+现在你已经了解了预训练模型的全貌，可以进一步探索这些组件的具体工作原理：
+
+- **[架构概述](4-architecture-overview)** —— 从序列到 3D 结构的端到端数据流
+- **[ESM2 序列编码器](8-esm2-sequence-encoder)** —— 冻结骨干网络与嵌入提取的内部机制
+- **[连续流匹配](5-continuous-flow-matching)** —— ODE 求解器如何从噪声生成结构
+- **[推理与集成生成](15-inference-and-ensemble-generation)** —— 分布式推理、采样策略及集成过滤
+- **[配置参考](16-configuration-reference)** —— 所有配置预设的完整参数参考
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/PeptoneLtd/PepTron/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+PepTron 是一个**基于流匹配的蛋白质结构预测系统**，它将冻结的 ESM2 序列编码器与可训练的结构头相结合，并由针对调和先验的连续流匹配机制所驱动。本页提供了顶层架构图——包括数据流、模块层次结构以及将它们绑定在一起的设计决策——将更深入的组件分析留给目录中的后续页面。
+
+## 系统架构概览
+
+完整的前向路径通过四个紧密耦合的阶段将氨基酸序列转换为 3D 原子坐标：**(1)** 通过 ESM2 进行序列编码，**(2)** 根据带噪坐标和流时间构建几何输入，**(3)** 经过 PairStack 细化后执行 FoldingTrunk 注意力计算，以及 **(4)** 通过结构模块解码为全原子位置。在训练期间，`FlowSteps` 控制器围绕此核心前向传递来编排噪声注入、自条件和指标记录。
+
+```mermaid
+graph TB
+    subgraph Input
+        AA["氨基酸序列<br/>(aatype, mask, residx)"]
+        T["流时间 t ∈ 0,1"]
+    end
+
+    subgraph ESM2["ESM2 编码器 (冻结)"]
+        ESM_FWD["ESM2Model.forward()<br/>36 层, 40 头"]
+        ESM_COMB["可学习的层组合<br/>softmax 加权和"]
+        ESM_MLP["esm_s_mlp:<br/>LayerNorm → Linear → ReLU → Linear"]
+    end
+
+    subgraph InputConstruction["几何输入构建"]
+        PB["伪 Beta 距离<br/>(带噪配对距离)"]
+        DGRAM["距离直方图分桶<br/>(39 个桶, 3.25–50.75 Å)"]
+        IP_EMB["InputPairEmbedding<br/>Linear: 39 → c_z=128"]
+        IPS["InputPairStack<br/>4 个块, 三角注意力 + 乘法更新"]
+        TPROJ["GaussianFourierProjection<br/>(时间 → 256 维)"]
+        T_EMB["TimeEmbedding<br/>Linear: 256 → c_z=128"]
+    end
+
+    subgraph Trunk["FoldingTrunk"]
+        RP["相对位置编码<br/>(32 个桶)"]
+        TSA["×48 TriangularSelfAttentionBlocks<br/>序列: 1024 维, 配对: 128 维"]
+        SM["StructureModule<br/>(IPA, 8 个块)"]
+    end
+
+    subgraph Heads["输出头"]
+        DISTO["Distogram 头"]
+        PTM["pTM 头"]
+        LDDT["plDDT 头"]
+        ATOM37["atom14 → atom37<br/>最终原子位置"]
+    end
+
+    AA --> ESM_FWD --> ESM_COMB --> ESM_MLP
+    PB --> DGRAM --> IP_EMB --> IPS
+    T --> TPROJ --> T_EMB
+    IPS --> PAIR_SUM["配对状态 s_z_0"]
+    T_EMB --> PAIR_SUM
+    ESM_MLP --> SEQ_STATE["序列状态 s_s_0"]
+    AA --> SEQ_STATE
+
+    SEQ_STATE --> RP
+    PAIR_SUM --> RP
+    RP --> TSA --> SM
+    SM --> DISTO
+    SM --> PTM
+    SM --> LDDT
+    SM --> ATOM37
+```
+
+来源: [model.py](peptron/model/model.py#L56-L149), [model.py](peptron/model/model.py#L152-L250), [model.py](peptron/model/model.py#L313-L500)
+
+## 两级模型层次结构
+
+PepTron 的模型被组织为**两个 `nn.Module` 类的组合**，它们将语言模型主干与结构预测头干净地分离，从而实现独立的冻结和 Megatron 流水线并行分阶段部署。
+
+| 类 | 角色 | 可训练？ | 关键子模块 |
+|---|---|---|---|
+| `ESMFoldSeqModel` | 封装 ESM2 编码器；管理流水线并行拆分 | 编码器通过 `encoder_frozen` 标志冻结 | `ESM2Model` (父类), `StructureHead` |
+| `StructureHead` | 从 ESM 嵌入到 3D 坐标的完整结构预测流水线 | 通过 `structure_frozen` 标志选择性冻结 | `esm_s_mlp`, `embedding`, `input_pair_embedding`, `input_pair_stack`, `input_time_projection`, `trunk` (FoldingTrunk), `distogram_head`, `ptm_head`, `lddt_head` |
+
+在编码器产生隐藏状态后，`ESMFoldSeqModel.forward()` 完全委托给 `StructureHead`。编码器的多层隐藏状态被提取为 `[B, L, Layers, C]`，通过跨层的可学习 softmax 加权和进行组合，然后通过 MLP 投影。**BOS/EOS 标记处理**是不对称的：前置一个 BOS 标记，用 EOS 替换第一个填充位置，然后在最终表示中将两者都去除。
+
+来源: [model.py](peptron/model/model.py#L56-L149), [model.py](peptron/model/model.py#L100-L143)
+
+## StructureHead 前向传递 — 数据流细节
+
+`StructureHead.forward()` 方法实现了核心计算图。以下是精确的操作序列，并附有张量形状的注释（其中 `B` = 批次大小，`L` = 序列长度）：
+
+**阶段 1 — 序列表示。** ESM2 隐藏状态在层间进行 softmax 组合并投影：`esm_s` → `esm_s_mlp` → 形状为 `[B, L, c_s]` 的 `s_s_0`。添加氨基酸嵌入：`s_s_0 += embedding(aa)`。
+
+**阶段 2 — 来自带噪几何的配对表示。** 如果批次中存在 `noised_pseudo_beta_dists`（流匹配模式），则将配对距离分桶到距离直方图中（39 个桶，跨度为 3.25–50.75 Å），通过 `input_pair_embedding` 进行嵌入，并通过 `InputPairStack`（4 个三角注意力 + 乘法更新块）进行细化。流时间 `t` 通过 `GaussianFourierProjection` → `Linear` 路径进行投影，并**广播加**到每个配对位置：`inp_z += time_emb[:, None, None]`。
+
+**阶段 3 — 额外输入路径（可选）。** 当启用 `flow_matching.extra_input` 时，**第二条并行路径**通过 `extra_input_pair_embedding` + `extra_input_pair_stack` 处理真实值或辅助原子位置，并将结果加到配对状态：`inp_z += extra_inp_z`。这为模型在训练期间提供了结构性辅助信息。
+
+**阶段 4 — 自条件化 / 循环。** 如果提供了 `prev_outputs`（来自先前的正向传递），则先前的序列状态、配对状态和距离直方图将被 LayerNorm 处理并作为残差连接添加。这实现了自条件化机制，从而支持迭代细化。
+
+**阶段 5 — FoldingTrunk。** 序列和配对状态进入主干，应用相对位置编码、48 次 `TriangularSelfAttentionBlock` 迭代，最后通过 `StructureModule`（基于 IPA，8 个块）产生原子位置。
+
+**阶段 6 — 输出头。** 主干输出馈入距离直方图、pTM、plDDT 和语言模型头。最终原子位置从 atom14 转换为 atom37 表示。
+
+来源: [model.py](peptron/model/model.py#L313-L500), [input_stack.py](peptron/model/input_stack.py#L184-L303)
+
+## 流匹配控制器 — FlowSteps
+
+`FlowSteps` 类（存在两个变体：`flow.py` 和 `flowmoco.py`）是**编排层**，在训练和推理期间，它使用特定于流匹配的逻辑来封装模型的前向传递。
+
+### 训练前向步骤 (`peptron_forward_step`)
+
+`peptron_forward_step` 函数实现了一个具有三个随机门的概率训练机制，这些门由配置概率控制：
+
+| 门 | 概率 | 动作 |
+|---|---|---|
+| **噪声注入** | `noise_prob` (默认 0.5) | 调用 `_add_noise(batch)` 以采样调和先验、插值，并将带噪距离 + 时间 `t` 注入批次 |
+| **额外输入移除** | `1 - extra_input_prob` | 从批次中移除 `extra_all_atom_positions`，强制模型在没有结构辅助信息的情况下进行预测 |
+| **自条件化** | `self_cond_prob` (默认 0.5) | 运行一次 `torch.no_grad()` 前向传递以获取 `prev_outputs`，并将其馈送到主前向传递 |
+
+如果跳过了噪声注入（`noise_prob` 门失败），模型接收 `t=1`（纯数据信号），从而也有效地在确定性结构预测上进行训练。
+
+### 噪声注入 (`_add_noise`)
+
+核心训练噪声过程：(1) 从 `HarmonicPrior` 采样，(2) 将噪声与数据进行 RMSD 对齐，(3) 采样均匀时间 `t`，(4) 线性插值 `noisy_beta = (1-t) * x1 + t * noisy`，(5) 计算配对距离并注入批次。
+
+来源: [flow.py](peptron/model/flow.py#L42-L133), [flow.py](peptron/model/flow.py#L268-L336), [flowmoco.py](peptron/model/flowmoco.py#L43-L118)
+
+## 调和先验
+
+`HarmonicPrior` 类实现了**主链坐标上的高斯分布**，其协方差是离散拉普拉斯（调和）矩阵 `J` 的伪逆。该矩阵编码了最近邻弹簧连接，刚度为 `a = 3/(3.8²)`，其中 3.8 Å 是特征的 Cα–Cα 键长。特征分解 `J = P D Pᵀ` 被预计算，采样按 `P · (D⁻ᐟ² · z)` 进行，其中 `z ~ N(0, I)`。该先验产生**物理上逼真的主链样构象**，作为流匹配的起点。
+
+来源: [flow.py](peptron/model/flow.py#L42-L69)
+
+## 推理 — 线性插值调度
+
+在推理期间，`FlowSteps.linear_interpolation()` 实现了学习流的**欧拉式 ODE 积分**：
+
+1. 从 `HarmonicPrior` 采样以获得初始带噪坐标
+2. 按离散调度步进（默认：`[1.0, 0.75, 0.5, 0.25, 0.1, 0]`）
+3. 在每一步：前向传播模型，提取预测的伪 beta，将噪声与预测进行 RMSD 对齐，通过线性插值或 MoCo 的 `cfm.step()` 更新噪声状态，重新计算下一步的距离和时间
+4. 可选地馈送 `prev_outputs` 以实现跨步的自条件化
+
+`flowmoco.py` 变体委托给 BioNeMo 的 `ContinuousFlowMatcher.step()` 进行更新，而 `flow.py` 使用直接线性公式：`noisy = (s/t) * noisy + (1 - s/t) * pseudo_beta`。
+
+来源: [flow.py](peptron/model/flow.py#L206-L265), [flowmoco.py](peptron/model/flowmoco.py#L265-L336)
+
+## 双流实现 — flow.py vs flowmoco.py
+
+PepTron 提供了**两个可互换的流匹配后端**，它们共享相同的 `FlowSteps` 接口，但底层框架依赖不同：
+
+| 方面 | `flow.py` | `flowmoco.py` |
+|---|---|---|
+| **先验** | 自定义 `HarmonicPrior` (手动特征分解) | BioNeMo `LinearHarmonicPrior` |
+| **插值** | 直接: `(1-t)*x1 + t*noisy` | BioNeMo `ContinuousFlowMatcher.interpolate()` |
+| **推理步** | 手动: `(s/t)*noisy + (1-s/t)*pred` | BioNeMo `ContinuousFlowMatcher.step()` |
+| **时间约定** | `t=0` 是数据, `t=1` 是噪声 | MoCo 约定翻转: `t_moco = 1 - t` |
+| **依赖** | 自包含 (仅 numpy, torch) | 需要 `bionemo.moco` |
+| **推理附加项** | — | 用于熵调度的 `predictor_fn()`, `x_0_sampler_fn()`, `x_1_sampler_fn()` |
+
+`flowmoco.py` 变体还暴露了 `predictor_fn()`，它将模型前向传递封装为可调用对象，以便与 BioNeMo 的 ODE 采样器和熵时间调度器集成。
+
+来源: [flow.py](peptron/model/flow.py#L1-L336), [flowmoco.py](peptron/model/flowmoco.py#L1-L410)
+
+## 分布式训练基础设施
+
+PepTron 利用 **NVIDIA NeMo2 + Megatron** 进行分布式训练，通过 `peptron/train.py` 编排。关键集成点：
+
+- **策略**: `MegatronStrategy`，具有可配置的张量和流水线模型并行
+- **精度**: `MegatronMixedPrecision`，默认为 bf16-mixed
+- **优化器**: 分布式 Adam 配合 `WarmupAnnealDecayHoldScheduler` (预热 → 退火 → 保持 min_lr)
+- **前向步骤绑定**: `flow.init_flow_steps()` 创建单例 `FlowSteps`，然后 `flow.peptron_forward_step` 通过 `biobert_lightning_module(forward_step=...)` 注册为自定义前向步骤
+- **数据步骤**: `structure_data_step` 处理结构预测的自定义批次整理
+
+`ESMFoldSeqModel` 继承自 `ESM2Model` (BioNeMo)，实现了无缝的流水线并行拆分，其中编码器占据早期阶段，结构头占据最后阶段。
+
+来源: [train.py](peptron/train.py#L65-L189)
+
+## 配置架构
+
+`config.py` 中的配置系统使用 `ml_collections.ConfigDict` 和 `FieldReference` 对象来处理共享的维度参数。架构通过 `get_config(name)` 暴露**命名预设**，这些预设将特定于预设的覆盖层叠在综合基础配置之上：
+
+| 预设 | 用途 | 关键覆盖 |
+|---|---|---|
+| `peptron_o_mixed` | 混合 PDB + IDRome 训练 | `crop_size=512`, `noise_prob=0.5`, `self_cond_prob=0.5`, `extra_input_prob=0.5` |
+| `peptron_o_pdb_idrome` | 具有重度噪声的 PDB+IDRome | `noise_prob=0.9`, `self_cond_prob=0.0` |
+| `peptron_o_inference` | 推理模式 | 禁用模板，无循环 |
+| `idp_finetuning_no_templ` | IDP 微调 | 调整损失权重 (距离直方图 0.2, FAPE 主链 0.6, pLDDT 0.02)，0 次循环迭代 |
+
+基础配置定义了完整的模型几何结构：ESM2 具有 36 层 / 40 头 / 2560 特征，FoldingTrunk 具有 48 块 / 1024 序列状态维度 / 128 配对状态维度，InputPairStack 具有 4 块。
+
+来源: [config.py](peptron/model/config.py#L67-L261), [config.py](peptron/model/config.py#L264-L697)
+
+## 项目目录结构
+
+```
+PeptoneLtd/PepTron/
+├── peptron/                          # 核心包
+│   ├── model/
+│   │   ├── config.py                 # 带有命名预设的 ConfigDict
+│   │   ├── model.py                  # ESMFoldSeqModel + StructureHead
+│   │   ├── flow.py                   # 流匹配 (独立后端)
+│   │   ├── flowmoco.py               # 流匹配 (BioNeMo MoCo 后端)
+│   │   ├── trunk.py                  # FoldingTrunk (TriSelfAttn → StructureModule)
+│   │   ├── tri_self_attn_block.py    # TriangularSelfAttentionBlock
+│   │   ├── input_stack.py            # InputPairStack (配对细化)
+│   │   ├── layers.py                 # GaussianFourierProjection
+│   │   └── loss.py                   # FAPE, 距离直方图, pLDDT, 违反损失
+│   ├── data/
+│   │   ├── data.py                   # 数据集类 (OpenFold, CSV)
+│   │   ├── data_pipeline.py          # 从 mmCIF/PDB 构建特征
+│   │   ├── datamodule.py             # Lightning DataModule
+│   │   ├── feature_pipeline.py       # 特征变换
+│   │   └── protein.py                # 蛋白质 ↔ 输出转换
+│   ├── train.py                      # 训练入口 (NeMo2 + Megatron)
+│   ├── infer.py                      # 推理入口
+│   └── utils/                        # 回调, 张量工具, 日志
+├── esm2/                             # ESM2 模型 (BioNeMo 封装)
+│   ├── api.py                        # 公共配置 + 模型类
+│   ├── model/                        # ESM2Model, 注意力, 嵌入
+│   ├── data/                         # 分词器, 数据集, 数据模块
+│   └── scripts/                      # 训练/推理脚本
+├── dataprep/                         # 数据准备实用程序
+│   ├── make_msas.sh                  # MSA 生成流水线
+│   ├── preprocess.py                 # 特征预处理
+│   ├── prep_idrome.py                # IDRome 数据集准备
+│   └── ...
+└── splits/                           # 训练/验证拆分 CSV
+    ├── IDRome_DB-train.csv
+    ├── IDRome_DB-val.csv
+    └── cameo2022.csv
+```
+
+<CgxTip>PepTron 的架构最好被理解为**用流匹配生成过程替代 AlphaFold2 的 MSA+模板输入路径**：模型不是以进化耦合和结构同源物为条件，而是以带噪的配对距离和流时间为条件，学习从调和先验去噪到天然结构。这就是为什么在所有 PepTron 预设中 `max_recycling_iters=0` 和 `template.enabled=False` 的原因——迭代细化通过流步骤发生，而不是循环。</CgxTip>
+
+<CgxTip>**自条件化机制** (`self_cond_prob`) 是流匹配中 AlphaFold 循环的类似物：以概率 `self_cond_prob`，一次 `torch.no_grad()` 前向传递产生 `prev_outputs`，其序列状态、配对状态和距离直方图作为残差输入馈送到主前向传递。这在*单个训练步骤内*创建了一个迭代细化循环，有别于多步推理调度。</CgxTip>
+
+## 建议阅读顺序
+
+现在你已了解了架构图，请按照目录中的逻辑依赖链继续阅读：
+
+1. **[连续流匹配](5-continuous-flow-matching)** — 数学基础和训练目标
+2. **[调和先验采样](6-harmonic-prior-sampling)** — 先验的构造方式及其重要性
+3. **[自条件化与推理调度](7-self-conditioning-and-inference-schedule)** — 迭代细化机制
+4. **[ESM2 序列编码器](8-esm2-sequence-encoder)** — 冻结的编码器和隐藏状态提取
+5. **[结构头与 FoldingTrunk](9-structure-head-and-foldingtrunk)** — 核心预测流水线
+6. **[数据流水线与特征处理](11-data-pipeline-and-feature-processing)** — 原始 PDB/IDRome 数据如何转化为模型输入
+
+---
+
+- [深入解析/配置参考](https://zread.ai/PeptoneLtd/PepTron/16-configuration-reference)
+
+---
+slug:16-configuration-reference
+blog_type:normal
+---
+
+
+PepTron 的配置系统基于 `ml_collections.ConfigDict` 构建——这是一种分层的、默认不可变的字典，强制类型一致性，并支持用于全局参数绑定的字段引用。主配置在 [`peptron/model/config.py`](peptron/model/config.py#L284-L849) 中被定义为单一的整体字典，划分为七个顶级域：**`data`**、**`globals`**、**`model`**、**`relax`**、**`loss`**、**`ema`** 和 **`training`**/**`inference`**。通过 `get_config(name)` 选择的命名预设，在此基础配置上叠加了针对性的修改，将 AlphaFold 2 补充材料中记录的训练机制和推理配置，以及 PepTron 自身的流匹配特定机制进行了编码。本参考文档列出了每个参数、其默认值、其语义角色以及约束它们的规则。
+
+来源: [config.py](peptron/model/config.py#L1-L261), [config.py](peptron/model/config.py#L264-L849)
+
+## 配置架构
+
+配置生命周期遵循三阶段流水线：**基础定义 → 预设覆盖 → 运行时强制执行**。基础 `config` 字典设定默认值。命名预设（例如 `peptron_o_mixed`）选择性地覆盖字段。最后，在配置被使用前，`enforce_config_constraints` 会验证互斥性和依赖规则。
+
+```mermaid
+flowchart TD
+    A["Base ConfigDict<br/>(config.py L284-849)"] --> B["get_config(name)<br/>Preset Overlay"]
+    B --> C{"Mode Branch"}
+    C -->|"train"| D["Force train defaults<br/>blocks_per_ckpt=1, use_lma=False"]
+    C -->|"predict"| E["Long-seq inference<br/>overrides (if enabled)"]
+    C -->|"low_prec"| F["Set eps=1e-4, inf=1e4"]
+    D --> G["enforce_config_constraints()"]
+    E --> G
+    F --> G
+    G --> H["Validated Config"]
+```
+
+<CgxTip>`ml_collections.FieldReference` 机制意味着在其定义位置 (L264) 修改 `c_z` 会传播到**所有**消费者——`input_embedder.c_z`、`evoformer_stack.c_z`、`structure_module.c_z`、`heads.distogram.c_z` 等。若要覆盖字段引用，需在构建字典*之前*重新赋值共享引用，或在构建之后覆盖各个消费者字段。</CgxTip>
+
+来源: [config.py](peptron/model/config.py#L19-L25), [config.py](peptron/model/config.py#L67-L261), [config.py](peptron/model/config.py#L264-L278)
+
+## 全局字段引用
+
+几个架构通道维度被定义为 `FieldReference` 对象，实现了单点控制，可传播至每个使用该值的子模块。下表记录了每个引用、其默认值及其主要消费者。
+
+| 字段引用 | 默认值 | 主要消费者 |
+|---|---|---|
+| `c_z` | 128 | `input_embedder`, `evoformer_stack`, `structure_module`, `heads.distogram`, `heads.tm`, `input_pair_stack`, `extra_msa.extra_msa_stack` |
+| `c_m` | 256 | `input_embedder`, `evoformer_stack`, `recycling_embedder`, `heads.masked_msa` |
+| `c_t` | 64 | `template.template_pair_embedder`, `template.template_pair_stack`, `template.template_pointwise_attention` |
+| `c_e` | 64 | `extra_msa.extra_msa_embedder`, `extra_msa.extra_msa_stack` |
+| `c_s` | 384 | `evoformer_stack`, `structure_module`, `heads.lddt`, `heads.experimentally_resolved` |
+| `blocks_per_ckpt` | None | `evoformer_stack`, `template.template_pair_stack` |
+| `chunk_size` | 4 | 全局注意力分块 |
+| `aux_distogram_bins` | 64 | `heads.distogram.no_bins`, `heads.tm.no_bins` |
+| `tm_enabled` | False | `heads.tm.enabled`, `loss.tm.enabled` |
+| `templates_enabled` | True | `data.common.use_templates`, `model.template.enabled` |
+| `eps` | 1e-8 | 所有损失和模型模块的数值稳定性 |
+| `tune_chunk_size` | True | `evoformer_stack`, `extra_msa.extra_msa_stack`, `template.template_pair_stack` |
+
+来源: [config.py](peptron/model/config.py#L264-L277)
+
+## 数据配置
+
+`data` 部分控制三种操作模式（`common`（共享）、`predict`、`eval` 和 `train`）的特征模式、MSA 处理、模板处理以及数据集加载。
+
+### 通用数据设置
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `max_recycling_iters` | 3 | 循环迭代次数；PepTron 预设设为 **0** |
+| `msa_cluster_features` | True | 使用 MSA 聚类特征 |
+| `reduce_msa_clusters_by_max_templates` | False | 根据最大模板数减少 MSA 聚类 |
+| `resample_msa_in_recycling` | True | 在循环期间重采样 MSA |
+| `use_templates` | True (ref) | 启用模板特征；PepTron 预设禁用 |
+| `use_template_torsion_angles` | True (ref) | 嵌入模板扭转角 |
+| `masked_msa.profile_prob` | 0.1 | 基于轮廓的 MSA 掩码概率 |
+| `masked_msa.same_prob` | 0.1 | 相同 token 的 MSA 掩码概率 |
+| `masked_msa.uniform_prob` | 0.1 | 均匀 MSA 掩码概率 |
+
+### 特定模式的数据设置
+
+| 参数 | `predict` | `eval` | `train` |
+|---|---|---|---|
+| `fixed_size` | True | True | True |
+| `subsample_templates` | False | False | True |
+| `masked_msa_replace_fraction` | 0.15 | 0.15 | 0.15 |
+| `max_msa_clusters` | 512 | 128 | 128 |
+| `max_extra_msa` | 1024 | 1024 | 1024 |
+| `max_template_hits` | 4 | 4 | 4 |
+| `max_templates` | 4 | 4 | 4 |
+| `crop` | False | True | True |
+| `crop_size` | None | 512 | 256 |
+| `supervised` | False | True | True |
+| `uniform_recycling` | False | False | True |
+| `shuffle_top_k_prefiltered` | — | — | 20 |
+| `clamp_prob` | — | — | 0.9 |
+| `max_distillation_msa_clusters` | — | — | 1000 |
+| `distillation_prob` | — | — | 0.75 |
+
+### 数据模块
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `use_small_bfd` | False | 使用精简的 BFD 数据库 |
+| `data_loaders.batch_size` | 1 | 每个加载器的批大小 |
+| `data_loaders.num_workers` | 16 | DataLoader 工作线程数 |
+| `data_loaders.pin_memory` | True | 锁页内存以加速 GPU 传输 |
+
+来源: [config.py](peptron/model/config.py#L286-L444)
+
+## 模型配置
+
+`model` 部分是最大的配置域，控制 ESM2 编码器、模板处理、额外 MSA 堆栈、Evoformer、主干网络、结构模块、预测头以及流匹配。
+
+### ESM2 编码器
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `esm2.feats` | 2560 | ESM2 嵌入维度 (3B 模型) |
+| `esm2.num_layers` | 36 | Transformer 层数 |
+| `esm2.attention_heads` | 40 | 注意力头数 |
+| `esm_type` | `"esm2_3B"` | ESM 模型变体标识符 |
+| `fp16_esm` | True | ESM 推理使用 FP16 |
+| `use_esm_attn_map` | False | 从 ESM 中提取注意力图 |
+| `esm_ablate_pairwise` | False | 消融成对组件 |
+| `esm_ablate_sequence` | False | 消融序列组件 |
+| `esm_input_dropout` | 0 | ESM 输入的 Dropout |
+| `embed_aa` | True | 嵌入氨基酸类型 |
+| `bypass_lm` | False | 完全绕过语言模型 |
+| `lddt_head_hid_dim` | 128 | pLDDT 头的隐藏维度 |
+
+### 输入嵌入器
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `input_embedder.tf_dim` | 22 | 目标特征维度 |
+| `input_embedder.msa_dim` | 49 | MSA 特征维度 |
+| `input_embedder.relpos_k` | 32 | 相对位置编码窗口 |
+| `input_pair_embedder.min_bin` | 3.25 | 最小距离分箱 (Å) |
+| `input_pair_embedder.max_bin` | 50.75 | 最大距离分箱 (Å) |
+| `input_pair_embedder.no_bins` | 39 | 距离分箱数 |
+| `input_pair_embedder.time_emb_dim` | 256 | 流匹配的时间嵌入维度 |
+| `recycling_embedder.min_bin` | 3.25 | 循环距离分箱最小值 |
+| `recycling_embedder.max_bin` | 20.75 | 循环距离分箱最大值 |
+| `recycling_embedder.no_bins` | 15 | 循环距离分箱数 |
+
+### Evoformer 堆栈
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `c_m` | 256 (ref) | MSA 对维度 |
+| `c_z` | 128 (ref) | 对表示维度 |
+| `c_hidden_msa_att` | 32 | MSA 注意力的隐藏维度 |
+| `c_hidden_opm` | 32 | 外积均值的隐藏维度 |
+| `c_hidden_mul` | 128 | 乘法更新的隐藏维度 |
+| `c_hidden_pair_att` | 32 | 对注意力的隐藏维度 |
+| `no_heads_msa` | 8 | MSA 注意力头数 |
+| `no_heads_pair` | 4 | 对注意力头数 |
+| `no_blocks` | 48 | Evoformer 块数 |
+| `transition_n` | 4 | 过渡层数 |
+| `msa_dropout` | 0.15 | MSA Dropout 率 |
+| `pair_dropout` | 0.25 | 对 Dropout 率 |
+
+### FoldingTrunk (兼容 ESMFold)
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `trunk.num_blocks` | 48 | 主干块数 |
+| `trunk.sequence_state_dim` | 1024 | 单一表示维度 |
+| `trunk.pairwise_state_dim` | 128 | 对表示维度 |
+| `trunk.sequence_head_width` | 32 | 序列注意力头宽度 |
+| `trunk.pairwise_head_width` | 32 | 成对注意力头宽度 |
+| `trunk.position_bins` | 32 | 位置编码分箱 |
+| `trunk.dropout` | 0 | 主干 Dropout 率 |
+| `trunk.layer_drop` | 0 | 层 Drop 率 |
+| `trunk.cpu_grad_checkpoint` | False | CPU 梯度检查点 |
+| `trunk.chunk_size` | None | 主干注意力分块大小 |
+
+### 结构模块
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `c_s` | 384 (ref) | 单一表示维度 |
+| `c_z` | 128 (ref) | 对表示维度 |
+| `c_ipa` | 16 | IPA 隐藏维度 |
+| `c_resnet` | 128 | ResNet 隐藏维度 |
+| `no_heads_ipa` | 12 | IPA 注意力头数 |
+| `no_qk_points` | 4 | 查询/键点数 |
+| `no_v_points` | 8 | 值点数 |
+| `no_blocks` | 8 | 结构模块块数 |
+| `no_transition_layers` | 1 | 每个块的过渡层数 |
+| `no_resnet_blocks` | 2 | 每次迭代的 ResNet 块数 |
+| `no_angles` | 7 | 扭转角数 |
+| `trans_scale_factor` | 10 | 平移缩放因子 |
+| `dropout_rate` | 0.1 | 结构模块 Dropout |
+
+### 模板配置
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `template.enabled` | True (ref) | 启用模板特征 |
+| `template.embed_angles` | True (ref) | 嵌入模板扭转角 |
+| `template.use_unit_vector` | False | 使用单位向量表示 |
+| `template.average_templates` | False | 近似模板计算（节省内存） |
+| `template.offload_templates` | False | 将模板卸载到 CPU（用于长序列） |
+| `template.template_pair_stack.no_blocks` | 2 | 模板对堆栈块数 |
+| `template.template_pair_stack.no_heads` | 4 | 模板对堆栈头数 |
+| `template.template_pair_stack.dropout_rate` | 0.25 | 模板对堆栈 Dropout |
+| `template.template_pointwise_attention.no_heads` | 4 | 模板逐点注意力头数 |
+
+### 预测头
+
+| 头 | 关键参数 | 默认值 |
+|---|---|---|
+| **lddt** | `no_bins=50`, `c_hidden=128` | pLDDT 置信度预测 |
+| **distogram** | `c_z=128(ref)`, `no_bins=64(ref)` | 距离分布 |
+| **tm** | `c_z=128(ref)`, `no_bins=64(ref)`, `enabled=False(ref)` | TM 分数预测 |
+| **masked_msa** | `c_m=256(ref)`, `c_out=23` | 掩码 MSA 预测 |
+| **experimentally_resolved** | `c_s=384(ref)`, `c_out=37` | 实验解析度预测 |
+
+### 流匹配
+
+`model.flow_matching` 子字典控制 PepTron 用于结构生成的连续流匹配引擎。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `noise_prob` | 0.5 | 训练期间用噪声替换输入的概率 |
+| `extra_input` | False | 启用到结构头的额外输入通道 |
+| `extra_input_prob` | 0.5 | 启用时提供额外输入的概率 |
+| `self_cond_prob` | 0.5 | 训练期间应用自条件的概率 |
+
+这三个概率控制训练时的随机增强策略：`noise_prob` 控制模型看到全噪声输入的频率（相对于部分加噪的插值），`self_cond_prob` 控制自条件注入，而 `extra_input_prob` 控制辅助输入路径。不同的预设会联合调整这些概率——参见下方的[预设目录](#preset-catalogue)。
+
+来源: [config.py](peptron/model/config.py#L466-L697)
+
+## 全局配置
+
+`globals` 部分控制内存-性能权衡和共享的数值参数。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `blocks_per_ckpt` | None (ref) | 梯度检查点粒度；在训练模式下设为 1 |
+| `chunk_size` | 4 (ref) | 用于减少内存的注意力分块大小 |
+| `use_lma` | False | 低内存注意力 (Staats & Rabe)；**与 `use_flash` 互斥** |
+| `use_flash` | False | FlashAttention；**与 `use_lma` 互斥** |
+| `use_cuequivariance_attention` | False | 使用 cuEquivariance 进行注意力计算；需要 `cuequivariance-torch` |
+| `use_cuequivariance_multiplicative_update` | False | 使用 cuEquivariance 进行乘法更新；需要 `cuequivariance-torch` |
+| `offload_inference` | False | 推理期间将中间张量卸载到 CPU |
+| `c_z` | 128 (ref) | 全局对通道维度 |
+| `c_m` | 256 (ref) | 全局 MSA 通道维度 |
+| `c_t` | 64 (ref) | 全局模板通道维度 |
+| `c_e` | 64 (ref) | 全局额外 MSA 通道维度 |
+| `c_s` | 384 (ref) | 全局单一表示维度 |
+| `eps` | 1e-8 (ref) | 全局数值稳定性 epsilon |
+
+<CgxTip>当启用 `long_sequence_inference` 时，系统会自动强制设置 `use_lma=True`、`use_flash=False`、`offload_inference=True`，并禁用所有堆栈的分块大小调整——这是针对超过 ~1000 个残基的序列的内存优化配置。</CgxTip>
+
+来源: [config.py](peptron/model/config.py#L447-L465), [config.py](peptron/model/config.py#L235-L257)
+
+## 损失配置
+
+每个损失项都有一个独立的 `weight` 参数和特定于任务的配置。总训练损失是所有启用项的加权和。
+
+| 损失项 | 权重 | 关键参数 |
+|---|---|---|
+| **distogram** | 0.3 | `min_bin=2.3125`, `max_bin=21.6875`, `no_bins=64` |
+| **fape** (总计) | 1.0 | 参见骨架/侧链子权重 |
+| &nbsp;&nbsp;fape.backbone | 0.5 | `clamp_distance=10.0`, `loss_unit_distance=10.0` |
+| &nbsp;&nbsp;fape.sidechain | 0.5 | `clamp_distance=10.0`, `length_scale=10.0` |
+| **plddt_loss** | 0.01 | `cutoff=15.0`, `no_bins=50`, `min_resolution=0.1`, `max_resolution=3.0` |
+| **masked_msa** | 2.0 | 掩码 MSA token 上的交叉熵 |
+| **supervised_chi** | 1.0 | `chi_weight=0.5`, `angle_norm_weight=0.01` |
+| **violation** | 0.0 | `violation_tolerance_factor=12.0`, `clash_overlap_tolerance=1.5` |
+| **experimentally_resolved** | 0.0 | `min_resolution=0.1`, `max_resolution=3.0` |
+| **tm** | 0.0 | `max_bin=31`, `no_bins=64`; 仅当 `tm_enabled=True` 时启用 |
+
+`idp_finetuning_no_templ` 预设为内在无序蛋白训练重新加权了这些损失：`distogram=0.2`、`fape.backbone=0.6`、`fape.sidechain=0.4`、`plddt=0.02`、`masked_msa=1.0`、`supervised_chi=0.50`。
+
+来源: [config.py](peptron/model/config.py#L705-L768)
+
+## 弛豫配置
+
+推理后应用的 AMBER 弛豫设置（默认禁用，`max_iterations=0`）。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `max_iterations` | 0 | 最大弛豫迭代次数 (0 = 禁用) |
+| `tolerance` | 2.39 | 收敛容差 |
+| `stiffness` | 10.0 | 约束刚度 |
+| `max_outer_iterations` | 20 | 外循环迭代次数 |
+| `exclude_residues` | [] | 从弛豫中排除的残基索引 |
+
+来源: [config.py](peptron/model/config.py#L698-L704)
+
+## 训练配置
+
+`training` 部分控制训练循环、分布式并行、数据路径以及数据集混合比例。
+
+### 优化器与调度
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `n_steps_train` | 2500 | 总训练步数 |
+| `warmup_steps_percentage` | 0.10 | 学习率预热步数占比 |
+| `steps_to_save_ckpt` | 100 | 检查点保存间隔（步数） |
+| `val_check_interval` | 100 | 验证间隔（步数） |
+| `limit_val_batches` | 3 | 验证批次数 |
+| `precision` | `"bf16-mixed"` | 训练精度 |
+
+优化器在 [`train.py`](peptron/train.py#L158-L176) 中以编程方式配置为 Adam，参数为 `lr=1e-4`、`weight_decay=0.01`、`β₁=0.9`、`β₂=0.95`，以及一个 `WarmupAnnealDecayHoldScheduler`，其 `max_lr=1e-4`、`min_lr=1e-6`、`anneal_percentage=0.15`。
+
+### 分布式并行
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `micro_batch_size` | 8 | 每设备的微批次大小 |
+| `num_nodes` | 1 | 计算节点数 |
+| `devices` | 8 | 每节点 GPU 数 |
+| `tensor_model_parallel_size` | 1 | 张量模型并行度 |
+| `pipeline_model_parallel_size` | 1 | 流水线模型并行度 |
+| `accumulate_grad_batches` | 1 | 梯度累积步数 |
+
+### 数据路径与混合
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `train_data_dir_pdb` | (path) | PDB 训练数据目录 |
+| `val_data_dir_pdb` | (path) | PDB 验证数据目录 |
+| `train_data_dir_idp` | (path) | IDRome 训练数据目录 |
+| `val_data_dir_idp` | (path) | IDRome 验证数据目录 |
+| `train_msa_dir_pdb` | (path) | PDB 训练 MSA 目录 |
+| `val_msa_dir_pdb` | (path) | PDB 验证 MSA 目录 |
+| `train_msa_dir_idp` | (path) | IDRome 训练 MSA 目录 |
+| `dataset_prob_pdb` | 0.3 | 混合数据集中的 PDB 采样概率 |
+| `dataset_prob_idp` | 0.7 | 混合数据集中的 IDRome 采样概率 |
+| `train_chains_pdb` | (path) | PDB 训练链 CSV |
+| `valid_chains_pdb` | (path) | PDB 验证链 CSV (CAMEO2022) |
+| `train_chains_idp` | (path) | IDRome 训练链 CSV |
+| `filter_chains` | True | 对 PDB 链应用时间过滤 |
+| `train_cutoff` | `"2020-05-01"` | PDB 训练数据的时间截止点 |
+| `train_clusters` | (path) | 用于过滤的 PDB 聚类文件 |
+
+### 采样与冻结
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `sample_train_confs_pdb` | False | 训练期间采样多个 PDB 构象 |
+| `sample_train_confs_idp` | True | 训练期间采样多个 IDRome 构象 |
+| `sample_val_confs_pdb` | False | 验证期间采样多个 PDB 构象 |
+| `first_as_template` | False | 使用第一个构象作为模板 |
+| `encoder_frozen` | True | 冻结 ESM2 编码器权重 |
+| `structure_frozen` | False | 冻结结构头权重 |
+| `pretrained_structure_head_path` | (path) | 预训练结构头检查点路径 |
+
+来源: [config.py](peptron/model/config.py#L770-L818), [train.py](peptron/train.py#L158-L176)
+
+## 推理配置
+
+`inference` 部分控制预测时的流匹配采样。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `chains_path` | `"/data/input"` | 包含链标识符的输入 CSV 路径 |
+| `checkpoint_path` | `""` | 模型检查点路径 |
+| `results_path` | `""` | 预测结果的输出目录 |
+| `msa_dir` | `""` | MSA 目录（可选） |
+| `as_protein` | False | 将输入视为原始蛋白序列 |
+| `no_diffusion` | False | 禁用流匹配采样（确定性前向传播） |
+| `self_cond` | False | 推理期间启用自条件 |
+| `noisy_first` | False | 对第一步施加噪声 |
+| `samples` | 100 | 生成的集成样本数 |
+| `tmax` | 1.0 | 最大积分时间；(0, 1) 内的值启用从 t=1→tmax→0 的部分去噪 |
+| `steps` | 10 | Euler 积分步数 |
+| `precision` | `"bf16-mixed"` | 推理精度 |
+| `num_gpus` | 1 | GPU 数量 |
+| `num_nodes` | 1 | 计算节点数 |
+| `micro_batch_size` | 2 | 每设备的微批次大小 |
+| `max_batch_size` | 10 | 分块采样的最大批次大小 |
+| `num_workers` | 16 | DataLoader 工作线程数 |
+| `tensor_model_parallel_size` | 1 | 张量并行度 |
+| `pipeline_model_parallel_size` | 1 | 流水线并行度 |
+| `prediction_interval` | `"epoch"` | 写入间隔：`"epoch"` 或 `"batch"` |
+| `config_class` | `"ESMFoldSeqConfig"` | 模型配置类：`"ESMFoldSeqConfig"` 或 `"ESM2Config"` |
+| `use_cuequivariance` | True | 启用 cuEquivariance 进行注意力和乘法更新 |
+| `pdb_id` | [] | 要预测的特定 PDB ID |
+| `runtime_json` | `""` | 运行时 JSON 配置的路径 |
+
+### 推理调度构建
+
+流匹配积分的时间调度在 [`infer.py`](peptron/infer.py#L190-L196) 中构建：当 `tmax=1.0` 时，调度为 `linspace(1, 0, steps+1)`；当 `0 < tmax < 1` 时，调度为 `[1.0] + linspace(tmax, 0, steps+1)`，实现两阶段去噪：首先从 t=1 确定性映射到 t=tmax，然后从 tmax 积分到 0。
+
+来源: [config.py](peptron/model/config.py#L822-L847), [infer.py](peptron/infer.py#L190-L207)
+
+## 预设目录
+
+`get_config(name)` 函数应用命名预设，这些预设编码了特定的训练和推理机制。下表记录了每个可用的预设及其相对于基础配置应用的关键覆盖。
+
+### 训练预设
+
+| 预设 | crop_size | noise_prob | self_cond_prob | extra_input_prob | templates | recycling | 备注 |
+|---|---|---|---|---|---|---|---|
+| `initial_training` | 256 | 0.5 | 0.5 | 0.5 | enabled | 3 | AF2 基线，无覆盖 |
+| `finetuning` | 384 | 0.5 | 0.5 | 0.5 | enabled | 3 | 增加 MSA 聚类数，violation 权重=1 |
+| `finetuning_ptm` | 384 | 0.5 | 0.5 | 0.5 | enabled | 3 | +TM 头，tm.weight=0.1 |
+| `finetuning_no_templ` | 384 | 0.5 | 0.5 | 0.5 | **disabled** | 3 | 无模板 |
+| `finetuning_no_templ_ptm` | 384 | 0.5 | 0.5 | 0.5 | **disabled** | 3 | 无模板 + TM 头 |
+| `idp_finetuning_no_templ` | 384 | 0.5 | 0.5 | 0.5 | **disabled** | **0** | IDP 调整的损失权重 |
+| `peptron_o_mixed` | **512** | 0.5 | 0.5 | 0.5 | **disabled** | **0** | 混合 PDB+IDRome 训练 |
+| `peptron_o_pdb_idrome` | **512** | **0.9** | **0.0** | 0.5 | **disabled** | **0** | 高噪声，无自条件 |
+| `peptron_o_pdb_idrome_violation` | **512** | **0.9** | **0.0** | 0.5 | **disabled** | **0** | +violation 权重=1 |
+
+### 推理预设
+
+| 预设 | 模板 | TM 头 | 额外 MSA | 备注 |
+|---|---|---|---|---|
+| `model_1` / `model_1_ptm` | enabled | ptm only | 5120 | 使用模板的模型 |
+| `model_2` / `model_2_ptm` | enabled | ptm only | default | 使用模板，无额外 MSA 覆盖 |
+| `model_3` / `model_3_ptm` | **disabled** | ptm only | 5120 | 无模板模型 |
+| `model_4` / `model_4_ptm` | **disabled** | ptm only | 5120 | 无模板模型 |
+| `model_5` / `model_5_ptm` | **disabled** | ptm only | default | 最小化无模板 |
+| `peptron_o_pdb` | **disabled** | — | — | 无模板，无循环 |
+| `peptron_o_idp` | **disabled** | — | — | noise_prob=0.9, self_cond_prob=0.0 |
+| `peptron_o_pdb_last_steps` | **disabled** | enabled | — | +violation, +TM, +exp_resolved |
+| `peptron_o_inference` | **disabled** | — | — | 默认推理预设 |
+
+来源: [config.py](peptron/model/config.py#L67-L233)
+
+## 配置约束与验证
+
+`enforce_config_constraints` 函数在配置时验证以下规则：
+
+| 约束 | 规则 | 错误 |
+|---|---|---|
+| 模板平均 vs. 卸载 | `average_templates` 和 `offload_templates` **互斥** | `ValueError` |
+| LMA vs. FlashAttention | `use_lma` 和 `use_flash` **互斥** | `ValueError` |
+| FlashAttention 可用性 | `use_flash=True` 需要安装 `flash_attn` 包 | `ValueError` |
+| cuEquivariance 可用性 | `use_cuequivariance_*` 需要安装 `cuequivariance_torch` | `ValueError` |
+| 推理卸载自动启用 | `offload_inference=True` 但没有 `average_templates=True` 会强制 `offload_templates=True` | 自动 |
+
+此外，特定模式的约束在 `get_config` 中被强制执行：
+
+- **训练模式**强制设置：`blocks_per_ckpt=1`、`chunk_size=None`、`use_lma=False`、`offload_inference=False`、`average_templates=False`、`offload_templates=False`
+- **长序列推理**强制设置：`offload_inference=True`、`use_lma=True`、`use_flash=False`，并禁用所有堆栈的分块大小调整
+- **低精度**模式设置：`eps=1e-4`、`inf=1e4`
+
+来源: [config.py](peptron/model/config.py#L27-L58), [config.py](peptron/model/config.py#L235-L258)
+
+## ESM2 预训练配置
+
+ESM2 编码器拥有其独立的基于 Pydantic 的配置系统，定义在 [`esm2/run/config_models.py`](esm2/run/config_models.py#L40-L229) 中，与主 `ConfigDict` 层级结构分离。
+
+### ESM2DataConfig
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `train_cluster_path` | (必填) | 训练聚类文件路径 |
+| `train_database_path` | (必填) | 训练数据库路径 |
+| `valid_cluster_path` | (必填) | 验证聚类文件路径 |
+| `valid_database_path` | (必填) | 验证数据库路径 |
+| `micro_batch_size` | 8 | 微批次大小 |
+| `result_dir` | `"./results"` | 结果目录 |
+| `min_seq_length` | 128 | 最小序列长度 |
+| `max_seq_length` | 128 | 最大序列长度 |
+| `random_mask_strategy` | `ALL_TOKENS` | 掩码策略枚举 |
+| `num_dataset_workers` | 0 | 数据集工作线程数 |
+
+### ExposedESM2PretrainConfig
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `use_esm_attention` | False | 使用 ESM2 自定义注意力（跳过 TE 加速） |
+| `token_dropout` | True | 启用 token Dropout |
+| `normalize_attention_scores` | False | 归一化注意力分数 |
+| `variable_seq_lengths` | False | 启用可变序列长度 |
+| `core_attention_override` | None | 覆盖注意力模块类 |
+
+### ESM2 模型方案
+
+[`esm2/run/recipes.py`](esm2/run/recipes.py#L39-L476) 中预定义的方案为特定模型大小配置了完整的 `MainConfig`：
+
+| 方案 | 层数 | 隐藏层 | 头数 | FFN 隐藏层 | 序列长度 | 精度 |
+|---|---|---|---|---|---|---|
+| `esm2_8m` | 6 | 320 | 20 | 1280 | 1024 | bf16-mixed |
+| `esm2_650m` | 33 | 1280 | 20 | 5120 | 1024 | bf16-mixed |
+
+基础方案默认值：`optimizer="adam"`、`lr=4e-4`、`warmup_steps=2000`、`lr_scheduler="warmup_anneal"`、`tensor_model_parallel_size=1`、`pipeline_model_parallel_size=1`、`ddp="megatron"`。
+
+来源: [config_models.py](esm2/run/config_models.py#L40-L229), [recipes.py](esm2/run/recipes.py#L39-L197)
+
+## Shell 脚本配置
+
+### 训练启动
+
+[`run_peptron_train.sh`](run_peptron_train.sh#L1-L5) 设置 `TORCHDYNAMO_SUPPRESS_ERRORS=1` 和 `CUDA_LAUNCH_BLOCKING=1`，然后调用 `python -m peptron.train`。默认配置预设为 `peptron_o_mixed`（定义于 [`train.py`](peptron/train.py#L51) L51）。
+
+[`run_peptron_distributed_train.sh`](run_peptron_distributed_train.sh#L1-L8) 添加 `CUDA_DEVICE_MAX_CONNECTIONS=1` 并通过 `torchrun --nproc_per_node=8` 启动。
+
+### 推理启动
+
+[`run_peptron_infer.sh`](run_peptron_infer.sh#L1-L82) 接受 CLI 标志并将其转发给 `python -m peptron.infer`，默认值如下：
+
+| CLI 标志 | 默认值 | 映射至 |
+|---|---|---|
+| `--input` / `-i` | (必填) | `config.inference.chains_path` |
+| `--checkpoint` / `-c` | (path) | `config.inference.checkpoint_path` |
+| `--results` / `-r` | `"results"` | `config.inference.results_path` |
+| `--filter-unphysical` / `-f` | `true` | 事后非物理轨迹过滤 |
+
+随后，脚本应用以下推理覆盖：`num_nodes=1`、`num_gpus=1`、`tensor_model_parallel_size=1`、`pipeline_model_parallel_size=1`、`micro_batch_size=1`、`max_batch_size=1`、`num_workers=8`、`samples=10`、`steps=10`、`tmax=1`。推理完成后，它会使用 `--filter-unphysical` 在每个结果子目录上运行 [`peptron.compress_ensemble`](peptron/compress_ensemble.py)。
+
+来源: [run_peptron_train.sh](run_peptron_train.sh#L1-L5), [run_peptron_distributed_train.sh](run_peptron_distributed_train.sh#L1-L8), [run_peptron_infer.sh](run_peptron_infer.sh#L1-L82)
+
+## EMA 配置
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `ema.decay` | 0.999 | 模型权重的指数移动平均衰减 |
+
+来源: [config.py](peptron/model/config.py#L769)
+
+## 运行时模式标志
+
+三个顶级布尔标志控制嵌套配置域之外的全局行为：
+
+| 标志 | 默认值 | 效果 |
+|---|---|---|
+| `mode` | `"train"` | 设置操作模式；触发训练模式约束强制执行 |
+| `low_prec` | False | 为 True 时，设置 `eps=1e-4` 和 `inf=1e4` 以兼容 FP16 数值 |
+| `long_sequence_inference` | False | 为 True 时，强制使用内存优化的推理配置 (LMA、卸载、禁用 Flash) |
+
+来源: [config.py](peptron/model/config.py#L819-L821)
+
+## 配置文件规范
+
+训练和推理入口点使用带有 `config_flags.DEFINE_config_file` 的 `absl.app`，以允许通过命令行标志进行运行时覆盖。配置文件路径遵循 `module_path:attribute_name` 语法：
+
+- **训练**：`--config=peptron/model/config.py:peptron_o_mixed`（默认位于 [`train.py`](peptron/train.py#L51) L51）
+- **推理**：`--config=peptron/model/config.py:peptron_o_inference`（默认位于 [`infer.py`](peptron/infer.py#L60) L60）
+
+任何嵌套字段都可以在启动时使用 `--config.<path>.<field>=<value>` 语法进行覆盖，例如 `--config.training.micro_batch_size=4 --config.model.flow_matching.noise_prob=0.8`。
+
+有关这些参数控制的架构组件的更多详细信息，请参阅[架构概述](4-architecture-overview)、[连续流匹配](5-continuous-flow-matching)、[自条件与推理调度](7-self-conditioning-and-inference-schedule)以及[损失函数与验证指标](13-loss-functions-and-validation-metrics)。
+
+---
+
+## 流匹配引擎
+
+- [深入解析/流匹配引擎/连续流匹配](https://zread.ai/PeptoneLtd/PepTron/5-continuous-flow-matching)
+
+---
+slug:5-continuous-flow-matching
+blog_type:normal
+---
+
+
+PepTron 用**连续流匹配**引擎取代了 AlphaFold2 的迭代循环机制，该引擎将一个与结构无关的先验转换为具有物理依据的蛋白质构象。该模型并非从与聚合物链毫无物理关系的高斯噪声中进行去噪，而是从编码共价主链连接性的**谐链先验**出发，通过**受最优传输（OT）启发的线性插值**，流向真实的原子坐标。时间以**随机傅里叶特征嵌入**的形式注入到成对表示中，使得 FoldingTrunk 同时成为结构预测器和速度场。
+
+## 数学基础
+
+连续流匹配定义了一条随时间变化的概率路径 $p_t(x)$，将先验分布 $p_0$（噪声）与数据分布 $p_1$（真实结构）连接起来。PepTron 采用了**最优传输（OT）线性插值**：
+
+$$x_t = (1 - t)\, x_1 + t\, x_0, \quad t \in [0, 1]$$
+
+其中 $x_1$ 是真实的伪 beta 坐标张量，$x_0$ 抽取自谐链先验。模型被训练为直接预测 $x_1$（预测类型为 `data`），相应的速度场为：
+
+$$v_t(x_t) = x_1 - x_0$$
+
+这是一个恒定速度场——这是线性插值方案的直接结果，它在坐标空间中产生直线路径。训练目标简化为最小化 $\|v_\theta(x_t, t) - (x_1 - x_0)\|^2$，或者在数据预测下等价于 $\|x_\theta(x_t, t) - x_1\|^2$，其中 $x_\theta$ 是神经网络的输出。
+
+来源：[flow.py](peptron/model/flow.py#L126-L132)，[flowmoco.py](peptron/model/flowmoco.py#L72-L82)
+
+## 谐链先验
+
+先验 $p_0$ 不是各向同性高斯分布。相反，PepTron 从**离散谐链模型**中采样，该模型捕捉了自由连接聚合物的涨落的高斯分布。刚度矩阵 $J$ 由弹簧常数 $a = 3 / 3.8^2$（其中 3.8 Å 是典型的 Cα–Cα 键长）构建：
+
+$$J_{ij} = \begin{cases} 2a & \text{if } i = j \text{ (bulk)} \\ a & \text{if } i = j \text{ (boundary)} \\ -a & \text{if } |i - j| = 1 \\ 0 & \text{otherwise} \end{cases}$$
+
+采样通过特征值分解 $J = P D P^\top$ 进行。由于 $J$ 是具有单一零特征值（平移不变性）的半正定矩阵，其逆矩阵被正则化为：$D^{-1}_{00} = 0$。样本抽取方式为 $x_0 = P \cdot (\sqrt{D^{-1}} \odot z)$，其中 $z \sim \mathcal{N}(0, I_{N \times 3})$，从而产生具有理想化主链正确协方差结构的坐标。
+
+`flowmoco.py` 变体委托给 BioNeMo 的 `LinearHarmonicPrior`，它实现了相同的物理原理，但集成了 MoCo（分子粗粒化）库的 `ContinuousFlowMatcher`。
+
+来源：[flow.py](peptron/model/flow.py#L42-L69)，[flowmoco.py](peptron/model/flowmoco.py#L22-L23)，[flowmoco.py](peptron/model/flowmoco.py#L72-L82)
+
+## 先验样本的 RMSD 对齐
+
+在插值之前，每个先验样本都会通过基于 SVD 的 RMSD 最小化进行**刚体对齐**，以对齐到真实结构。这一点至关重要：谐链先验具有平移和旋转不变性，因此如果不进行对齐，插值将浪费容量去学习简单的刚体运动。`rmsdalign` 函数计算最佳旋转 $R^*$ 和平移 $t^*$，使得 $\|R^* x_0 + t^* - x_1\|_{\text{RMSD}}$ 最小化，然后将变换应用于 $x_0$。如果 SVD 未能收敛，批次时间将被设置为 $t=1$（纯噪声），从而有效地跳过该样本。
+
+来源：[flow.py](peptron/model/flow.py#L118-L123)，[flowmoco.py](peptron/model/flowmoco.py#L100-L106)
+
+## 训练：噪声注入与前向步骤
+
+训练前向步骤由 `peptron_forward_step` 统一调度，它在模型前向传播之前应用三个随机控制：
+
+| 阶段 | 控制 | 概率 | 效果 |
+|-------|---------|-------------|--------|
+| 噪声注入 | `noise_prob` | 默认 0.5 | 采样 $t \sim \text{Uniform}(0,1)$，插值 $x_t$，将成对距离 + 时间注入批次 |
+| 自条件化 | `self_cond_prob` | 默认 0.5 | 使用 `torch.no_grad()` 运行模型一次，将输出作为 `prev_outputs` 送入第二次传播 |
+| 额外输入丢弃 | `extra_input_prob` | 默认 0.5 | 以 $1 - p$ 的概率从批次中移除 `extra_all_atom_positions` |
+
+当跳过噪声注入时（概率为 $1 - \text{noise\_prob}$），批次不会收到 `noised_pseudo_beta_dists` 或 `t` 键，模型将回退到其零初始化路径（相当于 $t=0$，即纯数据预测）。这创建了一个**混合训练目标**，将流匹配去噪与标准结构预测交替进行，从而稳定学习过程。
+
+噪声注入过程 `_add_noise`：
+1. 采样 $x_0 \sim \text{HarmonicPrior}$
+2. 通过 RMSD 将 $x_0$ 对齐到 $x_1$
+3. 抽取 $t \sim \text{Uniform}(0, 1)$
+4. 计算 $x_t = (1-t)\,x_1 + t\,x_0$
+5. 将成对距离 $\|x_t^{(i)} - x_t^{(j)}\|$ 和时间 $t$ 写入批次
+
+来源：[flow.py](peptron/model/flow.py#L106-L132)，[flowmoco.py](peptron/model/flowmoco.py#L84-L117)，[flow.py](peptron/model/flow.py#L280-L336)
+
+## 时间条件化：从标量到成对表示
+
+标量时间 $t$ 通过一个两阶段流水线嵌入到模型的成对状态 $z$ 中：
+
+1. **高斯傅里叶投影**：$t \mapsto [\sin(2\pi W t),\, \cos(2\pi W t)]$，其中 $W \in \mathbb{R}^{128}$ 是一个冻结的随机频率矩阵（默认 `embedding_size=256`）。这会将标量 $t$ 映射到一个 256 维空间，以捕捉多尺度的时间结构。
+
+2. **线性投影 + 广播**：傅里叶嵌入通过 `input_time_embedding` 投影到 $c_z = 128$ 维，然后在所有 $(i, j)$ 残基对上**进行广播相加**：`inp_z += time_emb[:, None, None, :]`。这确保了每个成对标记都接收到相同的时间信号，下游的 `InputPairStack` 和 `FoldingTrunk` 可以将其路由到依赖头部的调制中。
+
+当批次中不存在噪声时（未注入噪声的训练，或在 $t=0$ 处的推理），模型仍会以零输入运行时间嵌入路径，以保持 DDP 兼容性——所有秩必须执行相同的操作。
+
+来源：[layers.py](peptron/model/layers.py#L14-L28)，[model.py](peptron/model/model.py#L199-L206)，[model.py](peptron/model/model.py#L366-L381)
+
+## 推理：使用欧拉步长的线性插值
+
+在推理时，流通过 `linear_interpolation` 方法进行数值积分，该方法使用**类欧拉方案**离散化 ODE $dx/dt = v_t(x)$。默认方案是 `[1.0, 0.75, 0.5, 0.25, 0.1, 0]`，产生从纯噪声到数据的 5 个积分步长。
+
+在每个步长 $(t_k, t_{k+1})$：
+
+```mermaid
+flowchart TD
+    A["时间 t_k 的当前状态 x"] --> B["模型前向传播"]
+    B --> C["从原子位置提取伪 beta"]
+    C --> D["将先验 RMSD 对齐到模型预测"]
+    D --> E{"使用 MoCo?"}
+    E -->|Yes| F["cfm.step() — MoCo ODE 积分器"]
+    E -->|No| G["手动：x_new = (t_{k+1}/t_k) * x_prior + (1 - t_{k+1}/t_k) * x_pred"]
+    F --> H["从新 x 计算成对距离"]
+    G --> H
+    H --> I["设置批次 t = t_{k+1}"]
+    I --> J{"自条件化?"}
+    J -->|Yes| K["将输出存储为下一步的 prev_outputs"]
+    J -->|No| L["无条件继续"]
+    K --> M["下一个方案步长"]
+    L --> M
+```
+
+`flowmoco.py` 变体使用 `ContinuousFlowMatcher.step()`，它计算线性插值的精确解析步，而 `flow.py` 手动实现等效公式：$x_\text{new} = (s/t)\,x_\text{prior} + (1 - s/t)\,x_\text{pred}$。两者收敛于相同的轨迹——线性 ODE 允许精确的离散化。
+
+自条件化将步骤 $k$ 的输出作为 `prev_outputs` 馈送到步骤 $k+1$，允许模型迭代地改进其预测。推理方案还可以通过 `tmax` 参数进行自定义：当 `tmax < 1.0` 时，部分去噪轨迹会前置一个初始 $t=1$ 步长，从而实现从部分噪声结构开始的**热启动推理**。
+
+来源：[flow.py](peptron/model/flow.py#L206-L265)，[flowmoco.py](peptron/model/flowmoco.py#L265-L336)，[infer.py](peptron/infer.py#L190-L206)
+
+## 两种实现变体
+
+PepTron 提供了两个可互换的 `FlowSteps` 实现：
+
+| 方面 | `flow.py`（独立） | `flowmoco.py`（BioNeMo MoCo） |
+|--------|------------------------|-------------------------------|
+| 先验 | 自定义 `HarmonicPrior` 类 | 来自 bionemo.moco 的 `LinearHarmonicPrior` |
+| 插值 | 手动公式 `(1-t)*x1 + t*x0` | `ContinuousFlowMatcher.interpolate()` |
+| 推理步 | 手动 `(s/t)*noisy + (1-s/t)*pred` | `ContinuousFlowMatcher.step()` |
+| 时间采样 | `torch.rand()` | `torch.rand()`（MoCo 的 `sample_time` 被覆盖） |
+| 依赖项 | 仅依赖 PyTorch | 需要 bionemo.moco |
+| ODE 积分 | 带有解析线性步的欧拉法 | MoCo 的内置积分器 |
+
+`flowmoco.py` 变体还提供了 `predictor_fn`、`x_0_sampler_fn` 和 `x_1_sampler_fn` 回调，旨在与 MoCo 的 `EntropicTimeScheduler` 集成，该调度器根据中间分布的熵调整步长。当前的推理入口点（`infer.py`）从 `flowmoco` 导入。
+
+<CgxTip>这两个文件中的 `t` 约定不同：`flow.py` 使用 $t=0$ 表示数据，$t=1$ 表示噪声，而 MoCo 使用相反的约定（$t=0$ 表示噪声，$t=1$ 表示数据）。`flowmoco.py` 实现应用 `t_moco = 1 - t` 来弥合这一差距——这是在两种实现之间切换时容易出现细微错误的常见来源。</CgxTip>
+
+来源：[flow.py](peptron/model/flow.py#L42-L69)，[flowmoco.py](peptron/model/flowmoco.py#L22-L82)，[flowmoco.py](peptron/model/flowmoco.py#L126-L191)，[infer.py](peptron/infer.py#L32)
+
+## 配置预设
+
+流匹配行为由 `model.flow_matching` 配置块控制，并按训练预设进行覆盖：
+
+| 预设 | `noise_prob` | `self_cond_prob` | `extra_input_prob` | 使用场景 |
+|--------|-------------|-----------------|-------------------|----------|
+| `peptron_o_mixed` | 0.5 | 0.5 | 0.5 | 均衡的 PDB + IDRome 训练 |
+| `peptron_o_pdb_idrome` | 0.9 | 0.0 | 0.5 | 偏重流的混合训练 |
+| `peptron_o_pdb_idrome_violation` | 0.9 | 0.0 | 0.5 | 同上 + 启用违约损失 |
+| `peptron_o_idp` | 0.9 | 0.0 | — | IDP 专属训练 |
+| `peptron_o_pdb` | 0.5 (默认) | 0.5 (默认) | 0.5 (默认) | 仅 PDB 训练 |
+| 默认 | 0.5 | 0.5 | 0.5 | 基线 |
+
+较高的 `noise_prob` 值（0.9）表示一种强调流匹配路径的训练策略——模型在 90% 的时间里看到噪声中间体，只有 10% 的步骤在纯结构预测模式下运行。IDRome 预设禁用 `self_cond_prob` 反映了这样一个事实：本质上无序的蛋白质缺乏单一明确的结构供自条件化锚定。
+
+<CgxTip>`noise_prob` 参数有效地控制了两种训练机制之间的混合比例：流匹配（带噪声）和直接预测（无噪声）。将 `noise_prob` 设置为 `0.0` 会将 PepTron 降级为标准的结构预测器，而 `noise_prob = 1.0` 使其成为纯流模型。0.5 的默认值平衡了两者，使模型能够在学习去噪的同时保持直接预测能力。</CgxTip>
+
+来源：[config.py](peptron/model/config.py#L691-L696)，[config.py](peptron/model/config.py#L125-L148)，[config.py](peptron/model/config.py#L210-L219)
+
+## 架构集成
+
+流匹配引擎通过 `StructureHead.forward()` 方法中的两个注入点与更广泛的模型集成：
+
+```mermaid
+flowchart LR
+    subgraph Input
+        A["aatype, seq_mask"]
+        B["noised_pseudo_beta_dists, t"]
+        C["extra_all_atom_positions"]
+    end
+    subgraph StructureHead
+        D["ESM2 编码器 → s_s_0"]
+        E["输入成对嵌入\n(x_t 的距离图)"]
+        F["时间投影\n(GaussianFourier)"]
+        G["时间线性投影 → c_z"]
+        H["广播相加到 z"]
+        I["额外输入堆叠\n(可选)"]
+        J["FoldingTrunk"]
+        K["结构模块"]
+    end
+    subgraph Output
+        L["final_atom_positions"]
+    end
+    A --> D
+    B --> E
+    B --> F
+    F --> G
+    G --> H
+    E --> H
+    H --> J
+    C --> I
+    I --> J
+    D --> J
+    J --> K
+    K --> L
+```
+
+**带噪声的成对距离**通过与标准 ESMFold 用于其距离图输入相同的 `input_pair_embedding` 路径进入，但现在距离反映的是插值结构 $x_t$ 而不是模板。**时间嵌入**在成对堆栈之后被附加注入，提供全局时间上下文来调制主干处理带噪声成对信号的方式。这种设计确保 FoldingTrunk 能够在整个 $t \in [0, 1]$ 范围内无缝运行——在 $t=0$ 时它恢复为标准结构预测，在 $t=1$ 时它从谐链先验进行去噪。
+
+来源：[model.py](peptron/model/model.py#L366-L399)，[model.py](peptron/model/model.py#L199-L209)
+
+## 下一步
+
+流匹配引擎依赖于几个单独记录的支持系统：
+
+- **[谐链先验采样](6-harmonic-prior-sampling)** — 刚度矩阵、特征值分解和采样过程的详细推导
+- **[自条件化与推理方案](7-self-conditioning-and-inference-schedule)** — 自条件化如何改进迭代预测以及推理方案的构建方式
+- **[结构头与 FoldingTrunk](9-structure-head-and-foldingtrunk)** — 时间条件化的成对状态如何流经主干
+- **[损失函数与验证指标](13-loss-functions-and-validation-metrics)** — 流匹配训练损失如何与 FAPE/距离图/违约损失相互作用
+
+---
+
+- [深入解析/流匹配引擎/调和先验采样](https://zread.ai/PeptoneLtd/PepTron/6-harmonic-prior-sampling)
+
+---
+slug:6-harmonic-prior-sampling
+blog_type:normal
+---
+
+
+PepTron 用**谐和先验**（harmonic prior）替换了流匹配中常用的各向同性高斯噪声——这是一种源自高斯链模型平衡态统计的分布。这一选择并非表面修饰：它将物理链连通性直接注入先验中，确保在习得的速度场起作用之前，采样得到的噪声构象已经遵循真实的残基间距（≈3.8 Å）。结果是推理时收敛更快、训练更稳定，并且从第一步去噪起，生成的结构即遵循聚合物物理。
+
+来源：[flow.py](/peptron/model/flow.py#L42-L69), [flowmoco.py](/peptron/model/flowmoco.py#L72-L82)
+
+## 高斯链模型
+
+谐和先验建立在聚合物物理的一个经典结论之上。考虑一条包含 *N* 个残基的链，其中每一对相邻残基由刚度为 *a* 的谐和弹簧连接。构象 **x** = (x₁, …, xₙ) ∈ ℝ^(N×3) 的能量为：
+
+$$E(\mathbf{x}) = \frac{a}{2} \sum_{i=1}^{N-1} \|\mathbf{x}_{i+1} - \mathbf{x}_i\|^2 = \frac{1}{2} \mathbf{x}^\top (\mathbf{J} \otimes \mathbf{I}_3) \mathbf{x}$$
+
+其中 **J** ∈ ℝ^(N×N) 是**链连通性矩阵**——一个对称半正定三对角矩阵。PepTron 通过遍历所有相邻残基对来构造该矩阵，在对角线的 *(i, i)* 和 *(j, j)* 位置累加刚度 *a*，并在非对角线的 *(i, j)* 和 *(j, i)* 位置放置 −*a*。刚度常数设置为 **a = 3 / 3.8²**，其中 3.8 Å 是蛋白质中 Cα–Cα 键长的特征值。因子 3 源于三个空间维度，从而产生能够重现预期残基间距的逐维度方差。
+
+来源：[flow.py](/peptron/model/flow.py#L43-L52)
+
+## 特征分解与采样
+
+在高斯能量下，平衡态分布为 **N(0, J⁺ ⊗ I₃)**，其中 **J⁺** 是 **J** 的 Moore–Penrose 伪逆。对于长链，**J⁺** 的直接计算是不稳定的，因此 PepTron 执行特征分解 **J = P D Pᵀ** 并构造逆谱 **D_inv = 1/D**，显式地将第一模式置零（**D_inv[0] = 0**），以消除对应于刚体平移的零特征值。采样随后按三个代数步骤进行：
+
+```mermaid
+flowchart LR
+    A["z ~ N(0, I)<br/>shape: (B, N, 3)"] --> B["Scale by √D_inv<br/>per-mode variance"]
+    B --> C["Rotate by P<br/>P @ (z · √D_inv)"]
+    C --> D["RMSD-align<br/>to target x₁"]
+    D --> E["Harmonic prior<br/>sample x₀"]
+```
+
+1. **抽取白噪声**：z ~ N(0, I)，形状为 (B, N, 3)，在批次、残基和空间维度上彼此独立。
+2. **逐模式缩放**：将每个模式乘以 √D_inv，将逆谱作为逐特征值标准差应用。广播模式 `[None, :, None] 在批次和空间轴上同等缩放。
+3. **特征向量旋转**：通过批量矩阵乘法计算 **P** @ z_scaled，从特征基变换回残基坐标。
+
+这产生的样本**在构造上即具有平移不变性**（零模式不携带方差），且其残基间距遵循 Rouse 链分布——一种对蛋白质主链几何具有物理意义的先验。
+
+来源：[flow.py](/peptron/model/flow.py#L49-L69)
+
+## RMSD 对齐与规范固定
+
+谐和先验仅在一个全局 SO(3) 旋转范围内定义。为消除这种歧义，每个采样得到的噪声构象在插值前都会与真实数据坐标 **x₁** 进行 **RMSD 对齐**。`rmsdalign` 函数实现了 Kabsch 算法：通过加权均值将两个点云居中，计算互协方差矩阵，执行 SVD，并应用求得的最优旋转。如果 SVD 未能收敛（罕见的边缘情况），训练步骤将通过设置 *t = 1*（纯噪声）优雅降级，有效跳过该样本。
+
+来源：[flow.py](/peptron/model/flow.py#L118-L123), [util.py](/peptron/utils/util.py#L41-L64)
+
+## 两种实现变体
+
+PepTron 提供了谐和先验的两种可互换实现，通过导入 `flow.py` 或 `flowmoco.py` 来选择：
+
+| 方面 | `HarmonicPrior` (flow.py) | `LinearHarmonicPrior` (flowmoco.py) |
+|---|---|---|
+| **来源** | 自定义实现 | BioNeMo MoCo 框架 |
+| **实例化** | `HarmonicPrior(N=256, a=3/3.8²)` | `LinearHarmonicPrior(length=512, device, rng_generator)` |
+| **采样签名** | `.sample(batch_dims=(B,))` | `.sample(shape=(B, N, 3), device, rng_generator)` |
+| **特征分解** | 显式 `torch.linalg.eigh` | BioNeMo 内部实现 |
+| **时间采样** | `torch.rand` | MoCo 的 `UniformTimeDistribution` |
+| **插值** | 手动 `(1-t)·x₁ + t·x₀` | `ContinuousFlowMatcher.interpolate` |
+| **推理步** | 手动 `(s/t)·x₀ + (1−s/t)·x₁` | `ContinuousFlowMatcher.step` |
+
+自定义的 `HarmonicPrior` 保持了数学运算的透明性和自包含性。MoCo 变体则委托给 BioNeMo 经过验证的 `ContinuousFlowMatcher` 流水线，后者在内部处理时间方向约定——这需要一个 `t_moco = 1 − t` 的翻转，以协调 PepTron 的约定（t=0 为数据，t=1 为噪声）与 MoCo 的相反约定。两种变体产生相同的分布；选择纯粹是架构层面的。
+
+来源：[flow.py](/peptron/model/flow.py#L42-L69), [flowmoco.py](/peptron/model/flowmoco.py#L22-L82), [flowmoco.py](/peptron/model/flowmoco.py#L108-L117)
+
+## 训练中的角色：噪声注入
+
+在训练期间，`_add_noise` 方法编排了完整的腐败流水线。它实例化最大长度为 512 个残基的谐和先验，抽取一个噪声样本，将其与数据 RMSD 对齐，采样一个随机时间 *t* ∈ [0, 1]，并构造线性插值 **x_t = (1−t)·x₁ + t·x₀**。所得加噪的成对距离被存储为 `noised_pseudo_beta_dists`，并与 *t* 一起注入批次中。这种腐败是随机应用的——由 `noise_prob` 控制——因此模型能看到干净样本和加噪样本的混合，从而提高鲁棒性。
+
+```mermaid
+sequenceDiagram
+    participant B as Training Batch
+    participant HP as HarmonicPrior
+    participant RA as rmsdalign
+    participant M as Model
+
+    B->>HP: sample(batch_size)
+    HP-->>B: "x₀ (raw noise)"
+    B->>RA: "rmsdalign(x₁, x₀, mask)"
+    RA-->>B: "x₀ (aligned)"
+    B->>B: "t ~ Uniform(0,1)"
+    B->>B: "x_t = (1-t)·x₁ + t·x₀"
+    B->>B: compute pairwise distances
+    B->>M: "forward(batch with x_t, t)"
+```
+
+来源：[flow.py](/peptron/model/flow.py#L101-L133), [flowmoco.py](/peptron/model/flowmoco.py#L84-L117)
+
+## 推理中的角色：线性插值调度
+
+在推理时，`linear_interpolation` 驱动生成过程。它首先采样一个全新的谐和先验构象，然后在递减的时间调度上迭代（默认值：[1.0, 0.75, 0.5, 0.25, 0.1, 0]）。在每一步中，模型从当前加噪状态预测伪 beta 坐标；然后使用预测的结构通过流匹配步更新噪声，该步将构象向数据流形移动。自条件化将前一次预测作为 `prev_outputs` 反馈，允许模型精炼自身的中间估计。调度可通过 `tmax` 和 `steps` 参数自定义——当 `tmax < 1.0` 时，在从 `tmax` 线性下降至 0 之前，会前置一个 *t = 1.0* 的热启动步。
+
+来源：[flow.py](/peptron/model/flow.py#L206-L265), [flowmoco.py](/peptron/model/flowmoco.py#L265-L336), [infer.py](/peptron/infer.py#L190-L196)
+
+## 配置参考
+
+谐和先验由配置中 `model.flow_matching` 下的参数控制：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `noise_prob` | 0.5 | 训练期间注入谐和噪声的概率 |
+| `self_cond_prob` | 0.5 | 训练期间执行自条件化传递的概率 |
+| `extra_input` | False | 是否有额外的结构输入可用 |
+| `extra_input_prob` | 0.5 | 启用时保留额外输入的概率 |
+
+训练预设调整这些概率以匹配数据机制。`peptron_o_mixed` 预设（混合 PDB + IDRome）使用均衡的默认值（0.5/0.5/0.5），而 `peptron_o_pdb_idrome` 转变为 `noise_prob = 0.9` 和 `self_cond_prob = 0.0`，以在缺少结构模板的无序链上最大化噪声暴露。谐和先验长度目前在 `flow.py` 和 `flowmoco.py` 中均硬编码为 512 个残基（标记为 TODO，待改为配置驱动选择）。
+
+来源：[config.py](/peptron/model/config.py#L691-L696), [config.py](/peptron/model/config.py#L125-L148), [flow.py](/peptron/model/flow.py#L103)
+
+<CgxTip>刚度常数 a = 3/3.8² 并非任意选取——它是使谐和链中的平衡 Cα–Cα 距离与真实蛋白质中经验性的 3.8 Å 键长相匹配的唯一值。更改此值会将整个噪声分布偏移至偏离物理真实链统计的状态，从而降低训练稳定性和推理收敛性。</CgxTip>
+
+<CgxTip>在 `flow.py` 和 `flowmoco.py` 之间切换时，切记时间方向约定的翻转：PepTron 使用 t=0→数据，t=1→噪声，而 BioNeMo MoCo 使用相反的约定。`flowmoco.py` 中的 `t_moco = 1 − t` 转换是必不可少的——省略它将导致模型在反向插值上训练，并产生退化的样本。</CgxTip>
+
+## 数学总结
+
+完整的谐和先验采样过程可以简明表述。给定链长 *N* 和刚度 *a = 3/3.8²*：
+
+1. 构造 **J** ∈ ℝ^(N×N)：对角线为 2·a（边界除外），次/超对角线为 −a 的三对角矩阵
+2. 特征分解：**J** = **P** **D** **P**ᵀ
+3. 构造 **D⁺** = diag(1/d₁, …, 1/d_{N−1}, 0) —— 移除零模式的伪逆谱
+4. 采样：**x₀** = **P** · diag(√**D⁺**) · **z**，其中 **z** ~ N(0, I_{N×3})
+5. 对齐：**x₀** ← Kabsch(**x₁**, **x₀**, **mask**)
+
+这产生 **x₀** ~ N(0, **J⁺** ⊗ **I₃**) 到旋转对齐规范的投影，提供了一个在习得参数介入之前即已尊重链连通性、平移对称性和旋转等价性的先验。
+
+来源：[flow.py](/peptron/model/flow.py#L42-L69)
+
+---
+
+**下一步**：了解自条件化和推理调度如何与谐和先验协同工作以生成最终结构 → [自条件化与推理调度](7-self-conditioning-and-inference-schedule)
+
+---
+
+- [深入解析/流匹配引擎/自条件化与推理调度](https://zread.ai/PeptoneLtd/PepTron/7-self-conditioning-and-inference-schedule)
+
+---
+slug:7-self-conditioning-and-inference-schedule
+blog_type:normal
+---
+
+
+PepTron 的推理流程通过离散的时间调度，完成了从谐波先验噪声到结构化原子坐标的连续流转换，而**自条件**将每一步的结构预测作为辅助输入反馈给下一步——创建了一个迭代优化循环，显著稳定了轨迹质量。本页剖析了这两种机制：训练期间使用的随机自条件协议，以及推理时控制采样的确定性迭代调度。
+
+## 自条件：训练协议
+
+在训练期间，自条件以**概率性**方式应用——以 `self_cond_prob` 的概率，模型执行一次无梯度的初步前向传播以产生 `prev_outputs`，随后将其注入到主前向传播（带梯度追踪）中。这教导模型利用自身的先前预测作为条件信号，映射其在推理时将执行的迭代优化。该机制由 `model.flow_matching` 下的三个配置参数控制：
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `noise_prob` | `0.5` | 注入流匹配噪声的概率（对比 `t=1` 时的干净数据） |
+| `self_cond_prob` | `0.5` | 执行自条件预传递的概率 |
+| `extra_input_prob` | `0.5` | 保留额外的全原子位置输入的概率 |
+
+`peptron_forward_step` 中的训练前向步骤将其实现为一个三阶段流程：(1) 以 `noise_prob` 为条件的噪声注入，(2) 可选的额外输入丢弃，以及 (3) 以 `self_cond_prob` 为条件的自条件预传递。当触发自条件时，一次 `torch.no_grad()` 前向传播产生 `prev`，它作为 `prev_outputs` 传递给主模型调用。当未触发时，`prev=None`，模型在没有循环结构信号的情况下运行。
+
+来源: [flowmoco.py](peptron/model/flowmoco.py#L376-L395), [config.py](peptron/model/config.py#L691-L696)
+
+## 自条件：推理优化循环
+
+在推理时，自条件是**确定性**的——每个调度步骤都会将上一步的输出向前传递。`linear_interpolation` 方法初始化 `prev_outputs = None`，并在每个 ODE 步骤之后有条件地更新它：
+
+```python
+prev_outputs = None
+for t0, t1 in zip(schedule[:-1], schedule[1:]):
+    output = self.model(batch, prev_outputs=prev_outputs)
+    ...
+    if self_cond:
+        prev_outputs = output
+```
+
+当 `self_cond=True`（典型设置）时，模型在每一步都会接收到逐步细化的结构上下文。当 `self_cond=False` 时，模型不接收循环信息，每一步的预测独立于先前的输出——这对于消融实验或当模型在未使用自条件进行训练时非常有用（例如，`peptron_o_pdb_idrome` 预设设置了 `self_cond_prob=0.0`）。
+
+`ESMFoldSeqModel.forward` 将 `prev_outputs` 直接传递给 `StructureHead`，在那里它被循环嵌入器消耗以生成对表示和单一表示，从而增强模型的输入嵌入。这种架构路径与 AlphaFold2 的循环机制完全相同，但被重新用于流匹配的逐步条件设定。
+
+来源: [flowmoco.py](peptron/model/flowmoco.py#L302-L326), [model.py](peptron/model/model.py#L145-L149)
+
+## 推理调度构建
+
+推理调度定义了评估 ODE 的离散时间点，从 `t=1`（纯噪声）遍历到 `t=0`（干净结构）。根据 `tmax` 参数，存在两种构建模式：
+
+**完整调度**（`tmax = 1.0`）：从 1.0 降至 0.0 的均匀线性划分，包含 `steps + 1` 个点：
+```
+schedule = np.linspace(1.0, 0, steps + 1)  # 例如 [1.0, 0.9, 0.8, ..., 0.0]
+```
+
+**截断调度**（`0 < tmax < 1.0`）：一种两阶段调度，以 `t=1.0` 的初始噪声开始，然后跳至 `tmax` 进行 ODE 积分，创建一个从粗到细的划分：
+```
+schedule = [1.0] + list(np.linspace(tmax, 0, steps + 1))
+```
+
+截断调度具有重要意义，因为它允许第一步在纯噪声（`t=1.0`）下运行以进行初始结构幻象，然后跳转到结构已经部分解析的较晚时间点——以粒度换取计算效率。默认推理配置使用 `tmax=1.0` 和 `steps=10`，产生 11 个等距的评估点。
+
+来源: [infer.py](peptron/infer.py#L190-L196), [config.py](peptron/model/config.py#L822-L847)
+
+## ODE 积分步骤
+
+每个调度间隔 `[t0, t1]` 执行一次完整的模型前向传播，随后进行流匹配坐标更新。`flowmoco.py` 中的实现使用了 BioNeMo 的 `ContinuousFlowMatcher.step()` 方法，这需要仔细的**时间约定处理**——MoCo 内部使用 `t_moco = 1 - t`，其中 `t_moco=0` 对应噪声，`t_moco=1` 对应数据。转换和步骤逻辑如下进行：
+
+1. **模型预测**：运行 `self.model(batch, prev_outputs=prev_outputs)` 以获取当前结构输出并提取伪 beta 坐标
+2. **RMSD 对齐**：通过 `rmsdalign(pseudo_beta, noisy)` 将噪声样本重新对齐到预测坐标，以保证旋转不变性
+3. **时间转换**：计算 `moco_t0 = 1 - t0`，`moco_t1 = 1 - t1`，`dt = moco_t1 - moco_t0`
+4. **流更新**：`noisy = self.cfm.step(pseudo_beta, noisy, dt, moco_t0)` 沿着预测的速度场推进噪声状态
+5. **批次更新**：从更新后的 `noisy` 计算新的成对距离，并为下一次模型调用设置 `batch['t'] = t1`
+
+`flow.py` 中的替代实现使用了显式的解析步骤：`noisy = (s/t) * noisy + (1 - s/t) * pseudo_beta`，这直接源自线性插值路径 `x(t) = (1-t) * x_1 + t * x_0` 及其导数。
+
+来源: [flowmoco.py](peptron/model/flowmoco.py#L304-L323), [flow.py](peptron/model/flow.py#L246-L256)
+
+## 完整推理循环图
+
+下图展示了将自条件与 ODE 调度相结合的完整推理循环：
+
+```mermaid
+flowchart TD
+    A["采样 x₀ ~ HarmonicPrior<br/>(t = 1.0)"] --> B{"noisy_first?"}
+    B -- 是 --> C["根据 x₀ 设置批次距离<br/>batch.t = 1.0"]
+    B -- 否 --> D["初始化 prev_outputs = None"]
+    C --> D
+    D --> E["调度循环:<br/>for t₀, t₁ in zip(schedule)"]
+    E --> F["模型前向传播:<br/>output = model(batch, prev_outputs)"]
+    F --> G["从预测原子中<br/>提取伪 beta"]
+    G --> H["将噪声 RMSD 对齐至预测"]
+    H --> I["流更新:<br/>noisy = cfm.step(pred, noisy, dt, t₀)"]
+    I --> J["更新批次:<br/>来自 noisy 的距离,<br/>batch.t = t₁"]
+    J --> K{"self_cond?"}
+    K -- 是 --> L["prev_outputs = output"]
+    K -- 否 --> M["prev_outputs = None"]
+    L --> N{"更多步骤?"}
+    M --> N
+    N -- 是 --> F
+    N -- 否 --> O["返回最终结构"]
+```
+
+来源: [flowmoco.py](peptron/model/flowmoco.py#L265-L336), [infer.py](peptron/infer.py#L209-L264)
+
+## 配置预设及其自条件策略
+
+不同的训练预设采用不同的自条件策略，反映了训练稳定性与推理时优化能力之间的权衡：
+
+| 预设 | `noise_prob` | `self_cond_prob` | `extra_input_prob` | 原理 |
+|--------|-------------|-----------------|-------------------|-----------|
+| `peptron_o_mixed` | 0.5 | 0.5 | 0.5 | 平衡：噪声/干净以及自条件/无自条件的机会均等 |
+| `peptron_o_pdb_idrome` | 0.9 | 0.0 | 0.5 | 高噪声，无自条件：优先考虑多样化的 IDP 构象采样 |
+| `peptron_o_pdb_idrome_violation` | 0.9 | 0.0 | 0.5 | 与上述相同，但启用了违规损失 |
+| `peptron_o_idp` | 0.9 | 0.0 | — | 仅 IDP 训练，无自条件 |
+
+`peptron_o_pdb_idrome` 预设完全禁用了自条件（`self_cond_prob=0.0`），因为本质上无序的蛋白质需要模型探索广泛的构象系综，而不是收敛到单一的优化结构。自条件的优化偏好会人为地消除这种多样性。相反，`peptron_o_mixed` 以 50% 的概率启用它，以保持与有序（PDB）和无序（IDRome）域的兼容性。
+
+来源: [config.py](peptron/model/config.py#L125-L149), [config.py](peptron/model/config.py#L214-L219)
+
+## 推理 CLI 参数
+
+推理 shell 脚本和 `infer_model` 函数暴露了以下自条件和调度参数：
+
+| 参数 | CLI 标志 | 默认值 | 描述 |
+|-----------|----------|---------|-------------|
+| `self_cond` | `--config.inference.self_cond` | `False` | 在推理时启用逐步自条件 |
+| `noisy_first` | `--config.inference.noisy_first` | `False` | 在首次模型调用前使用噪声距离初始化批次 |
+| `no_diffusion` | `--config.inference.no_diffusion` | `False` | 完全跳过流——在 `t=1` 时进行单次预测 |
+| `steps` | `--config.inference.steps` | `10` | ODE 积分步骤数 |
+| `tmax` | `--config.inference.tmax` | `1.0` | 调度的最大时间（如果 < 1.0 则截断） |
+| `samples` | `--config.inference.samples` | `100` | 独立构象样本数 |
+
+<CgxTip>当采样本质上无序的蛋白质时，设置 `self_cond=False` 并增加 `samples` 以捕获构象异质性。对于有序蛋白质，启用 `self_cond=True` 并设置 `steps=10` 以进行精细的单一结构预测。</CgxTip>
+
+<CgxTip>`noisy_first=True` 选项在 `t=1.0` 时使用噪声派生的距离为初始批次提供种子，当模型期望带噪声的输入特征时，这可以改善首次模型调用的校准。若未启用，第一步将在未初始化的噪声距离上运行。</CgxTip>
+
+来源: [infer.py](peptron/infer.py#L72-L118), [run_peptron_infer.sh](run_peptron_infer.sh#L64-L77), [config.py](peptron/model/config.py#L822-L847)
+
+## 预测器函数接口
+
+除了标准的 `linear_interpolation` 循环外，`flowmoco.py` 还暴露了一个 `predictor_fn`，它将模型评估与调度循环解耦。该函数接受任意时间 `t` 和坐标状态 `x`，从 `x` 计算成对距离，将它们注入批次，运行一次模型前向传播，并返回伪 beta 坐标：
+
+```python
+def predictor_fn(self, batch, t, x):
+    b['t'] = t
+    b['noised_pseudo_beta_dists'] = self._pairwise_dists(x)
+    out = self.model(b)["structure_output"]
+    pred_pbeta = pseudo_beta_fn(b['aatype'], out['final_atom_positions'], None)
+    return pred_pbeta
+```
+
+该接口允许与高级 ODE 求解器（例如，自适应步长 Runge-Kutta）或需要可调用速度场的熵时间调度器进行集成。配套的 `x_0_sampler_fn` 和 `x_1_sampler_fn` 分别提供噪声先验和数据目标采样器，完善了 BioNeMo 的 `EntropicTimeScheduler` 所需的接口。
+
+---
+
+## 模型组件
+
+- [深入解析/模型组件/ESM2 序列编码器](https://zread.ai/PeptoneLtd/PepTron/8-esm2-sequence-encoder)
+
+---
+slug:8-esm2-sequence-encoder
+blog_type:normal
+---
+
+
+PepTron 的 ESM2 序列编码器是一个基于 Megatron 分布式的蛋白质语言模型，它将氨基酸序列转换为丰富的逐残基表示，作为下游结构预测流程的冻结感知主干。该编码器基于 NVIDIA 的 BioNeMo 框架构建，通过三项关键的 ESM2 专属定制扩展了 `MegatronBioBertModel`——**Token Dropout 缩放**、**嵌入层注意力掩码**和**非归一化 Softmax 注意力**——这些定制在保持与原始 ESM2 预训练保真度的同时，实现了大规模的张量并行与流水线并行。
+
+来源: [model.py](/esm2/model/model.py#L1-L669), [api.py](/esm2/api.py#L17-L28)
+
+## 架构谱系与设计原理
+
+ESM2 序列编码器占据了一个明确的架构生态位：它**不是**为结构预测而微调的通用语言模型，而是一个**冻结的特征提取器**，其预训练表示被 `StructureHead` 原封不动地消费。这一设计决策直接编码在模型构造器中——当 `config.training.encoder_frozen` 为 `True` 时，所有 ESM2 参数的 `requires_grad` 标志均被设为 `False`。编码器的输出在投影到主干序列状态空间之前，还会通过 `esm_s = esm_s.detach()` 从计算图中分离。
+
+类层次结构为：`ESM2Model → MegatronBioBertModel → MegatronModel`。随后，`ESMFoldSeqModel` 通过将编码器与 `StructureHead` 组合来扩展 `ESM2Model`，构成了完整的 PepTron 架构。这种组合模式确保了 ESM2 的前向传播能产生所有中间隐藏状态（`include_hiddens=True`），随后结构头通过一种可学习的层加权机制对这些状态进行重组。
+
+```mermaid
+classDiagram
+    direction TB
+    class MegatronBioBertModel {
+        +embedding: LanguageModelEmbedding
+        +encoder: TransformerBlock
+        +lm_head: BertLMHead
+        +forward(input_ids, attention_mask)
+    }
+    class ESM2Model {
+        +embedding: ESM2Embedding
+        +encoder: TransformerBlock
+        +embedding_forward(input_ids, position_ids, tokentype_ids, attention_mask)
+        +encoder_forward(hidden_states, attention_mask, ...)
+    }
+    class ESMFoldSeqModel {
+        +structure_head: StructureHead
+        -_compute_language_model_representations(tokenizer, esmaa)
+        +forward(batch, prev_outputs)
+    }
+    class ESM2Embedding {
+        +token_dropout: bool
+        +use_attention_mask: bool
+        +mask_token_id: int
+        -_apply_esm2_customization(word_embeddings, input_ids, attention_mask)
+    }
+    class ESM2DotProductAttention {
+        +esm2_scale_mask_softmax(input, mask, scale)
+    }
+    class ESM2TEDotProductAttention {
+        +softmax_scale: float = 1.0
+    }
+    class StructureHead {
+        +esm_s_combine: Parameter
+        +esm_s_mlp: Sequential
+        +trunk: FoldingTrunk
+        +embedding: Embedding
+    }
+    MegatronBioBertModel <|-- ESM2Model
+    ESM2Model <|-- ESMFoldSeqModel
+    ESM2Model --> ESM2Embedding : replaces LanguageModelEmbedding
+    ESM2Model --> ESM2DotProductAttention : custom attention path
+    ESM2Model --> ESM2TEDotProductAttention : TE-accelerated path
+    ESMFoldSeqModel --> StructureHead : composes
+```
+
+来源: [model.py](/peptron/model/model.py#L60-L118), [model.py](/esm2/model/model.py#L67-L199)
+
+## 相较标准 BioBERT 的三项 ESM2 定制
+
+ESM2 模型在三个精确界定的领域与标准 `MegatronBioBertModel` 产生了分歧。每项定制都是为了匹配原始 ESM2 的预训练行为，确保加载的检查点能够产生完全相同的输出。
+
+### 1. ESM2Embedding — Token Dropout 与注意力掩码
+
+`ESM2Embedding` 类替换了 `LanguageModelEmbedding`，并引入了两种在位置编码添加之前对原始词嵌入进行操作的相互关联的机制：
+
+**Token Dropout 缩放**补偿了推理期间遇到的可变掩码比例。在 ESM2 预训练期间，15% 的 Token 被掩码处理，其中 80% 被替换为掩码 Token——由此产生的期望掩码比例为 `0.15 × 0.8 = 0.12`。在推理时，实际的掩码比例可能有所不同，因此嵌入会按 `(1 - ESM2_MASK_RATIO_TRAIN) / (1 - mask_ratio_observed)` 进行缩放。此外，掩码 Token 位置在嵌入空间中被置零，以防止信息泄露。这种缩放确保了无论有多少 Token 被掩码，输入到 Transformer 的期望幅度保持恒定。
+
+**注意力掩码置零**将词嵌入乘以注意力掩码，确保填充位置在进入 Transformer 堆栈之前不贡献任何信号。这不仅应用于原始词嵌入（位置编码添加之前），还再次应用于组合嵌入（位置编码添加之后），为防止填充污染提供了双重保障。
+
+| 定制 | 目的 | 影响阶段 | 配置标志 |
+|---|---|---|---|
+| Token Dropout 缩放 | 在可变掩码下归一化嵌入幅度 | 位置编码前 | `token_dropout: bool = True` |
+| 掩码 Token 置零 | 移除掩码位置的信息 | 位置编码前 | `token_dropout: bool = True` |
+| 注意力掩码置零 | 抑制填充信号 | 位置编码前与后 | `use_attention_mask: bool = True` |
+
+来源: [embedding.py](/esm2/model/embedding.py#L31-L157)
+
+### 2. ESM2DotProductAttention — 定制 Softmax 与掩码
+
+`ESM2DotProductAttention` 通过两项行为变更覆盖了标准的 `DotProductAttention`。首先，当启用 `use_esm_attention` 时，注意力掩码采用 ESM2 的约定：填充位置被填充为 `finfo(dtype).min`（而非乘法掩码），并且掩码被切片为 `[b, np, 1, sk]` 形状，以匹配 ESM2 扩展的注意力掩码格式。其次，`esm2_scale_mask_softmax` 方法在可选的 fp32 精度下（由 `attention_softmax_in_fp32` 控制）执行 Softmax，随后转换回原精度，为半精度训练提供数值稳定性。
+
+`ESM2TEDotProductAttention` 提供了 Transformer Engine 加速的等效实现。其唯一的定制是强制设定 `softmax_scale = 1.0`，这禁用了 TE 后端默认的 `1/√d_k` 缩放。这与 ESM2 的预训练行为相匹配，即注意力分数**不**按键维度进行归一化。
+
+<CgxTip>当 `use_esm_attention = False`（默认值）时，模型使用标准的 Megatron 注意力机制并配合 Transformer Engine 加速，这仍然能通过黄金值测试。仅在需要原始 ESM2 注意力行为的精确按位复现时，才启用 `use_esm_attention = True`。</CgxTip>
+
+来源: [attention.py](/esm2/model/attention.py#L44-L369)
+
+### 3. 完整隐藏状态收集 — 多层表示提取
+
+`encoder_forward` 方法覆盖了标准的 Transformer 块前向传播，以收集**每一层**（而不仅仅是最终输出）的隐藏状态。在每个 Transformer 层之后，隐藏状态会从 `[s, b, h]` 格式置换为 `[b, s, h]` 格式，并追加到 `all_hidden_states` 中。在最终的层归一化之后，最后一个隐藏状态也会被追加。这种收集对于下游的 `StructureHead` 至关重要，后者使用一种可学习的 Softmax 加权组合来跨所有层进行重组。
+
+来源: [model.py](/esm2/model/model.py#L309-L398), [model.py](/esm2/model/model.py#L435-L448)
+
+## 表示流：从 Token 到结构特征
+
+从氨基酸 Token 到结构就绪特征的完整数据流遵循一个精确的流程。理解此流程对于诊断表示质量问题以及正确配置编码器至关重要。
+
+```mermaid
+flowchart TD
+    AA["氨基酸 Token<br/>(AF2 索引)"] --> AF2ESM["_af2_idx_to_esm_idx<br/>重新索引至 ESM 词表"]
+    AF2ESM --> BOS["添加 BOS/EOS Token<br/>_compute_lm_repr"]
+    BOS --> FWD["ESM2 前向传播<br/>收集所有隐藏状态"]
+    FWD --> PERM["置换至 [B, L, Layers, C]<br/>追加重复的最后一层"]
+    PERM --> TRIM["裁剪 BOS/EOS 位置<br/>esm_s[:, 1:-1]"]
+    TRIM --> COMB["可学习的层组合<br/>softmax(esm_s_combine) @ esm_s"]
+    COMB --> DETACH["从计算图分离<br/>esm_s.detach()"]
+    DETACH --> MLP["esm_s_mlp: LayerNorm → Linear → ReLU → Linear<br/>[B, L, C_esm] → [B, L, c_s]"]
+    MLP --> ADD["添加残基嵌入<br/>s_s_0 += embedding(aa)"]
+    ADD --> TRUNK["输入至 FoldingTrunk<br/>[B, L, c_s]"]
+
+    style AA fill:#e8f4f8,stroke:#2196F3
+    style TRUNK fill:#f3e8f8,stroke:#9C27B0
+    style DETACH fill:#fff3e0,stroke:#FF9800
+```
+
+`_compute_language_model_representations` 方法编排了该流程的前半部分。它在残基序列两端添加 BOS（`cls_token_id`）和 EOS（`eos_token_id`）Token，使用全 1 的注意力掩码运行完整的 ESM2 前向传播，并提取 `all_hidden_states` 张量。一个微妙但重要的细节是：最后一层的隐藏状态被**复制并追加**（`esm_s = torch.cat([esm_s, last], dim=2)`），使得表示与 HuggingFace ESM 检查点兼容，后者将最终层归一化的输出作为额外条目包含在内。
+
+可学习的层组合使用了 `esm_s_combine`，一个长度为 `num_layers + 1` 的参数向量。其 Softmax 产生一个跨层的概率分布，加权和将层维度折叠：`esm_s = (softmax(esm_s_combine) @ esm_s).squeeze(2)`。这允许模型学习哪些 ESM2 层对结构预测最具信息量——这是一种可微的层选择形式。
+
+来源: [model.py](/peptron/model/model.py#L120-L155), [model.py](/peptron/model/model.py#L289-L341)
+
+## 配置参考
+
+`ESM2GenericConfig` 数据类提供了编码器的所有可调参数。默认值对应于 ESM2-650M 架构。PepTron 使用 `ESM2Config` 子类（继承自 `ESM2GenericConfig`），该子类添加了训练专有字段，包括 `encoder_frozen` 和 `structure_frozen` 标志。
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `num_layers` | 33 | Transformer 层数（650M 模型） |
+| `hidden_size` | 1280 | 每层的隐藏维度 |
+| `num_attention_heads` | 20 | 多头注意力头数 |
+| `ffn_hidden_size` | 5120 | 前馈网络隐藏层大小（4× hidden） |
+| `hidden_dropout` | 0.0 | ESM2 移除了隐藏层的 Dropout |
+| `attention_dropout` | 0.0 | ESM2 移除了注意力的 Dropout |
+| `token_dropout` | True | 启用 ESM2 Token Dropout 缩放 |
+| `use_attention_mask` | True | 将注意力掩码应用于嵌入 |
+| `use_esm_attention` | False | 使用 ESM2 定制注意力（禁用 TE 加速） |
+| `normalize_attention_scores` | False | 禁用注意力中的 1/√d_k 缩放 |
+| `attention_softmax_in_fp32` | False | 在 fp32 下计算注意力 Softmax |
+| `position_embedding_type` | `"rope"` | 旋转位置嵌入，用于长度外推 |
+| `share_embeddings_and_output_weights` | True | 绑定输入/输出嵌入权重 |
+| `seq_length` | 1024 | 最大输入序列长度 |
+| `biobert_spec_option` | `esm2_bert_layer_with_transformer_engine_spec` | Transformer 层规格 |
+
+<CgxTip>`biobert_spec_option` 字段控制使用哪种注意力实现。`esm2_bert_layer_with_transformer_engine_spec`（默认）选择 `ESM2TEDotProductAttention` 且 `apply_query_key_layer_scaling = False`。已弃用的 `esm2_bert_layer_local_spec` 选择 `ESM2DotProductAttention` 且 `apply_query_key_layer_scaling = True`。</CgxTip>
+
+来源: [model.py](/esm2/model/model.py#L483-L649), [config_models.py](/esm2/run/config_models.py#L147-L229)
+
+## 编码器冻结与选择性训练
+
+`ESMFoldSeqModel` 支持两个级别的冻结，这对 PepTron 的训练策略至关重要：
+
+**全编码器冻结**（`config.training.encoder_frozen = True`）：ESM2 模型中的每个参数——包括嵌入、所有 Transformer 层和输出头——都被冻结。表示作为固定特征流过，训练期间仅更新 `StructureHead` 参数。这是标准运行模式。
+
+**结构部分冻结**（`config.training.structure_frozen = True`）：在 `StructureHead` 内部，特定的子模块可以按名称冻结。可配置的冻结集包括 `esm_s_combine`、`af2_to_esm`、`positional_encoding`、`esm_s_mlp`、`embedding`、`trunk`、`distogram_head`、`ptm_head`、`lm_head` 和 `lddt_head`。任何带点分隔的名称路径与此集合相交的参数都将设为 `requires_grad = False`。这实现了细粒度的消融研究——例如，在仅训练头时冻结主干。
+
+来源: [model.py](/peptron/model/model.py#L70-L96)
+
+## 推理接口
+
+对于独立的 ESM2 推理（不带结构头），`infer_esm2.py` 脚本提供了一个完整的入口点。它支持由布尔标志控制的三种输出模式：`include_hiddens`（所有层的隐藏状态）、`include_embeddings`（按序列平均池化的嵌入）和 `include_logits`（Token 级别的 Logits）。推理流程通过构建一个 `skip_logits = not include_logits` 的 `ESM2Config`，以在未请求 Logits 时避免不必要的计算。
+
+该模型支持多种配置类用于推理：`ESM2Config`（预训练编码器）、`ESM2FineTuneSeqConfig`（序列级回归头）和 `ESM2FineTuneTokenConfig`（Token 级分类头）。每种都可以通过 `--config-class` CLI 参数进行选择。
+
+来源: [infer_esm2.py](/esm2/scripts/infer_esm2.py#L26-L200)
+
+## 与下游组件的关系
+
+ESM2 序列编码器产生两类输出，馈入后续流程阶段。**逐残基序列特征**（`s_s_0`，形状 `[B, L, c_s]`）作为初始单状态表示进入 `FoldingTrunk`，并在那里通过三角自注意力块进行精炼。**成对特征**（`s_z_0`，形状 `[B, L, L, c_z]`）独立于基于距离的输入成对嵌入和时间嵌入（来自流匹配调度）构建，随后同样在主干中进行精炼。ESM2 编码器不直接产生成对特征——这种关注点分离确保了序列编码器纯粹作为一个单向特征提取器，而成对关系则从 `InputPairStack` 处理的几何与时间输入中产生。
+
+若要深入了解这些表示是如何被消费的，请参见 [Structure Head and FoldingTrunk](9-structure-head-and-foldingtrunk)。对于精炼它们的注意力机制，请参见 [Triangular Self-Attention Blocks](10-triangular-self-attention-blocks)。关于包含编码器初始化的完整训练设置，请参见 [Mixed PDB-IDRome Training Strategy](12-mixed-pdb-idrome-training-strategy)。
+
+---
+
+- [深入解析/模型组件/结构头与折叠主干网络](https://zread.ai/PeptoneLtd/PepTron/9-structure-head-and-foldingtrunk)
+
+---
+slug:9-structure-head-and-foldingtrunk
+blog_type:normal
+---
+
+
+**StructureHead** 和 **FoldingTrunk** 构成了 PepTron 结构生成架构核心的两阶段几何推理流水线。StructureHead 负责编排完整的前向传播过程——从 ESM2 编码器输出，经逐对特征构建，直至 3D 坐标预测——而 FoldingTrunk 则通过堆叠的三角自注意力块执行繁重的表征精化，随后将结果移交给 OpenFold 的 StructureModule，以输出 SE(3) 框架和原子位置。两者协同作用，将序列级语义与逐对几何推理桥接起来，消耗来自流匹配过程的带噪距离输入，并生成完整的全原子结构预测。
+
+来源: [model.py](peptron/model/model.py#L152-L509), [trunk.py](peptron/model/trunk.py#L70-L178)
+
+## 架构概述
+
+这两个模块间的数据流遵循精确的分级模式。StructureHead 充当**外部编排层**——它根据 ESM2 嵌入构建单序列和逐对表征，注入流匹配的时间和距离信号，处理来自先前结构预测的循环，并委托给 FoldingTrunk。FoldingTrunk 充当**内部表征引擎**——它应用相对位置编码，运行 `TriangularSelfAttentionBlock` 实例堆栈，并将精化后的表征投影到 OpenFold 的 `StructureModule` 以生成最终坐标。
+
+```mermaid
+flowchart TD
+    subgraph StructureHead
+        ESM2["ESM2 Encoder<br/>B × L × Layers × C"]
+        COMB["esm_s_combine<br/>(softmax加权层混合)"]
+        MLP["esm_s_mlp<br/>LayerNorm → Linear → ReLU → Linear"]
+        EMB["embedding(aa)<br/>氨基酸词元嵌入"]
+        SUM_S["s_s_0 = mlp(esm_s) + embed(aa)"]
+
+        DIST["noised_pseudo_beta_dists<br/>来自流匹配"]
+        DGRAM["距离图<br/>分箱 + input_pair_embedding"]
+        PSTACK["InputPairStack<br/>(4 个三角块)"]
+        TPROJ["GaussianFourierProjection(t)"]
+        TEMB["input_time_embedding<br/>time → c_z"]
+        SUM_Z["s_z_0 = pair_embed + time_embed"]
+
+        PREV["prev_outputs<br/>(循环信号)"]
+        RECYCLE["循环注入<br/>LayerNorm + 距离图嵌入"]
+    end
+
+    subgraph FoldingTrunk
+        RPE["RelativePosition<br/>逐对位置嵌入"]
+        BLOCKS["×48 TriangularSelfAttentionBlock<br/>(已检查点化)"]
+        PROJ_S["trunk2sm_s<br/>Linear: c_s → sm.c_s"]
+        PROJ_Z["trunk2sm_z<br/>Linear: c_z → sm.c_z"]
+        SM["StructureModule<br/>(IPA → 框架 → 原子)"]
+    end
+
+    ESM2 --> COMB --> MLP --> SUM_S
+    EMB --> SUM_S
+    DIST --> DGRAM --> PSTACK --> SUM_Z
+    TPROJ --> TEMB --> SUM_Z
+    PREV --> RECYCLE
+    SUM_S --> RECYCLE
+    SUM_Z --> RECYCLE
+    RECYCLE --> RPE
+    RPE --> BLOCKS
+    BLOCKS --> PROJ_S --> SM
+    BLOCKS --> PROJ_Z --> SM
+    SM --> OUT["结构字典<br/>{sm, s_s, s_z}"]
+```
+
+来源: [model.py](peptron/model/model.py#L313-L427), [trunk.py](peptron/model/trunk.py#L132-L178)
+
+## StructureHead: 编排层
+
+### 序列表征构建
+
+StructureHead 首先通过 `_af2_idx_to_esm_idx` 映射，将氨基酸索引从 OpenFold 的残基排序转换为 ESM2 的词元词汇表。ESM2 编码器生成所有层的隐藏状态，形状为 `[B, L, Layers, C]`。PepTron 并非仅使用最后一层，而是通过 `esm_s_combine` 在所有层上应用**可学习的 softmax 加权组合**——这是一个形状为 `[num_layers + 1]` 的参数向量，其 softmax 结果生成混合权重。这允许模型在各个训练阶段动态地关注信息量最大的 ESM2 层。组合后的表征经过 `esm_s_mlp`（LayerNorm → Linear → ReLU → Linear），从 ESM2 的特征维度（2560）投影到 Trunk 的序列状态维度（c_s = 1024），并与直接的氨基酸嵌入求和。
+
+来源: [model.py](peptron/model/model.py#L350-L364)
+
+### 带时间条件的逐对表征构建
+
+逐对通道是 PepTron 的流匹配集成进入架构的地方。当批次中存在带噪距离时（在流匹配训练或推理期间），StructureHead 通过三个组件构建初始逐对状态 `s_z_0`：
+
+1. **距离图嵌入**：带噪的逐对伪 β 距离被分入 `no_bins=39` 个直方图箱中，范围跨越 `[3.25, 50.75]` Å，然后通过 `input_pair_embedding`（Linear: 39 → 128）投影，并由 `InputPairStack` 精化——这是一个 4 块的三角更新栈，应用起始/结束节点注意力、出/入乘法更新和逐对过渡。
+
+2. **时间嵌入**：流匹配时间标量 `t ∈ [0, 1]` 通过 `GaussianFourierProjection`（正弦编码至 256 维）投影，随后通过 `input_time_embedding`（Linear: 256 → 128），并在所有 L × L 逐对位置上进行**广播相加**。这在全局上将每个对条件化于当前的扩散时间步。
+
+3. **额外输入（可选）**：当 `flow_matching.extra_input=True` 时，将通过独立的 `extra_input_pair_embedding` 和 `extra_input_pair_stack`，从真实或模板逐对距离构建额外的逐对嵌入，并将其加到主逐对状态中。这提供了来自已知构象的结构条件化。
+
+来源: [model.py](peptron/model/model.py#L267-L401), [layers.py](peptron/model/layers.py#L14-L28), [input_stack.py](peptron/model/input_stack.py#L184-L303)
+
+### 循环机制
+
+当提供 `prev_outputs` 时（来自上一次结构预测迭代），StructureHead 将三个循环信号注入初始表征：
+
+| 信号 | 目标 | 机制 |
+|--------|--------|-----------|
+| `prev_outputs['s_s']` | 序列状态 `s_s_0` | LayerNorm → 加性 |
+| `prev_outputs['s_z']` | 逐对状态 `s_z_0` | LayerNorm → 加性 |
+| `prev_outputs['sm']["positions"][-1]` | 逐对状态 `s_z_0` | 距离图 (15 箱, 3.375–21.375 Å) → 嵌入 → 加性 |
+
+距离图由上一次 StructureModule 迭代的 N/CA/C 骨架位置计算得出，通过推断 Cβ 坐标并对逐对 Cβ–Cβ 距离进行分箱得到。当不存在先前输出时，会添加零值循环项，以在不影响计算的情况下保持 DDP 兼容性。
+
+来源: [model.py](peptron/model/model.py#L404-L424), [trunk.py](peptron/model/trunk.py#L100-L104), [trunk.py](peptron/model/trunk.py#L180-L198)
+
+### 辅助头
+
+在 FoldingTrunk 返回精化后的结构字典后，StructureHead 应用四个辅助预测头：
+
+- **距离图头**：从 `s_z`（128）到 `distogram_bins`（64）logits 的线性投影，通过与其转置取平均进行对称化。
+- **语言建模头**：从 `s_s`（1024）到词元词汇表 logits 的线性投影。
+- **pLDDT 头**：在 StructureModule 的单一表征（c_s = 384）上操作的 `PerResidueLDDTCaPredictor`，在 50 个箱中预测逐残基置信度，并缩放至 [0, 100]。
+- **pTM 头**：从 `s_z` 到距离图箱的线性投影，随后调用 `compute_tm` 以生成预测的 TM 分数和预测的对齐误差。
+
+最终的全原子位置从 atom14 表示转换为 atom37 表示，StructureModule 的最终 SE(3) 框架被提取为 `final_affine_tensor`。
+
+来源: [model.py](peptron/model/model.py#L429-L504)
+
+## FoldingTrunk: 表征引擎
+
+### 内部架构
+
+FoldingTrunk 封装了三个子组件：**相对位置嵌入**、**三角自注意力块堆栈**，以及带有其投影层的 **StructureModule**。其配置由 `TrunkConfig` 管理：
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `num_blocks` | 48 | TriangularSelfAttentionBlock 实例的数量 |
+| `sequence_state_dim` (c_s) | 1024 | 单一表征通道维度 |
+| `pairwise_state_dim` (c_z) | 128 | 逐对表征通道维度 |
+| `sequence_head_width` | 32 | 序列注意力的头宽度（→ 32 头） |
+| `pairwise_head_width` | 32 | 逐对注意力的头宽度（→ 4 头） |
+| `position_bins` | 32 | 相对位置编码的分箱数 |
+| `dropout` | 0.0 | 块内的 Dropout 率 |
+| `chunk_size` | None | 轴向注意力分块大小（None = 不分块） |
+
+头数是隐式派生的：`sequence_num_heads = c_s / sequence_head_width = 32` 和 `pairwise_num_heads = c_z / pairwise_head_width = 4`。
+
+来源: [trunk.py](peptron/model/trunk.py#L70-L111), [model.py](peptron/model/model.py#L530-L560)
+
+### 相对位置编码
+
+`RelativePosition` 模块将逐对残基距离嵌入到逐对表征中。给定残基索引，它计算 `diff = residx[:, None, :] - residx[:, :, None]`，截断至 `[-bins, bins]`，偏移 `bins + 1`（将索引 0 保留给被掩码的对），并查找形状为 `[2 * bins + 2, c_z]` 的可学习嵌入。对于被掩码的位置，diff 被设为 0（填充索引）。此编码在每个 Trunk 迭代开始时**加到**逐对状态中，为各块提供位置感知能力。
+
+来源: [trunk.py](peptron/model/trunk.py#L35-L67), [trunk.py](peptron/model/trunk.py#L150)
+
+### 前向传播与梯度检查点化
+
+FoldingTrunk 的前向方法在块堆栈中执行单次传递（无内部循环——循环由 StructureHead 层级处理）。这些块通过 OpenFold 的 `checkpoint_blocks` 工具执行，且 `blocks_per_ckpt=1`，这意味着**每个 TriangularSelfAttentionBlock 都被单独进行梯度检查点化**。这以计算换取内存，将 Trunk 的内存占用从 O(L² × num_blocks) 降低至约 O(L²)，代价是在反向传播期间重新计算激活值。
+
+在块堆栈生成精化的 `s_s` 和 `s_z` 之后，两个投影层将 Trunk 的维度映射到 StructureModule 的维度：`trunk2sm_s`: Linear(1024 → 384) 和 `trunk2sm_z`: Linear(128 → 128)。随后 StructureModule 生成最终的 SE(3) 框架和原子位置。Trunk 返回一个包含 StructureModule 输出（`sm`）、精化的单一表征（`s_s`）和精化的逐对表征（`s_z`）的字典——后两者对循环机制和辅助头至关重要。
+
+来源: [trunk.py](peptron/model/trunk.py#L132-L178)
+
+## 表征流与维度
+
+下表追踪了在大小为 B 的批次和长度为 L 的序列下，张量形状贯穿完整 StructureHead → FoldingTrunk → StructureModule 流水线的变化：
+
+| 阶段 | 张量 | 形状 | 备注 |
+|-------|--------|-------|-------|
+| ESM2 输出 | `esm_s` | B × L × 37 × 2560 | 所有隐藏状态 |
+| 层组合 | `esm_s` | B × L × 2560 | softmax 加权混合 |
+| MLP 投影 | `s_s_0` | B × L × 1024 | 序列状态 |
+| 距离图 | `inp_z` | B × L × L × 128 | InputPairStack 之后 |
+| 时间注入 | `inp_z` | B × L × L × 128 | 加广播时间嵌入 |
+| 循环后 | `s_s_0, s_z_0` | B×L×1024, B×L×L×128 | 已添加循环信号 |
+| RPE 后 | `z` | B × L × L × 128 | 已添加相对位置 |
+| 48 块后 | `s_s, s_z` | B×L×1024, B×L×L×128 | 精化后的表征 |
+| SM 投影 | `sm_s, sm_z` | B×L×384, B×L×L×128 | 维度适配 |
+| StructureModule | `positions, frames` | B×L×14×3, B×L×(iter) | 全原子输出 |
+
+来源: [model.py](peptron/model/model.py#L313-L504), [trunk.py](peptron/model/trunk.py#L132-L178)
+
+## ESMFoldSeqModel 容器
+
+`ESMFoldSeqModel` 将 ESM2 编码器和 StructureHead 包装成一个继承自 `ESM2Model` 的单一模型类。它支持两种关键的冻结策略：
+
+- **`encoder_frozen=True`**（默认）：冻结所有 ESM2 参数，仅训练结构头。这是标准的 PepTron 训练机制。
+- **`structure_frozen=True`**：冻结特定的折叠层（`esm_s_combine`、`af2_to_esm`、`positional_encoding`、`esm_s_mlp`、`embedding`、`trunk`、`distogram_head`、`ptm_head`、`lm_head`、`lddt_head`），同时保持其他参数可训练。
+
+该模型的前向方法是一个轻量级包装器，它委托给 `structure_head(batch, prev_outputs)`，并返回 `{"structure_output": structure_output}`。这种简洁的接口允许流匹配引擎（`FlowSteps.predictor_fn`）通过构建包含 `t` 和 `noised_pseudo_beta_dists` 的批次、运行前向传递，并从预测的原子位置中提取伪 β 坐标来调用模型。
+
+来源: [model.py](peptron/model/model.py#L56-L149), [flowmoco.py](peptron/model/flowmoco.py#L126-L154)
+
+<CgxTip>`trunk2sm_s` 和 `trunk2sm_z` 投影层是 FoldingTrunk 的表征维度（c_s=1024, c_z=128）与 StructureModule 的维度（c_s=384, c_z=128）之间的**唯一**接口。如果修改 Trunk 的通道宽度，则必须相应地更新这些投影——c_z 维度默认恰好匹配，但 c_s 需要显式的 1024→384 降维投影。</CgxTip>
+
+<CgxTip>当批次中缺少 `noised_pseudo_beta_dists` 时（例如，在非流匹配评估期间），StructureHead 仍会以**零距离和零掩码**运行输入逐对嵌入路径，以维持 DDP 参数同步。这并非无操作——InputPairStack 仍会对零输入应用其可学习的变换，从而从层偏置中产生非零的偏置项。对于纯序列推理，应将此隐式偏置考虑在内。</CgxTip>
+
+## 配置参考
+
+`ESMFoldSeqConfig` 数据类组合了所有子配置。与 StructureHead 和 FoldingTrunk 相关的关键配置类如下：
+
+| 配置类 | 关键字段 | 默认值 |
+|-------------|------------|----------------|
+| `TrunkConfig` | `num_blocks`, `sequence_state_dim`, `pairwise_state_dim` | 48, 1024, 128 |
+| `StructureModuleConfig` | `c_s`, `c_z`, `c_ipa`, `no_heads_ipa`, `no_blocks` | 384, 128, 16, 12, 8 |
+| `InputPairEmbedderConfig` | `min_bin`, `max_bin`, `no_bins`, `time_emb_dim` | 3.25, 50.75, 39, 256 |
+| `FlowMatchingConfig` | `noise_prob`, `extra_input`, `self_cond_prob` | 0.5, False, 0.5 |
+| `ESM2Config` | `feats`, `num_layers`, `attention_heads` | 2560, 36, 40 |
+
+Trunk 配置通过 `get_esmfoldconfig()` 从全局 `ConfigDict` 中提取，该函数在构造 `TrunkConfig` 之前将 `structure_module` 子字典与 Trunk 配置分离。cuequivariance 覆盖标志会被显式传播，以确保加载检查点的配置不会静默还原注意力后端的选择。
+
+来源: [model.py](peptron/model/model.py#L511-L732), [config.py](peptron/model/config.py#L599-L629), [config.py](peptron/model/config.py#L734-L786)
+
+## 与相邻组件的关系
+
+StructureHead 和 FoldingTrunk 位于 PepTron 架构的中心，与周围系统具有明确定义的接口：
+
+- **上游**：[ESM2 序列编码器](8-esm2-sequence-encoder)提供多层隐藏状态，StructureHead 通过 `esm_s_combine` 和 `esm_s_mlp` 消耗这些状态。
+- **内部**：[三角自注意力块](10-triangular-self-attention-blocks)是 FoldingTrunk 内部的核心计算单元，执行成对的序列→逐对和逐对→序列更新。
+- **下游**：[连续流匹配](5-continuous-flow-matching)引擎调用 `FlowSteps.predictor_fn`，该函数构建带噪批次并调用 StructureHead，以在每个积分步获得结构预测。
+- **训练**：[损失函数和验证指标](13-loss-functions-and-validation-metrics)消耗 StructureHead 的输出字典——距离图 logits、pLDDT、pTM、StructureModule 框架上的 FAPE 以及原子位置——以计算训练信号。
+
+---
+
+- [深入解析/模型组件/三角自注意力块](https://zread.ai/PeptoneLtd/PepTron/10-triangular-self-attention-blocks)
+
+---
+slug:10-triangular-self-attention-blocks
+blog_type:normal
+---
+
+
+**TriangularSelfAttentionBlock** 是 PepTron `FoldingTrunk` 的核心迭代原语——一种双状态 Transformer 块，它通过交叉融合、三角推理和残差转换的精巧循环，联合优化逐残基的序列表示和残基对的几何表示。该模块默认堆叠 48 层，构成深度推理引擎，将 ESM2 嵌入与流匹配噪声条件转换为结构确定的配对表示，以供 OpenFold 的 `StructureModule` 使用。
+
+## 双状态表示
+
+每个块处理两个编码截然不同几何信息的耦合张量。**序列状态** `s ∈ ℝ^{B×L×C_s}` 携带逐残基特征——融合了 ESM2 语言模型表示、流匹配时间嵌入和循环结构信号。**配对状态** `z ∈ ℝ^{B×L×L×C_z}` 编码每对残基之间的关系信息——距离先验、相对位置嵌入和循环距离图信号。这两种表示并非独立处理；相反，块的架构确保了它们之间持续的双向信息流。
+
+| 表示 | 符号 | 形状 | 默认维度 | 语义内容 |
+|---|---|---|---|---|
+| 序列状态 | `s` | B × L × C_s | 1024 | 逐残基嵌入 (ESM2 + 流时间 + 循环) |
+| 配对状态 | `z` | B × L × L × C_z | 128 | 残基对几何特征 (距离 + 相对位置 + 距离图) |
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L26-L50), [config.py](peptron/model/config.py#L599-L608)
+
+## 块架构与信息流
+
+前向传播遵循严格的顺序，建立了**配对→序列→配对**的信息循环。此顺序并非任意设定——它确保配对几何上下文在更新后的序列状态广播回配对表示之前，能够调制序列级注意力。单个块内的完整数据流如下：
+
+```mermaid
+flowchart TD
+    subgraph Input
+        S_IN["s (序列状态)"]
+        Z_IN["z (配对状态)"]
+    end
+
+    subgraph "配对 → 序列通道"
+        P2S["PairToSequence<br/>z → 偏置"]
+        LN1["LayerNorm(s)"]
+        SA["门控自注意力<br/>带配对偏置"]
+        DROP1["Dropout + 残差"]
+        MLP_S["ResidueMLP(s)"]
+    end
+
+    subgraph "序列 → 配对通道"
+        S2P["SequenceToPair<br/>s → Δz"]
+    end
+
+    subgraph "三角配对更新"
+        TRI_OUT["TriangleMulOutgoing"]
+        TRI_IN["TriangleMulIncoming"]
+        TRI_ATT_S["TriangleAttStartingNode"]
+        TRI_ATT_E["TriangleAttEndingNode"]
+        MLP_Z["ResidueMLP(z)"]
+    end
+
+    S_IN --> LN1 --> SA
+    Z_IN --> P2S --> SA
+    SA --> DROP1 --> MLP_S
+    S_IN --> DROP1
+    S_IN --> MLP_S
+
+    MLP_S --> S2P
+    Z_IN --> S2P
+
+    S2P --> TRI_OUT
+    Z_IN --> TRI_OUT
+    S2P --> TRI_IN
+    Z_IN --> TRI_IN
+    TRI_OUT --> TRI_ATT_S
+    TRI_IN --> TRI_ATT_S
+    TRI_ATT_S --> TRI_ATT_E
+    TRI_ATT_E --> MLP_Z
+
+    MLP_S --> S_OUT["s' (已更新)"]
+    MLP_Z --> Z_OUT["z' (已更新)"]
+```
+
+`forward` 方法在运行时强制保持形状不变量：序列状态必须是 3 维，配对状态必须是 4 维，且两个输入的序列长度维度必须一致。布尔掩码 `B × L` 通过外积扩展为三角操作的轴向掩码 `B × L × L`：`tri_mask = mask.unsqueeze(2) * mask.unsqueeze(1)`。
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L113-L193)
+
+## 配对 → 序列：PairToSequence 与带偏置的注意力
+
+第一阶段从配对表示中提取**配对注意力偏置**，并将其注入序列的标准多头自注意力中。`PairToSequence` 模块对 `z` 应用 `LayerNorm`，然后进行线性投影 `ℝ^{C_z} → ℝ^{H_s}`，其中 `H_s` 为序列注意力头数。这会生成形状为 `B × L × L × H_s` 的张量，直接加到注意力 logits 上，使结构/几何上下文能够调节残基间的注意力分配。
+
+序列注意力本身是带有外部偏置机制的**门控多头自注意力**。给定投影的查询、键和值（通过单个 `Linear(C_s, 3·C_s)` 得到），注意力 logits 计算为 `a = (q · k^T) / √d + bias`。在 softmax 和值聚合后，输出被门控：`y = σ(g_proj(x)) ⊙ o_proj(attn_output)`，其中 `g_proj` 是一个已学习的线性门控，初始化时使其产生近似 1 的 sigmoid 值。此门控机制提供了梯度稳定性，并允许网络动态抑制注意力贡献。
+
+| 参数 | 公式 | 默认值 |
+|---|---|---|
+| 序列头数 (H_s) | C_s / sequence_head_width | 1024 / 32 = **32** |
+| 序列头宽度 | — | **32** |
+| 配对偏置维度 | = H_s | **32** |
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L146-L152), [layers.py](peptron/model/layers.py#L31-L92), [layers.py](peptron/model/layers.py#L156-L174)
+
+## 序列 → 配对：SequenceToPair
+
+在序列状态通过带偏置的自注意力和残差 MLP 更新后，`SequenceToPair` 模块将优化后的逐残基信息广播到配对表示中。这是通过**乘积与差分**机制实现的，该机制捕获残基对之间的乘法交互和加法差异：
+
+1. 应用 `LayerNorm` 并投影：`s' = Linear(s) ∈ ℝ^{B×L×2·C_{inner}}`，其中 `C_{inner} = C_z / 2`
+2. 拆分为两半：`q, k = chunk(s', 2)`
+3. 计算外积与差分：`prod = q[:, None, :, :] ⊙ k[:, :, None, :]`，`diff = q[:, None, :, :] - k[:, :, None, :]`
+4. 拼接并投影：`Δz = Linear(cat([prod, diff])) ∈ ℝ^{B×L×L×C_z}`
+
+**乘积**项捕获协同交互（例如，相关的结构偏好），而**差分**项捕获非对称关系（例如，沿链的方向依赖）。随后配对状态更新为 `z ← z + Δz`。
+
+来源: [layers.py](peptron/model/layers.py#L118-L153), [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L155)
+
+## 三角乘法更新
+
+随着配对表示融入了序列级信息，两个**三角乘法更新**操作根据 3D 空间固有的几何约束重构配对特征。正是这些操作赋予了该模块其名称及最具特色的计算特性。
+
+**出边**更新（`TriangleMultiplicationOutgoing`）沿 L×L 矩阵的一个轴处理配对表示，而**入边**更新（`TriangleMultiplicationIncoming`）沿转置轴处理。两者共同实施了一种**传递性**：若残基 *i* 接近 *k*，且残基 *k* 接近 *j*，则 (i, j) 配对表示应受此传递路径的影响。这对于将局部结构约束传播至全局折叠决策至关重要。
+
+两个操作均从 OpenFold 的实现中导入，并支持可选的 **cu-equivariance** 加速后端（`use_cuequivariance_multiplicative_update`）。行结构与列结构化的 Dropout（`2 × dropout` 率）独立应用于每次更新，Dropout 掩码在整行或整列共享，以保持配对表示的轴向结构。
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L157-L172), [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L61-L68)
+
+## 三角注意力
+
+两次**三角注意力**操作紧随乘法更新之后，为配对表示提供了已学习的轴向注意力机制。`TriangleAttentionStartingNode` 沿 L×L 配对矩阵的行执行注意力（固定“起始”残基索引），而 `TriangleAttentionEndingNode` 沿列执行注意力（固定“结束”残基索引）。来自 OpenFold 的三角注意力模块使用配对状态本身构建**三角偏置**——一种依赖位置的注意力调制形式，其中位置 (i, j, k) 的偏置取决于 (i, k) 和 (k, j) 处的配对特征，进一步强化了几何传递性。
+
+| 参数 | 公式 | 默认值 |
+|---|---|---|
+| 配对头数 (H_z) | C_z / pairwise_head_width | 128 / 32 = **4** |
+| 配对头宽度 | — | **32** |
+| 无穷值钳位 (inf) | — | **1e9** |
+
+与乘法更新类似，三角注意力支持 **cu-equivariance** 加速后端（`use_cuequivariance_attention`），并包装了轴向 Dropout（起始节点按行，结束节点按列）。`chunk_size` 参数控制内存高效的分块计算，将长序列的内存占用从 O(L²) 降至约 O(L)。
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L173-L188), [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L69-L80)
+
+## 残差 MLP 与输出
+
+序列和配对状态均通过 `ResidueMLP` 转换层进行定稿——这是带有预归一化、ReLU 激活和残差连接的双层前馈网络：`x ← x + Dropout(ReLU(LayerNorm(x) · W₁) · W₂)`。两者的内部维度均为 `4 × embed_dim`，提供了 Transformer 架构中常见的标准 4× 扩展因子。序列 MLP 按残基操作（在 `B × L × C_s` 的最后一个维度上），配对 MLP 按配对操作（在 `B × L × L × C_z` 的最后一个维度上），两者共享同一个 `ResidueMLP` 类。
+
+来源: [layers.py](peptron/model/layers.py#L177-L190), [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L82-L83), [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L190-L193)
+
+## 零初始化：渐进式解锁模式
+
+一个关键的架构细节是块内**所有输出投影的零初始化**。每个贡献残差更新的模块——序列注意力输出投影、`SequenceToPair` 输出、`PairToSequence` 线性层、两个三角乘法更新的 `linear_z` 投影、两个三角注意力的 `linear_o` 投影，以及两个 MLP 的最终线性层——在构造时其权重和偏置均被显式设为零。
+
+这意味着在初始化时，每个 `TriangularSelfAttentionBlock` 的行为等同于**恒等函数**：`s' = s`，`z' = z`。梯度流立即开始，但网络从堆叠块不施加任何变换的状态起步。这是一项成熟的技术（有时被称为“渐进式解锁”或“零初始化残差”），它通过防止深度堆叠的随机初始化模块产生破坏性的巨大更新来稳定早期训练。因此，48 层堆叠可以在不受梯度爆炸问题困扰的情况下进行训练，而此类深度通常会引发该问题。
+
+下表列举了所有零初始化的参数及其作用：
+
+| 模块 | 零初始化参数 | 作用 |
+|---|---|---|
+| `tri_mul_in` | `linear_z.weight`, `linear_z.bias` | 入边乘法更新初始为恒等 |
+| `tri_mul_out` | `linear_z.weight`, `linear_z.bias` | 出边乘法更新初始为恒等 |
+| `tri_att_start` | `mha.linear_o.weight`, `mha.linear_o.bias` | 起始节点注意力初始为恒等 |
+| `tri_att_end` | `mha.linear_o.weight`, `mha.linear_o.bias` | 结束节点注意力初始为恒等 |
+| `sequence_to_pair` | `o_proj.weight`, `o_proj.bias` | 序列→配对广播初始为恒等 |
+| `pair_to_sequence` | `linear.weight` | 配对→序列偏置初始为恒等 |
+| `seq_attention` | `o_proj.weight`, `o_proj.bias` | 序列注意力初始为恒等 |
+| `mlp_seq` | `mlp[-2].weight`, `mlp[-2].bias` | 序列 MLP 初始为恒等 |
+| `mlp_pair` | `mlp[-2].weight`, `mlp[-2].bias` | 配对 MLP 初始为恒等 |
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L90-L107)
+
+## 结构化轴向 Dropout
+
+该块采用三种不同的 Dropout 机制，每种旨在保持表示的几何结构：
+
+- **标准 Dropout**（`self.drop`）：以 `dropout` 概率应用于序列注意力输出。在所有位置共享。
+- **行级 Dropout**（`self.row_drop`）：以 `2 × dropout` 概率应用，掩码沿维度 2（L×L 配对矩阵的“列”索引）共享。给定行中的所有位置接受相同的 Dropout 决策。
+- **列级 Dropout**（`self.col_drop`）：以 `2 × dropout` 概率应用，掩码沿维度 1（“行”索引）共享。给定列中的所有位置接受相同的 Dropout 决策。
+
+此轴向 Dropout 策略对三角操作至关重要：沿某轴共享掩码可确保沿该轴计算的乘法更新或注意力看到配对表示的一致子集，而非独立丢弃条目从而破坏轴向计算结构。轴向 Dropout 的加倍概率补偿了掩码共享造成的有效 Dropout 概率降低。硬断言（`dropout < 0.4`）防止加倍的轴向概率超过 0.8。
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L85-L88), [layers.py](peptron/model/layers.py#L95-L115)
+
+## cu-Equivariance 加速
+
+两个可选的优化后端可替换三角操作的标准 PyTorch 实现：
+
+| 标志 | 替换对象 | 后端 |
+|---|---|---|
+| `use_cuequivariance_attention` | `TriangleAttentionStartingNode`, `TriangleAttentionEndingNode` | `cuequivariance-torch` |
+| `use_cuequivariance_multiplicative_update` | `TriangleMultiplicationOutgoing`, `TriangleMultiplicationIncoming` | `cuequivariance-torch` |
+
+这些标志可在构造时设置，或通过 `peptron.cueq_override` 中的模块级变量 `_CUEQ_ATTN_OVERRIDE` 和 `_CUEQ_MUL_OVERRIDE` 全局覆盖。全局覆盖机制专门用于处理**检查点加载**：已保存的模型在其配置中可能包含 `use_cuequivariance=False`，但推理可能从加速后端中受益。当设为非 `None` 值时，覆盖优先生效，从而允许在不修改检查点的情况下进行运行时切换。
+
+来源: [tri_self_attn_block.py](peptron/model/tri_self_attn_block.py#L109-L131), [cueq_override.py](peptron/cueq_override.py#L15-L28)
+
+## FoldingTrunk 中的配置与部署
+
+`FoldingTrunk` 将 `num_blocks` 个相同的 `TriangularSelfAttentionBlock` 模块实例化为 `nn.ModuleList`，每个块接收相同的超参数。PepTron 主干的默认配置如下：
+
+| 配置键 | 默认值 | 导出量 |
+|---|---|---|
+| `num_blocks` | 48 | — |
+| `sequence_state_dim` (C_s) | 1024 | — |
+| `pairwise_state_dim` (C_z) | 128 | — |
+| `sequence_head_width` | 32 | H_s = 32 头 |
+| `pairwise_head_width` | 32 | H_z = 4 头 |
+| `position_bins` | 32 | 相对位置嵌入范围 |
+| `dropout` | 0 | 轴向 Dropout = 0 |
+| `chunk_size` | None | 无分块（完全物化） |
+
+这些块在 `trunk_iter` 中顺序执行，由 OpenFold 的 `checkpoint_blocks` 工具以 `blocks_per_ckpt=1` 包装以进行梯度检查点化——用每个块的一次额外前向传播换取约 48 倍的峰值激活内存降低。来自 `RelativePosition` 的配对位置嵌入在块执行前被加到 `z` 中，提供三角操作随后优化的初始距离感知偏置。
+
+<CgxTip>当设置 `chunk_size`（例如 128）时，每个轴向注意力在 128 长度的序列块上计算，将峰值内存从 O(L²) 降至 O(L·chunk_size)。这对于超过约 500 个残基的序列推理至关重要。</CgxTip>
+
+<CgxTip>零初始化模式意味着在初始化时增加更多块不会造成负面影响——一个全新初始化的 48 块堆叠在功能上等同于 0 块堆叠。这使得无需逐层学习率调度即可稳定训练极深的配对堆叠。</CgxTip>
+
+来源: [config.py](peptron/model/config.py#L599-L628), [trunk.py](peptron/model/trunk.py#L70-L98), [trunk.py](peptron/model/trunk.py#L149-L158)
+
+## 接下来去哪
+
+三角自注意力块是结构预测前的最终变换。要了解其输入是如何组装的，请参阅 [Structure Head and FoldingTrunk](9-structure-head-and-foldingtrunk)。关于训练这 48 个块的损失情况，请查阅 [Loss Functions and Validation Metrics](13-loss-functions-and-validation-metrics)。关于使训练 48 个深度块成为可行的分布式基础设施，请参阅 [Megatron Distributed Training](14-megatron-distributed-training)。
+
+---
+
+## 数据与训练
+
+- [深入解析/数据与训练/数据流水线与特征处理](https://zread.ai/PeptoneLtd/PepTron/11-data-pipeline-and-feature-processing)
+
+---
+slug:11-data-pipeline-and-feature-processing
+blog_type:normal
+---
+
+
+PepTron 的数据流水线将原始蛋白质结构——包括折叠的 PDB 条目和无序的 IDRome 构象系综——转换为流匹配引擎和 ESM2 序列编码器所需的张量特征。该流水线被组织为三阶段架构：**原始特征提取** (`DataPipeline`)、**特征处理与张量化** (`FeaturePipeline`) 以及 **输入变换与裁剪** (`input_pipeline`)。每个阶段相互解耦且可组合，支持混合的 PDB-IDRome 训练策略，在该策略下，无序构象系综和晶体结构流经相同的处理路径，并采用特定模式的增强。
+
+来源: [data_pipeline.py](/peptron/data/data_pipeline.py#L1-L131), [feature_pipeline.py](/peptron/data/feature_pipeline.py#L1-L131), [input_pipeline.py](/peptron/data/input_pipeline.py#L1-L322)
+
+## 流水线架构概述
+
+端到端的数据流从磁盘上的结构文件出发，经过 NumPy 特征字典，转化为带有位置编码和掩码的 PyTorch 张量，最后经过裁剪和填充，生成适合 Megatron 分布式训练的固定大小批次。
+
+```mermaid
+flowchart TD
+    subgraph Stage1["阶段 1: 原始特征提取 (DataPipeline)"]
+        A1[".npz / .cif / .pdb 文件"] --> A2["make_mmcif_features / make_pdb_features"]
+        A2 --> A3["make_sequence_features"]
+        A3 --> A4["aatype, residue_index, all_atom_positions, all_atom_mask"]
+        B1["MSA 比对目录 (.a3m, .sto)"] --> B2["_parse_msa_data"]
+        B2 --> B3["make_msa_features"]
+        B3 --> B4["msa, deletion_matrix_int, num_alignments"]
+    end
+
+    subgraph Stage2["阶段 2: 特征处理 (FeaturePipeline)"]
+        C1["NumPy FeatureDict"] --> C2["make_data_config → 选择特征名称"]
+        C2 --> C3["np_to_tensor_dict → TensorDict"]
+        C3 --> C4["process_tensors_from_config"]
+    end
+
+    subgraph Stage3["阶段 3: 输入变换 (input_pipeline)"]
+        D1["TensorDict"] --> D2["nonensembled_transform_fns"]
+        D2 --> D3["MSA 采样与聚类"]
+        D3 --> D4["random_crop_to_size / make_fixed_size"]
+        D4 --> D5["批次就绪的 TensorDict"]
+    end
+
+    A4 --> C1
+    B4 --> C1
+    C4 --> D1
+```
+
+`DataPipeline` 类作为阶段 1 的编排器，将异构特征组装为统一的 `FeatureDict`（即 `Mapping[str, np.ndarray]`）。`FeaturePipeline` 类封装了阶段 2 和阶段 3，接收原始 NumPy 字典并输出完全变换后的 PyTorch 张量。这种分离确保了原始特征可以被缓存到磁盘（以 `.npz` 文件形式），而阶段 3 中的随机变换则在每个 epoch 重新应用。
+
+来源: [data_pipeline.py](/peptron/data/data_pipeline.py#L409-L616), [feature_pipeline.py](/peptron/data/feature_pipeline.py#L115-L131)
+
+## 阶段 1: 原始特征提取
+
+### 序列特征
+
+每个蛋白质条目都以 `make_sequence_features` 开始，该函数从原始氨基酸字符串构建残基级表示。该函数在特征字典中生成六个键：
+
+| 特征键 | 形状 | 描述 |
+|---|---|---|
+| `aatype` | `[num_res, 21]` | 20 种标准残基 + X（未知）的独热编码 |
+| `between_segment_residues` | `[num_res]` | 填零的片段边界指示符 |
+| `domain_name` | `[1]` (对象) | 编码的 PDB ID + 链标识符 |
+| `residue_index` | `[num_res]` | 整数残基位置（从 0 开始索引） |
+| `seq_length` | `[num_res]` | 每个残基重复的总序列长度 |
+| `sequence` | `[1]` (对象) | 编码的原始序列字符串 |
+
+独热映射使用 `restype_order_with_x`，它映射所有 20 种标准氨基酸加上一个未知 token。这是下游 `target_feat` 和 `msa_feat` 变换所使用的规范表示。
+
+来源: [data_pipeline.py](/peptron/data/data_pipeline.py#L30-L49)
+
+### 结构特征 (mmCIF 和 PDB 路径)
+
+两条并行的提取路径处理不同的结构来源。`make_mmcif_features` 处理由 OpenFold 的 `mmcif_parsing` 模块解析的 mmCIF 对象，为 37 原子表示提取 `all_atom_positions`（形状为 `[num_res, 37, 3]`）和 `all_atom_mask`（形状为 `[num_res, 37]`），以及元数据字段 `resolution` 和 `release_date`。对于 mmCIF 条目（实验结构），`is_distillation` 标志被设置为 `0.0`。
+
+`make_pdb_features` 处理由 PDB 解析的 `Protein` 对象，并引入**基于置信度的掩码**：当 `is_distillation=True` 时，`b_factors` 低于 `confidence_threshold`（默认为 50）的残基会将其原子掩码置零。这确保了低置信度的蒸馏集预测不会贡献于监督损失项——这是自蒸馏训练数据质量的关键机制。
+
+来源: [data_pipeline.py](/peptron/data/data_pipeline.py#L52-L141)
+
+### MSA 特征
+
+`make_msa_features` 将多序列比对转换为整数编码的数组。它对所有提供的 MSA 中的序列进行去重，将每个残基转换为其 `HHBLITS_AA_TO_ID` 整数索引，并产生三个输出键：
+
+| 特征键 | 形状 | 描述 |
+|---|---|---|
+| `msa` | `[num_alignments, num_res]` | 整数编码的 MSA 行 |
+| `deletion_matrix_int` | `[num_alignments, num_res]` | 每个位置的删除计数 |
+| `num_alignments` | `[num_res]` | 每个残基的总比对深度 |
+
+MSA 数据从 `.a3m` 文件（通过 `parse_a3m`）和 `.sto` Stockholm 文件（通过 `parse_stockholm`）中解析，两者均由 `AlignmentRunner` 生成。如果未找到 MSA 数据，则会插入一个仅包含查询序列的**虚拟 MSA** 作为后备，确保流水线在面对没有外部比对的序列时绝不会失败。
+
+来源: [data_pipeline.py](/peptron/data/data_pipeline.py#L143-L176), [data_pipeline.py](/peptron/data/data_pipeline.py#L522-L561)
+
+### IDRome 构象系综处理
+
+一条独特的预处理路径处理来自 IDRome 数据库的内在无序蛋白质构象系综。`prep_idrome.py` 脚本使用 MDTraj 加载分子动力学轨迹（具有 `.pdb` 拓扑的 `.xtc` 文件），遍历各帧，并将所有构象的 `all_atom_positions` 堆叠成一个形状为 `[num_frames, num_res, 37, 3]` 的单一数组。这种堆叠表示被保存为压缩的 `.npz` 文件，为流匹配训练目标保留了完整的构象系综，在该目标中模型学习从结构分布中进行采样。
+
+来源: [prep_idrome.py](/dataprep/prep_idrome.py#L148-L182)
+
+## 阶段 2: 特征处理与张量化
+
+### 配置驱动的特征选择
+
+`make_data_config` 根据模式（`train`、`eval`、`predict`）和配置标志来解析需要提取的特征。特征名称列表由三个来源组装而成：
+
+1. **无监督特征** (`cfg.common.unsupervised_features`)：始终包含——序列、MSA 和结构掩码特征
+2. **模板特征** (`cfg.common.template_features`)：仅在 `cfg.common.use_templates` 为真时包含
+3. **监督特征** (`cfg.supervised.supervised_features`)：仅在 `cfg[mode].supervised` 为真时包含——真实位置、帧和扭转角
+
+如果 `mode_cfg.crop_size` 为 `None`，则会被动态设置为实际序列长度，意味着不进行裁剪（用于预测模式）。
+
+来源: [feature_pipeline.py](/peptron/data/feature_pipeline.py#L51-L70)
+
+### NumPy 到张量的转换
+
+`np_to_tensor_dict` 执行从 NumPy 到 PyTorch 的桥接，仅转换选择列表中命名的特征，并丢弃所有其他特征。这种过滤对内存效率至关重要：原始特征字典可能包含大型 MSA 数组和在某些模式下不必要的模板特征。在此阶段，`deletion_matrix_int` 键被重命名为 `deletion_matrix` 并转换为 `float32`，以符合下游的期望。
+
+来源: [feature_pipeline.py](/peptron/data/feature_pipeline.py#L30-L48)
+
+### 钳位 FAPE 控制
+
+张量处理后，`np_example_to_features` 注入 `use_clamped_fape` 张量——这是 FAPE 损失的二元控制信号。在训练期间，每个样本以 `cfg.supervised.clamp_prob` 的概率随机钳位 FAPE，生成形状为 `[max_recycling_iters + 1]` 的张量。在评估期间，钳位始终被禁用（全为零）。这种随机钳位是从 AlphaFold2 继承的关键正则化技术。
+
+来源: [feature_pipeline.py](/peptron/data/feature_pipeline.py#L73-L112)
+
+## 阶段 3: 输入变换流水线
+
+变换流水线将一系列精心排序的可组合函数应用于张量字典。这些函数分为**非系综变换**（每个样本应用一次），并由 `nonensembled_transform_fns` 编排。
+
+### 变换执行顺序
+
+变换按照尊重数据依赖的严格顺序执行：
+
+| 阶段 | 变换 | 目的 |
+|---|---|---|
+| **类型转换与校正** | `cast_to_64bit_ints`, `correct_msa_restypes`, `squeeze_features` | 类型归一化与 MSA 残基校正 |
+| **掩码** | `randomly_replace_msa_with_unknown(0.0)`, `make_seq_mask`, `make_msa_mask` | 构建序列和 MSA 的布尔掩码 |
+| **特征分析** | `make_hhblits_profile` | 从 MSA 计算位置特异性评分矩阵 |
+| **模板** | `fix_templates_aatype`, `make_template_mask`, `make_pseudo_beta("template_")` | 处理模板特征（条件执行） |
+| **监督** | `make_atom14_positions`, `atom37_to_frames`, `atom37_to_torsion_angles`, `make_pseudo_beta`, `get_backbone_frames`, `get_chi_angles` | 真实结构特征（条件执行） |
+| **MSA 采样** | `sample_msa`, `make_masked_msa`, `nearest_neighbor_clusters`, `summarize_clusters` | MSA 子采样与聚类特征计算 |
+| **裁剪** | `crop_extra_msa`, `random_crop_to_size` | 空间和 MSA 维度缩减 |
+| **填充** | `make_fixed_size` | 填充至固定张量维度以进行批处理 |
+
+来源: [input_pipeline.py](/peptron/data/input_pipeline.py#L146-L285)
+
+### 随机裁剪
+
+`random_crop_to_size` 沿残基维度执行随机空间裁剪。给定 `crop_size` 参数，它选择一个连续的残基窗口，根据其形状模式将相同的裁剪应用于所有特征张量。模板特征被特殊处理：当启用 `subsample_templates` 时，模板在裁剪前被随机置换，以近似均匀的模板子采样。当 `use_clamped_fape` 处于活动状态时，裁剪锚点是确定性的（右锚定），确保同一裁剪的钳位和非钳位版本对齐。
+
+来源: [input_pipeline.py](/peptron/data/input_pipeline.py#L25-L106)
+
+### 固定大小填充
+
+`make_fixed_size` 将所有张量填充至批量 GPU 计算所需的统一维度。填充由 `shape_schema` 引导，该模式将每个特征键映射到符号形状（使用 `NUM_RES`、`NUM_MSA_SEQ`、`NUM_EXTRA_SEQ`、`NUM_TEMPLATES` 占位符）。每个维度都被填充到配置的最大值，默认填充值为零。`extra_cluster_assignment` 键被明确排除在填充之外，以避免向加速器进行不必要的数据传输。
+
+来源: [input_pipeline.py](/peptron/data/input_pipeline.py#L110-L143)
+
+## 数据集类与采样
+
+### OpenFoldSingleDataset
+
+主要数据集类从磁盘加载预处理的 `.npz` 文件。其 `__getitem__` 方法执行两阶段检索：(1) 从 `.npz` 文件加载结构特征，可选择对 IDRome 构象系综进行构影子采样，(2) 通过 `DataPipeline._process_msa_feats` 从比对目录加载 MSA 特征。这两个特征字典在传递给 `FeaturePipeline` 之前进行合并。
+
+对于 `all_atom_positions` 形状为 `[num_confs, num_res, 37, 3]` 的 IDRome 数据，有两种子采样策略可用：`subsample_pos=True` 在每次访问时随机选择一个构象（随机增强），而 `num_confs=N` 确定性地索引构象，通过系综基数扩展有效数据集大小。
+
+来源: [data.py](/peptron/data/data.py#L42-L211)
+
+### OpenFoldDataset (随机过滤)
+
+`OpenFoldDataset` 使用 AlphaFold2 风格的随机过滤封装多个组成数据集。应用两种过滤器类型：
+
+- **确定性过滤器** (`deterministic_train_filter`)：基于分辨率 > 9 Å 或单氨基酸比例 > 0.8 的硬拒绝
+- **随机过滤器** (`get_stochastic_train_filter_prob`)：与簇大小（去重）和序列长度（长度平衡采样）成反比的概率接受
+
+每个 epoch，数据集通过根据配置的 `probabilities`（例如，PDB 与蒸馏混合比例）采样数据集索引来“重掷”，然后对每个候选样本应用两种过滤器类型。
+
+来源: [data.py](/peptron/data/data.py#L214-L347)
+
+### OpenFoldBatchCollator
+
+整理器通过将每个张量维度填充到批次中观察到的最大大小，来处理批次中的变长蛋白质。它使用 `dict_multimap` 模式递归地将 `pad_and_stack` 应用于每个张量叶节点，采用零填充和一致的秩验证。这至关重要，因为在预测模式下 `crop_size` 可能等于原生序列长度，从而产生无法简单堆叠的不同大小张量。
+
+来源: [data.py](/peptron/data/data.py#L349-L397)
+
+## 数据模块与分布式集成
+
+### ESMFoldDataModule
+
+`ESMFoldDataModule` 继承自 NVIDIA NeMo/BioNeMo 框架的 `MegatronDataModule`，将 PepTron 的数据流水线与 Megatron 的分布式数据并行相集成。它将数据集封装在 `MultiEpochDatasetResampler` 和 `IdentityMultiEpochDatasetWrapper` 中，以实现高效的多 epoch 迭代，而无需重新洗牌的开销。
+
+`structure_data_step` 函数实现了**流水线阶段感知的键过滤**：只有 `input_ids` 和元数据键被路由到第一个流水线阶段（ESM2 编码器），而完整的结构特征集（原子位置、刚体组、MSA 特征、流匹配输入）被路由到最后一个流水线阶段。这最大限度地减少了流水线并行训练中的阶段间通信。
+
+来源: [datamodule.py](/peptron/data/datamodule.py#L38-L131), [datamodule.py](/peptron/data/datamodule.py#L133-L297)
+
+### 按流水线阶段的特征路由
+
+数据步骤将特征分类为与 Megatron 流水线并行阶段对齐的三组：
+
+| 阶段 | 特征 |
+|---|---|
+| **第一阶段** (ESM2 编码器) | `input_ids`, `name`, `resolution` |
+| **最后阶段** (结构头) | `aatype`, `residue_index`, `atom_mask`, `seq_length`, `seq_mask`, `bert_mask`, `target_feat`, atom14/atom37 掩码与映射, `use_clamped_fape` |
+| **最后阶段** (真实值) | `all_atom_positions`, `all_atom_mask`, `atom14_gt_positions`, `atom14_alt_gt_positions`, 刚体组帧, `backbone_rigid_tensor`, `chi_angles_sin_cos`, `ref_prot` |
+| **最后阶段** (CFM 输入) | `msa_mask`, `msa_row_mask`, `pseudo_beta`, `extra_msa`, `extra_has_deletion`, `extra_deletion_value`, `msa_feat` |
+
+像 `name` 这样的字符串值键在 GPU 传输之前通过 `str_to_ascii` 转换为 ASCII 整数张量，因为 Megatron 的通信原语需要数值张量。
+
+来源: [datamodule.py](/peptron/data/datamodule.py#L60-L130)
+
+## 蛋白质表示
+
+`peptron/data/protein.py` 中的 `Protein` 数据类提供了贯穿推理和评估过程使用的规范内存中表示。它存储 `atom_positions` (`[num_res, 37, 3]`)、`aatype` (`[num_res]`)、`atom_mask` (`[num_res, 37]`)、`residue_index`、`b_factors` 以及用于多链预测的可选 `chain_index`。工厂函数 `from_pdb_string`、`from_mmcif_string` 和 `from_dict` 提供从各种输入格式的构建，而 `output_to_protein` 将模型输出字典转换回 `Protein` 实例，用于 PDB 序列化和度量计算。
+
+来源: [protein.py](/peptron/data/protein.py#L31-L112)
+
+## 序列编码工具
+
+`misc.py` 模块提供 `encode_sequence` 和 `batch_encode_sequences`，用于带链连接器的多链序列编码。当存在多条链时（在序列字符串中由 `:` 分隔），在链之间插入 25 个残基的甘氨酸连接器，并且每条链的 `residue_index` 偏移 512 以防止索引冲突。`linker_mask` 张量标记真实残基 (1.0) 与连接器残基 (0.0)，从而实现对人工连接器位置的损失掩码。`collate_dense_tensors` 函数处理变长批次填充，镜像了 `OpenFoldBatchCollator` 中的整理逻辑。
+
+来源: [misc.py](/peptron/data/misc.py#L10-L82)
+
+<CgxTip>在处理 IDRome 构象系综数据时，请注意 `.npz` 文件中的 `all_atom_positions` 存储为 `[num_confs, num_res, 37, 3]`。`OpenFoldSingleDataset` 上的 `subsample_pos=True` 标志在每次 `__getitem__` 调用时随机选择一个构象，在训练期间提供隐式数据增强——每个 epoch 都会看到来自每个系综的不同随机构象。</CgxTip>
+
+<CgxTip>`structure_data_step` 函数是 PepTron 的 OpenFold 风格特征流水线与 Megatron 流水线并行训练之间的关键集成点。特征按流水线阶段显式划分：只有 `input_ids` 流向阶段 0 (ESM2)，而所有结构和 CFM 特征流向最后阶段。添加新特征键时，必须在相应的 `required_keys.update()` 块中注册它们，否则它们会在分布式训练期间被静默丢弃。</CgxTip>
+
+## 延伸阅读
+
+数据流水线直接馈入训练策略和损失计算。有关在训练期间控制如何混合这两个数据源的混合 PDB-IDRome 课程，请参阅[混合 PDB-IDRome 训练策略](12-mixed-pdb-idrome-training-strategy)。关于处理后的特征如何被损失函数消耗，特别是结构特征上的流匹配损失，请参阅[损失函数与验证指标](13-loss-functions-and-validation-metrics)。有关执行具有上述阶段感知特征路由的流水线并行训练的 Megatron 分布式基础设施，请参阅[Megatron 分布式训练](14-megatron-distributed-training)。
+
+---
+
+- [深入解析/数据与训练/混合 PDB-IDRome 训练策略](https://zread.ai/PeptoneLtd/PepTron/12-mixed-pdb-idrome-training-strategy)
+
+---
+slug:12-mixed-pdb-idrome-training-strategy
+blog_type:normal
+---
+
+
+PepTron的核心训练创新在于**将两个结构上异质的数据域进行概率混合**——即实验解析的PDB链和构象无序的IDRome系综——并将其整合至单一的训练循环中。该策略使得统一模型能够从共享的权重集中，同时学习折叠结构预测与内禀无序区（IDR）系综生成，这一过程受各数据集的采样概率和特定域的随机滤波器所控制。
+
+## 双域数据组合
+
+训练集由两个 `OpenFoldSingleDataset` 实例的**加权混合**构成，并在 `OpenFoldDataset` 容器下实现统一。每个域各自提供其数据目录、MSA比对目录和链元数据CSV，但共享相同的特征流水线与模型配置：
+
+```python
+pdb_trainset = OpenFoldSingleDataset(
+    data_dir=config.training["train_data_dir_pdb"],
+    alignment_dir=config.training["train_msa_dir_pdb"],
+    pdb_chains=pdb_chains,
+    config=config.data, mode='train',
+    subsample_pos=config.training["sample_train_confs_pdb"],
+)
+
+idp_trainset = OpenFoldSingleDataset(
+    data_dir=config.training["train_data_dir_idp"],
+    alignment_dir=config.training["train_msa_dir_idp"],
+    pdb_chains=idp_chains,
+    config=config.data, mode='train',
+    subsample_pos=config.training["sample_train_confs_idp"],
+)
+
+trainset = OpenFoldDataset(
+    [pdb_trainset, idp_trainset],
+    [config.training["dataset_prob_pdb"], config.training["dataset_prob_idp"]],
+    config.training["train_epoch_len"]
+)
+```
+
+默认混合权重为 **PDB = 0.3** 与 **IDRome = 0.7**，使训练偏向无序域。这反映出这样一个事实：IDRome样本提供了多重构象监督（系综层面的结构多样性），这对于流匹配目标至关重要；而PDB数据则提供了强劲的单结构锚点，用以稳定主链几何学习。
+
+来源: [train.py](peptron/train.py#L265-L289), [config.py](peptron/model/config.py#L802-L803)
+
+## 随机数据集融合：OpenFoldDataset
+
+`OpenFoldDataset` 类通过三层随机操作实现融合机制，每个epoch产出 `epoch_len` 个总样本：
+
+```mermaid
+flowchart TD
+    A["Epoch Start: <b>reroll()</b>"] --> B["torch.multinomial<br/>over dataset probabilities<br/>(PDB: 0.3, IDRome: 0.7)"]
+    B --> C{"Dataset Index?"}
+    C -->|"PDB (idx=0)"| D["looped_samples(0)<br/>PDB candidate cache"]
+    C -->|"IDP (idx=1)"| E["looped_samples(1)<br/>IDRome candidate cache"]
+    D --> F["Deterministic Filter<br/>resolution ≤ 9Å<br/>no single-AA dominance"]
+    E --> F
+    F --> G["Stochastic Filter<br/>cluster-size weighting<br/>length-dependent weighting"]
+    G --> H["torch.multinomial<br/>accept/reject per candidate"]
+    H --> I["Accepted sample →<br/>(dataset_idx, datapoint_idx)"]
+    I --> J["Append to self.datapoints"]
+    J --> K{epoch_len reached?}
+    K -->|No| B
+    KD -->|Yes| L["Epoch ready:<br/>__getitem__ dispatches to<br/>constituent dataset@]
+```
+
+**步骤 1 — 数据集选择** (`reroll`)：在epoch初始化时，`torch.multinomial` 根据数据集概率向量 `[0.3, 0.7]` 抽取 `epoch_len` 个样本，生成一个数据集索引序列。这决定了每个epoch中各域提供的样本数量。
+
+**步骤 2 — 确定性滤波**：每个候选链必须通过 `deterministic_train_filter`，该滤波器会拒绝分辨率 > 9.0 Å 或单一氨基酸占比超过序列80%的条目。此预滤波过程会无差别地剔除低质量和退化序列，不论其属于哪个域。
+
+**步骤 3 — 随机滤波** (`get_stochastic_train_filter_prob`)：通过初筛的候选样本将进一步接受基于两个乘性因子的概率性接受/拒绝判定： 对 **聚类规模反比加权** ——来自较大MMseqs2聚类（序列一致性阈值为0.4）的序列将被按比例降采样，以减少同源链的冗余； 对 **依赖长度的加权** ——计算公式为 `(max(min(L, 512), 256)) / 512`，该公式适度提升256–512残基范围内序列的权重，同时降低极短链的权重。
+
+来源: [data.py](peptron/data/data.py#L258-L346), [data.py](peptron/data/data.py#L214-L255)
+
+## 特定域的数据处理
+
+这两个域在真实结构表示上存在根本差异，该差异通过不同的 `subsample_pos` 与 `num_confs` 策略进行处理：
+
+| 方面 | PDB 域 | IDRome 域 |
+|--------|-----------|---------------|
+| **真实值** | 单一静态结构 | 多帧构象系综 |
+| **存储格式** | `all_atom_positions` 形状为 `[N_res, 37, 3]` 的 `.npz` | `all_atom_positions` 形状为 `[N_frames, N_res, 37, 3]` 的 `.npz` |
+| **`subsample_pos`** | `False` — 使用单一结构 | `True` — 每epoch随机采样一帧 |
+| **训练样本** | 每条链确定 | 随机 — 每次访问生成不同构象体 |
+| **数据准备** | 标准mmCIF → 通过OpenFold生成特征 | MD轨迹 (`.xtc`/`.pdb`) → 通过 `prep_idrome.py` 生成逐帧特征 |
+
+当 `subsample_pos=True`（IDRome）时，`__getitem__` 通过 `np.random.randint(0, N)` 随机选择一个帧索引，对堆叠的 `all_atom_positions` 数组进行索引。这意味着**同一IDRome链在不同epoch中会产生不同的训练目标**，从而教导模型预测完整的构象分布而非单一结构。
+
+在验证方面，当前默认采用**纯PDB验证**（CAMEO2022测试集）。可选的IDRome验证集（`idp_valset`）已定义但在训练循环中被注释掉，这表明基于PDB的结构指标（RMSD, GDT-TS）是主要的泛化信号。
+
+来源: [data.py](peptron/data/data.py#L168-L196), [train.py](peptron/train.py#L291-L313), [prep_idrome.py](dataprep/prep_idrome.py#L148-L182)
+
+## IDRome 数据准备流水线
+
+IDRome域需要专门的预处理，以将分子动力学轨迹转换为兼容OpenFold的特征文件。`prep_idrome.py` 脚本驱动了该转换过程：
+
+1. **输入**：由 `.pdb` 拓扑文件和 `.xtc` 轨迹文件（压缩的MD帧）定义的IDRome条目
+2. **逐帧提取**：每一帧被保存至临时PDB中，随后被解析为 `Protein` 数据类，并通过 `make_protein_features`（OpenFold的标准特征提取器）进行特征化
+3. **系综堆叠**：所有帧的 `all_atom_positions` 被堆叠至单一的 `[N_frames, N_res, 37, 3]` 张量中，替换原有的逐帧位置数组
+4. **输出**：一个包含完整系综及标准OpenFold特征的压缩 `.npz` 文件
+
+该过程遍历列于拆分CSV中的条目（例如，包含约20,159个条目的 `splits/IDRome_DB-train.csv`，以及包含约2,242个条目的 `splits/IDRome_DB-val.csv`），每个条目均标注了UniProt标识符、序列（`seqres`）及链长。
+
+来源: [prep_idrome.py](dataprep/prep_idrome.py#L148-L182), [IDRome_DB-train.csv](splits/IDRome_DB-train.csv#L1-L10)
+
+## 训练配置预设
+
+`peptron_o_mixed` 预设（在训练入口点加载的默认配置）配置了混合训练机制：
+
+```python
+# peptron_o_mixed preset
+c.model.template.enabled = False
+c.data.common.max_recycling_iters = 0
+c.data.common.use_templates = False
+c.data.train.crop_size = 512
+c.model.flow_matching.noise_prob = 0.5
+c.model.flow_matching.self_cond_prob = 0.5
+c.model.flow_matching.extra_input_prob = 0.5
+```
+
+这与用于后期微调的 `peptron_o_pdb_idrome` 预设形成对比，后者转向**更高的噪声条件化**（`noise_prob = 0.9`）并**禁用自条件化**（`self_cond_prob = 0.0`），体现了从均衡探索到聚焦去噪精修的课程学习过程：
+
+| 预设 | `noise_prob` | `self_cond_prob` | `extra_input_prob` | 训练阶段 |
+|--------|-------------|-----------------|-------------------|---------------|
+| `peptron_o_mixed` | 0.5 | 0.5 | 0.5 | 初始混合训练 |
+| `peptron_o_pdb_idrome` | 0.9 | 0.0 | 0.5 | 微调 |
+| `peptron_o_pdb_idrome_violation` | 0.9 | 0.0 | 0.5 | 违反权重微调 |
+
+**512的裁剪尺寸**在训练期间统一应用于两个域，确保了无论样本源自PDB还是IDRome，都能保持一致的内存占用。
+
+来源: [config.py](peptron/model/config.py#L125-L149), [config.py](peptron/model/config.py#L691-L696)
+
+## 链滤波与时间截断
+
+对于PDB域，当 `filter_chains=True`（默认值）时，会应用额外的**时间截断滤波器**。在从MMseqs2生成的聚类文件中加载聚类信息后，PDB链将被滤波，以排除任何 `release_date >= train_cutoff`（默认值：`"2020-05-01"`）的链。此举可防止来自可能出现在验证集（CAMEO2022）中的结构的信息泄漏，并实现了基于时间的训练/测试拆分：
+
+```python
+if filter_chains:
+    clusters = load_clusters(config.training["train_clusters"])
+    pdb_chains = pdb_chains.join(clusters)
+    pdb_chains = pdb_chains[pdb_chains.release_date < config.training["train_cutoff"]]
+```
+
+`load_clusters` 函数解析聚类文件，其中每行包含属于同一序列聚类的以空格分隔的链名称。聚类大小将连接至链元数据，以便在采样期间实现随机的聚类规模反比加权。
+
+来源: [train.py](peptron/train.py#L260-L263), [train.py](peptron/train.py#L55-L62), [cluster_chains.py](dataprep/cluster_chains.py#L16-L35)
+
+## 混合训练循环的架构
+
+下图展示了双域数据如何流经完整的训练基础设施：
+
+```mermaid
+flowchart LR
+    subgraph Data Preparation
+        P1["PDB mmCIFs"] --> P2["unpack_mmcif.py"]
+        P3["IDRome .xtc/.pdb"] --> P4["prep_idrome.py"]
+    end
+    subgraph Split & Index
+        P2 --> S1["split.py → train/val/test"]
+        P4 --> S2["IDRome_DB-train.csv<br/>IDRome_DB-val.csv"]
+    end
+    subgraph MSA Generation
+        S1 --> M1["make_msas.sh<br/>(MMseqs2 → UniRef30)"]
+        S2 --> M1
+    end
+    subgraph Dataset Construction
+        M1 --> D1["OpenFoldSingleDataset<br/>(PDB, subsample_pos=False)"]
+        M1 --> D2["OpenFoldSingleDataset<br/>(IDRome, subsample_pos=True)"]
+        D1 --> D3["OpenFoldDataset<br/>weights=[0.3, 0.7]<br/>+ stochastic filters"]
+        D2 --> D3
+    end
+    subgraph Training
+        D3 --> T1["ESMFoldDataModule"]
+        T1 --> T2["peptron_forward_step<br/>(flow matching)"]
+        T2 --> T3["MegatronStrategy<br/>distributed backprop"]
+    end
+```
+
+<CgxTip>0.3/0.7 的 PDB 与 IDRome 比例并非任意设定——它平衡了模型对解析良好的结构锚点的接触（用于教授精确的主链几何）与来自IDRome系综的丰富单样本监督（用于教授构象多样性）。在调整该比例时，应同时监测PDB结构的验证RMSD以及IDRome的系综层面指标，以检测域坍塌现象。</CgxTip>
+
+<CgxTip>针对IDRome的 `subsample_pos=True` 标志是将确定性单结构训练目标转化为随机系综目标的关键机制。若无此标志，模型将过拟合于最先存储的IDRome帧，从而丢失令流匹配对无序区具有意义的分布信号。</CgxTip>
+
+来源: [train.py](peptron/train.py#L254-L320), [config.py](peptron/model/config.py#L770-L818), [data.py](peptron/data/data.py#L258-L346)
+
+## 下一步
+
+在理解了数据混合策略之后，自然的推进方向是探究模型如何通过复合损失函数量化两个域的预测质量：[损失函数与验证指标](13-loss-functions-and-validation-metrics)。关于使该混合训练得以大规模实施的分布式基础设施，请参阅 [Megatron分布式训练](14-megatron-distributed-training)。
+
+---
+
+- [深入解析/数据与训练/损失函数与验证指标](https://zread.ai/PeptoneLtd/PepTron/13-loss-functions-and-validation-metrics)
+
+---
+slug:13-loss-functions-and-validation-metrics
+blog_type:normal
+---
+
+
+PepTron 的训练目标和评估框架继承了 AlphaFold/OpenFold 的多组件损失架构，同时整合了特定于流匹配的监督信号。损失模块将结构预测质量分解为**几何帧对齐**、**距离分布**、**扭转角**、**置信度校准**和**结构违规**五个通道——每个通道针对蛋白质几何的不同方面。验证指标则通过在流匹配推理输出上计算无参考 和有参考 (DRMSD, GDT-TS, GDT-HA) 分数来对这些损失进行补充。
+
+来源: [loss.py](peptron/model/loss.py#L1-L40), [flow.py](peptron/model/flow.py#L1-L40)
+
+## 损失架构概述
+
+总训练损失聚合了六个独立加权的子损失，每个子损失作用于预测结构的不同几何表示。下图展示了它们的依赖层级及其所消耗的数据表示：
+
+```mermaid
+graph TD
+    subgraph "Geometric Frame Losses"
+        FAPE["compute_fape<br/>(Frame-Aligned Point Error)"]
+        BB["backbone_loss<br/>(SE(3) backbone FAPE)"]
+        SC["sidechain_loss<br/>(rigid group FAPE)"]
+        FL["fape_loss<br/>(weighted BB + SC)"]
+    end
+
+    subgraph "Distributional Losses"
+        DL["distogram_loss<br/>(pairwise distance bins)"]
+        TL["tm_loss<br/>(predicted TM-score bins)"]
+        LL["lddt_loss<br/>(predicted lDDT bins)"]
+    end
+
+    subgraph "Angle Losses"
+        TAL["torsion_angle_loss<br/>(unnormalized 2D vectors)"]
+        SCL["supervised_chi_loss<br/>(chi dihedral supervision)"]
+    end
+
+    subgraph "Violation Losses"
+        BRB["between_residue_bond_loss<br/>(peptide bond geometry)"]
+        BRC["between_residue_clash_loss<br/>(inter-residue steric clashes)"]
+        WRV["within_residue_violations<br/>(intra-residue steric)"]
+        FSV["find_structural_violations"]
+        VL["violation_loss<br/>(combined violation penalty)"]
+    end
+
+    FAPE --> BB --> FL
+    FAPE --> SC --> FL
+    BRB --> FSV --> VL
+    BRC --> FSV
+    WRV --> FSV
+
+    style FAPE fill:#e8f4fd,stroke:#2980b9,stroke-width:2px
+    style FL fill:#d5f5e3,stroke:#27ae60,stroke-width:2px
+    style VL fill:#fde8e8,stroke:#e74c3c,stroke-width:2px
+```
+
+**fape_loss** 作为主要的几何监督信号，作用于 SE(3) 帧表示。**distogram_loss**、**tm_loss** 和 **lddt_loss** 通过将预测的 logit 分布与分桶的真实值进行比较，提供分布监督。**violation_loss** 作为正则化项，对物理上不可能的结构进行惩罚。
+
+来源: [loss.py](peptron/model/loss.py#L43-L291), [loss.py](peptron/model/loss.py#L536-L582), [loss.py](peptron/model/loss.py#L1354-L1373)
+
+## 帧对齐点误差 (FAPE)
+
+**FAPE** 损失是 PepTron 的核心几何目标。它测量预测与真实原子位置之间的平均距离误差，此前两者均已通过骨干刚体变换被转换至共同的局部坐标系中。这种帧对齐特性使得 FAPE **对全局 SE(3) 变换保持不变**——这是结构预测的关键要求，因为绝对坐标系是任意的。
+
+`compute_fape` 函数接收预测帧和真实帧（作为 `Rigid` 对象）、它们对应的位置、二进制掩码、用于归一化的 `length_scale`，以及用于截断异常值误差的可选 `l1_clamp_distance`：
+
+```
+FAPE = (1/N_frames * 1/N_pts) * Σ_i Σ_j clamp(||T_i^pred(x_j^pred) - T_i^gt(x_j^gt)||) / length_scale
+```
+
+其中 `T_i` 表示通过逆转帧 `i` 获得的局部帧变换，截断操作 防止因巨大对齐误差导致的梯度爆炸。该实现使用**对 FP16 友好的顺序求和**，而非单次除法，以避免混合精度训练中的数值问题。
+
+来源: [loss.py](peptron/model/loss.py#L88-L159)
+
+### 骨干与侧链 FAPE
+
+`backbone_loss` 根据模型的 `traj` 输出（张量-7 表示：四元数 + 平移）构建预测刚体变换，并根据 4×4 齐次骨干张量构建真实变换。它通过 `use_clamped_fape` 支持可选的**截断/非截断 FAPE 插值**，该方法在截断版本（截断至 10Å）和非截断版本之间进行混合，以在稳定早期训练的同时保留预测良好区域的梯度信号。
+
+`sidechain_loss` 作用于结构模块最后一次迭代的刚体组帧和原子位置。它通过根据 `alt_naming_is_better` 混合 `rigidgroups_gt_frames` 和 `rigidgroups_alt_gt_frames` 来处理**对称感知的真实值**，该标志为对称原子组（例如，末端羧基上的两个等价氧原子）选择最佳命名约定。
+
+组合后的 `fape_loss` 应用可配置的权重：
+
+```python
+loss = config.backbone.weight * bb_loss + config.sidechain.weight * sc_loss
+```
+
+来源: [loss.py](peptron/model/loss.py#L162-L291)
+
+## 扭转角损失
+
+### 直接扭转角损失
+
+`torsion_angle_loss` 作用于**未归一化的 2D 向量** (sin, cos) 而非原始角度，避免了 ±π 处的不连续性。给定预测角度 `a`、真实角度 `a_gt` 和替代真实角度 `a_alt_gt`（考虑 π 周期性），该损失选择最小平方距离：
+
+```
+l_torsion = mean(min(||a_norm - a_gt||², ||a_norm - a_alt_gt||²))
+l_angle_norm = mean(|norm(a) - 1|)
+loss = l_torsion + 0.02 * l_angle_norm
+```
+
+`l_angle_norm` 项惩罚偏离单位范数的情况，鼓励网络产生归一化良好的角度预测。权重 0.02 反映了相对于角度精度，归一化是次要关注点。
+
+来源: [loss.py](peptron/model/loss.py#L64-L85)
+
+### 监督 Chi 损失
+
+`supervised_chi_loss`（源自 AlphaFold 的算法 27）将扭转监督扩展至 **chi 二面角**（侧链旋转异构体）。它通过计算直接误差和偏移误差并取最小值，来处理 π 周期性的 chi 角：
+
+```
+sq_chi_error = min(||true_chi - pred||², ||true_chi_shifted - pred||²)
+```
+
+偏移量计算为 `true_chi_shifted = (1 - 2 * chi_pi_periodic) * true_chi`，其中 `chi_pi_periodic` 是依赖于残基类型的指示符，用于标识具有 π 对称性的角度。该损失将经过掩码处理的 chi 误差与范数正则化项组合，两者分别由可配置的 `chi_weight` 和 `angle_norm_weight` 加权。
+
+来源: [loss.py](peptron/model/loss.py#L294-L388)
+
+## 分布损失
+
+这些损失监督分桶几何量上的**预测概率分布**，训练模型在生成结构预测的同时产生校准良好的置信度估计。
+
+### 距离图损失
+
+`distogram_loss` 将成对的 Cβ–Cβ 距离离散化为 `no_bins=64` 个分桶，跨度为 `[2.3125, 21.6875]` Å，并计算预测 logits 与独热编码真实桶之间的 softmax 交叉熵。平方掩码 `pseudo_beta_mask[..., None] * pseudo_beta_mask[..., None, :]` 确保只有有效的残基对参与计算。
+
+来源: [loss.py](peptron/model/loss.py#L536-L582)
+
+### TM 损失
+
+`tm_loss` 通过计算预测与真实骨干变换之间的平方帧对齐距离，对其进行分桶，并针对真实分布计算交叉熵，从而监督预测对齐误差 (PAE) 头。分辨率滤波器将损失门控为仅对 `[min_resolution, max_resolution]` 内的结构生效。`scale = 0.5` 因子提升了 FP16 训练的稳定性。
+
+来源: [loss.py](peptron/model/loss.py#L678-L732)
+
+### LDDT 损失
+
+`lddt_loss` 使用**真实 lDDT-CA 分数**（与梯度断开）作为软目标：连续分数被离散化为 `no_bins=50` 个分桶，转换为独热分布，并通过 softmax 交叉熵与模型预测的 logits 进行比较。这训练了置信度头去预测局部结构质量，而无需通过 lDDT 计算本身进行微分。
+
+来源: [loss.py](peptron/model/loss.py#L484-L533)
+
+## 结构违规损失
+
+违规损失作为**硬几何约束**——它们不教导模型将原子放置在何处，而是惩罚物理上不可能的构型。这对于流匹配生成至关重要，因为去噪过程可能会产生带有严重空间位阻冲突的中间结构。
+
+### 残基间键损失
+
+实现了**平底损失** (Jumper et al. 补充材料 第 1.9.11 节，公式 44–45)，仅当偏离理想肽键几何的程度超过容差阈值时才进行惩罚：
+
+| 组件 | 理想值 | 惩罚对象 |
+|-----------|-------------|-----------|
+| C–N 键长 | 1.33 Å (脯氨酸为 1.32 Å) | 超过 `tolerance_factor_soft × σ` 的长度偏差 |
+| ∠CA–C–N | 116.2° | 余弦角度偏差 |
+| ∠C–N–CA | 121.7° | 余弦角度偏差 |
+
+`relu` 激活函数创建了平底——容差内的误差产生零损失。单独的 `tolerance_factor_soft`（用于损失）和 `tolerance_factor_hard`（用于违规掩码）阈值允许梯度计算与违规计数具有不同的敏感度。
+
+来源: [loss.py](peptron/model/loss.py#L735-L891)
+
+### 残基间冲突损失
+
+惩罚不同残基中非键合原子之间的**空间位阻冲突**。对于每个残基间原子对，它计算距离并将其与范德华半径之和进行比较。当 `distance < (r_i + r_j) - overlap_tolerance` 时，即检测到冲突。该实现显式地将连续残基间的骨干 C–N 键和二硫键 CYS–SG 桥接排除在冲突检测之外。
+
+来源: [loss.py](peptron/model/loss.py#L894-L1038)
+
+### 违规损失聚合
+
+`violation_loss` 将所有违规项组合为单个标量：
+
+```python
+loss = bonds_c_n + angles_ca_c_n + angles_c_n_ca + l_clash / (num_atoms + ε)
+```
+
+其中 `l_clash` 对残基间和残基内冲突损失求和，并通过原子数量进行归一化。这种归一化确保了冲突项在不同长度的蛋白质间能适当地缩放。
+
+来源: [loss.py](peptron/model/loss.py#L1354-L1373)
+
+## 置信度预测指标
+
+这些函数从模型的输出 logits 计算**结构质量估计**，在推理时提供逐残基和逐残基对的置信度分数。
+
+### 预测 LDDT (pLDDT)
+
+`compute_plddt` 函数通过计算 softmax 概率分布并对桶中心求期望，将距离图 logits 转换为预测的 lDDT 分数：
+
+```
+pLDDT = 100 × Σ_k P(bin_k) × center(bin_k)
+```
+
+乘以 100 将分数缩放至常规的 [0, 100] 范围。
+
+来源: [loss.py](peptron/model/loss.py#L391-L402)
+
+### 预测对齐误差 (PAE)
+
+`compute_predicted_aligned_error` 函数根据 PAE 头的 logits 计算每个残基对的预期对齐距离误差，同时返回逐对误差矩阵和最大预测误差。
+
+来源: [loss.py](peptron/model/loss.py#L604-L641)
+
+### 预测 TM 分数
+
+`compute_tm` 函数通过计算 softmax 分布、对每个桶应用 TM 分数核 `1/(1 + d²/d₀²)`，并选择具有最大加权分数的对齐方式，从 PAE logits 估计 TM 分数。`d₀` 参数随序列长度缩放，计算公式为 `1.24 × (N - 15)^(1/3) - 1.8`。
+
+来源: [loss.py](peptron/model/loss.py#L644-L675)
+
+## 验证指标管线
+
+验证指标在 `FlowSteps._compute_validation_metrics` 方法中计算，该方法作用于流匹配推理轨迹生成的**最终原子位置**。该方法支持由 `superimposition_metrics` 标志控制的两种模式。
+
+| 指标 | 类型 | 参考基准 | 范围 | 计算开销 |
+|--------|------|-----------|-------|-----------------|
+| **lDDT-CA** | 无参考 | 无 | [0, 1] | 低 (O(N²)) |
+| **DRMSD-CA** | 无参考 | 真实结构 | [0, ∞) Å | 低 (O(N²)) |
+| **Alignment RMSD** | 有参考 | 真实结构 | [0, ∞) Å | 中 (SVD) |
+| **GDT-TS** | 有参考 | 叠合后 | [0, 1] | 中 |
+| **GDT-HA** | 有参考 | 叠合后 | [0, 1] | 中 |
+
+默认情况下，训练期间 `superimposition_metrics=False` 以避免高开销的 SVD 叠合，仅启用轻量级的 lDDT-CA 和 DRMSD-CA 计算。依赖叠合的指标 (RMSD, GDT-TS, GDT-HA) 保留用于完整评估运行。
+
+```mermaid
+flowchart LR
+    A["Final Atom Positions"] --> B{"superimposition<br/>_metrics?"}
+    B -->|"False (train)"| C["lDDT-CA"]
+    B -->|"False (train)"| D["DRMSD-CA"]
+    B -->|"True (eval)"| C
+    B -->|"True (eval)"| D
+    B -->|"True (eval)"| E["SVD Superimpose"]
+    E --> F["Alignment RMSD"]
+    E --> G["GDT-TS"]
+    E --> H["GDT-HA"]
+```
+
+来源: [flow.py](peptron/model/flow.py#L135-L183)
+
+### lDDT-CA
+
+基于 Cα 原子的**局部距离差异测试**测量在 0.5、1.0、2.0 和 4.0 Å 阈值内保留的成对距离的分数，并取等权平均。称其无参考的意义在于它不需要全局叠合——它直接比较局部距离模式，对结构域运动具有鲁棒性，特别适用于**本质无序蛋白质**，因为在这类蛋白质上全局 RMSD 具有误导性。
+
+来源: [loss.py](peptron/model/loss.py#L405-L481)
+
+### DRMSD-CA
+
+基于 Cα 原子的**距离均方根偏差**计算成对距离矩阵而非坐标矩阵的均方根偏差。与 lDDT 类似，它避免了叠合，但捕获了全局拓扑一致性。它作为训练时 RMSD 的快速替代指标。
+
+来源: [flow.py](peptron/model/flow.py#L160-L166)
+
+### GDT-TS 与 GDT-HA
+
+**全局距离测试**分数测量在最优叠合后位于距离阈值内的 Cα 原子的分数。GDT-TS 使用阈值 {1, 2, 4, 8} Å，而 GDT-HA 使用更严格的阈值 {0.5, 1, 2, 4} Å。这些是 CASP 结构预测评估的标准指标，但需要昂贵的基于 SVD 的叠合步骤。
+
+来源: [flow.py](peptron/model/flow.py#L168-L181)
+
+## 训练时损失与指标集成
+
+`peptron_forward_step` 函数在 Megatron-NeMo 训练循环中编排完整的前向传播。在计算结构预测和验证指标之前，它集成了三种随机增强策略：
+
+1. **调和噪声注入** (概率 `noise_prob`)：应用 `_add_noise` 方法，该方法通过 `noisy_beta = (1-t) * x1 + t * noisy` 在真实伪 beta 坐标和调和先验样本之间进行插值，然后根据加噪位置计算成对距离作为距离图输入。
+
+2. **额外输入随机丢弃** (概率 `1 - extra_input_prob`)：移除 `extra_all_atom_positions` 特征，以训练对缺失模板信息的鲁棒性。
+
+3. **自条件化** (概率 `self_cond_prob`)：执行初步的无梯度前向传播，将输出作为 `prev_outputs` 反馈至第二次前向传播——使模型能够迭代地精炼其自身的预测。
+
+在模型前向传播之后，验证指标在 `torch.no_grad()` 下计算，并通过 `FlowSteps.log` 方法记录，该方法按阶段 (`train_*` 或 `val_*`) 和步数 (`iter_*`) 累积值。指标通过 `save_log_to_json` 持久化为 JSON。
+
+<CgxTip>检查点监视器默认追踪 `val_loss`（在 `train_model` 的 `metric_to_monitor_for_checkpoints` 参数中配置）。当训练期间 `superimposition_metrics=False` 时，记录的 `lddt_ca` 和 `drmsd_ca` 是由单步模型输出计算的——而非来自完整的多步流匹配轨迹，后者会产生更准确但开销更大的估计。</CgxTip>
+
+来源: [flow.py](peptron/model/flow.py#L280-L336), [train.py](peptron/model/train.py#L65-L200)
+
+## 诊断用违规指标
+
+除了标量违规损失外，`compute_violation_metrics` 还生成一个包含逐样本诊断指标的字典，用于量化结构违规的**严重程度和普遍性**：
+
+| 指标键 | 描述 |
+|------------|-------------|
+| `violations_extreme_ca_ca_distance` | 连续 Cα–Cα 对超过理想值 + 1.5 Å 的比例 |
+| `violations_between_residue_bond` | 逐残基键违规掩码的均值 |
+| `violations_between_residue_clash` | 逐残基原子间冲突掩码的均值 |
+| `violations_within_residue` | 逐残基原子内违规掩码的均值 |
+| `violations_per_residue` | 组合的逐残基违规掩码（取所有违规的最大值） |
+
+这些指标作为**事后质量过滤器**——具有高违规率的结构表明存在病态预测，可能需要过滤或重新推理。`utils` 模块中的 `filter_unphysical_traj` 工具使用这些指标进行轨迹剪枝。
+
+来源: [loss.py](peptron/model/loss.py#L1258-L1335), [loss.py](peptron/model/loss.py#L1295-L1335)
+
+## 损失函数总结
+
+| 损失函数 | 输入表示 | 监督目标 | 关键参数 |
+|---------------|---------------------|-------------------|----------------|
+| `fape_loss` | SE(3) 帧 + 平移 | 骨干 + 侧链几何 | `backbone.weight`, `sidechain.weight`, `clamp_distance=10.0` |
+| `distogram_loss` | 成对距离 logits | 分桶的 Cβ–Cβ 距离 | `min_bin=2.3125`, `max_bin=21.6875`, `no_bins=64` |
+| `tm_loss` | PAE logits | 分桶的帧对齐误差 | `max_bin=31`, `no_bins=64` |
+| `lddt_loss` | 置信度 logits | 分桶的真实 lDDT-CA | `no_bins=50`, `cutoff=15.0` |
+| `supervised_chi_loss` | 角度 sin/cos 向量 | 真实 chi 二面角 | `chi_weight`, `angle_norm_weight` |
+| `violation_loss` | 原子14位置 | 物理约束 | `violation_tolerance_factor`, `clash_overlap_tolerance` |
+
+来源: [loss.py](peptron/model/loss.py#L270-L291), [loss.py](peptron/model/loss.py#L536-L582), [loss.py](peptron/model/loss.py#L678-L732), [loss.py](peptron/model/loss.py#L484-L533), [loss.py](peptron/model/loss.py#L294-L388), [loss.py](peptron/model/loss.py#L1354-L1373)
+
+<CgxTip>违规损失使用**平底（基于 ReLU 的）惩罚**，当几何形状在容差范围内时产生零梯度。这意味着它们纯粹作为约束而非吸引子起作用——FAPE 损失提供朝向正确结构的吸引力，而违规损失仅在预测处于物理上不可能的区域时激活，以将其推离。这种设计对流匹配至关重要，因为中间去噪步骤可以自由探索扭曲的几何形状，而不会被违规项拉向真实结构。</CgxTip>
+
+## 后续步骤
+
+此处描述的损失函数通过 [配置参考](16-configuration-reference) 中定义的 `ConfigDict` 对象进行配置，并在 [Megatron 分布式训练](14-megatron-distributed-training) 中详述的分布式训练基础设施内执行。训练期间计算的验证指标为 [推理与集成生成](15-inference-and-ensemble-generation) 中讨论的集成过滤策略提供了依据。
+
+---
+
+## 分布式基础设施
+
+- [深入解析/分布式基础设施/Megatron 分布式训练](https://zread.ai/PeptoneLtd/PepTron/14-megatron-distributed-training)
+
+---
+slug:14-megatron-distributed-training
+blog_type:normal
+---
+
+
+PepTron 的训练基础设施基于 **NVIDIA NeMo2 + Megatron-LM** 构建，提供了一个三轴并行模型——张量并行（TP）、流水线并行（PP）和数据并行（DP）——并通过 PyTorch Lightning 进行编排。本页将介绍分布式训练架构、策略配置、流水线阶段间的数据路由，以及启动大规模多 GPU 训练所需的运行环境。
+
+## 分布式训练启动
+
+多 GPU 训练的标准入口点是 `run_peptron_distributed_train.sh`，它使用 `torchrun` 为每个 GPU 生成一个进程：
+
+```bash
+export TORCHDYNAMO_SUPPRESS_ERRORS=1
+export CUDA_LAUNCH_BLOCKING=1
+export PYTHONPATH=<path-to-peptron-repo>
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+
+torchrun --nproc_per_node=8 -m peptron.train
+```
+
+有三个环境变量值得关注。**`CUDA_DEVICE_MAX_CONNECTIONS=1`** 串行化了 CUDA 流，这对于 Megatron-LM 的通信/计算核心重叠至关重要——将其设置为 1 可确保 all-gather 和 reduce-scatter 操作与前向/反向计算正确重叠。**`CUDA_LAUNCH_BLOCKING=1`** 强制同步执行 CUDA 以实现确定性调试。**`TORCHDYNAMO_SUPPRESS_ERRORS=1`** 则会抑制由 Megatron 的自定义 autograd 函数引发的 TorchDynamo 错误。相比之下，单节点的 `run_peptron_train.sh` 通过普通的 `python -m peptron.train` 启动，无需 `torchrun`，适用于单 GPU 调试或性能分析。
+
+来源：[run_peptron_distributed_train.sh](/run_peptron_distributed_train.sh#L1-L8)，[run_peptron_train.sh](/run_peptron_train.sh#L1-L5)
+
+## 并行架构
+
+PepTron 通过 NeMo2 的 `MegatronStrategy` 组合了三个正交的并行维度。下图展示了训练批次在并行层次结构中的流动过程：
+
+```mermaid
+flowchart TB
+    subgraph DP["数据并行 (DDP)"]
+        direction TB
+        subgraph R0["Rank 组 0"]
+            subgraph PP0["流水线阶段 0"]
+                TP0["张量并行组\n(ESM2 编码器分片)"]
+            end
+            subgraph PP1["流水线阶段 1"]
+                TP1["张量并行组\n(结构头分片)"]
+            end
+            PP0 -->|"阶段间\n激活值"| PP1
+        end
+        subgraph R1["Rank 组 1"]
+            PP2["流水线阶段 0'"]
+            PP3["流水线阶段 1'"]
+            PP2 --> PP3
+        end
+    end
+    DP -->|"梯度\nall-reduce"| DP
+```
+
+该策略在 `train_model()` 中实例化如下：
+
+```python
+strategy = nl.MegatronStrategy(
+    tensor_model_parallel_size=tensor_model_parallel_size,
+    pipeline_model_parallel_size=pipeline_model_parallel_size,
+    ddp="megatron",
+    find_unused_parameters=True,
+    enable_nemo_ckpt_io=True,
+)
+```
+
+`ddp="megatron"` 标志选择了 Megatron-LM 的自定义分布式数据并行实现，而非 PyTorch 的原生 DDP，这是与分布式优化器兼容所必需的。**`find_unused_parameters=True`** 是必要的，因为结构头在每次前向传递中并不会使用 ESM2 编码器的所有参数——具体而言，当 `encoder_frozen=True` 时，编码器梯度为零，但这些参数仍然参与计算图。**`enable_nemo_ckpt_io=True`** 激活了 NeMo2 的分布式检查点格式，该格式按并行 rank 存储分片，而非整体式检查点，从而大幅缩减了大规模场景下的检查点 I/O 时间。
+
+来源：[peptron/train.py](/peptron/train.py#L112-L118)
+
+## 并行配置默认值
+
+`config.py` 中的默认配置设定了保守的单节点并行值，这些值可以在多节点集群中进行扩展：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `tensor_model_parallel_size` | 1 | 模型张量分片所跨的 GPU 数量 |
+| `pipeline_model_parallel_size` | 1 | 流水线阶段数（模型层在各 GPU 间拆分） |
+| `devices` | 8 | 每节点的 GPU 数量 |
+| `num_nodes` | 1 | 集群中的节点数 |
+| `micro_batch_size` | 8 | 梯度累积前每个 GPU 的微批次大小 |
+| `accumulate_grad_batches` | 1 | 优化器步进前需累积的微批次数量 |
+| `precision` | `bf16-mixed` | 混合精度模式（bf16 或 fp16） |
+
+**全局批次大小**并非直接设置——它由 `infer_global_batch_size()` 推断得出，其计算公式为：
+
+> `global_batch_size = micro_batch_size × num_nodes × devices × accumulate_grad_batches ÷ (tensor_model_parallel_size × pipeline_model_parallel_size)`
+
+这确保了全局批次能够在所有并行轴上均匀分配。使用默认值时（micro=8，1 个节点，8 个设备，TP=1，PP=1，accum=1），全局批次大小为 64。
+
+来源：[peptron/model/config.py](/peptron/model/config.py#L770-L817)，[peptron/train.py](/peptron/train.py#L245-L252)
+
+## 流水线阶段数据路由
+
+Megatron 流水线并行的一个关键点是，不同的模型阶段在不同的 GPU rank 上执行，且每个阶段仅需要输入批次的一个子集。`structure_data_step()` 函数通过检查 Megatron-LM 的 `parallel_state` 实现了此路由逻辑：
+
+```mermaid
+flowchart LR
+    Batch["完整批次\n(所有键)"] --> Filter{"流水线阶段?"}
+    Filter -->|"首阶段"| S0["input_ids\nname, resolution"]
+    Filter -->|"末阶段"| S1["aatype, residue_index\natom positions, rigids\nCFM 特征 (msa, pseudo_beta)"]
+    Filter -->|"中间阶段"| S2["空\n(直通)"]
+```
+
+**流水线首阶段**仅接收 `input_ids`（分词后的氨基酸）、`name` 和 `resolution`——这是 ESM2 编码器所需的最小输入。**流水线末阶段**接收完整的结构预测特征集：原子位置、刚体组帧、主干刚体、chi 角以及所有连续流匹配（CFM）输入（`msa_mask`、`pseudo_beta`、`msa_feat` 等）。当前阶段不需要的键被设置为 `None`，从而避免了不必要的 GPU 间数据传输。在键过滤之后，`get_batch_on_this_context_parallel_rank()` 会沿序列维度对批次进行切片，以支持**上下文并行**（第四种并行模式，将长序列划分到各 rank）。所有保留的张量均通过 `.cuda(non_blocking=True)` 移至 CUDA，以实现主机到设备传输的重叠。
+
+来源：[peptron/data/datamodule.py](/peptron/data/datamodule.py#L38-L130)
+
+## 分布式优化器与学习率调度
+
+PepTron 使用了 Megatron-LM 的**分布式优化器**（`use_distributed_optimizer=True`），它将优化器状态（Adam 矩）在数据并行 rank 间进行分片。这将每 GPU 的内存消耗从 O(params × DP) 降低至 O(params)，对于 30 亿参数的 ESM2 主干网络而言，这是一项关键优化。
+
+```python
+optimizer = MegatronOptimizerModule(
+    config=OptimizerConfig(
+        lr=1e-4,
+        optimizer="adam",
+        use_distributed_optimizer=True,
+        weight_decay=0.01,
+        adam_beta1=0.9,
+        adam_beta2=0.95,
+        fp16=config.fp16,
+        bf16=config.bf16,
+    ),
+    lr_scheduler=WarmupAnnealDecayHoldScheduler(
+        warmup_steps=warmup_steps,
+        max_steps=n_steps_train,
+        max_lr=1e-4,
+        min_lr=1e-6,
+        anneal_percentage=0.15,
+    )
+)
+```
+
+**WarmupAnnealDecayHoldScheduler** 实现了三阶段调度：(1) 在 `warmup_steps`（默认为总步数的 10%）内从零线性预热至 `max_lr`；(2) 在剩余步数接下来的 15% 内，通过余弦退火降至 `min_lr`；(3) 在训练最后的 85% 期间保持在 `min_lr`。此调度策略在稳定流匹配速度场早期训练的同时，防止了后期的振荡。
+
+来源：[peptron/train.py](/peptron/train.py#L158-L176)
+
+## 训练器与混合精度
+
+NeMo2 `Trainer` 通过 Megatron 专有插件封装了 PyTorch Lightning 的训练器：
+
+```python
+trainer = nl.Trainer(
+    accelerator="gpu",
+    devices="auto",
+    strategy=strategy,
+    limit_val_batches=limit_val_batches,
+    val_check_interval=val_check_interval,
+    max_steps=n_steps_train,
+    num_nodes=num_nodes,
+    log_every_n_steps=val_check_interval,
+    callbacks=callbacks,
+    plugins=nl.MegatronMixedPrecision(precision=precision),
+)
+```
+
+**`MegatronMixedPrecision`** 并非 PyTorch Lightning 的标准混合精度——它委托给 Megatron-LM 的内部 `autocast` 实现，该实现处理了 fp16/bf16 类型转换与 Megatron 自定义通信原语之间的复杂交互。`devices="auto"` 标志会自动检测每个节点的可用 GPU，而 `num_nodes` 则控制多集群启动时的节点总数。每训练 `val_check_interval` 步（默认为 100）便会触发一次验证，并通过 `limit_val_batches` 限制验证批次的数量，以控制验证开销。
+
+来源：[peptron/train.py](/peptron/train.py#L143-L154)
+
+## 训练回调与检查点
+
+训练循环注册了若干用于容错性和可观测性的回调：
+
+| 回调 | 目的 |
+|---|---|
+| `RichModelSummary(max_depth=4)` | 在训练开始时打印层次化模型参数摘要 |
+| `LearningRateMonitor()` | 每步将学习率记录到所有已配置的日志器中 |
+| `PreemptionCallback()` | 在收到抢占信号（SIGTERM）时保存检查点，实现集群的优雅重新排队 |
+| `TimingCallback()` | 记录来自 NeMo 实验管理器的 epoch 级计时指标 |
+| `ModelCheckpoint` | 按 `val_loss` 保存前 20 个检查点，并每隔 `steps_to_save_ckpt` 步保存 `last` 检查点 |
+
+`ModelCheckpoint` 使用 `always_save_context=True` 来启用 NeMo2 基于 SerDe 的检查点机制，其中所有 `IOMixin` 对象（数据采样器、优化器、日志器）均与模型权重一同序列化。检查点文件名包含 `{epoch}-{step}-{consumed_samples}` 以防文件名冲突。**自动恢复**通过 `resume.AutoResume(resume_if_exists=True, resume_ignore_no_checkpoint=True)` 进行配置，它会搜索 `-last` 检查点并恢复训练状态，包括优化器矩、数据采样器位置和全局步数。
+
+来源：[peptron/train.py](/peptron/train.py#L136-L224)
+
+## 数据并行与 MegatronDataSampler
+
+`ESMFoldDataModule` 继承自 `MegatronDataModule`，并实例化了一个 `MegatronDataSampler` 来协调各并行 rank 间的批次分布：
+
+```python
+self.data_sampler = MegatronDataSampler(
+    seq_len=max_seq_length,
+    micro_batch_size=micro_batch_size,
+    global_batch_size=global_batch_size,
+    dataloader_type="single",
+    rampup_batch_size=rampup_batch_size,
+    output_log=predict_dataset is None,
+)
+```
+
+`dataloader_type="single"` 选择了 `MegatronPretrainingRandomSampler`，该采样器维护了一个在检查点恢复后依然存在的已消耗样本计数器——确保重启后不会有训练样本被重复或遗漏。数据集使用 `IdentityMultiEpochDatasetWrapper` 封装在 `MultiEpochDatasetResampler` 中，它通过从底层 `OpenFoldDataset`（其本身根据配置的概率混合 PDB 和 IDRome 数据）中重复采样，创建了一个恰好包含 `max_train_steps × global_batch_size` 个样本的虚拟数据集。
+
+来源：[peptron/data/datamodule.py](/peptron/data/datamodule.py#L192-L254)
+
+## 面向分布式张量拼接的猴子补丁
+
+`monkey_patch.py` 模块使用一个安全版本（`safe_batch_collator`）替换了 BioNeMo 的 `batch_collator` 函数，以处理分布式训练中出现的边缘情况：
+
+- **标量张量**：对 0 维张量使用 `torch.stack` 而非 `torch.cat`
+- **变长序列**：在沿批次维度拼接之前，沿序列维度将张量填充至最大长度
+- **嵌套字典**：通过 `recursive_batch_collator` 进行递归整理
+- **PassthroughLossReduction.reduce**：已打补丁以使用安全整理器，防止 Megatron 的损失归约在跨 rank 传递可变形状张量时发生崩溃
+
+这些补丁是必要的，因为 Megatron 的流水线并行可能会在不同 rank 上产生具有不同张量形状的批次，而原始的 BioNeMo 整理器假定形状是统一的。这些补丁在导入时通过 `apply_monkey_patches()` 应用。
+
+来源：[peptron/monkey_patch.py](/peptron/monkey_patch.py#L1-L196)
+
+## 容器环境
+
+分布式训练环境由 Dockerfile 定义，该文件扩展了 NVIDIA 的 BioNeMo 框架容器：
+
+```
+FROM nvcr.io/nvidia/clara/bionemo-framework:2.7.1
+```
+
+此基础镜像提供了 Megatron-LM、NeMo2、PyTorch 和 CUDA。PepTron 额外添加了 **cuequivariance**（`cuequivariance_torch==0.8.0` 和 `cuequivariance-ops-torch-cu12==0.8.0`）用于等变注意力原语，以及 **OpenFold**（从 `nv_upstream_trt_cuequivariance` 分支克隆）用于提供结构模块层。`bionemo-moco==0.0.2.2` 包提供了训练和推理期间使用的连续流匹配调度。
+
+来源：[Dockerfile](/Dockerfile#L1-L40)
+
+<CgxTip>当扩展至 8 个 GPU 以上时，请优先增加 `tensor_model_parallel_size`（对于 ESM2 编码器的注意力层，它具有最佳的通信计算比），然后再增加 `pipeline_model_parallel_size` 以应对结构头。务必验证 `global_batch_size` 能被 `TP × PP` 整除——否则 `infer_global_batch_size` 将在启动时抛出错误。</CgxTip>
+
+<CgxTip>在所有分布式运行中设置 `CUDA_DEVICE_MAX_CONNECTIONS=1`。若无此设置，由于 NVIDIA Ampere+ GPU 上的流排序问题，Megatron-LM 的 all-gather/reduce-scatter 与前向计算的重叠将产生不正确的结果。</CgxTip>
+
+## 扩展至多节点集群
+
+对于多节点训练，启动命令会发生变化，通过集群的作业调度器（SLURM、Kubernetes 等）在各节点间分发 `torchrun`。每个节点运行带有 `--nnodes` 和 `--node_rank` 参数的相同命令。关键的配置更改包括：
+
+1. 在训练配置中设置 `num_nodes` 以匹配集群的节点数
+2. 设置 `devices` 为每节点的 GPU 数量（DGX 系统通常为 8）
+3. 调整 `micro_batch_size` 和 `accumulate_grad_batches` 以维持所需的全局批次大小：`global = micro × nodes × devices × accum ÷ (TP × PP)`
+4. 确保对 `experiment_dir` 具有共享文件系统访问权限，以便所有 rank 都能将检查点和日志写入同一路径
+
+在共享集群中，`PreemptionCallback` 尤为重要——在发生抢占时，它会触发立即保存检查点；而在重新启动时，`AutoResume` 会自动从上次保存的步数继续，并完整恢复优化器和采样器的状态。
+
+## 相关页面
+
+- [数据流水线与特征处理](11-data-pipeline-and-feature-processing) — 有关 `OpenFoldSingleDataset` 和 `OpenFoldBatchCollator` 为分布式数据流水线提供数据的详情
+- [混合 PDB-IDRome 训练策略](12-mixed-pdb-idrome-training-strategy) — 解释在 `MegatronDataSampler` 下运行的混合数据集采样
+- [损失函数与验证指标](13-loss-functions-and-validation-metrics) — 涵盖 `ESMFoldLossReduction` 及损失在各并行 rank 间的归约方式
+- [推理与集成生成](15-inference-and-ensemble-generation) — 分布式推理配置共享相同的并行原语
+- [配置参考](16-configuration-reference) — 所有分布式训练参数的完整列表
+
+---
+
+- [深入解析/分布式基础设施/推理与集成生成](https://zread.ai/PeptoneLtd/PepTron/15-inference-and-ensemble-generation)
+
+---
+slug:15-inference-and-ensemble-generation
+blog_type:normal
+---
+
+
+PepTron 的推理流水线将训练好的流匹配模型转换为**结构系综生成器**——通过从谐波先验的迭代去噪，为给定的蛋白质序列生成多个合理的 3D 构象。该流水线包含分布式模型加载、分块防 OOM 采样、流式 PDB 输出，以及带有物理合理性过滤的事后轨迹压缩。本页将剖析三个阶段：**推理编排**、**流匹配采样**和**系综压缩**。
+
+来源: [infer.py](/peptron/infer.py#L1-L341), [run_peptron_infer.sh](/run_peptron_infer.sh#L1-L82)
+
+## 推理流水线概述
+
+端到端推理流水线经历三个不同阶段，由 shell 启动器和 Python 推理模块协同编排：
+
+```mermaid
+flowchart TD
+    A["CSV 输入<br/>(序列)"] --> B["infer_model()<br/>分布式训练器设置"]
+    B --> C["peptron_predict_step()<br/>分块采样循环"]
+    C --> D["FlowSteps.linear_interpolation()<br/>迭代去噪"]
+    D --> E["StreamingPredictionWriter<br/>逐样本 PDB 输出"]
+    E --> F["compress_ensemble.py<br/>PDB → XTC + 拓扑"]
+    F --> G["filter_unphysical_traj()<br/>物理合理性检查"]
+    G --> H["最终系综<br/>topology.pdb + trajectory.xtc"]
+
+    style A fill:#e8f4e8,stroke:#2d7d2d
+    style D fill:#ffe8e8,stroke:#c44040
+    style H fill:#e8e8ff,stroke:#4040c4
+```
+
+Shell 脚本 `run_peptron_infer.sh` 编排了这一完整生命周期：它首先使用可配置参数调用 `python -m peptron.infer`，然后遍历每个结果子目录以调用 `python -m peptron.compress_ensemble --filter-unphysical`，将逐样本的 PDB 文件转换为压缩的 XTC 轨迹，同时丢弃非物理的帧。
+
+来源: [run_peptron_infer.sh](/run_peptron_infer.sh#L64-L81)
+
+## 推理编排
+
+### 入口点与配置
+
+推理入口点为 `peptron.infer:main`，它加载 `peptron_o_inference` 配置预设，并覆盖多个运行时设置以使模型准备就绪进入预测模式。关键的是，推理过程禁用了循环 (`max_recycling_iters = 0`) 和模板 (`use_templates = False`)，并配置了梯度检查点和分块以优化内存效率：
+
+| 覆盖项 | 值 | 依据 |
+|---|---|---|
+| `config.mode` | `"predict"` | 切换至预测通路 |
+| `max_recycling_iters` | `0` | 推理期间无迭代精炼 |
+| `use_templates` | `False` | 流匹配推理中不使用模板 |
+| `blocks_per_ckpt` | `1` | 激进的梯度检查点以节省内存 |
+| `chunk_size` | `None` | 推理时不进行注意力分块 |
+| `offload_inference` | `False` | 将激活保留在 GPU 上 |
+
+`main()` 函数还会将完整的推理配置序列化到结果目录的 `params.json` 文件中，确保每次系综运行的可复现性。
+
+来源: [infer.py](/peptron/infer.py#L288-L338), [config.py](/peptron/model/config.py#L228-L232)
+
+### 分布式推理设置
+
+`infer_model()` 函数使用 NVIDIA 的 Megatron 策略构建 PyTorch Lightning 推理环境。全局批大小通过 `infer_global_batch_size()` 从并行配置中推断得出，该函数计算 `micro_batch_size × num_nodes × devices`。策略对象使用 Megatron 的自定义 DDP 实现，并设置 `find_unused_parameters=True`，以适应流匹配模型的条件计算路径：
+
+```python
+strategy = nl.MegatronStrategy(
+    tensor_model_parallel_size=tensor_model_parallel_size,
+    pipeline_model_parallel_size=pipeline_model_parallel_size,
+    ddp="megatron",
+    find_unused_parameters=True,
+)
+```
+
+精度默认通过 `MegatronMixedPrecision` 设置为 **bf16-mixed**，从而在流 ODE 积分中保持数值稳定性的同时，启用 TF32 矩阵乘法和 cuDNN 以提高吞吐量。
+
+来源: [infer.py](/peptron/infer.py#L72-L157)
+
+### 模型与数据初始化
+
+模型通过 `get_esmfoldconfig()` 构建，该函数加载检查点并配置 ESMFold 架构。流匹配引擎通过 `flow.init_flow_steps(cfg=esmfold_config, generator_seed=137)` 以单例形式初始化，前向步绑定至 `flow.peptron_forward_step`。预测数据集是从输入 CSV 加载的 `CSVDataset`，封装在具有可配置 `micro_batch_size` 和 `num_workers` 的 `ESMFoldDataModule` 中。
+
+关键的一步是对 Lightning 模块的 `predict_step` 方法进行**运行时猴子补丁**。默认的预测步被替换为自定义的 `peptron_predict_step`，该步骤实现了分块且内存安全的系综生成：
+
+```python
+module.predict_step = MethodType(peptron_predict_step, module)
+module._predict_cfg = { **predict_cfg, "samples": samples }
+```
+
+来源: [infer.py](/peptron/infer.py#L159-L285)
+
+## 流匹配采样
+
+### 推理调度构建
+
+推理时间调度由两个面向用户的参数构建：**`steps`**（ODE 积分步数）和 **`tmax`**（积分起始时间）。当 `tmax = 1.0` 时，调度使用 `np.linspace(1.0, 0, steps + 1)` 跨越从纯噪声到清晰结构的完整范围。当 `0 < tmax < 1.0` 时，执行部分去噪——调度从 `t=1.0`（数据分布）开始，然后跳转至 `tmax` 并线性递减至零。这允许从部分含噪状态进行**热启动**：
+
+| `tmax` 值 | 调度行为 |
+|---|---|
+| `1.0` | 完全去噪: `linspace(1.0, 0, steps+1)` |
+| `0 < tmax < 1.0` | 部分去噪: `[1.0] + linspace(tmax, 0, steps+1)` |
+| `≤ 0` | **错误** —— 无效值 |
+
+来源: [infer.py](/peptron/infer.py#L190-L196)
+
+### 分块系综生成
+
+`peptron_predict_step` 方法以**内存安全的分块**方式生成 `samples` 个构象，以防止长序列发生 OOM。每个分块通过 `_repeat_item()`（沿维度 0 交错张量）将输入批次重复 `n` 次，然后调用 `flow._FLOW_STEPS.linear_interpolation()` 以生成 `n` 个独立的结构样本：
+
+```mermaid
+flowchart LR
+    B["输入批次"] --> R["_repeat_item(batch, n)"]
+    R --> L["linear_interpolation()&lt;br/&gt;n 个独立样本"]
+    C["tensor_tree_map -> CPU"] --> S["torch.save() 至临时文件"]
+    S --> E["torch.cuda.empty_cache()"]
+
+    style L fill:#ffe8e8,stroke:#c44040
+    style E fill:#e8f4e8,stroke:#2d7d2d
+```
+
+每个分块立即被卸载至一个临时 `.pt` 文件中，该文件标记有**全局秩**和每次预测调用的**唯一 UUID**，随后显式释放 GPU 缓存。该方法返回一个包含 `{temp_files, prediction_uuid}` 的字典，供 `StreamingPredictionWriter` 回调使用，以将分块合并为最终的 PDB 输出。
+
+来源: [infer.py](/peptron/infer.py#L209-L264)
+
+### 线性插值 (ODE 求解器)
+
+核心采样算法为 `FlowSteps.linear_interpolation()`，它实现了流匹配 ODE 从 `t=1`（谐波先验）到 `t=0`（数据分布）的**欧拉积分**。算法流程如下：
+
+1. **先验采样**：为序列长度 `N` 实例化一个 `HarmonicPrior`，并从高斯谐波分布中抽取 `batch_size` 个噪声样本
+2. **调度迭代**：对于调度中的每个连续时间对 `(t, s)`，模型根据当前含噪状态预测结构
+3. **自条件化**：若 `self_cond=True`，上一步的输出将作为 `prev_outputs` 馈入模型，使结构预测能基于自身先验估计进行精炼
+4. **噪声更新**：每步之后，通过线性插值公式更新含噪坐标：`noisy = (s/t) * noisy + (1 - s/t) * pseudo_beta`，有效地沿流路径传输噪声
+5. **距离特征**：重新计算更新后含噪坐标的成对距离，并将其作为 `noised_pseudo_beta_dists` 注入批次中，用于下一次模型前向传播
+
+`no_diffusion` 标志会绕过整个 ODE 积分并执行单次模型前向传播——这对于**确定性的单结构预测**非常有用。`noisy_first` 标志会在首次模型调用之前，使用 `t=1` 时的先验噪声距离初始化批次。
+
+来源: [flow.py](/peptron/model/flow.py#L206-L265)
+
+### 推理时的谐波先验采样
+
+`HarmonicPrior` 类预计算链刚度矩阵 **J**（具有弹簧常数 `a = 3/3.8²` 的三对角拉普拉斯矩阵）的特征分解，得到特征值 **D** 和特征向量 **P**。采样在特征基中抽取高斯噪声 `z ~ N(0, I)`，通过 `√(D⁻¹)` 缩放（滤除对应于平移的零模式），并通过 `P @ z` 旋转回原空间。这产生了**谐波分布**的样本——一种尊重链连接性的主链坐标上的高斯分布：
+
+```python
+class HarmonicPrior:
+    def __init__(self, N=256, a=3/(3.8**2)):
+        J = torch.zeros(N, N)
+        for i, j in zip(np.arange(N-1), np.arange(1, N)):
+            J[i,i] += a; J[j,j] += a; J[i,j] = J[j,i] = -a
+        D, P = torch.linalg.eigh(J)
+        D_inv = 1/D; D_inv[0] = 0  # 移除平移模式
+        self.P, self.D_inv = P, D_inv
+```
+
+在 ODE 积分开始之前，先验通过 `rmsdalign()` 与数据对齐，确保噪声样本与目标结构在旋转上保持一致。
+
+来源: [flow.py](/peptron/model/flow.py#L42-L69), [flow.py](/peptron/model/flow.py#L220-L224)
+
+## 流式输出与系综写入
+
+### StreamingPredictionWriter
+
+`StreamingPredictionWriter` 回调（扩展自 Lightning 的 `BasePredictionWriter`）在 `write_interval="batch"` 时处理分块预测结果。在 `write_on_batch_end` 时，它：
+
+1. **识别分块**：通过将 `prediction_uuid` 和全局秩与临时文件模式进行匹配：`_tmp_rank{rank}_predictid_{uuid}_part*.pt`
+2. **流式 PDB 输出**：对于每个分块，`interpolations` 键通过 `expand_tensors_in_list()` 扩展为逐样本的独立字典，每个字典再通过 `protein.get_prot_pdb()` 和 `protein.prots_to_pdb()` 转换为 PDB 格式
+3. **按序列组织**：每个样本被写入以蛋白质命名的子目录中，文件名编码了秩、批次索引和样本索引：`predictions_rank_{rank}_batch_{batch_idx}_{sample_idx}.pdb`
+4. **清理**：处理完毕后删除临时 `.pt` 文件，防止磁盘空间累积
+
+这种流式方法确保**在任何时候内存中驻留的结构不超过一个分块的数量**，无论请求的样本总数是多少。
+
+来源: [callbacks.py](/peptron/utils/callbacks.py#L13-L77)
+
+## 系综压缩与物理过滤
+
+### PDB 至 XTC 转换
+
+推理为每个序列生成包含单个 PDB 文件的目录后，`compress_ensemble.py` 将其转换为标准的分子动力学轨迹格式（XTC + 拓扑 PDB）。`pdb_dir_to_xtc()` 函数：
+
+1. 从首个 PDB 创建 `MDAnalysis.Universe` 以提取拓扑
+2. 写入包含原子结构模板的 `topology.pdb`
+3. 使用 `MDAnalysis.Writer` 将每个 PDB 帧流式传输至单个 `trajectory.xtc` 文件中，可选择过滤非物理帧
+4. 在成功纳入轨迹后删除单个 PDB 文件
+
+与单个 PDB 文件相比，这种压缩通常可将磁盘使用量减少 **10-50 倍**，同时生成与标准 MD 分析工具（MDTraj、MDAnalysis、PyEMMA、VMD）兼容的格式。
+
+来源: [compress_ensemble.py](/peptron/compress_ensemble.py#L12-L50)
+
+### 物理合理性过滤
+
+`filter_unphysical_traj()` 函数对每个采样构象应用三项几何完整性检查，丢弃违反基本物理约束的结构：
+
+| 判据 | 阈值 | 依据 |
+|---|---|---|
+| **CA–CA 顺序距离** | < 4.5 Å | 相邻 Cα 原子必须在肽键几何范围内 |
+| **C–N 顺序距离** | < 2.0 Å | 连续残基间的肽键长度 |
+| **残基间原子冲突** | > 1.0 Å | 不同残基的任意两个原子不应重叠 |
+
+每次检查都会在轨迹帧上生成一个布尔掩码；最终掩码为所有三个掩码的逻辑与。当 `strict=True` 时，断言确保至少有一个帧能通过过滤。该函数作用于 `mdtraj.Trajectory` 对象，并返回仅包含物理合理帧的切片轨迹。
+
+来源: [filter_unphysical_traj.py](/peptron/utils/filter_unphysical_traj.py#L82-L106)
+
+## 推理配置参考
+
+所有推理参数嵌套在配置字典的 `config.inference` 下。下表汇总了每个参数及其默认值和作用：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `chains_path` | `"/data/input"` | 包含序列的输入 CSV 路径 |
+| `checkpoint_path` | `""` | 训练好的 PepTron 检查点路径 |
+| `results_path` | `""` | PDB 系综的输出目录 |
+| `msa_dir` | `""` | 包含 MSA 比对的目录 |
+| `as_protein` | `False` | 返回 `Protein` 对象而非字典 |
+| `no_diffusion` | `False` | 跳过 ODE 积分（单次前向传播） |
+| `self_cond` | `False` | 跨 ODE 步启用自条件化 |
+| `noisy_first` | `False` | 使用 t=1 时的先验噪声进行初始化 |
+| `samples` | `100` | 要生成的系综构象数量 |
+| `tmax` | `1.0` | ODE 积分的起始时间 |
+| `steps` | `10` | 欧拉积分步数 |
+| `precision` | `"bf16-mixed"` | 数值精度模式 |
+| `num_gpus` | `1` | 每个节点的 GPU 数量 |
+| `num_nodes` | `1` | 分布式节点数量 |
+| `micro_batch_size` | `2` | 每设备批大小 |
+| `max_batch_size` | `10` | 每分块最大样本数（OOM 控制） |
+| `num_workers` | `16` | DataLoader 工作进程数 |
+| `tensor_model_parallel_size` | `1` | Megatron 张量并行度 |
+| `pipeline_model_parallel_size` | `1` | Megatron 流水线并行度 |
+| `prediction_interval` | `"epoch"` | 写入回调间隔（`"epoch"` 或 `"batch"`） |
+| `use_cuequivariance` | `True` | 为注意力/乘法操作启用 cuEquivariance |
+
+<CgxTip>`max_batch_size` 参数是系综生成期间 GPU 内存消耗的主要控制项。它决定了每个分块中同时生成的样本数量。对于长序列（>300 个残基），将 `max_batch_size` 减小至 1-2，并增加 `steps` 以牺牲挂钟时间为代价换取更高质量的样本。</CgxTip>
+
+来源: [config.py](/peptron/model/config.py#L822-L847)
+
+## 运行推理
+
+Shell 启动器 `run_peptron_infer.sh` 为完整的推理 + 压缩流水线提供了独立接口。它接受三个必选/可选标志：
+
+```bash
+./run_pepton_infer.sh \
+    --input sequences.csv \
+    --checkpoint /path/to/peptron-checkpoint \
+    --results results/ \
+    --filter-unphysical
+```
+
+该脚本设置了多个用于 NCCL 稳定性的环境变量（`NCCL_TIMEOUT=3600`、`TORCH_NCCL_ENABLE_MONITORING=0`），并通过 absl 配置标志传递推理参数。默认配置在单 GPU 上以 `tmax=1.0` 生成 **10 个样本**，并进行 **10 个 ODE 步**。推理完成后，脚本遍历所有蛋白质子目录，并在启用物理过滤的情况下将每个系综压缩为 XTC 格式。
+
+<CgxTip>扩展至多 GPU 推理时，确保 `micro_batch_size` 能被 `num_gpus` 整除，并将 `max_batch_size` 设置为 `num_gpus` 的倍数。启动器脚本的头部注释记录了此约束：`max_batch_size = k × num_gpus`，其中 k 为正整数 ≤ N（数据集大小）。</CgxTip>
+
+来源: [run_peptron_infer.sh](/run_peptron_infer.sh#L1-L82)
+
+## 预测步架构
+
+预测步架构展示了 PepTron 如何用感知流匹配的采样循环替代标准的 Lightning 预测循环：
+
+```mermaid
+sequenceDiagram
+    participant Trainer
+    participant PredictStep
+    participant FlowSteps
+    participant Model
+    participant Writer
+
+    Trainer->>PredictStep: batch (单个序列)
+    PredictStep->>PredictStep: 每个分块 _repeat_item(batch, n)
+    loop 每个分块
+        PredictStep->>FlowSteps: linear_interpolation(repeated_batch)
+        FlowSteps->>FlowSteps: HarmonicPrior.sample()
+        loop 调度中的每个 (t, s)
+            FlowSteps->>Model: forward(batch, prev_outputs)
+            Model-->>FlowSteps: structure_output
+            FlowSteps->>FlowSteps: "更新含噪坐标: (s/t)·noisy + (1-s/t)·pred"
+            FlowSteps->>FlowSteps: 计算成对距离
+        end
+        FlowSteps-->>PredictStep: "{interpolations: final_output}"
+        PredictStep->>PredictStep: 卸载至 CPU，保存临时 .pt 文件
+        PredictStep->>PredictStep: torch.cuda.empty_cache()
+    end
+    PredictStep-->>Trainer: "{temp_files, prediction_uuid}"
+    Trainer->>Writer: write_on_batch_end(prediction)
+    loop 每个临时文件
+        Writer->>Writer: 扩展张量 → 逐样本 PDB
+        Writer->>Writer: 写入 PDB，删除临时文件
+    end
+```
+
+来源: [infer.py](/peptron/infer.py#L209-L264), [flow.py](/peptron/model/flow.py#L206-L265), [callbacks.py](/peptron/utils/callbacks.py#L31-L77)
+
+## 后续步骤
+
+- 关于推理期间求解的流匹配 ODE 的数学基础，请参阅 [连续流匹配](5-continuous-flow-matching)
+- 关于为采样过程提供种子的谐波先验分布的详细信息，请参阅 [谐波先验采样](6-harmonic-prior-sampling)
+- 关于跨 ODE 步精炼样本的自条件化机制，请参阅 [自条件化与推理调度](7-self-conditioning-and-inference-schedule)
+- 关于包含所有推理参数的完整配置架构，请参阅 [配置参考](16-configuration-reference)
+
+---

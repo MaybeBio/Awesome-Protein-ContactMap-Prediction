@@ -1,0 +1,37 @@
+# PeptoneLtd/PepTron
+
+Source: https://zread.ai/PeptoneLtd/PepTron
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速上手](2-quick-start.md)
+- [入门/预训练模型](3-pre-trained-models.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/配置参考](16-configuration-reference.md)
+### 流匹配引擎
+
+- [深入解析/流匹配引擎/连续流匹配](5-continuous-flow-matching.md)
+- [深入解析/流匹配引擎/调和先验采样](6-harmonic-prior-sampling.md)
+- [深入解析/流匹配引擎/自条件化与推理调度](7-self-conditioning-and-inference-schedule.md)
+
+### 模型组件
+
+- [深入解析/模型组件/ESM2 序列编码器](8-esm2-sequence-encoder.md)
+- [深入解析/模型组件/结构头与折叠主干网络](9-structure-head-and-foldingtrunk.md)
+- [深入解析/模型组件/三角自注意力块](10-triangular-self-attention-blocks.md)
+
+### 数据与训练
+
+- [深入解析/数据与训练/数据流水线与特征处理](11-data-pipeline-and-feature-processing.md)
+- [深入解析/数据与训练/混合 PDB-IDRome 训练策略](12-mixed-pdb-idrome-training-strategy.md)
+- [深入解析/数据与训练/损失函数与验证指标](13-loss-functions-and-validation-metrics.md)
+
+### 分布式基础设施
+
+- [深入解析/分布式基础设施/Megatron 分布式训练](14-megatron-distributed-training.md)
+- [深入解析/分布式基础设施/推理与集成生成](15-inference-and-ensemble-generation.md)
+
