@@ -1,0 +1,4762 @@
+# idptools/finches
+
+Source: https://zread.ai/idptools/finches
+
+# 入门
+
+- [入门/概述](https://zread.ai/idptools/finches/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**FINCHES**（**F**irst-principle **I**nteractions via **CHE**mical **S**pecificity，基于化学特异性的第一性原理相互作用）是一个 Python 包，用于预测由本质无序区（IDR）驱动的分子间相互作用。FINCHES 并不依赖自上而下的经验拟合，而是采用自下而上的方式：它使用基于物理的粗粒化力场，直接从氨基酸序列计算残基与片段的相互作用能，随后将这些能量聚合为关于结合特异性和相行为的定量预测。该包已发表于 *Science*（2025），并作为独立的 Python 库、一组 Google Colab 笔记本以及网页服务器提供使用，网址为 [finches-online.com](https://www.finches-online.com/)。
+
+来源: [README.md](/README.md#L1-L30), [docs/index.rst](/docs/index.rst#L1-L48)
+
+## FINCHES 的预测内容
+
+FINCHES 回答了关于无序区相互作用的四个核心问题。**首先**，它生成**相互作用图**（intermaps）——即二维热图，其中每个像素代表一条序列的滑动窗口片段与另一条序列片段之间的预测相互作用强度，从而揭示哪些区域驱动了异型或同型结合。**其次**，它计算**逐残基相互作用向量**，将整体相互作用分解为每个位置上的吸引与排斥贡献，从而能够精确定位“粘性”残基。**第三**，它计算单一的**平均场 epsilon (ε) 值**，用于量化两条序列间的净相互作用强度——该标量是进行更高层级热力学推理的关键输入。**第四**，它将该 epsilon 值桥接到 **Flory-Huggins 相图**中，预测序列是否会发生液-液相分离，以及相边界如何随盐浓度或 pH 值等条件发生偏移。这四种分析共享相同的底层力场引擎，因此结果在不同尺度间保持内部一致性。
+
+来源: [docs/index.rst](/docs/index.rst#L14-L40), [finches/frontend/frontend_base.py](/finches/frontend/frontend_base.py#L1-L50)
+
+## 架构概览
+
+代码库围绕**物理模型**（力场）、**计算引擎**（epsilon 与矩阵构造器）以及**用户界面**（前端）的清晰分离进行组织。这种三层架构意味着你可以在不更改分析代码的情况下替换力场，或者根据需求在不同抽象层级上访问相同的计算逻辑。
+
+```mermaid
+graph TD
+    subgraph Frontend Layer
+        MF[Mpipi_frontend]
+        CF[CALVADOS_frontend]
+        FB[FinchesFrontend<br/>base class]
+    end
+
+    subgraph Computation Layer
+        IMC[InteractionMatrixConstructor]
+        ES[epsilon_stateless<br/>functions]
+        ETF[epsilon_to_FHtheory]
+        IV[interaction_vector]
+    end
+
+    subgraph Forcefield Layer
+        MP[Mpipi_model<br/>Mpipi_original / Mpipi_GGv1]
+        CM[calvados_model<br/>CALVADOS1 / CALVADOS2]
+        CU[custom_model<br/>user-defined]
+    end
+
+    subgraph Analytical Layer
+        FH[Flory-Huggins<br/>binodal / spinodal]
+    end
+
+    subgraph Supporting Tools
+        PDB[PDB_structure_tools]
+        DD[domain_decomposition]
+        FDU[folded_domain_utils]
+    end
+
+    MF --> FB
+    CF --> FB
+    FB --> IMC
+    MP --> MP
+    CF --> CM
+    IMC --> ES
+    IMC --> MP
+    IMC --> CM
+    IMC --> CU
+    ETF --> FH
+    ETF --> ES
+    IV --> IMC
+    IV --> PDB
+    PDB --> FDU
+    DD --> FB
+```
+
+**前端层** — `Mpipi_frontend` 和 `CALVADOS_frontend` 类继承自共享的 `FinchesFrontend` 基类。它们将力场模型与 `InteractionMatrixConstructor` 捆绑在一起，通过单一对象暴露诸如 `epsilon()`、`interaction_figure()` 和 `intermolecular_idr_matrix()` 等高级方法。大多数用户应从此处入手。
+
+**计算层** — `InteractionMatrixConstructor` 是将力场转化为可执行计算的引擎。它从模型的 `compute_interaction_parameter()` 函数构建成对查找表，随后提供用于全序列 epsilon、滑动窗口矩阵和加权成对相互作用的方法。`epsilon_stateless` 中的无状态辅助函数负责处理矩阵分解（吸引与排斥）及向量构建，且无需维护状态。
+
+**力场层** — 每个力场类都封装了物理逻辑：`Mpipi_model` 加载 Mpipi-GG 参数（σ, ε, ν, μ, 电荷字典）并计算修正的 Mpipi 相互作用势；`calvados_model` 根据 CALVADOS2 粘性参数构建 Ashbaugh-Hatch + Yukawa 势；`custom_model` 允许你定义任意的成对字典及可选的依赖条件的调节。这三者均暴露相同的接口（`ALL_RESIDUES_TYPES`、`compute_interaction_parameter()`、`CONFIGS`），因此 `InteractionMatrixConstructor` 可以统一对待它们。
+
+来源: [finches/__init__.py](/finches/__init__.py#L1-L24), [finches/frontend/frontend_base.py](/finches/frontend/frontend_base.py#L14-L50), [finches/epsilon_calculation.py](/finches/epsilon_calculation.py#L17-L100), [finches/forcefields/mpipi.py](/finches/forcefields/mpipi.py#L1-L40), [finches/forcefields/calvados.py](/finches/forcefields/calvados.py#L1-L50)
+
+## 项目结构
+
+```
+finches/
+├── __init__.py                    # 包入口：导出 Mpipi_frontend, CALVADOS_frontend
+├── frontend/
+│   ├── frontend_base.py           # FinchesFrontend 基类（共享逻辑）
+│   ├── mpipi_frontend.py          # Mpipi_frontend（支持蛋白质 + RNA）
+│   ├── calvados_frontend.py       # CALVADOS_frontend（仅支持蛋白质，含 RNA 守卫）
+│   └── interlogo.py               # 相互作用标志生成
+├── epsilon_calculation.py         # InteractionMatrixConstructor（核心引擎）
+├── epsilon_stateless.py           # 纯函数：矩阵操作，epsilon 向量
+├── epsilon_to_FHtheory.py         # 从 epsilon 桥接至 Flory-Huggins 相图
+├── interaction_vector.py          # 逐残基相互作用向量图
+├── forcefields/
+│   ├── mpipi.py                   # Mpipi_model (Mpipi_original, Mpipi_GGv1)
+│   ├── calvados.py                # calvados_model (CALVADOS1, CALVADOS2)
+│   ├── custom_model.py            # custom_model（用户自定义成对交互）
+│   └── calibration/               # 力场校准脚本
+├── analytical_fh/
+│   ├── floryhuggins.py            # 双节面/旋节线封装
+│   └── backend.py                 # 解析 FH 求解器 (Qian et al. 2022)
+├── PDB_structure_tools.py         # PDB → 表面可及残基提取
+├── domain_decomposition/          # 从相互作用图中识别相互作用区域
+├── data/                          # 预计算的力场参数
+├── utils/
+│   ├── folded_domain_utils.py     # FoldedDomain 类（SASA，表面掩码）
+│   └── matrix_manipulation.pyx    # Cython 加速的矩阵计算
+└── tests/                         # pytest 测试套件
+```
+
+来源: [finches/__init__.py](/finches/__init__.py#L1-L24), [finches/epsilon_calculation.py](/finches/epsilon_calculation.py#L17-L50), [finches/forcefields/custom_model.py](/finches/forcefields/custom_model.py#L1-L30)
+
+## 力场对比
+
+FINCHES 附带了两个经过验证的力场。在两者之间进行选择将决定底层物理逻辑、支持的残基类型以及可用的依赖条件参数。
+
+| 特性 | **Mpipi-GG** (`Mpipi_frontend`) | **CALVADOS2** (`CALVADOS_frontend`) |
+|---|---|---|
+| **底层势函数** | 修正的 Mpipi (σ, ε, ν, μ + 电荷) | Ashbaugh-Hatch LJ + Yukawa DH |
+| **来源文献** | Joseph et al. 2021; Lotthammer et al. 2024 | Tesei et al. 2021 |
+| **蛋白质支持** | 20 种标准氨基酸 | 20 种标准氨基酸 |
+| **RNA 支持** | 是（残基 `U`） | 否（遇到 `U` 会抛出 `ValueError`） |
+| **可调条件** | `salt`，`dielectric` | `salt`，`pH`，`temp` |
+| **默认 charge_prefactor** | 0.20 | 0.70 |
+| **默认 null_interaction_baseline** | −0.128533 | −0.45 |
+| **推荐适用场景** | 蛋白质-蛋白质与蛋白质-RNA 的 IDR | 仅涉及蛋白质的 IDR 以及 pH/温度研究 |
+
+<CgxTip>`null_interaction_baseline` 是区分吸引与排斥成对相互作用的阈值。它针对每个力场进行校准，以重现 poly(GS) 参考序列的行为（该序列预期表现为非相互作用的高斯链）。这意味着你**不能**跨力场比较原始的 epsilon 值——只有单一力场内序列的排序才有意义。</CgxTip>
+
+来源: [finches/forcefields/mpipi.py](/finches/forcefields/mpipi.py#L17-L35), [finches/forcefields/calvados.py](/finches/forcefields/calvados.py#L26-L50), [finches/frontend/calvados_frontend.py](/finches/frontend/calvados_frontend.py#L18-L28)
+
+## 快速使用示例
+
+使用 FINCHES 最简单的方式是通过前端对象。安装完成后，导入一个前端，将其实例化，并以字符串形式传入氨基酸序列：
+
+```python
+from finches import Mpipi_frontend, CALVADOS_frontend
+
+# 使用默认条件实例化前端
+mf = Mpipi_frontend()          # salt=0.150, dielectric=80.0
+cf = CALVADOS_frontend()       # salt=0.150, pH=7.4, temp=288
+
+# 定义序列（DDX4 N 端结构域）
+ddx4_ntd = 'MGDEDWEAEINPHMSSYVPIFEKDRYSGENGDNFNRTPASSSEMDDGPSRRDHFMKSGFASGRNFGNRDAGECNKRDNTSTMGGFGVGKSFGNRGFSNSRFEDGDSSGFWRESSNDCEDNPTRNRGFSKRGGYRDGNNSEASGPYRRGGRGSFRGCRGGFGLGSPNNDLDPDECMQRTGGLFGSRRPVLSGTGNGDTSQSRSGSGSERGGYKGLNEEVITGSGKNSWKSEAEGGES'
+
+# 计算同型 epsilon（标量相互作用强度）
+print(mf.epsilon(ddx4_ntd, ddx4_ntd))
+
+# 生成相互作用图
+mf.interaction_figure(ddx4_ntd, ddx4_ntd)
+
+# 计算滑动窗口相互作用矩阵
+matrix, disorder1, disorder2 = mf.intermolecular_idr_matrix(ddx4_ntd, ddx4_ntd)
+```
+
+`epsilon()` 方法返回一个总结净相互作用的单浮点数；`interaction_figure()` 生成带有平行无序轨迹的 matplotlib 热图；`intermolecular_idr_matrix()` 返回原始矩阵及各序列的无序分布，以便进行自定义分析。
+
+来源: [README.md](/README.md#L40-L75), [finches/__init__.py](/finches/__init__.py#L20-L24), [finches/frontend/mpipi_frontend.py](/finches/frontend/mpipi_frontend.py#L11-L30)
+
+## 三种界面，同一目标
+
+FINCHES 可通过三种互补的界面访问，每种均适用于不同的工作流：
+
+| 界面 | 最适合 | 位置 |
+|---|---|---|
+| **Python 包** | 编程式分析、批量计算、集成至流水线 | `pip install git+https://git@github.com/idptools/finches.git` |
+| **Google Colab** | 零安装探索、教学、一次性分析 | [finches-colab](https://github.com/idptools/finches-colab) |
+| **网页服务器** | 无需任何设置的快速查询、与非编程人员分享结果 | [finches-online.com](https://www.finches-online.com/) |
+
+Python 包提供对每个参数（窗口大小、加权方案、空洗牌、自定义力场）的完全控制。Colab 笔记本提供引导式演练。网页服务器则通过浏览器 UI 暴露最常用的操作。
+
+来源: [README.md](/README.md#L8-L15)
+
+## 核心概念
+
+在深入详细文档之前，有四个概念支柱支撑着每一次 FINCHES 计算：
+
+**Epsilon (ε)** 是平均场相互作用参数。其计算方式为：在两条序列间构建成对相互作用矩阵，使用 `null_interaction_baseline` 将吸引贡献与排斥贡献分离，应用可选的电荷与脂肪族加权方案，最后求平均。ε 值越负，表示净吸引力越强。这是推导所有其他预测的基础量。
+
+**相互作用图** 通过滑动窗口方法计算：每条序列被分解为可配置窗口大小（默认为 31 个残基）的重叠片段，随后计算每对片段的 epsilon。生成的二维矩阵揭示了空间分辨的相互作用模式——例如，一条 IDR 上特定的带电斑块驱动与另一条 IDR 上的芳香斑块结合。
+
+**加权方案** 对原始成对矩阵进行细化。*电荷加权* 降低了同种电荷对的排斥贡献，反映出带电侧链在无序链中可以彼此重定向远离的事实。*脂肪族加权* 增强了被其他脂肪族残基包围的脂肪族残基的贡献，捕捉疏水斑块的协同效应。两者默认启用，并由特定于各力场的 `charge_prefactor` 参数控制。
+
+**相图** 通过 Flory-Huggins 理论将 epsilon 与宏观行为联系起来。epsilon 值映射到 Flory-Huggins χ 参数，而 Qian 等人 (2022) 提出的解析双节面/旋节线曲线可预测共存浓度。这一桥梁使得序列层面的突变能够直接联系到相边界的偏移。
+
+<CgxTip>FINCHES 的预测对于**比较性**分析最为可靠——例如，“突变 X 相较于野生型是增加还是降低了相分离倾向？”——而不是对临界浓度的绝对定量预测。平均场框架必然简化了链连接性、溶剂化及多体效应。文档的注意事项部分详细讨论了这些局限性。</CgxTip>
+
+来源: [finches/epsilon_stateless.py](/finches/epsilon_stateless.py#L85-L160), [finches/epsilon_calculation.py](/finches/epsilon_calculation.py#L17-L100), [finches/analytical_fh/floryhuggins.py](/finches/analytical_fh/floryhuggins.py#L1-L60), [finches/epsilon_to_FHtheory.py](/finches/epsilon_to_FHtheory.py#L1-L30)
+
+## 接下来去哪
+
+本文档的结构旨在带你从安装入门深入到技术细节。对于初学者，我们推荐以下阅读顺序：
+
+1. **[快速开始](2-quick-start)** — 运行 FINCHES 并计算你的第一个 epsilon 和相互作用图
+2. **[安装指南](3-installation-guide)** — conda、pip 及开发安装的详细设置
+3. **[架构概览](4-architecture-overview)** — 前端 → 计算 → 力场层如何连接
+4. **[Mpipi 与 CALVADOS 前端](5-mpipi-and-calvados-frontends)** — 两个主要用户面向类的完整 API 参考
+5. **[相互作用图与图形](6-interaction-maps-and-figures)** — 生成与解读二维相互作用热图
+6. **[Epsilon 计算与加权](9-epsilon-calculation-and-weighting)** — 理解 epsilon 的计算方式及加权方案如何影响结果
+
+如果你有特定的用例，可以直接跳转至相关的深入页面——目录结构的设计使得每一页均自成一体，同时交叉引用了前置知识。
+
+---
+
+- [入门/快速开始](https://zread.ai/idptools/finches/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+在五分钟内从零开始完成你的首次相互作用预测。本指南将带你安装 FINCHES、初始化前端对象，并计算你的第一个 **epsilon** 相互作用值——这是量化两个本质无序区域（IDR）之间化学特异性的核心指标。
+
+## 前提条件
+
+FINCHES 需要 **Python 3.9+**（为获得最佳性能，推荐使用 3.11 或 3.12），并依赖于 `numpy`、`scipy`、`cython`、`pytorch`、`mdtraj` 和 `metapredict`。下表汇总了支持的安装方式：
+
+| 方式 | 适用对象 | 命令 |
+|--------|----------|---------|
+| 通过 GitHub 使用 pip | 大多数用户 | `pip install git+https://git@github.com/idptools/finches.git` |
+| 本地可编辑安装 | 贡献者 / 开发者 | `git clone git@github.com:idptools/finches.git` → `cd finches` → `pip install -e .` |
+| Google Colab | 免安装探索 | [finches-colab notebooks](https://github.com/idptools/finches-colab) |
+| Web 服务器 | 快速查询，无需写代码 | [finches-online.com](https://www.finches-online.com/) |
+
+来源: [README.md](/README.md#L75-L155), [pyproject.toml](/pyproject.toml#L13-L31)
+
+## 安装
+
+### 步骤 1 — 创建并激活 conda 环境
+
+```bash
+conda create -n finches python=3.12 -y
+conda activate finches
+```
+
+### 步骤 2 — 通过 conda 安装核心依赖
+
+这可以确保 NumPy/PyTorch 构建版本的一致性（在 macOS 上这一点至关重要，混用 conda 和 PyPI 构建会导致失败）：
+
+```bash
+conda install numpy pytorch scipy cython matplotlib jupyter -c pytorch
+conda install mdtraj
+pip install metapredict
+```
+
+### 步骤 3 — 安装 FINCHES
+
+```bash
+pip install git+https://git@github.com/idptools/finches.git
+```
+
+### 步骤 4 — 验证安装
+
+```bash
+python -c "from finches.frontend.mpipi_frontend import Mpipi_frontend; mf = Mpipi_frontend(); print('Success')"
+```
+
+> **注意：** 首次导入需要 60–90 秒，因为需要加载 Cython 编译的模块。后续导入将会很快。
+
+来源: [README.md](/README.md#L83-L158), [docs/getting_started.rst](/docs/getting_started.rst#L22-L40)
+
+## 你的首次计算
+
+下图展示了从序列到预测的最简工作流。FINCHES 遵循**前端模式**：你实例化一个特定力场的前端对象，然后传入氨基酸序列来调用其方法。
+
+```mermaid
+flowchart LR
+    A["导入前端"] --> B["实例化对象<br/>(选择力场)"]
+    B --> C["定义序列<br/>为 Python 字符串"]
+    C --> D["调用 .epsilon()"]
+    D --> E["获取相互作用值<br/>(float)"]
+    style A fill:#e8f5e9,stroke:#2e7d32
+    style B fill:#e3f2fd,stroke:#1565c0
+    style C fill:#fff3e0,stroke:#ef6c00
+    style D fill:#f3e5f5,stroke:#7b1fa2
+    style E fill:#fce4ec,stroke:#c62828
+```
+
+### 初始化前端
+
+FINCHES 暴露了两个前端类——**`Mpipi_frontend`** 和 **`CALVADOS_frontend`**——它们提供了相同的接口，但底层由不同的力场参数化方案提供支持：
+
+```python
+from finches import Mpipi_frontend, CALVADOS_frontend
+
+# Mpipi-GG 力场 (支持蛋白质和 RNA，通过 'U' 残基实现)
+mf = Mpipi_frontend(salt=0.150, dielectric=80.0)
+
+# CALVADOS2 力场 (仅支持蛋白质；对 pH 和温度敏感)
+cf = CALVADOS_frontend(salt=0.150, pH=7.4, temp=288)
+```
+
+这两个构造函数默认采用近似生理条件。关键区别在于：`Mpipi_frontend` 接受 `salt` 和 `dielectric` 参数，而 `CALVADOS_frontend` 接受 `salt`、`pH` 和 `temp`（以开尔文为单位）参数。
+
+来源: [finches/__init__.py](/finches/__init__.py#L16-L17), [finches/frontend/mpipi_frontend.py](/finches/frontend/mpipi_frontend.py#L12-L21), [finches/frontend/calvados_frontend.py](/finches/frontend/calvados_frontend.py#L34-L43)
+
+### 计算 epsilon 值
+
+**epsilon** 值是两个 IDR 序列之间相互作用自由能的标量代理——越负表示越具有吸引力，越正表示越具有排斥力，零则对应于中性的 GS-linker 参考基准：
+
+```python
+# DDX4 N 端结构域 (一个被广泛研究的相分离 IDR)
+ddx4_ntd = 'MGDEDWEAEINPHMSSYVPIFEKDRYSGENGDNFNRTPASSSEMDDGPSRRDHFMKSGFASGRNFGNRDAGECNKRDNTSTMGGFGVGKSFGNRGFSNSRFEDGDSSGFWRESSNDCEDNPTRNRGFSKRGGYRDGNNSEASGPYRRGGRGSFRGCRGGFGLGSPNNDLDPDECMQRTGGLFGSRRPVLSGTGNGDTSQSRSGSGSERGGYKGLNEEVITGSGKNSWKSEAEGGES'
+
+# 同型相互作用 (DDX4 与自身)
+print(mf.epsilon(ddx4_ntd, ddx4_ntd))
+```
+
+对于**异型**相互作用，只需传入两个不同的序列：
+
+```python
+seq_A = 'GGGGGRRRRR'   # 一段富含精氨酸的短基序
+seq_B = 'GGGGGYYYYY'   # 一段富含酪氨酸的短基序
+
+print(mf.epsilon(seq_A, seq_B))  # 如果 π-阳离子接触占主导，则表现出吸引作用
+```
+
+<CgxTip>epsilon 值是**依赖顺序的**（外在的）：通常 `epsilon(A, B) ≠ epsilon(B, A)`。你可以将第一个序列想象为“浸润”在第二个序列中。要获得内在的（与顺序无关的）值，请除以第一个序列的长度：`epsilon(A, B) / len(A) == epsilon(B, A) / len(B)`。</CgxTip>
+
+来源: [finches/frontend/frontend_base.py](/finches/frontend/frontend_base.py#L206-L241), [README.md](/README.md#L36-L43), [demo/overview_uses/basic_uses.ipynb](/demo/overview_uses/basic_uses.ipynb#L140-L175)
+
+### 生成相互作用图
+
+超越单一标量，**相互作用图** 会生成一个 2D 热图，展示两条序列中位置解析的相互作用强度——这非常适合用于识别哪些子区域驱动了结合：
+
+```python
+mf.interaction_figure(ddx4_ntd, ddx4_ntd)
+```
+
+这会计算一个滑动窗口相互作用矩阵，并使用并行的无序预测轨道对其进行渲染。返回的元组包含 matplotlib 的 figure 和 axes 对象，以便进行进一步的自定义。
+
+来源: [finches/frontend/frontend_base.py](/finches/frontend/frontend_base.py#L288-L416), [finches/frontend/mpipi_frontend.py](/finches/frontend/mpipi_frontend.py#L128-L149)
+
+## 核心前端 API 速览
+
+`Mpipi_frontend` 和 `CALVADOS_frontend` 都暴露了相同的一组高级方法。下表汇总了你最常使用的主要入口点：
+
+| 方法 | 返回值 | 用途 |
+|--------|---------|---------|
+| `epsilon(seq1, seq2)` | `float` | 两条完整序列之间的标量相互作用能 |
+| `epsilon_vectors(seq1, seq2)` | 数组元组 | 每个残基的吸引和排斥相互作用向量 |
+| `intermolecular_idr_matrix(seq1, seq2)` | `(matrix_tuple, disorder_1, disorder_2)` | 原始滑动窗口相互作用矩阵 + 无序分布 |
+| `interaction_figure(seq1, seq2)` | `(fig, im, ax_main, ...)` | 渲染出的带有无序轨道的 2D 相互作用热图 |
+| `per_residue_attractive_vector(seq1, seq2)` | `(indices, values)` | 每个残基的平均吸引相互作用（用于识别“贴纸”） |
+| `per_residue_repulsive_vector(seq1, seq2)` | `(indices, values)` | 每个残基的平均排斥相互作用（用于识别“间隔物”） |
+
+所有方法都接受 `use_aliphatic_weighting` 和 `use_charge_weighting` 标志（默认为 `True`），这些标志会应用针对疏水和电荷环境效应的校正项。
+
+来源: [finches/frontend/frontend_base.py](/finches/frontend/frontend_base.py#L206-L282), [finches/frontend/frontend_base.py](/finches/frontend/frontend_base.py#L570-L696)
+
+## 选择力场
+
+| 特性 | `Mpipi_frontend` | `CALVADOS_frontend` |
+|---------|-------------------|----------------------|
+| 底层模型 | Mpipi-GG v1 | CALVADOS2 |
+| 构造函数参数 | `salt`, `dielectric` | `salt`, `pH`, `temp` |
+| RNA 支持（`U` 残基） | ✅ 是 | ❌ 否 (引发 `ValueError`) |
+| 最适用场景 | 蛋白质-蛋白质和蛋白质-RNA | 对 pH/温度敏感的蛋白质-蛋白质 |
+| 主要引用文献 | Joseph et al. (2021) + Lotthammer et al. (2024) | Tesei et al. (2022) |
+
+对于大多数仅涉及蛋白质的用例，两种力场都表现良好。处理含 RNA 的序列时请使用 `Mpipi_frontend`（用 `U` 表示尿嘧啶）；需要依赖 pH 或温度的预测时请使用 `CALVADOS_frontend`。
+
+来源: [finches/frontend/mpipi_frontend.py](/finches/frontend/mpipi_frontend.py#L12-L21), [finches/frontend/calvados_frontend.py](/finches/frontend/calvados_frontend.py#L16-L25), [finches/frontend/calvados_frontend.py](/finches/frontend/calvados_frontend.py#L28-L43)
+
+## 故障排除
+
+| 症状 | 原因 | 解决方案 |
+|---------|-------|-----|
+| `ModuleNotFoundError: No module named 'finches'` | 未安装 FINCHES | 运行 `pip install git+https://git@github.com/idptools/finches.git` |
+| 首次导入耗时 >60s | 首次加载时进行 Cython 编译 | 正常现象——后续导入会很快 |
+| `ValueError: CALVADOS2 cannot handle RNA ('U')` | CALVADOS 输入中包含 `U` 残基 | 切换至支持 RNA 的 `Mpipi_frontend` |
+| `metapredict` 的 `ImportError` | 缺少仅限 pip 的依赖项 | 运行 `pip install metapredict` |
+| macOS NumPy/PyTorch 崩溃 | 混用 conda + PyPI 构建 | 通过 conda 安装两者：`conda install numpy pytorch -c pytorch` |
+
+来源: [README.md](/README.md#L94-L109), [finches/frontend/calvados_frontend.py](/finches/frontend/calvados_frontend.py#L16-L25)
+
+## 接下来的去向
+
+现在你已经能够计算相互作用能并生成相互作用图了，接下来可以探索 FINCHES 更深层的能力：
+
+1. **[安装指南](3-installation-guide)** — 高级设置：可编辑安装、Cython 编译细节、`uv` 包管理器
+2. **[Mpipi 和 CALVADOS 前端](5-mpipi-and-calvados-frontends)** — 每个前端方法的完整参数参考
+3. **[相互作用图和图形](6-interaction-maps-and-figures)** — 自定义热图外观、结构域叠加和零洗牌归一化
+4. **[Epsilon 计算与加权](9-epsilon-calculation-and-weighting)** — 理解脂肪族和电荷加权校正
+5. **[Flory-Huggins 相图](14-flory-huggins-phase-diagrams)** — 从 epsilon 值推导相行为预测
+
+---
+
+- [入门/安装指南](https://zread.ai/idptools/finches/3-installation-guide)
+
+---
+slug:3-installation-guide
+blog_type:normal
+---
+
+
+本指南将引导你完成在系统上安装和验证 **FINCHES**（基于化学特异性的第一性原理相互作用）所需的每一个步骤。FINCHES 是一个用于计算 IDR 相关化学特异性的 Python 包，其安装过程涉及编译 Cython 扩展以及若干科学计算相关的 Python 依赖项。阅读完本页面后，你将拥有一个可用的环境，随时可以开始 [快速入门](2-quick-start) 的探索。
+
+来源: [README.md](/README.md#L1-L176), [pyproject.toml](/pyproject.toml#L1-L76)
+
+## 前提条件
+
+在安装 FINCHES 之前，请查阅以下要求与限制，以确保安装过程顺畅：
+
+| 要求 | 详情 |
+|---|---|
+| **Python 版本** | 要求 ≥ 3.7；**推荐 3.11 或 3.12** 以获得最佳性能 |
+| **许可证** | CC BY-NC 4.0 — **仅供非商业用途** |
+| **C++ 编译器** | 编译 Cython 扩展时必需（大多数操作系统开发工具中已附带） |
+| **Git** | 两种安装方法均必需 |
+| **Conda**（推荐） | 用于管理环境与依赖生态 |
+
+<CgxTip>FINCHES 包含一个经过 Cython 编译的模块（`matrix_manipulation.pyx`），用于加速矩阵运算。该扩展在安装期间构建，需要一个可用的 C 编译器。在 macOS 上，请确保已安装 Xcode 命令行工具（`xcode-select --install`）。在 Linux 上，`gcc` 通常默认可用。</CgxTip>
+
+来源: [pyproject.toml](/pyproject.toml#L26-L31), [setup.py](/setup.py#L1-L30), [LICENSE](/LICENSE#L1-L5)
+
+## 核心依赖
+
+FINCHES 依赖于以下运行时包，它们在 `pyproject.toml` 中声明。了解这些依赖有助于排查任何版本冲突：
+
+| 包 | 版本约束 | 作用 |
+|---|---|---|
+| `numpy` | （推荐 ≥ 2） | 数组运算，Cython 包含路径 |
+| `afrc` | ≥ 0.3.4 | 解析 FRC（Flory 无规线团）标度 |
+| `scipy` | 任意 | 数值积分与优化 |
+| `soursop` | ≥ 0.2.4 | 聚合物物理计算 |
+| `pandas` | 任意 | 数据结构操作 |
+| `metapredict` | 任意（仅限 pip） | 内在无序区预测 |
+| `ipython` | 任意 | 交互式计算支持 |
+
+**构建时**依赖（仅在安装期间需要）为 `setuptools≥61.0`、`wheel`、`versioningit≈2.0`、`cython` 和 `numpy`。
+
+来源: [pyproject.toml](/pyproject.toml#L29-L31), [pyproject.toml](/pyproject.toml#L1-L8)
+
+## 安装方法一览
+
+以下流程图展示了两种受支持的安装路径及其决策标准：
+
+```mermaid
+flowchart TD
+    A["开始: 创建并激活 conda 环境"] --> B["安装 conda 生态依赖"]
+    B --> C{"计划修改<br/>FINCHES 源代码?"}
+    C -->|"否 — 仅使用"| D["方法 1: 通过 GitHub pip 安装"]
+    C -->|"是 — 开发/贡献"| E["方法 2: 克隆 + 可编辑安装"]
+    D --> F["验证安装"]
+    E --> F
+    F --> G{{"✅ FINCHES 已就绪"}}
+
+    style A fill:#e8f4e8,stroke:#2d7d2d
+    style G fill:#e8f4e8,stroke:#2d7d2d
+    style C fill:#fff3cd,stroke:#856404
+```
+
+### 方法 1：从 GitHub 直接使用 pip 安装
+
+这是面向大多数用户的**推荐方法**。它将 FINCHES 的固定副本直接安装到你的活跃环境中，而无需在本地克隆仓库。
+
+```bash
+pip install git+https://git@github.com/idptools/finches.git
+```
+
+此命令将拉取最新的 `main` 分支、编译 Cython 扩展并自动安装所有依赖项。你可以在任何目录下运行此命令——该包最终会安装到你的环境的 site-packages 中。
+
+来源: [README.md](/README.md#L113-L118)
+
+### 方法 2：克隆与可编辑安装
+
+如果你打算修改源代码、贡献修复补丁，或者希望享受通过 `git pull` 进行更新的便利，请使用此方法。**请将其克隆到一个合理的工作目录中**——仓库将被复制到该位置。
+
+```bash
+# 1. 克隆仓库
+git clone git@github.com:idptools/finches.git
+
+# 2. 进入项目根目录（即 pyproject.toml 所在目录）
+cd finches
+
+# 3. 以可编辑模式安装
+pip install -e .
+```
+
+`-e`（可编辑）标志会创建一个指向源代码目录的动态链接，而非将文件复制到 site-packages 中。这提供了两个关键优势：
+
+1. **即时更新** — 在克隆的目录中执行 `git pull` 后，下次导入 FINCHES 时会立即反映代码的变更，无需重新安装。
+2. **正确的 Cython 编译** — 在可编辑安装期间，Cython 扩展（`matrix_manipulation.pyx`）会就地编译。目前，非可编辑的 pip 安装存在一个已知的打包问题，可能导致编译后的 `.so` 文件无法正确分发。
+
+<CgxTip>如果你使用了方法 2，随后又切换到其他分支或拉取了重大更新，Cython 的 `.so` 文件不会自动重新编译。在重大更新后，请重新运行 `pip install -e .` 以重建扩展。</CgxTip>
+
+来源: [README.md](/README.md#L120-L145), [setup.py](/setup.py#L17-L29)
+
+## 逐步操作：Conda 环境设置
+
+以下流程已在干净的 conda 环境中经过测试，是最可靠的安装路径。它谨慎地管理依赖生态，以避免在混用 conda 和 PyPI 包时可能出现的跨平台 numpy 冲突。
+
+### 第 1 步 — 创建并激活环境
+
+```bash
+conda create -n finches python=3.12 -y
+conda activate finches
+```
+
+来源: [README.md](/README.md#L84-L91)
+
+### 第 2 步 — 通过 Conda 安装生态依赖
+
+**从 conda** 安装核心科学计算包，以确保 ABI 兼容性。这在 macOS 上尤为重要，因为混用 conda 和 PyPI 的 numpy/PyTorch 构建版本会导致段错误。
+
+```bash
+# 从 pytorch 频道安装以获得一致的 ABI
+conda install numpy pytorch scipy cython matplotlib jupyter -c pytorch
+
+# mdtraj 单独安装（不同的频道/依赖链）
+conda install mdtraj
+```
+
+### 第 3 步 — 安装仅限 pip 的依赖
+
+```bash
+# metapredict 仅通过 PyPI 分发
+pip install metapredict
+```
+
+来源: [README.md](/README.md#L94-L108)
+
+### 第 4 步 — 安装 FINCHES
+
+从上文介绍的安装方法中选择方法 1 或方法 2。对于大多数用户：
+
+```bash
+pip install git+https://git@github.com/idptools/finches.git
+```
+
+来源: [README.md](/README.md#L110-L118)
+
+### 第 5 步 — 验证安装
+
+离开安装目录（以避免导入混淆）并运行验证命令：
+
+```bash
+cd ~
+python -c "from finches.frontend.mpipi_frontend import Mpipi_frontend; mf = Mpipi_frontend(); print('Success')"
+```
+
+如果输出为 `Success`，则说明 FINCHES 已正确安装，且力场数据与 Cython 扩展均可正常访问。首次调用可能需要稍作等待，因为 Python 需要编译并缓存导入的模块。
+
+来源: [README.md](/README.md#L147-L158)
+
+## 完整安装摘要
+
+下表提供了从全新系统开始进行完整安装流程的单一参考：
+
+| 步骤 | 命令 | 目的 |
+|---|---|---|
+| 1 | `conda create -n finches python=3.12 -y` | 创建隔离环境 |
+| 2 | `conda activate finches` | 激活环境 |
+| 3 | `conda install numpy pytorch scipy cython matplotlib jupyter -c pytorch` | 核心科学计算依赖 |
+| 4 | `conda install mdtraj` | 轨迹分析依赖 |
+| 5 | `pip install metapredict` | IDR 预测依赖 (仅限 PyPI) |
+| 6a | `pip install git+https://git@github.com/idptools/finches.git` | 安装 FINCHES (直接安装) |
+| 6b | `git clone git@github.com:idptools/finches.git && cd finches && pip install -e .` | 安装 FINCHES (可编辑安装) |
+| 7 | `python -c "from finches.frontend.mpipi_frontend import Mpipi_frontend; mf = Mpipi_frontend(); print('Success')"` | 验证安装 |
+
+来源: [README.md](/README.md#L75-L158), [pyproject.toml](/pyproject.toml#L29-L31)
+
+## 平台特别说明
+
+### macOS
+
+在 Apple Silicon (M1/M2/M3) 和 Intel Mac 上，**最关键的规则**是从**相同的包生态**安装 `numpy` 和 `pytorch`——要么两者都来自 conda，要么都来自 PyPI。混用它们会因不兼容的 C ABI 绑定而产生段错误。上述逐步指南中采用的 conda 优先策略在设计上规避了此问题。
+
+在运行 `pip install` 之前，请确保已安装 Xcode 命令行工具，因为 Cython 扩展需要 C 编译器：
+
+```bash
+xcode-select --install
+```
+
+### Linux
+
+Linux 系统通常预装了 `gcc`。若未预装，请通过发行版的包管理器安装（如在 Debian/Ubuntu 上执行 `sudo apt install build-essential`）。无需其他特定于平台的步骤。
+
+### Windows
+
+FINCHES 尚未在 Windows 上进行官方测试。Windows 用户的推荐路径是使用 **Windows Subsystem for Linux (WSL2)**，并在 WSL 环境中安装 conda 发行版，然后按照 Linux 说明进行操作。
+
+来源: [README.md](/README.md#L76-L78), [setup.py](/setup.py#L1-L30)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'finches.utils.matrix_manipulation'` | Cython `.pyx` 未编译为 `.so` | 从项目根目录重新运行 `pip install -e .`，或改用方法 1 |
+| `ImportError: numpy.core.multiarray failed to import` | 编译时与运行时的 numpy 版本不匹配 | 在当前环境中重新安装 numpy：`conda install numpy --force-reinstall` |
+| 导入时出现段错误 | 混用 conda/PyPI 的 numpy + pytorch | 移除两者并从 conda 重新安装：`conda install numpy pytorch -c pytorch` |
+| 安装期间出现 `versioningit` 错误 | 缺少构建依赖 | 单独安装：`pip install versioningit`，然后重试 |
+| 找不到 `metapredict` | 未通过 pip 安装 | `pip install metapredict`（conda 不分发此包） |
+| 首次导入缓慢 | 正常现象 — Python 在首次运行时缓存字节码 | 后续导入将会很快；无需采取任何行动 |
+
+来源: [README.md](/README.md#L76-L158), [setup.py](/setup.py#L17-L29), [pyproject.toml](/pyproject.toml#L1-L8)
+
+## 安装内容
+
+了解包的布局有助于诊断导入问题并明确数据文件的存放位置。下图直观展示了已安装的包结构：
+
+```mermaid
+graph LR
+    subgraph finches["finches/"]
+        A["__init__.py<br/>(导出前端)"]
+        B["frontend/<br/>(Mpipi, CALVADOS)"]
+        C["forcefields/<br/>(模型 + 数据)"]
+        D["epsilon_calculation.py"]
+        E["utils/matrix_manipulation<br/>(Cython .pyx → .so)"]
+        F["data/<br/>(力场 .pickle)"]
+        G["analytical_fh/<br/>(Flory-Huggins)"]
+        H["domain_decomposition/"]
+    end
+
+    style E fill:#ffe0e0,stroke:#cc3333
+    style F fill:#e0e0ff,stroke:#3333cc
+```
+
+**红色**节点（`matrix_manipulation`）是经过 Cython 编译的模块——如果此文件缺少其编译后的 `.so` 对应物，FINCHES 将在导入时失败。**蓝色**节点（`data/`）包含序列化的力场参数文件（`.pickle`），它们在运行时由前端对象加载。
+
+来源: [finches/__init__.py](/finches/__init__.py#L1-L24), [setup.py](/setup.py#L12-L22), [MANIFEST.in](/MANIFEST.in#L1-L17)
+
+## 替代安装方式：Google Colab
+
+如果你不想在本地安装任何内容，FINCHES 也提供了一组**预配置的 Google Colab 笔记本**。这无需任何本地设置——只需在浏览器中打开笔记本并运行即可：
+
+- **Colab 笔记本**: [github.com/idptools/finches-colab](https://github.com/idptools/finches-colab)
+- **Web 服务器**: [finches-online.com](https://www.finches-online.com/)
+
+这些替代方案非常适合快速探索或教学，不过在以编程方式使用时，它们缺乏本地安装的灵活性。
+
+来源: [README.md](/README.md#L10-L14)
+
+## 后续步骤
+
+FINCHES 安装并验证完成后，你即可开始使用：
+
+1. **[快速入门](2-quick-start)** — 在一分钟内运行你的首次相互作用预测
+2. **[架构概览](4-architecture-overview)** — 了解前端、力场与计算层的连接方式
+3. **[Mpipi 与 CALVADOS 前端](5-mpipi-and-calvados-frontends)** — 学习用于相互作用图谱、epsilon 值与残基向量的主要 API
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/idptools/finches/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+FINCHES（**F**irst-principle **I**nteractions via **CHE**mical **S**pecificity，基于化学特异性的第一性原理相互作用）采用四层架构组织，清晰地分离了用户交互、核心计算、生物物理模型和参数数据。本页映射了完整的模块拓扑，追溯了从氨基酸序列到相图的主要数据流，并识别出使系统可在多种力场模型间扩展的设计模式。
+
+来源: [__init__.py](/finches/__init__.py#L1-L24), [README.md](/README.md#L1-L176)
+
+## 结构层
+
+代码库被划分为四个不同的层，每层具有单一职责。**前端层**暴露面向用户的 API 并处理可视化。**核心计算层**实现了构建相互作用矩阵、计算 epsilon 值和构造残基向量的数学机制。**力场层**将生物物理模型封装为可互换的插件。**数据层**以序列化字典的形式存储预计算的参数集。这种分离确保了添加新力场时无需修改计算或前端代码。
+
+```
+finches/
+├── frontend/                  ← 第 1 层: 面向用户的 API 与可视化
+│   ├── frontend_base.py           FinchesFrontend (抽象基类)
+│   ├── mpipi_frontend.py          Mpipi_frontend (具体实现)
+│   ├── calvados_frontend.py       CALVADOS_frontend (具体实现)
+│   └── interlogo.py               Logo 生成工具
+│
+├── epsilon_calculation.py    ← 第 2 层: 核心计算
+├── epsilon_stateless.py          无状态向量/epsilon 函数
+├── epsilon_to_FHtheory.py        Flory-Huggins 理论桥接
+├── interaction_vector.py         相互作用向量绘图
+├── sequence_tools.py             序列属性计算器 (FCR, NCPR)
+├── parsing_aminoacid_sequences.py 序列解析工具
+│
+├── forcefields/               ← 第 3 层: 力场模型 (接口模式)
+│   ├── mpipi.py                   Mpipi_model
+│   ├── calvados.py                calvados_model
+│   ├── custom_model.py            custom_model (用户自定义)
+│   └── calibration/              校准数据与脚本
+│
+├── analytical_fh/            ← 第 2b 层: Flory-Huggins 求解器
+│   ├── backend.py                 原始 Qian 等人的求解器
+│   └── floryhuggins.py            封装 API
+│
+├── domain_decomposition/     ← 横切关注点: 区域分析
+│   └── domain_analysis.py         InteractingRegions, extract_regions
+│
+├── PDB_structure_tools.py    ← 横切关注点: 折叠域整合
+│
+├── utils/                    ← 性能: Cython 加速
+│   ├── matrix_manipulation.pyx    dict2matrix, matrix_scan (Cython)
+│   └── folded_domain_utils.py     折叠域辅助函数
+│
+├── data/                     ← 第 4 层: 参数数据
+│   ├── Mpipi/                     Mpipi 序列化参数文件
+│   ├── calvados/                  CALVADOS 序列化参数文件
+│   ├── fingerprints.py            参数指纹识别
+│   ├── forcefield_dependencies.py 基线与预因子计算
+│   └── reference_sequence_info.py 参考序列数据
+│
+└── tests/                    ← 验证
+    ├── test_epsilon_calculation.py
+    ├── test_FH_diagrams.py
+    ├── test_finches.py
+    └── test_frontend_mpipi.py
+```
+
+来源: [__init__.py](/finches/__init__.py#L1-L24), [epsilon_calculation.py](/finches/epsilon_calculation.py#L1-L50), [frontend_base.py](/finches/frontend_base.py#L1-L30)
+
+## 核心设计模式
+
+FINCHES 采用两种主要设计模式来管理模块间的交互方式。
+
+### 接口模式：InteractionMatrixConstructor
+
+**InteractionMatrixConstructor** 是架构的枢纽。它接受任何实现了所需约定的力场对象——具体为 `ALL_RESIDUES_TYPES`、`compute_interaction_parameter(r1, r2)` 和 `CONFIGS`——并为计算成对矩阵、加权矩阵、epsilon 值和滑动窗口矩阵提供统一的 API，而无需考虑底层的生物物理模型。这是经典的接口（或策略）模式：计算算法是固定的，而相互作用参数的来源是可互换的。
+
+| 力场约定方法 | 用途 | 定义位置 |
+|---|---|---|
+| `ALL_RESIDUES_TYPES` | 有效残基组列表（例如，蛋白质 + RNA） | 所有力场类 |
+| `compute_interaction_parameter(r1, r2)` | 返回残基对的成对相互作用值 | 所有力场类 |
+| `CONFIGS` | 包含 `charge_prefactor` 和 `null_interaction_baseline` 的字典 | 所有力场类 |
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L29-L100)
+
+### 继承模式：FinchesFrontend 层次结构
+
+**前端**层使用类继承来共享实现，同时允许特定于模型的定制。`FinchesFrontend` 是一个抽象基类，定义了共享方法（`intermolecular_idr_matrix`、`epsilon`、`interaction_figure`、`per_residue_attractive_vector`）。`Mpipi_frontend` 和 `CALVADOS_frontend` 派生自它，各自构建自己的力场模型和 `InteractionMatrixConstructor` 实例，然后委托给超类进行计算。`CALVADOS_frontend` 额外应用了 `@RNA_check` 装饰器来拒绝包含 RNA 的序列，因为 CALVADOS2 不支持核酸残基。
+
+| 类 | 父类 | 力场 | RNA 支持 | 关键覆写 |
+|---|---|---|---|---|
+| `FinchesFrontend` | — | 无 (抽象) | — | 无法直接实例化 |
+| `Mpipi_frontend` | `FinchesFrontend` | `Mpipi_GGv1` | ✅ (通过 `U` 残基) | 处理 `U` → 禁用无序预测 |
+| `CALVADOS_frontend` | `FinchesFrontend` | `CALVADOS2` | ❌ | 所有方法上的 `@RNA_check` 装饰器 |
+
+来源: [frontend_base.py](/finches/frontend_base.py#L12-L28), [mpipi_frontend.py](/finches/frontend/mpipi_frontend.py#L1-L15), [calvados_frontend.py](/finches/frontend/calvados_frontend.py#L1-L40)
+
+## 数据流架构
+
+下图追溯了从氨基酸序列到最终输出的主要计算流水线。FINCHES 中的每一次分析都遵循此核心路径，并带有通向相图和折叠域相互作用的可选分支。
+
+```mermaid
+flowchart TD
+    SEQ["氨基酸序列<br/>(seq1, seq2)"] --> PARSE["序列验证<br/>& 转换"]
+    PARSE --> FF["力场模型<br/>(Mpipi / CALVADOS / Custom)"]
+    
+    FF --> LOOKUP["成对查找表<br/>lookup[r1][r2] → value"]
+    LOOKUP --> PWM["成对矩阵<br/>(N×M numpy 数组)"]
+    
+    PWM --> CW["上下文加权<br/>• 脂肪族加权<br/>• 电荷加权"]
+    CW --> WM["加权矩阵"]
+    
+    WM --> SPLIT["吸引 / 排斥<br/>在 null_interaction_baseline 处拆分"]
+    SPLIT --> EPS["ε 值<br/>(标量相互作用强度)"]
+    SPLIT --> VEC["ε 向量<br/>(逐残基吸引/排斥)"]
+    
+    WM --> SW["滑动窗口扫描<br/>(Cython 加速)"]
+    SW --> IM["相互作用矩阵<br/>(位置解析的 ε 映射)"]
+    
+    EPS --> FH["Flory-Huggins<br/>相图"]
+    IM --> FIG["相互作用图<br/>(热图 + 无序轨迹)"]
+    VEC --> VPL["相互作用向量图"]
+    
+    PDB["PDB 结构"] --> SAFD["表面可及的<br/>折叠域残基"]
+    SAFD --> IDV["域间 ε 向量"]
+    
+    style SEQ fill:#e1f5fe
+    style FF fill:#fff3e0
+    style EPS fill:#e8f5e9
+    style IM fill:#e8f5e9
+    style FH fill:#f3e5f5
+```
+
+**阶段 1 — 序列摄入与验证**：根据 `ALL_RESIDUES_TYPES` 验证输入序列，以确保所有残基属于同一残基组。可选的 `sequence_converter` 函数可以在验证前转换序列（用于掩码或自定义残基映射）。
+
+**阶段 2 — 力场解析**：为每个残基对调用力场模型的 `compute_interaction_parameter(r1, r2)` 来填充查找字典。这在 `InteractionMatrixConstructor` 初始化期间发生一次，如果调用了 `_update_parameters()` 则会再次发生。
+
+**阶段 3 — 矩阵构建**：通过为每个 (residue_i, residue_j) 对索引查找表来构建成对相互作用矩阵。Cython 加速的 `dict2matrix()` 函数在性能关键路径上处理此操作。
+
+**阶段 4 — 上下文加权**：两种可选的加权方案修改原始矩阵。**脂肪族加权**放大被其他脂肪族残基包围的残基的相互作用，捕获疏水斑块效应。**电荷加权**减少带相反电荷邻居之间的排斥（由 `charge_prefactor` 缩放），对侧链重定向和 pKa 偏移进行建模。
+
+**阶段 5 — Epsilon 计算**：加权矩阵在 `null_interaction_baseline`（以 poly(GS) 序列作为高斯链参考进行校准）处被拆分为吸引和排斥分量。求和与平均后产生标量 ε 值或逐残基的 ε 向量。
+
+**阶段 6 — 滑动窗口扫描**：对于相互作用图，序列被分解为重叠窗口，并计算每个窗口对的 ε，生成位置解析的 2D 矩阵。在此步骤中，Cython 的 `matrix_scan()` 函数比纯 Python 提供了约 12 倍的加速。
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L200-L400), [epsilon_stateless.py](/finches/epsilon_stateless.py#L1-L200), [matrix_manipulation.pyx](/finches/utils/matrix_manipulation.pyx#L1-L80)
+
+## 力场模型比较
+
+三种力场模型在物理基础、参数来源和支持的残基类型上有所不同。三者都实现了相同的约定，使得它们在 `InteractionMatrixConstructor` 中可互换。
+
+| 属性 | Mpipi (Mpipi_GGv1) | CALVADOS (CALVADOS2) | 自定义模型 |
+|---|---|---|---|
+| **物理基础** | Mie 势 + Debye-Hückel | Ashbaugh-Hatch LJ + Yukawa | 用户定义 |
+| **参数来源** | Joseph et al. 2021, Lotthammer et al. 2024 | Tesei et al. 2021 | 用户提供的字典 |
+| **条件依赖** | 盐浓度，介电常数 | 盐浓度，pH，温度 | 通过回调任意定义 |
+| **RNA 支持** | ✅ (U 残基) | ❌ | 用户定义 |
+| **参数存储** | 5 个序列化字典 (σ, ε, ν, μ, charge) | 1 个序列化 DataFrame | 内联字典 |
+| **默认 charge_prefactor** | 0.20 | 0.70 | 用户定义 |
+| **默认 null_interaction_baseline** | −0.128533 | −0.45 | 用户定义 |
+
+`custom_model` 类通过接受成对相互作用的扁平字典（例如，`{'A_A': -1, 'A_K': 0.5}`）、用于可调参数的可选 `condition_dictionary` 以及在条件改变时重新计算相互作用的 `condition_dependence_function` 回调，实现了任意的力场定义。这使得无需修改 FINCHES 源代码即可原型化新型粗粒化模型。
+
+来源: [mpipi.py](/finches/forcefields/mpipi.py#L1-L50), [calvados.py](/finches/forcefields/calvados.py#L1-L80), [custom_model.py](/finches/forcefields/custom_model.py#L1-L60)
+
+## 横切模块
+
+多个模块跨越多个层并与外部工具集成：
+
+**折叠域整合** (`PDB_structure_tools.py`)：使用 `soursop` 解析 PDB 结构，使用 7Å 探针半径计算溶剂可及表面积 (SASA)，并提取表面可及的折叠域 (SAFD) 残基。然后将这些残基输入到 `get_interdomain_epsilon_vectors()` 中，以计算 IDR 如何与相邻折叠域的表面相互作用，并通过距离依赖加权来考虑空间邻近性。
+
+**域分解** (`domain_decomposition/domain_analysis.py`)：使用逐行/列 ε 谱的峰值查找，识别 2D 相互作用矩阵内的连续相互作用区域。返回封装了起止位置、序列以及用于在相互作用图上叠加的矩形坐标的 `InteractingRegions` 对象。
+
+**Flory-Huggins 桥接** (`epsilon_to_FHtheory.py`)：将计算出的 ε 值转换为 Flory-Huggins χ 参数并构建相图。通过迭代重新初始化力场模型并在每个条件点重新计算 ε，支持跨盐浓度、pH 和介电常数的条件依赖扫描。
+
+**序列工具** (`sequence_tools.py`)：提供序列级属性计算器，包括带电残基比例 (FCR)、净电荷 per 残基 (NCPR) 以及用于电荷模式分析的 κ (kappa) 参数。
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L1-L80), [domain_analysis.py](/finches/domain_decomposition/domain_analysis.py#L1-L100), [epsilon_to_FHtheory.py](/finches/epsilon_to_FHtheory.py#L1-L50), [sequence_tools.py](/finches/sequence_tools.py#L1-L80)
+
+## 性能架构
+
+FINCHES 使用 Cython 处理两个性能关键操作。`dict2matrix()` 函数使用带有 `@cython.boundscheck(False)` 的类型化 C 级循环将 Python 查找字典转换为 NumPy 2D 数组。`matrix_scan()` 函数使用预分配数组和 C 级算术实现滑动窗口 ε 计算，与等效的纯 Python 实现相比，提供了约 **12 倍的加速**。两者均在安装时通过 `cython` 依赖项编译，并在向前端方法传递 `use_cython=True`（默认值）时自动使用。
+
+<CgxTip>在生产运行中始终保持 `use_cython=True`（默认值）。Cython 路径会被透明调用——无需更改代码。仅在调试时设置 `use_cython=False`，因为对于大序列，纯 Python 回退机制会显著变慢。</CgxTip>
+
+来源: [matrix_manipulation.pyx](/finches/utils/matrix_manipulation.pyx#L1-L80)
+
+## 推荐阅读路径
+
+既然你已经了解了架构，以下进阶路径将从面向用户的 API 逐步深入到计算细节：
+
+1. **[Mpipi 与 CALVADOS 前端](5-mpipi-and-calvados-frontends)** — 从此处开始了解主要 API 入口点
+2. **[InteractionMatrixConstructor](8-interactionmatrixconstructor)** — 理解连接前端与力场的核心接口
+3. **[Epsilon 计算与加权](9-epsilon-calculation-and-weighting)** — 深入探讨相互作用强度是如何量化的
+4. **[Mpipi 力场参数](11-mpipi-forcefield-parameters)** — 详细检查默认力场模型
+5. **[Flory-Huggins 相图](14-flory-huggins-phase-diagrams)** — 了解 ε 值如何预测相行为
+
+---
+
+- [深入解析/域分解与区域](https://zread.ai/idptools/finches/18-domain-decomposition-and-regions)
+
+---
+slug:18-domain-decomposition-and-regions
+blog_type:normal
+---
+
+
+`finches.domain_decomposition` 模块提供了一套算法流程，用于在分子间相互作用图（intermap）中**自动识别并界定优先相互作用的空间区域**。你无需手动检查二维热图，即可通过编程方式提取出两条序列表现出强吸引或排斥行为的矩形区域，并获得残基级别的边界、子序列提取以及可视化叠加层。这是连接原始相互作用矩阵与具有生物学可解释性的结构域-结构域相互作用预测之间的桥梁。
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L1-L796)
+
+## 概念架构
+
+finches 中的结构域分解作为一个**三阶段流程**运行，从 1D 列计数 → 2D 矩形边界 → 双向合并区域，逐步缩小范围。其核心思想是，intermap 的列（和行）编码了一个一维信号，表示“序列 2 中有多少残基与序列 1 中该位置的相互作用低于阈值”。该信号中的峰值定义了候选的相互作用走廊，算法在子切片上递归应用峰值检测以细化二维边界。
+
+```mermaid
+flowchart TD
+    A[前端对象 + 两条序列] --> B[通过<br>intermolecular_idr_matrix 计算 Intermap]
+    B --> C{双向分解}
+    C -->|水平遍历| D[在原始数组上<br>get_interaction_regions]
+    C -->|垂直遍历| E[在转置数组上<br>get_interaction_regions]
+    D --> F[矩形区域边界]
+    E --> G[转置的边界<br>交换回来]
+    F --> H[合并重叠的矩形]
+    G --> H
+    H --> I[数组索引 →<br>残基编号 转换]
+    I --> J[构建 InteractingRegions 对象<br>并提取子序列]
+    J --> K["返回:<br>(interactor_pairs, regions, intermap)"]
+```
+
+采用双向策略的原因在于 `get_interaction_regions` 具有固有的方向偏差：它的第一次遍历作用于列，使其对“垂直方向”的相互作用块更敏感。通过同时运行原始数组和转置数组并合并重叠结果，可以捕获原本会被遗漏的水平方向相互作用块。
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L628-L696), [domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L90-L198)
+
+## `InteractingRegions` 数据结构
+
+`InteractingRegions` 类是主要的输出对象——一个结构化容器，为每个相互作用区域对捕获了**严格峰值边界**和**窗口扩展边界**。
+
+| 属性 | 类型 | 描述 |
+|---|---|---|
+| `r1_start` / `r1_end` | `int` | 序列 1 的起始/结束残基索引（峰值边界） |
+| `r1_sequence` | `str` | 序列 1 在峰值边界内的子序列 |
+| `r2_start` / `r2_end` | `int` | 序列 2 的起始/结束残基索引（峰值边界） |
+| `r2_sequence` | `str` | 序列 2 在峰值边界内的子序列 |
+| `r1_start_full` / `r1_end_full` | `int` | 包含两侧半窗口的扩展边界 |
+| `r1_sequence_full` | `str` | 扩展（全窗口）边界处的子序列 |
+| `rectangle_info` | `property` | 用于绘图的 `[x_start, x_end, y_start, y_end, kwargs]` 列表 |
+
+`r1_start`/`r1_end` 与 `r1_start_full`/`r1_end_full` 之间的区别是有意为之的：峰值检测算法识别的是每个滑动窗口的中心，但实际的相互作用延伸至该中心周围的 ±半窗口残基。`_full` 属性相应地扩展了边界，为你提供了对检测到的相互作用有贡献的完整序列上下文。
+
+<CgxTip>当使用 `InteractingRegions.rectangle_info` 进行可视化时，你可以在访问该属性之前通过设置 `ir.edgecolor` 或 `ir.rectangle_kwargs = {'facecolor': 'blue', 'alpha': 0.3}` 来自定义矩形外观。这些关键字参数会在渲染时合并到 matplotlib 的 Rectangle 参数中。</CgxTip>
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L12-L88)
+
+## `extract_regions` 入口点
+
+这是面向用户的主要函数，负责编排整个流程：
+
+```python
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+from finches.domain_decomposition.domain_analysis import extract_regions
+
+mf = Mpipi_frontend()
+
+s1 = 'MESNQSNNGGSGNAALNRGGRYVPPHLRGGDGGAAAAASAGGDDRRGGAGGGGYRRG'
+s2 = 'LEGMSGDMRSGGGYRGRGGRGNGQRFGGRDHRYQGGSGNGGGGNGGGGGFGGGGQRSGG'
+
+interactor_pairs, regions, intermap = extract_regions(
+    frontend_obj=mf,
+    seq1=s1,
+    seq2=s2,
+    window_size=31,
+    criteria="less",
+    criteria_threshold=-0.2,
+    baseline=0.3,
+    min_region_area=500,
+    min_region_size=20
+)
+```
+
+返回的元组包含：**(1)** 一个带有残基级边界和子序列的 `InteractingRegions` 对象列表，**(2)** 数组索引空间中的原始矩形边界，以及 **(3)** 完整的 intermap 数组，用于下游的可视化或分析。
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L90-L198)
+
+## 参数参考
+
+分解算法暴露了几个相互依赖的阈值，用于控制区域的灵敏度和特异性：
+
+| 参数 | 默认值 | 作用 |
+|---|---|---|
+| `window_size` | `31` | 用于计算 intermap 的滑动窗口。必须为奇数；偶数值会被自动校正并发出警告。 |
+| `criteria` | `"less"` | 阈值化方向：`"less"` 选择吸引性（负 ε）区域；`"greater"` 选择排斥性（正 ε）区域。 |
+| `criteria_threshold` | `-0.2` | 应用掩码时的 ε 值。当 `criteria="less"` 时，比该值更负的值被认为是“相互作用的”。 |
+| `baseline` | `0.3` | 定义峰值“边缘”的峰高比例。峰值的边界是信号降至 `baseline × peak_height` 以下的位置。 |
+| `min_region_area` | `500` | 保留区域的最小面积（宽度 × 高度，以残基计）。过滤掉虚假的小斑块。 |
+| `min_region_size` | `20` | 任一轴上的最小线性维度（以残基计）。确保区域在范围上具有生物学意义。 |
+| `penalize_opposite` | `False` | 当为 `True` 时，从列计数中减去相反符号相互作用的计数，对与强相反特性相互作用重叠的区域进行惩罚。 |
+| `offset_threshold` | `0.2` | 相反符号惩罚的阈值。与相反方向的 `criteria_threshold` 相对应。 |
+
+**调优指南**：降低 `criteria_threshold`（例如从 -0.2 降至 -0.5）会使算法更具选择性，仅保留最强的相互作用斑块。提高 `baseline`（例如从 0.3 升至 0.5）会使峰值边缘更锐利，产生更紧密的边界。降低 `min_region_area` 和 `min_region_size` 会提高对较小相互作用斑块的灵敏度，但代价是可能会增加假阳性。
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L90-L198), [domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L300-L398)
+
+## 算法深入探讨：三趟峰值检测
+
+分解的核心是 `get_interaction_regions`，它对二维 intermap 数组执行**递归三趟峰值检测**。每一趟都会缩小搜索空间：
+
+### 第 1 趟 —— 列扫描
+
+将 intermap 阈值化为二进制掩码（当 `criteria="less"` 时，值 ≤ `criteria_threshold`）。按列求和产生一维计数信号。`scipy.signal.find_peaks` 识别该信号平滑版本（3 点移动平均）中的峰值。每个峰值的宽度使用 `peak_width` 测量，该方法从峰值向外遍历，直到信号降至 `baseline × peak_height` 以下。窄于 `min_region_size` 的峰值将被丢弃。
+
+### 第 2 趟 —— 每个列峰值内的行扫描
+
+对于每个列峰值区域，将 intermap 的相应子切片转置，并应用相同的峰值检测。这将识别出*在*列走廊内相互作用集中的行范围。
+
+### 第 3 趟 —— 每个行子区域内的列扫描
+
+对于每个列峰值内的每个行子区域，算法提取二维子子图并再次对列应用峰值检测。最后一趟细化了水平边界，产生紧密的矩形边界。
+
+每个生成的矩形在接受之前，都会在两个维度上根据 `min_region_area` 和 `min_region_size` 进行评估。
+
+```mermaid
+flowchart LR
+    subgraph "第 1 趟: 列扫描"
+        A[完整 Intermap] --> B[按列计数信号]
+        B --> C[find_peaks + peak_width]
+        C --> D["列边界:<br>(left_idx, right_idx)"]
+    end
+    subgraph "第 2 趟: 行扫描"
+        D --> E["提取子图[:, left:right]"]
+        E --> F["转置 → 行计数信号"]
+        F --> G["行边界:<br>(bottom_idx, top_idx)"]
+    end
+    subgraph "第 3 趟: 细化"
+        G --> H["提取子子图[bot:top, left:right]"]
+        H --> I["在子子图上进行列计数"]
+        I --> J["最终矩形边界"]
+    end
+```
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L401-L598), [domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L210-L298)
+
+## 双向合并
+
+由于三趟算法是列优先的，它产生的区域偏向于高窄型。`get_bidirectional_interaction_regions` 通过在原始数组和转置数组上均运行 `get_interaction_regions`，然后使用贪心成对算法**合并任何重叠的矩形**来解决此问题：
+
+1. 在数组上运行分解 → `regions_1`
+2. 在转置数组上运行分解 → `regions_2`，然后将每个边界元组从 `((x_start, x_end), (y_start, y_end))` 交换为 `((y_start, y_end), (x_start, x_end))`
+3. 合并两个区域列表
+4. 通过 `rectangles_overlap` 迭代检查所有对是否重叠；当发现重叠时，用**边界框**（左边缘的最小值，右边缘的最大值）替换该对，并重新启动扫描
+5. 重复直到没有重叠为止
+
+重叠测试使用标准的轴对齐矩形分离逻辑：如果一个矩形完全在另一个矩形的左侧/右侧或上方/下方，则这两个矩形不重叠；否则它们重叠。
+
+<CgxTip>合并算法的复杂度在每次迭代时为 O(n²)，并具有合并即重启的语义。对于数量非常多的区域（>100），这可能会变慢。在实践中，大多数蛋白质-蛋白质 intermap 产生的区域少于 20 个，因此这很少成为问题。</CgxTip>
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L628-L696), [domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L600-L626)
+
+## 索引转换：数组空间 ↔ 残基空间
+
+intermap 是使用大小为 `window_size` 的滑动窗口计算的，这意味着数组索引不直接对应于残基编号。函数 `convert_intermap_index_to_residue_number` 执行此映射：
+
+```python
+residue_number = array_index + window_half
+# 其中 window_half = (window_size - 1) / 2
+```
+
+对于默认的 `window_size=31`，`window_half=15`，因此数组索引 0 对应于残基 16，数组索引 1 对应于残基 17，依此类推。此偏移量解释了这样一个事实：第一个有效窗口的中心位于第 16 个残基（每侧各有 15 个残基）。
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L200-L225)
+
+## 使用 `plot_regions_on_intermap` 进行可视化
+
+该模块提供了一个便捷函数，用于将检测到的区域矩形叠加在 intermap 热图上：
+
+```python
+from finches.domain_decomposition.domain_analysis import plot_regions_on_intermap
+
+# 使用不同颜色绘制多个区域集
+plot_regions_on_intermap(
+    array=intermap,
+    regions_lists=[regions_set_1, regions_set_2],
+    colors=['red', 'blue'],
+    filename='output.png'  # 设为 None 以交互式显示
+)
+```
+
+该函数使用 `PRGn` 色彩映射（紫色 = 吸引，绿色 = 排斥）渲染 intermap，参数为 `vmin=-2.5, vmax=2.5`，为每个区域绘制 `matplotlib.patches.Rectangle` 轮廓，并将轴标记为“Sequence 1”和“Sequence 2”。y 轴被反转以匹配标准的 intermap 方向。
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L700-L796)
+
+## 实用函数
+
+几个底层函数支持该流程，并可用于自定义分析工作流：
+
+| 函数 | 签名 | 用途 |
+|---|---|---|
+| `peak_width` | `(data, peak_index, baseline)` | 从峰值向左和向右遍历，直到信号降至 `baseline` 以下；返回 `(width, left_index, right_index)`。如果峰值已低于基线，则引发 `PeakError`。 |
+| `remove_included_ranges` | `(ranges)` | 给定一个 `(width, left, right)` 元组列表，移除任何完全包含在另一个范围内的范围。按左边界排序，然后迭代过滤。 |
+| `rectangles_overlap` | `(R1, R2)` | 使用分离轴测试，如果两个轴对齐的矩形重叠则返回 `True`。 |
+| `rectangle_area` | `(rect)` | 根据 `((left, right), (bottom, top))` 边界格式计算 `width × height`。 |
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L230-L298), [domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L600-L660)
+
+## 综合应用：端到端示例
+
+```python
+from finches import Mpipi_frontend
+from finches.domain_decomposition.domain_analysis import extract_regions, plot_regions_on_intermap
+
+# 初始化前端
+mf = Mpipi_frontend()
+
+# 定义两条序列（例如，来自不同蛋白质的 IDR 区域）
+s1 = 'MESNQSNNGGSGNAALNRGGRYVPPHLRGGDGGAAAAASAGGDDRRGGAGGGGYRRGGGNSGGGGGGGYDRGYNDNRDDRDNRGGSGGYGRDRNYEDRGYNGGGGGGGNRGYNNNRGGGGGGYNRQDRGDGGSSNFSRGGYNNRDEGSDNRGSGRSYNNDRRDNGGD'
+s2 = 'LEGMSGDMRSGGGYRGRGGRGNGQRFGGRDHRYQGGSGNGGGGNGGGGGFGGGGQRSGGGGGFQSGGGGGRQQQQQQRAQPQQDWWS'
+
+# 提取相互作用区域
+interactor_pairs, raw_regions, intermap = extract_regions(
+    frontend_obj=mf,
+    seq1=s1,
+    seq2=s2,
+    window_size=31,
+    criteria="less",          # 寻找吸引性相互作用
+    criteria_threshold=-0.2,  # ε 低于 -0.2 被认为是相互作用的
+    baseline=0.3,             # 峰值边缘位于峰高的 30% 处
+    min_region_area=500,      # 要求至少 500 残基² 的面积
+    min_region_size=20        # 要求每个维度至少 20 个残基
+)
+
+# 检查每个相互作用区域
+for ir in interactor_pairs:
+    print(f"Seq1 residues {ir.r1_start}-{ir.r1_end}: {ir.r1_sequence}")
+    print(f"Seq2 residues {ir.r2_start}-{ir.r2_end}: {ir.r2_sequence}")
+    print(f"Full-window seq1: {ir.r1_start_full}-{ir.r1_end_full}")
+    print(f"Full-window seq2: {ir.r2_start_full}-{ir.r2_end_full}")
+    print("---")
+
+# 可视化叠加在 intermap 上的区域
+plot_regions_on_intermap(intermap, [raw_regions], ['red'], filename='regions.png')
+```
+
+来源：[domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L90-L198), [domain_analysis.py](finches/domain_decomposition/domain_analysis.py#L700-L796)
+
+## 与相邻模块的关系
+
+结构域分解流程位于 intermap 计算的下游，并与折叠结构域分析工具互补：
+
+- **[相互作用图和图表](6-interaction-maps-and-figures)** —— 生成 `extract_regions` 操作所基于的原始 intermap
+- **[滑动窗口矩阵计算](10-sliding-window-matrix-computation)** —— `InteractionMatrixConstructor.calculate_sliding_epsilon` 调用是 intermap 生成的基础
+- **[PDB 表面残基提取](16-pdb-surface-residue-extraction)** 和 **[空间可及性掩码](17-spatial-accessibility-masking)** —— `folded_domain_utils.py` 中的 `FoldedDomain` 类提供了用于识别结构化结构域表面残基的正交功能；这些可以与结构域分解结合使用，以分析 IDR-折叠结构域界面
+
+对于不进行区域提取的序列级相互作用分析，请参见[每残基相互作用向量](7-per-residue-interaction-vectors)。对于馈入 intermap 的底层 ε 计算，请参见[Epsilon 计算与加权](9-epsilon-calculation-and-weighting)。
+
+---
+
+- [深入解析/序列上下文加权方案](https://zread.ai/idptools/finches/19-sequence-context-weighting-schemes)
+
+---
+slug:19-sequence-context-weighting-schemes
+blog_type:normal
+---
+
+
+Finches 实现了两种主要的**序列上下文加权方案** —— 电荷加权和脂肪族聚类加权 —— 用于校正原始成对相互作用矩阵中粗粒度力场仅在残基对水平上无法捕获的局部序列上下文效应。这两种方案在 epsilon 聚合*之前*，作为交互矩阵的乘性或减性变换进行操作，这意味着它们在不改变底层力场参数的情况下，改变了有效的逐残基相互作用强度。第三种上下文相关方案 —— 用于折叠结构域与 IDR 界面的空间可达性掩码 —— 结合了电荷加权和 3D 几何可达性，将在[空间可达性掩码](17-spatial-accessibility-masking)中讨论。
+
+## 架构概述
+
+加权流水线是对原始成对矩阵的顺序变换。`calculate_weighted_pairwise_matrix` 方法协调了以下顺序：原始矩阵首先进行电荷加权（减性），然后进行脂肪族加权（乘性）。此顺序很重要，因为电荷加权会原地调整排斥元素，而脂肪族加权随后会对整个矩阵进行缩放 —— 包括已经过电荷调整的值。
+
+```mermaid
+flowchart TD
+    A["Raw pairwise matrix<br/>lookup[r1][r2]"] --> B{"use_charge_weighting?"}
+    B -->|Yes| C["Charge weighting<br/>w_matrix = matrix − (matrix × repulsive_mask × charge_prefactor)"]
+    B -->|No| D["w_matrix = matrix"]
+    C --> E{"use_aliphatic_weighting?"}
+    D --> E
+    E -->|Yes| F["Aliphatic weighting<br/>w_matrix = w_matrix × ali_mask"]
+    E -->|No| G["Return w_matrix"]
+    F --> G
+```
+
+每种加权方案在 `parsing_aminoacid_sequences.py` 中实现为一个**掩码生成函数**，返回一个与相互作用矩阵形状相同的 2D 数组。该掩码对从局部序列上下文导出的逐位置加权因子进行编码，然后在 `epsilon_calculation.py` 中对其进行代数应用。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L494-L603), [parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L25-L306)
+
+## 电荷上下文加权
+
+### 物理原理
+
+在平均场隐式溶剂模型中，两个残基之间的同种电荷排斥计算，就如同两个侧链相互指向并承受完全的静电惩罚。而在现实中，多肽链上的带电侧链可以相互重新定向，和/或经历 pKa 偏移从而减弱其有效电荷。**电荷上下文加权**方案通过削弱嵌入在**同种电荷**局部序列片段中的带电残基间的排斥相互作用来纠正这一点 —— 其物理直觉在于，同号电荷簇已通过侧链重定向部分屏蔽了彼此，因此原始模型高估了它们的跨序列排斥。
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L25-L96), [epsilon_calculation.py](/finches/epsilon_calculation.py#L546-L594)
+
+### |NCPR/FCR| 加权因子
+
+对于每对带电残基（序列 1 中的 r₁，序列 2 中的 r₂），该方案在每个位置周围提取一个 **±1 残基的窗口**，连接两个局部片段，并计算：
+
+$$w_{\text{charge}} = \left|\frac{\text{NCPR}}{\text{FCR}}\right|$$
+
+其中 **NCPR** 是每个残基的净电荷，**FCR** 是连接片段中带电残基的比例。该比值具有优雅的边界行为：
+
+| 片段组成 | NCPR | FCR | \|NCPR/FCR\| | 解释 |
+|---|---|---|---|---|
+| 全为同号电荷（如 `EEE`） | ±1.0 | 1.0 | **1.0** | 最大权重 —— 同种电荷簇，排斥计算高估最严重 |
+| +/- 电荷等量混合（如 `KEE`） | 0.0 | 1.0 | **0.0** | 无权重 —— 电荷平衡，无系统性高估 |
+| 中性环境中的单个带电残基（如 `KAA`） | 0.33 | 0.33 | **1.0** | 孤立电荷获得全权重（单电荷片段的 FCR=NCPR） |
+| 无带电残基 | — | 0 | **0.0** | 无权重 —— 非带电对，掩码项为零 |
+
+然后，该加权因子作为相互作用矩阵排斥部分的**减性校正**被应用：
+
+```python
+w_matrix = matrix - (matrix * repulsive_mask * charge_prefactor)
+```
+
+`charge_prefactor`（0 < prefactor < 1）是一个特定于力场的标量，用于控制校正的整体幅度。它会根据每个模型进行校准，并存储在力场的 `CONFIGS` 字典中。
+
+<CgxTip>电荷加权仅生成**排斥掩码** —— 吸引掩码虽已计算但目前未使用。曾测试过一种将加权拆分为吸引和排斥两部分的替代实现，但在校准基准测试中发现其表现更差。注释掉的替代实现仍保留在源码中以供参考。</CgxTip>
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L97-L194), [sequence_tools.py](/finches/sequence_tools.py#L76-L113)
+
+### 窗口提取：`get_neighbors_window_of3`
+
+每个带电残基周围的局部片段由 `get_neighbors_window_of3(i, sequence)` 提取，该函数返回位置 `i` 处的残基及其两侧各一个邻居（窗口大小 ≤ 3）。在序列边界处，窗口会平滑地截断为 2 或 1 个残基，而不是进行填充。来自序列 1 和序列 2 的两个窗口被连接成一个最多包含 6 个残基的单一片段，用于 NCPR/FCR 计算。
+
+来源：[sequence_tools.py](/finches/sequence_tools.py#L164-L195)
+
+### 折叠结构域变体：`get_charge_weighted_FD_mask`
+
+对于**溶剂可及折叠结构域（SAFD）**表面与 IDR 之间的结构域间相互作用，电荷加权是不对称的：折叠结构域残基被孤立处理（无 ±1 窗口），而 IDR 残基仍保留其 ±1 上下文窗口。这反映了这样一个物理现实：折叠结构域上的表面残基具有由三级结构决定的固定朝向，而非由局部序列上下文决定。因此，连接片段为 `r1 + get_neighbors_window_of3(j, sequence2)`，而非对称的双窗口。
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L200-L246), [epsilon_stateless.py](/finches/epsilon_stateless.py#L271-L422)
+
+## 脂肪族聚类加权
+
+### 物理原理
+
+在隐式溶剂粗粒度模型中，两个脂肪族（疏水）残基之间的吸引作用反映了界面上释放水的热力学。然而，释放水是一个**量子化**的现象：两个孤立的亮氨酸可能无法形成足够大的疏水片来释放大量水分子，而两个亮氨酸簇则可以创建一个能够实现此目的的连续界面。**脂肪族聚类加权**方案提升了属于局部簇的脂肪族残基间的吸引作用，使得成簇的脂肪族残基比同等数量间隔分布的脂肪族残基具有更强的有效疏水性。
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L252-L306)
+
+### 组分配：`get_aliphatic_groups`
+
+序列中的每个脂肪族残基 (A, V, I, L, M) 根据其局部片段内拥有的脂肪族邻居数量被分配到一个**组**中。该过程分三个阶段进行：
+
+1. **二进制掩码**：将序列转换为二进制掩码，其中脂肪族位置 = 1，所有其他位置 = 0。
+2. **最近邻计数**：`MASK_n_closest_nearest_neighbors` 计算每个脂肪族残基在其连接片段内拥有的脂肪族邻居数（片段由 `extract_fragments` 定义，`max_separation=1` 意味着脂肪族残基之间最多允许一个间隔，否则片段分裂）。
+3. **组阈值划分**：原始邻居计数上限为 3，产生三个组：
+
+| 组 | 邻居数 | 物理含义 |
+|---|---|---|
+| **0** | N/A（非脂肪族） | 不应用脂肪族加权 |
+| **1** | 1 | 孤立脂肪族 —— 无聚类收益 |
+| **2** | 2 | 小簇 —— 中等疏水增强 |
+| **3** | ≥3 | 大簇 —— 强疏水增强 |
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L311-L341), [sequence_tools.py](/finches/sequence_tools.py#L236-L317)
+
+### 乘性加权表
+
+脂肪族掩码是一个 2D 矩阵，其中每个条目由两条序列间的组配对决定。**multiplier_weighting** 字典定义了每种组组合的缩放因子：
+
+|  | 序列2：组 1 | 序列2：组 2 | 序列2：组 3 |
+|---|---|---|---|
+| **序列1：组 1** | 1.0 | 1.0 | 1.0 |
+| **序列1：组 2** | 1.0 | **1.5** | **1.5** |
+| **序列1：组 3** | 1.0 | **1.5** | **3.0** |
+
+从该表得出的关键观察：涉及至少一个孤立脂肪族（组 1）的相互作用**从不缩放**（乘数 = 1.0）。只有当两个残基都属于簇时，缩放才会激活。最大乘数 **3.0** 出现在两个大簇相互作用时，反映了簇-簇接触产生的超比例疏水界面。混合组 2/组 3 配对的不对称 1.5 因子代表了中等程度的增强。
+
+该掩码作为**纯乘性**变换应用：
+
+```python
+w_matrix = w_matrix * ali_mask
+```
+
+这意味着脂肪族加权对存在脂肪族聚类的位置缩放*所有*相互作用 —— 包括吸引和排斥。非脂肪族位置的掩码值为 1.0，使其保持不变。
+
+<CgxTip>脂肪族聚类加权在结构域间（折叠结构域–IDR）计算中**不应用**。其理由是折叠结构域表面不计算脂肪族组，因此 FD 表面上的所有脂肪族残基都被视为孤立的（组 1）。请参阅 `get_interdomain_epsilon_vectors`，其中参数列表中不存在 `use_aliphatic_weighting`。</CgxTip>
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L284-L306), [epsilon_calculation.py](/finches/epsilon_calculation.py#L597-L599)
+
+## 片段提取与邻居计数
+
+这两种加权方案都依赖于 `sequence_tools.py` 中的实用工具来提取局部序列上下文：
+
+### `extract_fragments(mask, max_separation=1)`
+
+将二进制掩码转换为连续片段，其中一个片段是由最多 `max_separation` 个零分隔的 1 的连续序列。例如，当 `max_separation=1` 时：
+
+```
+输入：[0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1]
+输出：['111011', '1', '11', '11', '101101']
+```
+
+位置 4 和 6 之间的单个零被桥接为一个片段，而两个或更多的零则创建片段边界。
+
+### `MASK_n_closest_nearest_neighbors(mask, max_separation=1, max_distance=4)`
+
+对于掩码中值为 1（脂肪族）的每个位置，此函数计算在该位置周围 `max_distance=4` 残基窗口内的脂肪族邻居数量，*在其局部片段内*。结果是一个非二进制掩码，其中每个脂肪族位置保存其邻居计数，非脂肪族位置保持为 0。
+
+来源：[sequence_tools.py](/finches/sequence_tools.py#L201-L317)
+
+## 集成到 Epsilon 流水线
+
+完整的加权流水线流经 `calculate_weighted_pairwise_matrix`，该函数被所有下游 epsilon 计算函数调用。下表总结了每种计算路径中处于激活状态的加权方案：
+
+| 计算函数 | 电荷加权 | 脂肪族加权 | 空间（XYZ）掩码 |
+|---|---|---|---|
+| `calculate_epsilon_value` | ✓ | ✓ | ✗ |
+| `calculate_epsilon_vectors` | ✓ | ✓ | ✗ |
+| `calculate_sliding_epsilon` | ✓ | ✓ | ✗ |
+| `get_interdomain_epsilon_vectors` | ✓（FD 变体） | ✗ | ✓ |
+| `get_interdomain_epsilon_value` | ✓（FD 变体） | ✗ | ✓ |
+
+所有 IDR–IDR 计算默认启用电荷加权和脂肪族加权。两者均可通过 `use_charge_weighting=False` 和 `use_aliphatic_weighting=False` 标志禁用。结构域间计算使用不对称的 `get_charge_weighted_FD_mask` 并应用空间可达性掩码，但完全跳过脂肪族加权。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L614-L701), [epsilon_stateless.py](/finches/epsilon_stateless.py#L119-L268), [epsilon_stateless.py](/finches/epsilon_stateless.py#L271-L422)
+
+## 通过 API 控制加权
+
+加权标志在计算栈的每一层均有暴露。在 `InteractionMatrixConstructor` 层级：
+
+```python
+from finches.forcefields.mpipi import Mpipi_model
+from finches.epsilon_calculation import InteractionMatrixConstructor
+
+params = Mpipi_model(version='Mpipi_GGv1')
+IMC = InteractionMatrixConstructor(parameters=params)
+
+# 默认：启用两种加权
+eps = IMC.calculate_epsilon_value(seq1, seq2)
+
+# 禁用电荷加权（使用原始排斥值）
+eps = IMC.calculate_epsilon_value(seq1, seq2, use_charge_weighting=False)
+
+# 禁用脂肪族加权（将所有脂肪族残基视为孤立）
+eps = IMC.calculate_epsilon_value(seq1, seq2, use_aliphatic_weighting=False)
+
+# 禁用两者（纯成对矩阵，无上下文校正）
+eps = IMC.calculate_epsilon_value(seq1, seq2,
+                                   use_charge_weighting=False,
+                                   use_aliphatic_weighting=False)
+```
+
+`charge_prefactor` 在构造时根据力场的 `CONFIGS` 字典设定，但可以通过 `epsilon_stateless.py` 中的无状态函数在每次调用时覆盖。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L18-L189), [epsilon_stateless.py](/finches/epsilon_stateless.py#L119-L268)
+
+## 设计原理与局限性
+
+这两种加权方案处理的是完全不同的物理校正。**电荷加权**是一种*减性*校正，它削弱了对同种电荷簇高估的排斥 —— 它绝不会使相互作用更具吸引力，只会减弱排斥。**脂肪族加权**是一种*乘性*校正，它增强了聚类脂肪族位置的吸引和排斥相互作用 —— 它放大了原始矩阵中已有的任何内容。这种不对称性是有意为之的：电荷重定向只能减少排斥（绝不会将吸引增强到超越原始模型），而疏水聚类则真正放大了有效的相互作用强度。
+
+一个重要的局限性：脂肪族加权目前**仅限于五种标准脂肪族残基** (A, V, I, L, M)。芳香族残基 (F, W, Y) 不参与聚类，尽管 π–π 堆积簇可能表现出类似的上下文相关增强。源码指出这是一个未来的研究方向。此外，电荷加权窗口固定为 ±1（共 3 个残基）；这是在捕获局部电荷上下文与计算成本之间权衡的选择，但原则上可以泛化。
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L252-L267), [epsilon_calculation.py](/finches/epsilon_calculation.py#L568-L576)
+
+## 后续步骤
+
+- 有关定义 `charge_prefactor` 和 `null_interaction_baseline` 的力场参数，请参阅 [Mpipi 力场参数](11-mpipi-forcefield-parameters) 和 [CALVADOS 力场参数](12-calvados-forcefield-parameters)。
+- 有关加权矩阵如何输入到 epsilon 聚合中，请参阅 [Epsilon 计算与加权](9-epsilon-calculation-and-weighting)。
+- 有关结构域间计算中使用的空间可达性掩码方案，请参阅 [空间可达性掩码](17-spatial-accessibility-masking)。
+- 有关加权流水线底层的 Cython 加速矩阵操作，请参阅 [Cython 矩阵加速](20-cython-matrix-acceleration)。
+
+---
+
+- [深入解析/Cython 矩阵加速](https://zread.ai/idptools/finches/20-cython-matrix-acceleration)
+
+---
+slug:20-cython-matrix-acceleration
+blog_type:normal
+---
+
+
+`matrix_manipulation.pyx` Cython 扩展模块为 finches 中两个计算密集型操作提供了 C 编译的热路径：**两两交互矩阵构建**（`dict2matrix`）和**滑动窗口 epsilon 扫描**（`matrix_scan`）。通过用静态类型的 C 循环取代纯 Python 循环，消除了边界检查并利用了类型化内存视图，这些函数将实际耗时降至等效 Python 实现的约 **5–10%**——即 10–20 倍的加速，这使得大矩阵和高吞吐量分析变得切实可行。
+
+来源：[matrix_manipulation.pyx](finches/utils/matrix_manipulation.pyx#L1-L201), [epsilon_calculation.py](finches/epsilon_calculation.py#L450-L520)
+
+## 架构与调用图
+
+Cython 模块位于分层计算管道的最底层。[InteractionMatrixConstructor](8-interactionmatrixconstructor) 中的高层 API 函数及前端通过显式的 `use_cython` 标志委托给它，且始终提供纯 Python 的回退方案。
+
+```mermaid
+flowchart TD
+    subgraph Frontend
+        F["FinchesFrontend.intermolecular_idr_matrix()"]
+    end
+    subgraph Core
+        IMC["InteractionMatrixConstructor"]
+        CPH["calculate_pairwise_heterotypic_matrix()"]
+        CSE["calculate_sliding_epsilon()"]
+        CWP["calculate_weighted_pairwise_matrix()"]
+    end
+    subgraph Cython["matrix_manipulation.pyx"]
+        D2M["dict2matrix()"]
+        MS["matrix_scan()"]
+    end
+    subgraph Fallback["Pure-Python Fallback"]
+        PY_D2M["nested dict lookup loops"]
+        PY_MS["__matrix2eps() + nested loops"]
+    end
+
+    F -->|"use_cython=True"| CSE
+    CWP --> CPH
+    CPH -->|"use_cython=True"| D2M
+    CPH -->|"use_cython=False"| PY_D2M
+    CSE -->|"use_cython=True"| MS
+    CSE -->|"use_cython=False"| PY_MS
+```
+
+当 `use_cython=True`（默认值）时，调用路径会经由编译后的 `.pyx` 函数。当为 `False` 时，相同的逻辑将在纯 Python 中执行，这在调试或 Cython 扩展编译失败的环境中非常有用。
+
+来源：[epsilon_calculation.py](finches/epsilon_calculation.py#L450-L520), [frontend_base.py](finches/frontend/frontend_base.py#L60-L135)
+
+## Cython 优化指令
+
+每个加速函数都带有两个 Cython 编译器指令的装饰器，这些指令在编译时剥离了 Python 级别的安全检查：
+
+| 指令 | 效果 | 风险 |
+|---|---|---|
+| `@cython.boundscheck(False)` | 禁用数组索引边界验证 | 越界访问会导致未定义行为（段错误），而非抛出 `IndexError` |
+| `@cython.cdivision(True)` | 禁用 Python 风格的除零检查 | 除以零会导致 C 级别的错误，而非抛出 `ZeroDivisionError` |
+
+这些操作在此是安全的，因为所有循环边界均派生自经过预验证的矩阵维度，且除法仅发生于已知为正数的 `window_size`。这种组合消除了每次迭代的 Python 开销，并允许内层循环编译为扁平的 C 机器码。
+
+来源：[matrix_manipulation.pyx](finches/utils/matrix_manipulation.pyx#L8-L18)
+
+## 函数参考
+
+### `dict2matrix(seq1, seq2, lookup) → np.ndarray`
+
+通过在预计算的字典中查找每个残基对，构建一个 Len(seq1) × Len(seq2) 的两两交互矩阵。这取代了在列表的列表中追加元素并通过 `np.array()` 转换的纯 Python 双重循环。
+
+**类型化签名：**
+
+- `seq1: str`, `seq2: str` — 氨基酸序列
+- `lookup: dict` — 嵌套字典，其中 `lookup[r1][r2]` 返回一个 `float` 类型的交互参数
+- **返回：** `cnp.ndarray[cnp.float_t, ndim=2]` — 一个 C 连续的 float64 矩阵
+
+**实现策略：** 该函数预分配一个 `np.empty((l1, l2), dtype=float)` 数组，并使用 C 类型的索引变量（`cdef int r1, r2`）来填充它，避免了任何中间 Python 列表的构建。由于内层循环对每个元素执行一次字典查找，Python 中的主要开销是每次迭代的解释器分派——Cython 完全消除了这一点。
+
+**调用自：** 当 `use_cython=True` 时，由 `InteractionMatrixConstructor.calculate_pairwise_heterotypic_matrix()` 调用。
+
+来源：[matrix_manipulation.pyx](finches/utils/matrix_manipulation.pyx#L8-L22), [epsilon_calculation.py](finches/epsilon_calculation.py#L460-L476)
+
+### `matrix_scan(w_matrix, window_size, null_interaction_baseline) → tuple`
+
+[滑动窗口矩阵计算](10-sliding-window-matrix-computation)中性能关键的核心函数。通过在完整交互矩阵上滑动 `window_size × window_size` 的窗口，计算平滑后的 epsilon 矩阵，将每个子窗口相对于 `null_interaction_baseline` 分解为吸引和排斥成分，并累加其行均值。
+
+**类型化签名：**
+
+- `w_matrix: double[:,:]` — Cython 类型化内存视图（NumPy 数组的零拷贝视图）
+- `window_size: int` — 方形滑动窗口的边长（应为奇数）
+- `null_interaction_baseline: double` — 区分吸引（< 基线）与排斥（> 基线）交互的阈值
+- **返回：** `(everything, seq1_indices, seq2_indices)` — 包含 3 个 NumPy 数组的元组
+
+**返回元素：**
+
+| 元素 | 形状 | 描述 |
+|---|---|---|
+| `everything` | `(L1−W+1) × (L2−W+1)` | 滑动窗口 epsilon 值 |
+| `seq1_indices` | `(L1−W+1,)` | 序列 1 的蛋白质空间残基索引（从 1 开始） |
+| `seq2_indices` | `(L2−W+1,)` | 序列 2 的蛋白质空间残基索引（从 1 开始） |
+
+其中 `L1`、`L2` 为矩阵维度，`W` 为 `window_size`。
+
+**实现策略——为何如此高效：** 该函数使用四个预分配数组（`everything`、`attractive_matrix`、`repulsive_matrix` 和 `sub`），并在 C 类型循环中逐元素手动分解每个窗口。吸引/排斥分离、行均值累加以及最终求和均被编写为使用 `cdef int` 索引和 `cdef double` 累加器的显式 `for` 循环。这避免了 NumPy 在小型 `window_size × window_size` 子矩阵上的每次操作开销（临时数组创建、数据类型强制转换、方法分派）——由于窗口操作需重复 `(L1−W+1) × (L2−W+1)` 次，这种开销在纯 Python 版本中占据主导地位。
+
+**蛋白质空间索引：** 返回的索引数组使用从 1 开始的编号（第一个残基 = 1），计算方式为 `start = int((window_size − 1) / 2) + 1`。这符合生化惯例，并由 `len(seq_indices) == matrix.shape[i]` 的断言强制保证。
+
+**调用自：** 当 `use_cython=True` 时，由 `InteractionMatrixConstructor.calculate_sliding_epsilon()` 调用。
+
+来源：[matrix_manipulation.pyx](finches/utils/matrix_manipulation.pyx#L25-L127), [epsilon_calculation.py](finches/epsilon_calculation.py#L745-L800)
+
+### `return_random_array(n) → np.ndarray` 和 `seed_C_rand(seedval)`
+
+用于随机操作的实用函数。`return_random_array(n)` 使用 C 语言的 `rand()/RAND_MAX` 生成一个包含 `n` 个均匀随机浮点数的数组，而 `cdef`（模块私有）的 `seed_C_rand()` 封装了 `srand()` 用于设置种子。这些函数直接使用 `libc.stdlib`，绕过了 Python 的 `random` 模块，从而在紧凑循环中将开销降至最低。
+
+来源：[matrix_manipulation.pyx](finches/utils/matrix_manipulation.pyx#L130-L201)
+
+## 构建与编译
+
+Cython 扩展在安装时通过 `setup.py` 编译，该文件声明了一个针对 `finches.utils.matrix_manipulation` 的单一 `Extension`：
+
+```python
+extensions = [
+    Extension(
+        "finches.utils.matrix_manipulation",
+        ["finches/utils/matrix_manipulation.pyx"],
+        include_dirs=[numpy.get_include()],
+    )
+]
+setup(
+    ext_modules=cythonize(extensions, compiler_directives={'language_level': "3"}),
+)
+```
+
+`include_dirs` 引用了 NumPy 的 C API 头文件（`cimport numpy` 所需），而 `language_level="3"` 确保在 Cython 转译步骤中采用 Python 3 语义。构建依赖项——`cython` 和 `numpy`——在 `pyproject.toml` 的 `[build-system] requires` 中声明。
+
+<CgxTip>如果 Cython 扩展编译失败（例如缺少 C 编译器或未安装 Cython），包仍会安装成功——只是 `use_cython=True` 的代码路径会在运行时失败。`calculate_pairwise_heterotypic_matrix()` 和 `calculate_sliding_epsilon()` 中的纯 Python 回退方案提供了完全一致的结果，因此设置 `use_cython=False` 是一种安全的权宜之计。</CgxTip>
+
+来源：[setup.py](setup.py#L1-L32), [pyproject.toml](pyproject.toml#L1-L6)
+
+## Cython 与纯 Python：算法比较
+
+两种实现在算法上完全相同，但在执行模型上有所不同：
+
+| 方面 | Cython (`matrix_manipulation.pyx`) | 纯 Python |
+|---|---|---|
+| **dict2matrix** 循环 | `cdef int` 索引 → 基于 `cnp.ndarray` 的 C `for` 循环 | Python `for` 循环追加到嵌套 `list` → `np.array()` |
+| **matrix_scan** 窗口提取 | 类型化内存视图拷贝至预分配的 `sub` 数组 | NumPy 切片：`w_matrix[i:i+W, j:j+W]` |
+| **吸引/排斥分离** | C 中的逐元素 `if/else` | `epsilon_stateless.get_attractive_repulsive_matrices()` 使用布尔掩码乘法 |
+| **行均值累加** | 使用 `cdef double` 的显式 `row_sum += attractive_matrix[r1,r2]` | `np.sum(np.mean(attractive_matrix, axis=1))` |
+| **数组分配** | 一次预分配（`np.empty`） | 每次窗口迭代时创建（NumPy 临时对象） |
+| **相对性能** | **1×**（基准） | 慢 **10–20×** |
+
+核心洞察在于，Cython 版本不仅仅是“加速 Python”——它用原生 C 循环取代了 NumPy 向量化但高开销的小数组操作。对于 `matrix_scan` 函数，其内层窗口通常为 31×31 = 961 个元素，而外层循环运行 `(L1−30) × (L2−30)` 次，每个窗口的 NumPy 分派成本（函数查找、数据类型检查、临时分配）远远超过了实际的算术运算。Cython 消除了所有这些分派开销。
+
+来源：[matrix_manipulation.pyx](finches/utils/matrix_manipulation.pyx#L80-L127), [epsilon_calculation.py](finches/epsilon_calculation.py#L800-L874), [epsilon_stateless.py](finches/epsilon_stateless.py#L24-L56)
+
+## 集成点与 `use_cython` 标志
+
+`use_cython` 布尔标志贯穿三个层级：
+
+1. **前端层** — `FinchesFrontend.intermolecular_idr_matrix()` 接受 `use_cython=True` 并将其直接传递给 `calculate_sliding_epsilon()`。
+
+2. **InteractionMatrixConstructor** — `calculate_pairwise_heterotypic_matrix()` 和 `calculate_sliding_epsilon()` 均接受 `use_cython=True`。请注意，`calculate_weighted_pairwise_matrix()` 也接受该标志，并将其转发给 `calculate_pairwise_heterotypic_matrix()` 以用于初始矩阵构建。
+
+3. **Cython 层** — 该标志决定了是调用 `matrix_manipulation.dict2matrix()` / `matrix_manipulation.matrix_scan()` 还是调用内联的 Python 等效实现。
+
+这种分层设计意味着 Cython 加速同时应用于矩阵构建步骤（`dict2matrix`）和滑动窗口扫描步骤（`matrix_scan`），并且可以在任何调用层级独立切换。
+
+<CgxTip>为了在批量分析中获得最大吞吐量（例如，扫描数百个序列对），请确保在顶层调用时设置 `use_cython=True`。该标志在所有地方均默认为 `True`，因此这是默认行为——只有显式设置 `use_cython=False` 才会禁用它。</CgxTip>
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L62-L135), [epsilon_calculation.py](finches/epsilon_calculation.py#L440-L520), [epsilon_calculation.py](finches/epsilon_calculation.py#L710-L800)
+
+## 相关页面
+
+- `matrix_scan` 所加速的滑动窗口算法文档见 [滑动窗口矩阵计算](10-sliding-window-matrix-computation)。
+- 调用这些 Cython 函数的 `InteractionMatrixConstructor` 方法涵盖在 [InteractionMatrixConstructor](8-interactionmatrixconstructor) 中。
+- `dict2matrix` 所使用的字典查找表（`self.lookup`）由力场参数构建——参见 [Mpipi 力场参数](11-mpipi-forcefield-parameters) 和 [CALVADOS 力场参数](12-calvados-forcefield-parameters)。
+
+---
+
+## 前端 API
+
+- [深入解析/前端 API/Mpipi 与 CALVADOS 前端](https://zread.ai/idptools/finches/5-mpipi-and-calvados-frontends)
+
+---
+slug:5-mpipi-and-calvados-frontends
+blog_type:normal
+---
+
+
+**Mpipi** 和 **CALVADOS** 前端是 finches 中面向用户的主要接口。它们提供了统一的高层 API，用于计算分子间相互作用能、生成残基级相互作用向量、构建相互作用矩阵图以及构建 Flory-Huggins 相图——所有这些均无需直接与底层力场参数或计算引擎交互。每个前端封装了特定的粗粒化力场模型，并将繁重的计算任务委派给共享的 `InteractionMatrixConstructor`，同时添加特定于模型的验证、默认参数和 RNA 处理逻辑。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L1-L30), [mpipi_frontend.py](finches/frontend/mpipi_frontend.py#L1-L25), [calvados_frontend.py](finches/frontend/calvados_frontend.py#L1-L35)
+
+## 架构：继承驱动设计
+
+两个前端均继承自抽象基类 `FinchesFrontend`，该基类实现了完整的计算与可视化 API。派生类仅重写其构造函数（以绑定正确的力场模型）以及少数需要特定模型输入验证的方法——最显著的是 RNA 序列处理。这意味着添加到基类中的每个新方法都会自动在两个前端中可用，从而确保跨模型的 API 一致性。
+
+```mermaid
+classDiagram
+    class FinchesFrontend {
+        <<abstract>>
+        +IMC_object : InteractionMatrixConstructor
+        +intermolecular_idr_matrix(seq1, seq2, ...)
+        +epsilon(seq1, seq2, ...)
+        +epsilon_vectors(seq1, seq2, ...)
+        +interaction_figure(seq1, seq2, ...)
+        +per_residue_attractive_vector(seq1, seq2, ...)
+        +per_residue_repulsive_vector(seq1, seq2, ...)
+        +protein_nucleic_vector(seq, ...)
+        +plot_protein_nucleic_vector(seq, ...)
+        +build_phase_diagram(seq, ...)
+        +plot_phase_diagram(seq, ...)
+        +plot_multiple_phase_diagrams(seq_dict, ...)
+    }
+
+    class Mpipi_frontend {
+        +model : Mpipi_model
+        +__init__(salt, dielectric)
+        +intermolecular_idr_matrix()$
+        +interaction_figure()$
+    }
+
+    class CALVADOS_frontend {
+        +model : calvados_model
+        +__init__(salt, pH, temp)
+        +intermolecular_idr_matrix()$
+        +epsilon()$
+        +interaction_figure()$
+    }
+
+    FincheFrontend <|-- Mpipi_frontend
+    FinchesFrontend <|-- CALVADOS_frontend
+
+    note for Mpipi_frontend "$ = override with RNA-tolerant logic"
+    note for CALVADOS_frontend "$ = override with RNA-check decorator"
+```
+
+基类明确阻止直接实例化——调用 `FinchesFrontend()` 会引发 `TypeError`，从而强制用户通过具体的派生类进行操作。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L25-L37)
+
+## 实例化与构造函数参数
+
+每个前端的构造函数会初始化两个关键对象：**力场模型**（编码所有残基-残基相互作用参数）和 **`InteractionMatrixConstructor`**（使用该模型进行计算）。构造函数的区别在于它们暴露的物理条件：
+
+| 前端 | 构造函数签名 | 力场模型 | 物理参数 |
+|---|---|---|---|
+| `Mpipi_frontend` | `Mpipi_frontend(salt=0.150, dielectric=80.0)` | `Mpipi_model("Mpipi_GGv1")` | 盐浓度 (M)，介电常数 |
+| `CALVADOS_frontend` | `CALVADOS_frontend(salt=0.150, pH=7.4, temp=288)` | `calvados_model("CALVADOS2")` | 盐浓度 (M)，pH，温度 (> (K) |
+
+**关键区别**：Mpipi 暴露了 `dielectric` 参数（通过介电常数进行屏蔽），而 CALVADOS 暴露了 `pH` 和 `temp` 参数（Henderson-Hasselbalch 质子化和温度依赖的静电学）。两者的默认值均为 **150 mM 盐**，反映了生理离子强度。
+
+```python
+# Mpipi 前端 — 基于介电常数的静电学
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+mf = Mpipi_frontend(salt=0.150, dielectric=80.0)
+
+# CALVADOS 前端 — 基于 pH 和温度的静电学
+from finches.frontend.calvados_frontend import CALVADOS_frontend
+cf = CALVADOS_frontend(salt=0.150, pH=7.4, temp=288)
+```
+
+来源: [mpipi_frontend.py](finches/frontend/mpipi_frontend.py#L9-L16), [calvados_frontend.py](finches/frontend/calvados_frontend.py#L31-L41)
+
+## 核心 API 方法
+
+以下方法在**两个**前端对象上均可用。下表总结了每个方法的功能和返回类型：
+
+| 方法 | 功能 | 返回值 |
+|---|---|---|
+| `epsilon(seq1, seq2)` | 全序列两两相互作用能 | `float` |
+| `epsilon_vectors(seq1, seq2)` | 吸引与排斥 epsilon 分解向量 | 数组 `tuple` |
+| `intermolecular_idr_matrix(seq1, seq2)` | 带无序分布的滑动窗口相互作用矩阵 | `(matrix_tuple, disorder_1, disorder_2)` |
+| `interaction_figure(seq1, seq2)` | 完整可视化：热力图 + 无序度轨迹 | `(fig, im, ax_main, ax_top, ax_right, ax_colorbar)` |
+| `per_residue_attractive_vector(seq1, seq2)` | 吸引相互作用的逐残基平均值 | `(indices, values)` |
+| `per_residue_repulsive_vector(seq1, seq2)` | 排斥相互作用的逐残基平均值 | `(indices, values)` |
+| `protein_nucleic_vector(seq)` | 逐残基的蛋白质-RNA 结合谱 (poly-U) | `(indices, values)` |
+| `plot_protein_nucleic_vector(seq)` | 蛋白质-RNA 结合谱可视化 | `(fig, ax)` |
+| `build_phase_diagram(seq)` | Flory-Huggins 双节线 + 旋节线 | 8 元素元组 |
+| `plot_phase_diagram(seq)` | 单序列相图绘制 | `(phase_data, fig, ax)` |
+| `plot_multiple_phase_diagrams(seq_dict)` | 叠加多个相图 | `(phase_data_list, fig, ax)` |
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L39-L1345)
+
+### Epsilon：全序列相互作用能
+
+最简单的入口点计算两个完整序列的标量 epsilon 值。这直接委派给 `InteractionMatrixConstructor.calculate_epsilon_value()`：
+
+```python
+mf = Mpipi_frontend()
+eps = mf.epsilon("MDVFKPGDKIIYTVKQEE", "KRTYADGEEYVQTVKPGK")
+# 返回一个浮点数 — 负值 = 净吸引，正值 = 净排斥
+```
+
+`use_aliphatic_weighting` 和 `use_charge_weighting` 标志（均默认为 `True`）分别控制局部序列上下文是否调整脂肪族和电荷贡献。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L201-L232)
+
+### 分子间 IDR 矩阵：滑动窗口计算
+
+`intermolecular_idr_matrix()` 方法是区域解析分析的计算骨干。它将两个序列分解为 `window_size` 残基（默认为 31）的重叠窗口，并计算每对窗口的 epsilon，生成一个 2D 矩阵，其中每个单元格表示 `seq1` 的一个区域与 `seq2` 的一个区域之间的相互作用能。
+
+返回值为一个 3 元组：
+
+- **`[0]`** — 相互作用矩阵元组本身：`(matrix_array, seq1_indices, seq2_indices)`。`matrix_array` 是一个 2D NumPy 数组；索引数组将矩阵的行/列映射回序列位置。
+- **`[1]`** — `seq1` 的无序度谱（来自 metapredict），若 `disorder_1=False` 则为全 1 数组。
+- **`[2]`** — `seq2` 的无序度谱，若 `disorder_2=False` 则为全 1 数组。
+
+```python
+mf = Mpipi_frontend()
+result = mf.intermolecular_idr_matrix("MDVFKPGDKIIYTVKQEE", "KRTYADGEEYVQTVKPGK")
+matrix_array = result[0][0]    # 2D 滑动 epsilon 值
+seq1_idx     = result[0][1]    # 将行映射到 seq1 位置的索引
+seq2_idx     = result[0][2]    # 将列映射到 seq2 位置的索引
+disorder_1   = result[1]       # seq1 的无序度谱
+disorder_2   = result[2]       # seq2 的无序度谱
+```
+
+<CgxTip>窗口边缘未进行填充，因此矩阵维度比序列长度大约小 `(window_size - 1)`（每侧）。务必使用返回的索引数组将矩阵位置映射回残基位置。</CgxTip>
+
+当 `null_shuffle` 设置为整数（例如 100）时，该方法会生成相应数量的序列打乱零矩阵，从真实矩阵中减去零矩阵的均值，并返回打乱归一化的结果。对于同型相互作用（`seq1 == seq2`），零矩阵会被对称化以避免伪影。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L42-L197)
+
+### 逐残基相互作用向量
+
+两个互补方法将相互作用矩阵沿 `seq1` 分解为逐残基谱：
+
+- **`per_residue_attractive_vector()`** — 对于 `seq1` 中的每个残基，计算 `seq2` 中所有**负**（吸引）值的平均值。这可以在不受排斥邻居干扰的情况下识别“粘附”区域。
+- **`per_residue_repulsive_vector()`** — 对于 `seq1` 中的每个残基，计算 `seq2` 中所有**正**（排斥）值的平均值。
+
+两者均返回 `(indices, values)` 并默认应用 Savitzky-Golay 平滑（`smoothing_window=20`，`poly_order=3`）。设置 `smoothing_window=False` 以禁用平滑。设置 `return_total=True` 以获取原始总和而非平均值。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L540-L795)
+
+### 蛋白质-核酸向量
+
+`protein_nucleic_vector()` 方法通过在蛋白质序列上滑动窗口并计算与等长 poly-U RNA 片段的 epsilon，来计算逐残基的蛋白质-RNA 结合倾向谱。这仅在支持 RNA 的前端上可用（参见下文的 RNA 处理部分）。结果使用 Savitzky-Golay 滤波器进行平滑，并以 `(indices, values)` 的形式返回。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L800-L895)
+
+### 相互作用图
+
+`interaction_figure()` 方法生成发表级质量的复合图，包含：中心相互作用矩阵热力图、沿顶部和右侧轴的平行无序度谱条形图，以及集成的色条。当 `zero_folded=True`（默认）时，被 metapredict 预测为折叠的残基在矩阵中会被置零，这反映了折叠结构域无法进行 IDR 样相互作用的物理现实。
+
+前端之间的可视化参数有所不同：
+
+| 参数 | Mpipi 默认值 | CALVADOS 默认值 | 原因 |
+|---|---|---|---|
+| `vmin` / `vmax` | -3 / 3 | -7.5 / 7.5 | CALVADOS 的 epsilon 值范围更宽 |
+
+额外的图表功能包括结构域高亮（`seq1_domains`、`seq2_domains`）、位置标记线（`seq1_lines`、`seq2_lines`）以及自定义矩形叠加（`plot_rectangles`）。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L236-L530), [calvados_frontend.py](finches/frontend/calvados_frontend.py#L160-L175)
+
+### 相图
+
+三种方法提供 Flory-Huggins 相图的计算与可视化：
+
+1. **`build_phase_diagram(seq)`** — 根据序列的 epsilon 值计算同型双节线和旋节线。返回一个 8 元素元组，包含稀相/浓相浓度、临界点以及双节线和旋节线的温度数组。
+2. **`plot_phase_diagram(seq)`** — 绘制单序列双节线，显示温度与体积分数 (φ) 的关系。
+3. **`plot_multiple_phase_diagrams(seq_dict)`** — 叠加多个序列的双节线。接受 `{name: [sequence, color]}` 字典，并可选择通过参考序列的临界温度 (`tc_ref`) 归一化温度。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L1020-L1345)
+
+## RNA 序列处理：关键差异
+
+两个前端之间最重要的功能区别在于它们处理 RNA 序列的方式（由 `U` 残基代码表示尿嘧啶）：
+
+```mermaid
+flowchart TD
+    A["序列包含 'U'?"] --> B{哪个前端?}
+    B -->|Mpipi| C["RNA 被视为 poly-U 容忍处理<br/>对包含 U 的序列禁用无序度预测"]
+    B -->|CALVADOS| D["引发 ValueError:<br/>CALVADOS2 无法处理 RNA ('U')"]
+    C --> E["正常计算"]
+    D --> F["异常传播至调用方"]
+```
+
+**Mpipi** 将 RNA 作为 poly-U 片段容纳——Mpipi 力场包含尿嘧啶的参数。当序列包含 `U` 时，前端会自动禁用该序列的无序度预测（因为 metapredict 仅处理蛋白质序列），但会继续进行计算。
+
+**CALVADOS** 明确**拒绝**任何包含 `U` 的序列。这通过 `@RNA_check` 装饰器强制执行，该装饰器在任何计算开始之前检查 `seq1` 和 `seq2`，并引发带有消息 `"CALVADOS2 cannot handle RNA ('U')"` 的 `ValueError`。此装饰器应用于 CALVADOS 前端的 `intermolecular_idr_matrix()`、`epsilon()` 和 `interaction_figure()`。
+
+此外，CALVADOS 提供了一个 `protein_nucleic_vector()` 桩方法，该方法无条件引发@CgxTip(/CCgxTip>异常，因为本质上#CgxTip>蛋白质-RNA 计算本质上不受支持。
+
+<CgxTip>在将序列+%3C/CgxTip>序列传递给 `CALVADOS_frontend` 之前，务必检查是否含有 `U` 残基。如果需要进行蛋白质-R>RNA 相互作用分析，请:CgxTip>请仅=tip> exclusively 使用 `Mpipi(* frontend*`。</CgxTip>
+
+来源: [mpipi_frontend.py](finches/frontend/mpipi_frontend.py4L50-L75), [calvados_frontend.py](finG&/frontend/calvados_frontend.py#L17-L29)
+
+## 方法重写摘要
+
+虽然基类提供了完整实现，但每个派生类会重写=派生类>特定方法#8:以注入特定于模型的行为。下表> table> 精确显示了哪些方法被重写及其原因：
+
+| 方法 |< 在 Mpipi 中4#9 中重写？* | 在 CALVADOS 中9:13 中重写@CALVADOS* | 重写原因 |
+|---|---|---|---|
+| `__init__, __init__` | ✅ | ✅ | 绑定不同的力场模型和 `@0 IMC_object` |
+| `intermolecular_idr_matrix` | ✅ | ✅ | Mpipi: 自动检测 `U` → 禁用无序度; CALVADOS: `@RNA_check` 装饰器 |
+| `epsilon` | ❌ | ✅ | CALVADOS: `@RNA_check` 装饰器 |
+| `epsilon_vectors` | ❌ | ❌ | 无需特定于模型的验证 |
+| `interaction_figure` | ✅ | ✅ | Mpipi: 自动检测 `U` → 禁用无序度; CALVADOS: `@RNA_check` + 不同的 `vmin`/`vmax` 默认值 |
+| `per_residue_attractive_vector` | ❌ | ❌ | 按原样继承 |
+| `per_residue_repulsive_vector` | ❌ | ❌ | 按原样继承 |
+| `protein_nucleic_vector` | ❌ | ✅ (桩方法) | CALVADOS: 引发异常 — 不支持 RNA |
+| `build_phase_diagram` | ❌ | ❌ | 按原样继承 |
+| `plot_phase_diagram` | ❌ | ❌ | 按原样继承 |
+| `plot_multiple_phase_diagrams` | ❌ | ❌ | 按原样继承 |
+
+来源: [mpipi_frontend.py](finches/frontend/mpipi_frontend.py#L1-L292), [calvados_frontend.py](finches/frontend/calvados_frontend.py#L1-L350)
+
+## 前端选择
+
+| 判据 | 使用 `Mpipi_frontend` | 使用 `CALVADOS_frontend` |
+|---|---|---|
+| 蛋白质-蛋白质 IDR 相互作用 | ✅ | ✅ |
+| 蛋白质-RNA 相互作用 | ✅ | ❌ |
+| 基于介电常数的静电控制 | ✅ | ❌ |
+| pH/温度依赖的质子化 | ❌ | ✅ |
+| Mpipi_GGv1 参数集 | ✅ | ❌ |
+| CALVADOS2 参数集 | ❌ | ✅ |
+
+对于大多数蛋白质-蛋白质研究，任一前端都会产生有效的结果，但数值会有所不同，因为它们编码了不同的粗粒化力场参数化。对于蛋白质-核酸研究，`Mpipi_frontend` 是唯一的选择。
+
+**下一步**：要了解每个前端绑定的力场参数，请参阅 [Mpipi 力场参数](11-mpipi-forcefield-parameters) 和 [CALVADOS 力场参数](12-calvados-forcefield-parameters)。关于两个前端委派的计算引擎，请参阅 [InteractionMatrixConstructor](8-interactionmatrixconstructor)。有关可视化的详细信息，请参阅 [相互作用图与图形](6-interaction-maps-and-figures)。
+
+---
+
+- [深入解析/前端 API/交互A图与图形](https://zread.ai/idptools/finches/6-interaction-maps-and-figures)
+
+---
+slug:6-interaction-maps-and-figures
+blog_type:normal
+---
+
+
+交互图是 FINCHES 的主要可视化输出，它提供了一个二维热图，展示了两个内在无序区（IDR）的各个局部区域之间预测的交互方式。它们通过 `Mpipi_frontend` 或 `CALVADOS_frontend` 对象的 **`interaction_figure()`** 方法生成，该方法在内部计算滑动窗口 epsilon 矩阵，叠加逐序列的无序分布曲线，掩蔽折叠区域，并在单次调用中渲染出可用于发表的 matplotlib 图像。
+
+## 交互图的工作原理
+
+交互图的构建方式是将两个序列分解为 `window_size` 个残基的重叠片段，然后计算序列 1 的每个片段与序列 2 的每个片段之间的逐对 epsilon（交互能量）。生成的二维矩阵以热图形式展示，其中 **x 轴**映射序列 1 的位置，**y 轴**映射序列 2 的位置，**像素颜色**表示预测的交互强度——默认情况下，负值（吸引）显示为绿色，正值（排斥）显示为紫色。沿顶部和右侧边缘的平行条形轨道展示了每个残基的预测无序概率，而折叠域则自动置零。
+
+```mermaid
+flowchart TD
+    A["两条氨基酸<br/>序列 &#40;seq1, seq2&#41;"] --> B["滑动窗口<br/>分片<br/>&#40;window_size=31&#41;"]
+    B --> C["逐对 epsilon<br/>计算<br/>&#40;IMC_object&#41;"]
+    C --> D["原始交互<br/>矩阵 &#40;2D ndarray&#41;"]
+    D --> E{"null_shuffle<br/>已启用?"}
+    E -- 是 --> F["减去乱序<br/>基线矩阵"]
+    E -- 否 --> G["继续"]
+    F --> G
+    G --> H{"zero_folded<br/>已启用?"}
+    H -- 是 --> I["将折叠域<br/>区域掩蔽为零"]
+    H -- 否 --> J["继续"]
+    I --> J
+    J --> K["渲染热图 +<br/>无序度条形轨道<br/>+ 颜色条"]
+    K --> L["返回 fig, im,<br/>ax_main, ax_top,<br/>ax_right, ax_colorbar"]
+```
+
+上面的流程图展示了从原始序列到渲染图像的完整决策流程。每个阶段都可通过 `interaction_figure()` 的参数集进行配置。
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L247-L399)，[frontend_base.py](finches/frontend/frontend_base.py#L131-L198)
+
+## 生成交互图
+
+最简单的用法只需要两个序列和一个前端对象：
+
+```python
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+
+mf = Mpipi_frontend()
+
+s1 = 'MESNQSNNGGSGNAALNRGGRYVPPHLRGGDGGAAAAASAGGDDRRGGAGGGGYRRGGGNSGGGGGGGYDRGYNDNRDDRDNRGGSGGYGRDRNYEDRGYNGGGGGGGNRGYNNNRGGGGGGYNRQDRGDGGSSNFSRGGYNNRDEGSDNRGSGRSYNNDRRDNGGD'
+s2 = 'LEGMSGDMRSGGGYRGRGGRGNGQRFGGRDHRYQGGSGNGGGGNGGGGGFGGGGQRSGGGGGFQSGGGGGRQQQQQQRAQPQQDWWS'
+
+# 生成交互图（同源型）
+mf.interaction_figure(s1, s1, tic_frequency=15)
+
+# 生成交互图（异源型）
+mf.interaction_figure(s1, s2, tic_frequency=15)
+```
+
+该方法返回一个由 matplotlib 对象组成的元组，以便进一步自定义：`(fig, im, ax_main, ax_top, ax_right, ax_colorbar)`。如果设置了 `no_disorder=True`，返回值将简化为 `(fig, im, ax_main)`。
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L247-L399)，[interaction_matrix_demo.ipynb](demo/protein_matrix/interaction_matrix_demo.ipynb#L87-L120)
+
+## 交互图参数
+
+`interaction_figure()` 方法提供了对计算、视觉样式和域注释的广泛控制：
+
+| 参数 | 类型 | 默认值 | 用途 |
+|---|---|---|---|
+| `seq1`, `seq2` | str | — | 待比较的氨基酸序列 |
+| `window_size` | int | 31 | 滑动窗口长度（必须为奇数） |
+| `use_cython` | bool | True | 使用 Cython 加速矩阵计算 |
+| `use_aliphatic_weighting` | bool | True | 按局部脂肪族密度对脂肪族残基进行加权 |
+| `use_charge_weighting` | bool | True | 按局部电荷密度对带电残基进行加权 |
+| `tic_frequency` | int | 100 | 坐标轴刻度间距 |
+| `vmin`, `vmax` | float | -3, 3 | 色阶范围（kT 单位） |
+| `cmap` | str | `'PRGn'` | Matplotlib 颜色映射名称 |
+| `zero_folded` | bool | True | 将折叠域像素置零 |
+| `disorder_1`, `disorder_2` | bool | True | 计算并展示无序度分布曲线 |
+| `no_disorder` | bool | False | 完全省略无序度轨道 |
+| `null_shuffle` | bool/int | False | 用于零基线减法的序列乱序次数 |
+| `fname` | str | None | 图像保存路径（None = 仅显示） |
+| `seq1_domains`, `seq2_domains` | list | [] | 以深色条高亮显示的域区域 |
+| `seq1_lines`, `seq2_lines` | list | [] | 垂直/水平参考线 |
+| `plot_rectangles` | list | None | 自定义矩形叠加层 `[s1_start, s1_end, s2_start, s2_end, kwargs]` |
+| `linewidth` | float | 1 | 域边界线的宽度 |
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L247-L399)
+
+## 图像布局与坐标轴
+
+交互图使用 `plt.subplot2grid((4, 4), ...)` 在单个图像中排列四个面板：
+
+| 坐标轴 | 网格位置 | 内容 |
+|---|---|---|
+| `ax_main` | (1,0) colspan=3, rowspan=3 | 二维交互热图 |
+| `ax_top` | (0,0) colspan=3 | 序列 1 的无序度条形图（垂直条，0–1 刻度） |
+| `ax_right` | (1,3) rowspan=3 | 序列 2 的无序度条形图（水平条，0–1 刻度） |
+| `ax_colorbar` | (0,3) | 热图的色阶图例 |
+
+通过 `seq1_domains` 或 `seq2_domains` 传入的域高亮，会在相应的无序度轨道上渲染为深色的垂直或水平跨度。来自 `plot_rectangles` 的自定义矩形直接在 `ax_main` 上绘制为仅含边框的色块，这对于标注特定的交互热点非常有用。
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L400-L560)
+
+## 访问原始矩阵
+
+当你需要底层数值数据进行自定义分析或可视化时，请调用 `intermolecular_idr_matrix()` 而非 `interaction_figure()`：
+
+```python
+# 返回 (B, disorder_1, disorder_2)
+result = mf.intermolecular_idr_matrix(s1, s2, window_size=31)
+
+# 解包矩阵元组
+B       = result[0]   # 交互矩阵结构
+d1      = result[1]   # 序列 1 的无序度分布
+d2      = result[2]   # 序列 2 的无序度分布
+
+# B 本身是一个包含 3 个元素的元组：
+matrix  = B[0]   # 滑动 epsilon 值的二维 numpy 数组
+idx_s1  = B[1]   # 将矩阵列映射到序列 1 位置的索引数组
+idx_s2  = B[2]   # 将矩阵行映射到序列 2 位置的索引数组
+```
+
+之所以需要索引数组，是因为滑动窗口不会对序列进行填充——矩阵边缘的起始和结束位置取决于 `window_size`。具体而言，第一个有效索引位于 `window_size // 2 + 1`，最后一个位于 `len(seq) - window_size // 2`。
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L58-L198)
+
+## 零乱序归一化
+
+将 `null_shuffle` 设置为整数（推荐：100）会从交互矩阵中减去一个序列乱序基线。在每次乱序迭代中，两个序列都会被随机重排，计算一个新的矩阵，所有乱序矩阵的均值即为零基线。对于**同源型**交互（seq1 == seq2），该零基线会被对称化以避免伪影。这种归一化突出了依赖于残基顺序而非仅依赖组成的交互模式。
+
+```python
+# 基于 100 次乱序对照进行归一化
+mf.interaction_figure(s1, s2, null_shuffle=100, tic_frequency=15)
+```
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L147-L192)
+
+## 折叠域掩蔽
+
+当 `zero_folded=True`（默认值）时，`interaction_figure()` 方法使用 **metapredict** 来识别折叠域边界，并将所有对应折叠残基的矩阵像素置零。这可以防止稳定折叠区域产生误导性的交互信号，因为粗粒度力场模型是针对无序环境校准的。当使用 `plot_protein_nucleic_vector()` 时，相同的折叠边界会在无序度轨道上以灰色阴影显示。
+
+来源：[frontend_base.py](finches/frontend/frontend_base.py#L400-L440)
+
+## 序列标志可视化
+
+`interlogo` 模块提供了 HTML 渲染的序列标志，根据每个残基的化学语境和交互贡献为其着色并调整大小。这些设计用于 Jupyter notebook 的展示。
+
+### 化学语境配色方案
+
+残基使用 `AA_COLOR` 中定义的固定调色板按化学类别进行着色：
+
+| 化学类别 | 残基 | 颜色 |
+|---|---|---|
+| 芳香族 | Y, W, F | `#ff9d00` (橙色) |
+| 脂肪族 | A, L, M, I, V | `#171616` (黑色) |
+| 极性 | Q, N, S, T, H, G | `#04700d` (绿色) |
+| 负电 | E, D | `#ff0d0d` (红色) |
+| 正电 | R, K | `#2900f5` (蓝色) |
+| 半胱氨酸 | C | `#ffe70d` (黄色) |
+| 脯氨酸 | P | `#cf30b7` (洋红色) |
+
+一个单独的 `AA_CHARGE_COLOR` 字典提供了仅显示电荷的视图，其中只有 E/D（红色）和 R/K（蓝色）被着色；其他所有残基均为黑色。
+
+### 吸引与排斥标志
+
+```python
+from finches.frontend.interlogo import plot_attractive_logo, plot_repulsive_logo
+
+# 吸引标志：残基大小由有利的交互贡献决定
+plot_attractive_logo(s1, s2, mf, window_size=31, quantile_threshold=0.7)
+
+# 排斥标志：残基大小由不利的交互贡献决定
+plot_repulsive_logo(s1, s2, mf, window_size=31, quantile_threshold=0.7)
+```
+
+`quantile_threshold` 参数（默认 0.7）控制可见性截断：低于大小分布阈值分位数的残基将渲染为浅灰色（`#cccccc`），而非其化学类别颜色，从而确保只有与交互最相关的位置在视觉上突出。
+
+### 自定义化学语境图
+
+若需手动控制，`chemical_context_seq_plot()` 可接受任何序列和缩放向量：
+
+```python
+from finches.frontend.interlogo import chemical_context_seq_plot
+import numpy as np
+
+scale_vector = np.random.rand(len(s1))  # 任意逐残基数值
+chemical_context_seq_plot(s1, scale_vector, min_font_sz=8, max_font_sz=30, quantile_threshold=0.7)
+```
+
+来源：[interlogo.py](finches/frontend/interlogo.py#L1-L270)
+
+## 窗口大小注意事项
+
+默认的 `window_size=31` 是根据经验选择的：约 30 个残基的 IDR 代表了一个长度尺度，在此尺度上化学特异性可以被有效编码。较小的窗口会提高空间分辨率，但会减少交互能量平均所依赖的片段长度，这可能会引入噪声。较大的窗口能平滑局部变异，但可能会遗漏细粒度的交互模式。使用非默认窗口时，应相应调整 `vmin`/`vmax`，因为能量范围会发生偏移：
+
+```python
+# 较小的窗口 — 较窄的能量范围
+mf.interaction_figure(s1, s2, window_size=13, vmin=-2, vmax=2, tic_frequency=15)
+```
+
+来源：[idr_idr.rst](docs/idr_idr.rst#L52-L67)
+
+## 前端模型差异
+
+`Mpipi_frontend` 和 `CALVADOS_frontend` 都暴露了相同的 `interaction_figure()` 接口，但在底层力场和初始化参数上有所不同：
+
+| 特性 | Mpipi_frontend | CALVADOS_frontend |
+|---|---|---|
+| 力场 | Mpipi_GGv1 | CALVADOS2 |
+| 初始化参数 | `salt`, `dielectric` | `salt`, `pH`, `temp` |
+| RNA 支持 | 是（通过序列中的 `U`） | 否（引发 `ValueError`） |
+| 默认盐浓度 | 0.150 M | 0.150 M |
+
+CALVADOS 前端应用了 `@RNA_check` 装饰器，如果任一输入序列中出现 `'U'`，则会引发 `ValueError`；而 Mpipi 前端原生支持蛋白质-核酸交互。
+
+来源：[mpipi_frontend.py](finches/frontend/mpipi_frontend.py#L1-L100)，[calvados_frontend.py](finches/frontend/calvados_frontend.py#L1-L150)
+
+<CgxTip>当生成用于发表的交互图时，设置 `fname` 以 350 DPI 保存，并根据序列长度手动调整 `tic_frequency`——对于 200 个残基以下的序列使用约 15，对于超过 500 个残基的序列使用约 100，以保持刻度标签的可读性。</CgxTip>
+
+<CgxTip>`plot_rectangles` 参数是标注交互热点最灵活的方式：传入 `[[s1_start, s1_end, s2_start, s2_end, {'edgecolor':'red', 'linestyle':'--'}]]` 可直接在热图上绘制自定义样式的矩形，而不会改变底层数据。</CgxTip>
+
+---
+
+- [深入解析/前端 API/残基级交互向量](https://zread.ai/idptools/finches/7-per-residue-interaction-vectors)
+
+---
+slug:7-per-residue-interaction-vectors
+blog_type:normal
+---
+
+
+每个残基的相互作用向量将全局 ε 相互作用值分解为**位置解析图谱**，揭示了其中一条序列上的哪些残基驱动了与另一条序列之间的吸引或排斥相互作用。这是一种诊断透镜，将单一的标量摘要转化为逐残基的相互作用化学图谱——这对于识别“贴标”区域、理解结构域边界，以及在本质上无序区域内合理解释突变效应至关重要。
+
+## 概念基础
+
+每个残基的相互作用向量回答了这样一个问题：*对于序列 1 中的每个位置 i，它与序列 2 的净相互作用特征是什么？* 答案并非一个单一的数值，而是两个互补的向量——**吸引**和**排斥**——每个向量的长度均为 *N*（即参考序列中的残基数量）。这些向量的计算方式是：沿某一轴折叠完整的滑动窗口相互作用矩阵，应用基于符号的掩码以分离吸引（ε < 0）和排斥（ε > 0）贡献，并可选择对结果进行平滑处理。
+
+这种分解之所以重要，是因为对某个区域取平均值可能会掩盖贴标与间隔之间的相互作用：一个区域可能在少数位置上具有强吸引力，而在其他位置则是排斥的。由于本质上无序区域（IDR）中的排斥区域可以通过重排来彼此规避，而吸引残基则主动驱动聚结，因此逐残基图谱使你能够识别推定的贴标残基，**而不会与邻近的排斥元素相混淆**。
+
+```mermaid
+flowchart TD
+    A["Sequences S1, S2"] --> B["Sliding-Window<br/>Interaction Matrix"]
+    B --> C{"Sign-Based Masking"}
+    C -->|ε < threshold| D["Attractive Mask"]
+    C -->|ε > threshold| E["Repulsive Mask"]
+    D --> F["Row-wise Summation<br/>(collapse S2 axis)"]
+    E --> G["Row-wise Summation<br/>(collapse S2 axis)"]
+    F --> H["Average or Total<br/>per residue"]
+    G --> I["Average or Total<br/>per residue"]
+    H --> J["Savitzky-Golay<br/>Smoothing"]
+    I --> K["Savitzky-Golay<br/>Smoothing"]
+    J --> L["(indices, attractive_vector)"]
+    K --> M["(indices, repulsive_vector)"]
+```
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L570-L696), [frontend_base.py](finches/frontend/frontend_base.py#L702-L828)
+
+## 两个 API 层：前端与相互作用向量模块
+
+Finches 通过**两个互补的 API 层**暴露逐残基相互作用向量，每一层都适用于不同的工作流。前端层通过 `FinchesFrontend` 对象上的方法提供了最高级别且最便捷的访问方式，而 `interaction_vector` 模块则提供了带有直接绘图功能的独立函数。
+
+| 特性 | 前端 (`FinchesFrontend`) | 相互作用向量模块 |
+|---|---|---|
+| 入口点 | `xf.per_residue_attractive_vector()` / `xf.per_residue_repulsive_vector()` | `show_sequence_interaction_vector()` / `show_folded_domain_interaction_vector()` |
+| 返回值 | `(indices, values)` numpy 数组 | matplotlib 图形（若 `return_vectors=True` 则返回向量） |
+| 计算基础 | 滑动窗口矩阵 → 行缩减 | 直接调用 `get_sequence_epsilon_vectors()` |
+| 平滑处理 | 内置 Savitzky-Golay | 无（绘制原始向量） |
+| 折叠结构域支持 | 否（仅支持 IDR–IDR） | 是，通过 PDB 表面残基支持 |
+| 标志可视化 | 通过 `interlogo.plot_attractive_logo()` | 通过 `make_interaction_vector_plot()` |
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L570-L696), [interaction_vector.py](finches/interaction_vector.py#L100-L144)
+
+## 前端 API：`per_residue_attractive_vector` 和 `per_residue_repulsive_vector`
+
+任何 `FinchesFrontend` 实例（例如 `MpipiFrontend` 或 `CalvadosFrontend`）上的这些方法，都通过完整的滑动窗口相互作用矩阵来计算逐残基向量。计算分为三个阶段进行：**矩阵生成** → **掩码行缩减** → **平滑处理**。
+
+### 吸引向量
+
+```python
+from finches.frontend.mpipi_frontend import MpipiFrontend
+
+xf = MpipiFrontend()
+
+seq1 = "MDFFVLSVQEGDSNVQVDVLGATAAYSVLEA"
+seq2 = "GSTDRRAGATQNEVSMVSQLQDKVKVLGAP"
+
+indices, attractive_vals = xf.per_residue_attractive_vector(
+    seq1, seq2,
+    window_size=31,
+    return_total=False,
+    attractive_threshold=0,
+    smoothing_window=20,
+    poly_order=3
+)
+```
+
+该函数首先调用 `intermolecular_idr_matrix()` 获取滑动窗口矩阵 *B*，然后构造一个 `attractive_mask`，其中满足 `B < attractive_threshold`。对 `B * attractive_mask` 逐行求和，得出每个位置的总吸引贡献。当 `return_total=False`（默认值）时，该总和将除以每行中吸引项的数量，得出**平均**吸引相互作用；当设置为 `True` 时，将返回原始总和，这可以揭示具有许多微弱吸引残基的区域，这些残基能够共同驱动结合。
+
+<CgxTip>设置 `return_total=True` 会将解释的侧重点从“每个残基的平均吸引力有多大”转变为“每个残基所受的总吸引力有多大”——后者在预测贴标驱动的相行为时具有更大的物理意义，因为多个弱贴标可以等效地协同作用，达到与少数强贴标相同的效果。</CgxTip>
+
+### 排斥向量
+
+```python
+indices, repulsive_vals = xf.per_residue_repulsive_vector(
+    seq1, seq2,
+    window_size=31,
+    return_total=False,
+    repulsive_threshold=0,
+    smoothing_window=20,
+    poly_order=3
+)
+```
+
+其逻辑与吸引向量类似，但应用了 `repulsive_mask = B > repulsive_threshold`。同样的 `return_total` 标志控制着返回平均值还是总和的行为。
+
+### 参数参考
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `seq1` | str | — | 第一条氨基酸序列（向量的参考序列） |
+| `seq2` | str | — | 第二条氨基酸序列 |
+| `window_size` | int | 31 | 相互作用矩阵的滑动窗口大小 |
+| `use_cython` | bool | True | 使用 Cython 加速的矩阵计算 |
+| `use_aliphatic_weighting` | bool | True | 按局部脂肪族残基密度加权 |
+| `use_charge_weighting` | bool | True | 按局部电荷环境加权 |
+| `return_total` | bool | False | 返回每行的总和而非平均值 |
+| `attractive_threshold` / `repulsive_threshold` | float | 0 | 掩码的符号边界 |
+| `smoothing_window` | int / False | 20 | Savitzky-Golay 窗口（传入 False 以禁用） |
+| `poly_order` | int / False | 3 | Savitzky-Golay 多项式阶数（传入 False 以禁用） |
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L570-L696), [frontend_base.py](finches/frontend/frontend_base.py#L702-L828)
+
+## 独立模块 API：`interaction_vector`
+
+`finches.interaction_vector` 模块提供了四个独立于前端运行的函数，同时支持 **IDR–IDR** 和 **IDR–折叠结构域** 相互作用向量的计算，并内置了 matplotlib 绘图功能。
+
+### IDR–IDR 相互作用向量
+
+`show_sequence_interaction_vector()` 计算并绘制两条 IDR 序列之间的逐残基相互作用图谱。它是 `epsilon_calculation.get_sequence_epsilon_vectors()` 和 `make_interaction_vector_plot()` 的便捷封装：
+
+```python
+from finches.interaction_vector import show_sequence_interaction_vector
+from finches.forcefields.mpipi import Mpipi_model
+from finches.epsilon_calculation import InteractionMatrixConstructor
+
+params = Mpipi_model(version='Mpipi_GGv1')
+IMC = InteractionMatrixConstructor(parameters=params)
+
+seq1 = "MDFFVLSVQEGDSNVQVDVLGATAAYSVLEA"
+seq2 = "GSTDRRAGATQNEVSMVSQLQDKVKVLGAP"
+
+fig = show_sequence_interaction_vector(
+    seq1, seq2, IMC,
+    charge_prefactor=None,
+    null_interaction_baseline=None,
+    use_charge_weighting=True,
+    use_aliphatic_weighting=True,
+    sequence_names=['Protein_A', 'Protein_B'],
+    title=None
+)
+```
+
+返回的图形将吸引向量（红色）和排斥向量（蓝色）显示为叠加的折线图，x 轴为残基位置。当 `all_resi_labels=True`（默认值）时，x 轴刻度标签将显示实际的氨基酸残基，并**按其化学类别着色**（芳香族 = 橙色，带电 = 红色/蓝色，极性 = 绿色，脂肪族 = 黑色，半胱氨酸 = 黄色，脯氨酸 = 紫色）。
+
+### IDR–折叠结构域 相互作用向量
+
+`show_folded_domain_interaction_on_sequence()` 将相互作用向量的计算扩展到 IDR 与**相邻折叠结构域上的溶剂可及残基**相互作用这一具有生物学关键意义的情况。它将 PDB 结构解析与结构域间向量计算链接在一起：
+
+```python
+from finches.interaction_vector import show_folded_domain_interaction_on_sequence
+
+fig = show_folded_domain_interaction_on_sequence(
+    pdb='structure.pdb',
+    FD_start=50,
+    FD_end=150,
+    sequence2='GGGGDDDDRRRR...',  # the IDR
+    X=IMC,
+    idr_position='Cterm',
+    sequence_of_ref='sequence2',  # project onto the IDR
+    sequence_names=['Full_protein', 'IDR_region']
+)
+```
+
+该工作流首先调用 `pdb_to_SDFDresidues_and_xyzs()` 提取溶剂可及折叠结构域（SAFD）残基及其 3D 坐标，然后将它们传递给 `get_interdomain_epsilon_vectors()`，该函数会考虑**空间邻近性**——在 3D 空间中更靠近 IDR 附着点的残基贡献更大。`sequence_of_ref` 参数控制向量投影到哪条序列上：`'sequence2'`（IDR）或 `'sequence1'`（SAFD 表面）。
+
+### 完整折叠结构域向量
+
+`make_interaction_vector_for_folded_domain()` 返回长度等于**整个折叠结构域**（而不仅仅是溶剂可及残基）的向量。埋藏位置用零填充，使向量可以直接与完整的结构域序列对齐：
+
+```python
+from finches.interaction_vector import make_interaction_vector_for_folded_domain
+
+full_attractive, full_repulsive = make_interaction_vector_for_folded_domain(
+    pdb='structure.pdb',
+    FD_start=50, FD_end=150,
+    sequence2='GGGGDDDDRRRR...',
+    X=IMC,
+    idr_position='Cterm'
+)
+# len(full_attractive) == FD_end - FD_start + 1
+```
+
+来源: [interaction_vector.py](finches/interaction_vector.py#L19-L95), [interaction_vector.py](finches/interaction_vector.py#L100-L144), [interaction_vector.py](finches/interaction_vector.py#L256-L314)
+
+## 可视化：相互作用向量图与序列标志
+
+### 折线图渲染
+
+`make_interaction_vector_plot()` 将双重的吸引/排斥向量渲染为带有可配置残基标签 x 轴的 matplotlib 图形：
+
+```python
+from finches.interaction_vector import make_interaction_vector_plot
+
+fig = make_interaction_vector_plot(
+    attractive_vector, repulsive_vector, sequence1,
+    sequence_names=['Protein_A', 'Protein_B'],
+    title='Custom title',
+    all_resi_labels=True,   # color-coded residue tick labels
+    fig=None                # pass existing figure to overlay
+)
+```
+
+该图形在 y=0 处使用一条灰色虚线作为相互作用基线，吸引值（负值，红色）位于下方，排斥值（正值，蓝色）位于上方。图形宽度随序列长度动态缩放，大约为 `len(sequence) / 5.5` 英寸。
+
+### HTML 序列标志
+
+`interlogo` 模块提供了一种替代的可视化方式，将氨基酸序列渲染为**带有残基特定字体大小的 HTML 字符串**，其中较大的字符表示较强的相互作用。这在 Jupyter 笔记本中快速视觉扫描贴标位置时特别有效：
+
+```python
+from finches.frontend.interlogo import plot_attractive_logo, plot_repulsive_logo
+
+# Attractive logo: larger residues = more attractive
+plot_attractive_logo(seq1, seq2, xf, window_size=31, quantile_threshold=0.7)
+
+# Repulsive logo: larger residues = more repulsive
+plot_repulsive_logo(seq1, seq2, xf, window_size=31, quantile_threshold=0.7)
+```
+
+`quantile_threshold` 参数（默认值为 0.7）控制视觉截断：低于相互作用幅度第 70 百分位的残基以浅灰色（`#cccccc`）渲染，从而将视线吸引到最强的相互作用残基上。残基按化学类别使用 6 类方案着色：
+
+| 化学类别 | 残基 | 颜色 |
+|---|---|---|
+| 芳香族 | Y, W, F | `#ff9d00` (橙色) |
+| 肪肪族 | A, L, M, I, V | `#171616` (近黑色) |
+| 极性 | Q, N, S, T, H, G | `#04700d` (绿色) |
+| 负电 | E, D | `#ff0d0d` (红色) |
+| 正电 | R, K | `#2900f5` (蓝色) |
+| 特殊 | C, P | `#ffe70d` (黄色), `#cf30b7` (紫色) |
+
+底层的 `chemical_context_seq_plot()` 函数将相互作用向量归一化到字体大小范围（默认 3–40 像素），并委托给 `styled_text()` 生成 HTML，每 50 个残基插入一个换行符以提高可读性。
+
+来源: [interaction_vector.py](finches/interaction_vector.py#L149-L253), [interlogo.py](finches/interlogo.py#L194-L268), [interlogo.py](finches/interlogo.py#L121-L173)
+
+## 蛋白质-核酸相互作用向量
+
+一个专门的变体 `protein_nucleic_vector()` 用于计算蛋白质与 poly-U RNA 序列之间的逐残基相互作用图谱。这绕过了完整的矩阵构建，而是使用针对固定 poly-U 靶标的**滑动窗口 epsilon 计算**：
+
+```python
+indices, binding_profile = xf.protein_nucleic_vector(
+    seq='MDFFVLSVQEGDSNVQVDVLGATAAYSVLEA',
+    fragsize=21,
+    smoothing_window=30,
+    poly_order=3
+)
+```
+
+蛋白质中每个长度为 `fragsize` 的窗口都会与相同长度的 poly-U RNA 片段进行评估，并将得到的 epsilon 值（按片段长度归一化）分配给该窗口的中心。这生成了一个沿蛋白质链的 RNA 结合倾向的一维图谱。
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L834-L872)
+
+## 计算流水线总结
+
+```mermaid
+flowchart LR
+    subgraph "Interaction Vector Module"
+        A1["show_sequence_interaction_vector()"] --> B1["get_sequence_epsilon_vectors()"]
+        A2["show_folded_domain_interaction_on_sequence()"] --> B2["pdb_to_SDFDresidues_and_xyzs()"]
+        B2 --> C2["get_interdomain_epsilon_vectors()"]
+    end
+
+    subgraph "Frontend Layer"
+        D1["per_residue_attractive_vector()"] --> E1["intermolecular_idr_matrix()"]
+        D2["per_residue_repulsive_vector()"] --> E2["intermolecular_idr_matrix()"]
+        E1 --> F1["Mask + Row Sum + Savgol"]
+        E2 --> F2["Mask + Row Sum + Savgol"]
+    end
+
+    subgraph "Visualization"
+        G1["make_interaction_vector_plot()"]
+        G2["plot_attractive_logo() / plot_repulsive_logo()"]
+        G3["chemical_context_seq_plot()"]
+    end
+
+    B1 --> G1
+    C2 --> G1
+    F1 --> G2
+    F2 --> G2
+    G2 --> G3
+```
+
+来源: [interaction_vector.py](finches/interaction_vector.py#L1-L16), [frontend_base.py](finches/frontend/frontend_base.py#L567-L696), [interlogo.py](finches/interlogo.py#L1-L48)
+
+## 实际考量
+
+**平滑处理默认开启。** Savitzky-Golay 滤波器（window=20, poly_order=3）消除了逐残基图谱中的高频噪声，但可能会模糊结构域边界处的尖锐过渡。当你需要原始的残基级别信号时，可以通过传入 `smoothing_window=False` 或 `poly_order=False` 来禁用它。
+
+**索引偏移取决于窗口大小。** 由于滑动窗口矩阵不会填充序列，返回的索引数组从 `(window_size + 1) / 2` 开始，到 `len(sequence) - (window_size - 1) / 2` 结束。请始终使用返回的索引，而不是假定其为 `range(len(sequence))`。
+
+**`sequence_of_ref` 参数对折叠结构域很重要。** 当计算 IDR–折叠结构域向量时，`sequence_of_ref='sequence2'` 会将向量投影到 IDR 上（有助于识别哪些 IDR 残基受折叠表面的影响最大），而 `sequence_of_ref='sequence1'` 投影到 SAFD 表面上（有助于映射哪些表面斑块与 IDR 的相互作用最强）。
+
+<CgxTip>对于折叠结构域分析，当需要将向量与完整结构域序列对齐（例如，与其他逐残基注释叠加）时，推荐使用 `make_interaction_vector_for_folded_domain()` 而非 `show_folded_domain_interaction_on_sequence()`，因为前者返回完整结构域长度的向量，并在埋藏位置处用零填充。</CgxTip>
+
+来源: [interaction_vector.py](finches/interaction_vector.py#L256-L314), [frontend_base.py](finches/frontend/frontend_base.py#L652-L696)
+
+## 相关页面
+
+- 关于这些向量基础的滑动窗口矩阵，请参见 [Sliding Window Matrix Computation](10-sliding-window-matrix-computation)。
+- 关于 epsilon 分解逻辑（吸引/排斥拆分），请参见 [Epsilon Calculation and Weighting](9-epsilon-calculation-and-weighting)。
+- 关于托管 `per_residue_*_vector()` 方法的前端对象，请参见 [Mpipi and CALVADOS Frontends](5-mpipi-and-calvados-frontends)。
+- 关于折叠结构域向量中使用的 PDB 表面残基提取，请参见 [PDB Surface Residue Extraction](16-pdb-surface-residue-extraction)。
+
+---
+
+## 核心计算
+
+- [深入解析/核心计算/交互矩阵构造器](https://zread.ai/idptools/finches/8-interactionmatrixconstructor)
+
+---
+slug:8-interactionmatrixconstructor
+blog_type:normal
+---
+
+
+**InteractionMatrixConstructor** 是 finches 中的核心计算引擎——一个通过**接口设计模式**连接力场模型与序列水平相互作用分析的类。它接受任何经过验证的力场对象（例如 Mpipi、CALVADOS），并暴露统一的 API，用于计算两两矩阵、加权矩阵、epsilon 向量以及滑动窗口 epsilon 图。如果你需要在前端提供的功能之外对相互作用计算进行细粒度控制，这就是你的入口。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L1-L25)
+
+## 架构角色
+
+`InteractionMatrixConstructor` 在 finches 的计算流水线中占据关键位置。力场模型定义了残基*如何*相互作用（生物物理层面）；而 `InteractionMatrixConstructor` 定义了利用这些相互作用*计算什么*（分析层面）。这种分离意味着相同的分析代码在不同力场下无需修改即可运行——这是经典的接口模式。
+
+```mermaid
+graph TD
+    FF["Forcefield Model<br/>(Mpipi / CALVADOS / Custom)"] -->|parameters| IMC["InteractionMatrixConstructor"]
+    IMC -->|lookup table| PM["Pairwise Matrix<br/>(unweighted)"]
+    PM -->|charge + aliphatic<br/>weighting| WM["Weighted Matrix"]
+    WM -->|baseline split| EV["Epsilon Vectors<br/>(attractive + repulsive)"]
+    WM -->|sliding window| SE["Sliding Epsilon Map"]
+    IMC -.->|used by| FE["Frontend Classes<br/>(Mpipi_frontend / CALVADOS_frontend)"]
+    IMC -.->|used by| ES["epsilon_stateless<br/>functions"]
+```
+
+前端（[Mpipi 和 CALVADOS 前端](5-mpipi-and-calvados-frontends)）在内部实例化一个 `InteractionMatrixConstructor` 并将操作委托给它，而 `epsilon_stateless` 中的无状态函数则接受一个 IMC 实例作为其 `X` 参数，以实现零开销的函数调用。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L27-L42), [frontend_base.py](/finches/frontend/frontend_base.py#L40-L41)
+
+## 初始化与配置
+
+构造函数接受一个力场对象以及几个特定于模型的调优参数：
+
+```python
+from finches.forcefields.mpipi import Mpipi_model
+from finches.epsilon_calculation import InteractionMatrixConstructor
+
+# 初始化力场
+Mpipi_GGv1_params = Mpipi_model(version='Mpipi_GGv1')
+
+# 初始化 InteractionMatrixConstructor
+IMC = InteractionMatrixConstructor(
+    parameters=Mpipi_GGv1_params,
+    sequence_converter=False,
+    charge_prefactor=None,
+    null_interaction_baseline=None,
+    compute_forcefield_dependencies=False
+)
+```
+
+| 参数 | 类型 | 默认值 | 用途 |
+|-----------|------|---------|---------|
+| `parameters` | 力场对象 | *(必填)* | `finches.forcefields` 中实现了 `ALL_RESIDUES_TYPES`、`compute_interaction_parameter()` 和 `CONFIGS` 的任何对象 |
+| `sequence_converter` | 可调用对象 | `lambda a: a` | 在计算前转换输入序列（例如，掩码残基） |
+| `charge_prefactor` | 浮点数 | 来自 `CONFIGS` | 缩放电荷加权强度的标量（0–1）；用于调节同种电荷排斥的软化程度 |
+| `null_interaction_baseline` | 浮点数 | 来自 `CONFIGS` | 区分吸引与排斥相互作用的阈值；默认为 poly(GS) 参考值 |
+| `compute_forcefield_dependencies` | 布尔值 | `False` | 若为 `True`，当 `CONFIGS` 中不可用时，将在运行时重新计算 `null_interaction_baseline` |
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L20-L131)
+
+### 力场契约
+
+`parameters` 对象必须实现三个特定的属性——这就是**力场接口契约**：
+
+1. **`ALL_RESIDUES_TYPES`** — 一个列表的列表，其中每个内部列表定义了属于同一分子类型的残基（例如，一个列表用于氨基酸，一个列表用于 RNA 碱基）。所有列表中的每个残基都必须具有可计算的两两参数。
+
+2. **`compute_interaction_parameter(r1, r2)`** — 一个为任意有效残基对返回相互作用参数的函数。返回值是一个序列，其 `[0]` 号元素为标量相互作用强度（负数 = 吸引，正数 = 排斥）。
+
+3. **`CONFIGS`** — 一个包含预计算的力场特定常量的字典，至少包括 `'charge_prefactor'` 和 `'null_interaction_baseline'`。
+
+例如，Mpipi 模型将 `ALL_RESIDUES_TYPES` 定义为 `[['M','G','K','T','Y','A','D','E','V','L','Q','W','R','F','S','H','N','P','C','I'], ['U']]`，将蛋白质残基与 RNA 尿嘧啶分离开来。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L59-L89), [mpipi.py](/finches/forcefields/mpipi.py#L199-L199)
+
+### 构造时的内部状态
+
+在 `__init__` 期间，构造函数会构建一个**查找字典**——一个嵌套的 `dict`，其中 `self.lookup[r1][r2]` 直接映射到每个有效残基对的相互作用值。这种预计算意味着后续的矩阵计算避免了重复的力场函数调用，转而执行常数时间的字典查找。该查找表由 `_update_lookup_dict()` 构建，它会遍历扁平化残基集中所有叉积对。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L134-L189), [epsilon_calculation.py](/finches/epsilon_calculation.py#L195-L252)
+
+## 核心方法
+
+### 两两矩阵构建
+
+这些方法通过序列到序列的残基查找来构建原始（未加权）的相互作用矩阵。
+
+**`calculate_pairwise_heterotypic_matrix(sequence1, sequence2, convert_to_custom=True, use_cython=True)`** → 形状为 `(len(seq1), len(seq2))` 的 `np.ndarray`
+
+返回完整的两两矩阵，其中每个元素 `[i][j]` 为 `self.lookup[seq1[i]][seq2[j]]`。通过 `matrix_manipulation.dict2matrix()` 实现的 Cython 加速路径比纯 Python 回退快约 10 倍。序列在计算前会通过序列转换器和 `_check_sequence()` 进行验证。
+
+**`calculate_pairwise_homotypic_matrix(sequence, convert_to_custom=True)`** → `np.ndarray`
+
+一个便捷的包装器，调用异型方法并传入 `sequence2 = sequence1`。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L396-L488)
+
+### 加权矩阵构建
+
+**`calculate_weighted_pairwise_matrix(sequence1, sequence2, convert_to_custom=True, charge_prefactor=None, use_charge_weighting=True, use_aliphatic_weighting=True, use_cython=True)`** → `np.ndarray`
+
+这是引入生物物理上下文的环节。从原始两两矩阵开始，会依次应用两次加权操作：
+
+1. **电荷加权** — 对于每对带电残基，将每个残基周围的局部 ±1 残基窗口拼接起来，并计算 `|NCPR|/FCR` 比率。该权重反映了同种电荷残基是否聚集在一起。加权矩阵变为：`w_matrix = matrix - (matrix * repulsive_mask * charge_prefactor)`，有效地软化了存在电荷簇区域的同种电荷排斥。
+
+2. **脂肪族加权** — 一个由局部脂肪族区块（A、L、M、I、V）导出的乘性掩码，放大了嵌入在富含脂肪族区域中残基的相互作用强度。
+
+这两种加权方案都可以通过各自的布尔标志独立切换。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L494-L603), [parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L25-L96)
+
+### Epsilon 向量与值计算
+
+**`calculate_epsilon_vectors(sequence1, sequence2, use_charge_weighting=True, use_aliphatic_weighting=True)`** → `tuple[list, list]`
+
+返回 `(attractive_vector, repulsive_vector)`——相互作用的逐残基分解。内部委托给 `epsilon_stateless.get_sequence_epsilon_vectors()`，其流程为：(1) 构建加权矩阵，(2) 在 `null_interaction_baseline` 处将其分割为吸引/排斥子矩阵，(3) 减去基线使得零值代表无相互作用，(4) 计算列均值以生成逐残基向量。
+
+**`calculate_epsilon_value(sequence1, sequence2, use_charge_weighting=True, use_aliphatic_weighting=True)`** → `float`
+
+返回标量 epsilon——即吸引向量和排斥向量中所有元素的总和。该单一值量化了两个序列之间的整体相互作用强度。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L614-L701), [epsilon_stateless.py](/finches/epsilon_stateless.py#L119-L201)
+
+### 滑动窗口 Epsilon
+
+**`calculate_sliding_epsilon(sequence1, sequence2, window_size=31, use_charge_weighting=True, use_aliphatic_weighting=True, use_cython=True)`** → `tuple[np.ndarray, np.ndarray, np.ndarray]`
+
+这是计算量最大且视觉信息最丰富的输出。它不是计算整个序列的单个 epsilon，而是在加权两两矩阵上滑动一个 `window_size × window_size` 的窗口，并为每个窗口位置计算局部 epsilon。结果是一个带有相关序列位置索引数组的 2D 热图矩阵。
+
+返回的元组为 `(epsilon_matrix, seq2_indices, seq1_indices)`，其中索引数组将矩阵坐标映射回蛋白质空间的残基编号（从 1 开始索引）。默认使用通过 `matrix_manipulation.matrix_scan()` 实现的 Cython 路径以提升性能。
+
+```python
+B = IMC.calculate_sliding_epsilon(seq1, seq2, window_size=31)
+
+import matplotlib.pyplot as plt
+fig, ax = plt.subplots(figsize=(10, 10))
+plt.imshow(B[0],
+           extent=[B[1][0], B[1][-1], B[2][0], B[2][-1]],
+           aspect='auto', vmax=4, vmin=-4,
+           cmap='seismic', origin='lower')
+```
+
+<CgxTip>窗口大小必须为奇数——如果传入偶数值，它会被静默递增。窗口不能超过任一序列的长度。</CgxTip>
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L705-L872)
+
+## 实用与更新方法
+
+### 序列验证
+
+**`_check_sequence(sequence)`** — 验证序列中的所有残基是否恰好属于 `self.valid_residue_groups` 中的**一个**残基组。如果序列混合了残基类型（例如，同一字符串中包含蛋白质和 RNA）或包含未知残基，则抛出异常。
+
+**`get_converted_sequence(sequence)`** → `str` — 将序列传递给 `self.sequence_converter`，然后进行验证。有助于检查实际参与计算的转换后序列。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L302-L383)
+
+### 力场热替换
+
+**`_update_parameters(new_parameters)`** — 替换当前的力场对象并重建查找字典，同时保留 `charge_prefactor`、`sequence_converter` 和 `null_interaction_baseline`。这使得无需完全重新实例化即可在运行时切换力场。
+
+**`_update_lookup_dict(unknown_set_to_zero=False)`** — 使用当前的 `self.parameters` 从头重建 `self.lookup` 字典。若 `unknown_set_to_zero=True`，缺失的残基对将被静默设置为 0.0 而不是抛出错误——这对于参数集不完整的模型很有用。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L195-L296)
+
+## 完整方法摘要
+
+| 方法 | 返回值 | 描述 |
+|--------|---------|-------------|
+| `calculate_pairwise_homotypic_matrix(seq)` | `np.ndarray (n×n)` | 原始未加权的自相互作用矩阵 |
+| `calculate_pairwise_heterotypic_matrix(s1, s2)` | `np.ndarray (n×m)` | 原始未加权的交叉相互作用矩阵 |
+| `calculate_weighted_pairwise_matrix(s1, s2)` | `np.ndarray (n×m)` | 电荷 + 脂肪族加权后的矩阵 |
+| `calculate_epsilon_vectors(s1, s2)` | `(list, list)` | 逐残基的吸引和排斥向量 |
+| `calculate_epsilon_value(s1, s2)` | `float` | 标量整体相互作用强度 |
+| `calculate_sliding_epsilon(s1, s2)` | `(matrix, idx1, idx2)` | 带索引的 2D 局部 epsilon 热图 |
+| `get_converted_sequence(seq)` | `str` | 经转换器 + 验证后的序列 |
+| `_update_parameters(params)` | `None` | 热替换力场，重建查找表 |
+| `_update_lookup_dict()` | `None` | 从当前参数重建查找表 |
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L18-L874)
+
+## 数据流：从残基到 Epsilon
+
+一对序列的完整计算流水线遵循以下演进过程：
+
+```mermaid
+flowchart LR
+    A["Residue pair<br/>r1, r2"] -->|lookup[r1][r2]| B["Raw pairwise<br/>matrix"]
+    B -->|charge_prefactor ×<br/>repulsive_mask| C["Charge-weighted<br/>matrix"]
+    C -->|× aliphatic_mask| D["Fully weighted<br/>matrix"]
+    D -->|split at baseline| E["Attractive +<br/>Repulsive matrices"]
+    E -->|subtract baseline<br/>+ column means| F["Epsilon vectors"]
+    F -->|sum| G["Scalar epsilon"]
+    D -->|sliding window| H["2D epsilon map"]
+```
+
+该类中的每个方法都是这条单一计算路径上的路标——这些方法仅仅暴露了流水线不同阶段的中间结果。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L386-L872), [epsilon_stateless.py](/finches/epsilon_stateless.py#L14-L49)
+
+## 与其他组件的关系
+
+`InteractionMatrixConstructor` **被**以下组件**消费**（而非消费者）：
+
+- **前端类** — `Mpipi_frontend` 和 `CALVADOS_frontend` 都将 IMC 实例存储为 `self.IMC_object`，并将它们的 `intermolecular_idr_matrix()` 和 epsilon 调用委托给它。参见 [Mpipi 和 CALVADOS 前端](5-mpipi-and-calvados-frontends)。
+
+- **`epsilon_stateless` 函数** — 无状态函数 `get_sequence_epsilon_vectors()` 和 `get_sequence_epsilon_value()` 接受 IMC 作为其 `X` 参数，并调用其 `calculate_weighted_pairwise_matrix()` 方法。参见 [Epsilon 计算与加权](9-epsilon-calculation-and-weighting)。
+
+- **`interaction_vector` 模块** — 可视化函数将 IMC 传递给 epsilon 计算，以生成逐残基相互作用图。参见 [逐残基相互作用向量](7-per-residue-interaction-vectors)。
+
+- **Cython 加速** — `calculate_pairwise_heterotypic_matrix()` 和 `calculate_sliding_epsilon()` 都通过 `matrix_manipulation` 的 Cython 函数来处理性能关键的循环。参见 [Cython 矩阵加速](20-cython-matrix-acceleration)。
+
+<CgxTip>在直接使用 IMC 和使用前端之间做选择时，对于标准分析建议首选前端。当你需要自定义加权组合、检查中间矩阵或在单次会话中进行力场热替换时，请直接使用 IMC。</CgxTip>
+
+---
+
+- [深入解析/核心计算/Epsilon 计算与加权](https://zread.ai/idptools/finches/9-epsilon-calculation-and-weighting)
+
+---
+slug:9-epsilon-calculation-and-weighting
+blog_type:normal
+---
+
+
+epsilon 计算流程是 finches 的定量核心——它将原始的成对力场参数转换为标量相互作用参数（ε），该参数编码了两个氨基酸序列之间净吸引与排斥的特征。该流程通过分层架构运行：力场查找 → 矩阵构建 → 上下文加权 → 基线分解 → epsilon 聚合。理解每一层对于解释相行为预测以及在前端默认值之外自定义分析至关重要。
+
+## 计算流程概述
+
+epsilon 的计算遵循确定性的五阶段流程。每个阶段将原始残基间能量逐步细化为更符合生物物理现实的序列:序列相互作用表征：
+
+```mermaid
+flowchart TD
+    A["力场查找表<br/>(self.lookup)"] --> B["成对相互作用矩阵<br/>(len(s1) × len(s2))"]
+    B --> C{"应用加权?"}
+    C -->|电荷| D["电荷加权矩阵<br/>w = M − M·R_mask·cp"]
+    C -->|脂肪族| E["脂肪族加权矩阵<br/>w = w · Ali_mask"]
+    C -->|均不| F["未加权矩阵"]
+    D --> G["基线分解<br/>吸引: M < baseline<br/>排斥: M > baseline"]
+    E --> G
+    F --> G
+    G --> H["基线偏移<br/>M_attr − baseline, M_rep − baseline"]
+    H --> I["轴投影<br/>沿列求均值 → 向量"]
+    I --> J["Epsilon 聚合<br/>ε = Σ(attr_vec) + Σ(rep_vec)"]
+```
+
+该流程由 `InteractionMatrixConstructor` 类（负责控制矩阵构建和加权）以及 `epsilon_stateless` 中的无状态函数（负责处理分解和聚合）协调执行。这种分离确保了无论输入矩阵来源于同型、异型还是结构域间计算，都应用相同的分解逻辑。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L18-L131), [epsilon_stateless.py](/finches/epsilon_stateless.py#L1-L50)
+
+## InteractionMatrixConstructor 作为 Epsilon 引擎
+
+`InteractionMatrixConstructor` 是所有 epsilon 相关计算流经的主要对象。它使用力场参数对象和两个特定模型的校准常量——`charge_prefactor` 和 `null_interaction_baseline`——进行初始化，这两个常量分别控制原始交互值的加权和划分方式：
+
+```python
+from finches.forcefields.mpipi import Mpipi_model
+from finches.epsilon_calculation import InteractionMatrixConstructor
+
+# 初始化力场
+params = Mpipi_model(version='Mpipi_GGv1')
+
+# 使用自动校准的常量初始化构造器
+IMC = InteractionMatrixConstructor(parameters=params)
+```
+
+在构造时，该对象会构建一个**查找字典**（`self.lookup`），通过 `parameters.compute_interaction_parameter(r1, r2)` 预先计算所有有效残基对的相互作用。该字典是所有后续矩阵操作的基础，避免了在序列分析期间进行冗余的力场计算。如果未显式提供 `charge_prefactor` 或 `null_interaction_baseline`，构造器将尝试从 `parameters.CONFIGS` 中获取预计算值；如果不可用且 `compute_forcefield_dependencies=True`，则会即时重新计算。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L18-L189)
+
+### 构造器参数及其作用
+
+| 参数 | 类型 | 作用 | 默认来源 |
+|---|---|---|---|
+| `parameters` | 力场对象 | 提供 `compute_interaction_parameter()`、`ALL_RESIDUES_TYPES`、`CONFIGS` | 必需 |
+| `sequence_converter` | 函数 | 在矩阵构建前转换输入序列（例如掩码处理） | 恒等函数 |
+| `charge_prefactor` | float ∈ (0, 1) | 缩放排斥相互作用中电荷上下文加权的强度 | `parameters.CONFIGS['charge_prefactor']` |
+| `null_interaction_baseline` | float | 划分吸引和排斥相互作用的阈值 | `parameters.CONFIGS['null_interaction_baseline']` |
+| `compute_forcefield_dependencies` | bool | 如果 `CONFIGS` 中缺失校准常量，则重新计算 | `False` |
+
+`sequence_converter` 参数实现了强大的间接调用：可以注入任何将输入字符串转换为有效残基序列的函数，从而允许在不修改核心计算路径的情况下进行掩码处理、结构域提取或残基重映射。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L20-L131)
+
+## 零相互作用基线校准
+
+**零相互作用基线**是 epsilon 流程中影响最大的校准常量。它定义了能量阈值：低于该阈值的成对相互作用被分类为*吸引*，高于该阈值则被分类为*排斥*。该阈值不为零——它是参考序列的相互作用能，该参考序列预期表现为非相互作用的 Gaussian 链。标准参考序列是 400 个残基的 poly(GS) 重复序列：
+
+```python
+# 校准函数内部求解的过程
+seq = 'GS' * 200
+# 寻找使 epsilon(seq, seq) = 0 的基线
+result = root_scalar(f, bracket=[-10.0, 10.0])
+```
+
+校准过程使用 `scipy.optimize.root_scalar` 来寻找计算出的 poly(GS) 同源二聚体的 epsilon 越过零点时的基线值，此时电荷和脂肪族加权均被**禁用**。这种寻根方法确保了基线与底层力场自洽——更改力场版本需要重新校准。
+
+`finches.data.forcefield_dependencies` 中的 `get_null_interaction_baseline` 函数为新的或自定义力场公开了此校准过程。预计算的基线存储在每个力场的 `CONFIGS` 字典中，以避免在运行时进行昂贵的重复计算。
+
+来源：[forcefield_dependencies.py](/finches/data/forcefield_dependencies.py#L17-L68)
+
+## 矩阵构建：从查找到成对数组
+
+三种矩阵构建方法构成了 epsilon 计算的基础，每种方法都生成一个二维 NumPy 数组，其中元素 `[i][j]` 表示序列 1 的残基 `i` 与序列 2 的残基 `j` 之间的相互作用能：
+
+### 未加权矩阵构建
+
+**`calculate_pairwise_heterotypic_matrix(sequence1, sequence2)`** 通过在 `self.lookup` 中查找每个残基对来构建原始相互作用矩阵。有两种后端可用：速度约快 10 倍的 Cython 实现（`matrix_manipulation.dict2matrix`）和纯 Python 回退方案。同型变体（`calculate_pairwise_homotypic_matrix`）只需简单地使用两个相同的序列调用异型方法即可。
+
+### 加权矩阵构建
+
+**`calculate_weighted_pairwise_matrix(sequence1, sequence2, ...)`** 对原始矩阵应用两种可选的加权方案，由布尔标志控制：
+
+```python
+w_matrix = IMC.calculate_weighted_pairwise_matrix(
+    sequence1, sequence2,
+    use_charge_weighting=True,    # 缩放排斥的电荷-电荷相互作用
+    use_aliphatic_weighting=True   # 增强成簇的脂肪族相互作用
+)
+```
+
+加权是**按顺序**应用的——首先是电荷加权，然后对已经过电荷加权的矩阵进行脂肪族加权。此顺序很重要，因为脂肪族加权是一个乘性掩码，它可以放大或衰减已被电荷加权修改的值。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L426-L603)
+
+## 电荷上下文加权
+
+电荷加权实现了一种生物物理洞察：两个残基之间的同电荷排斥取决于每个残基周围的**局部电荷上下文**，而不仅仅是孤立的残基对。两侧被其他赖氨酸包围的两个赖氨酸比嵌入在中性序列上下文中的两个赖氨酸经历更强的有效排斥，因为同电荷残基簇无法重新定向其侧链以彼此避开。
+
+加权计算如下：
+
+$$w_{matrix} = M - (M \times R_{mask} \times c_p)$$
+
+其中 $R_{mask}$ 是排斥电荷掩码，$c_p$ 是 `charge_prefactor`。该掩码通过检查每个带电残基对 `(r1, r2)` 并计算每个残基在 ±1 残基窗口内的局部电荷不对称性来构建：
+
+$$\text{charge\_weight} = \left|\frac{\text{NCPR}}{\text{FCR}}\right|$$
+
+此处，NCPR 是每个残基的净电荷，FCR 是拼接的局部片段中带电残基的比例。当片段均匀带同种电荷时（需要最大排斥缓解），该比率接近 1.0；当片段电荷平衡时（无需缓解），该比率接近 0.0。仅应用电荷加权的**排斥**分量——虽然计算了吸引掩码，但目前未使用，因为经验验证表明，仅排斥方案在所有基准测试中表现更好。
+
+| 片段示例 | NCPR | FCR | |NCPR/FCR| | 解释 |
+|---|---|---|---|---|
+| `KKK` + `KKK` | +1.0 | 1.0 | 1.0 | 最大排斥缓解 |
+| `EEE` + `EEE` | −1.0 | 1.0 | 1.0 | 最大排斥缓解 |
+| `KKK` + `EEE` | 0.0 | 1.0 | 0.0 | 无缓解（异种电荷） |
+| `KAK` + `EAE` | 0.0 | 0.67 | 0.0 | 无缓解（电荷平衡） |
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L25-L194), [epsilon_calculation.py](/finches/epsilon_calculation.py#L546-L594)
+
+## 脂肪族上下文加权
+
+脂肪族加权近似模拟了一种溶剂介导效应：脂肪族残基之间的疏水吸引并非简单的成对叠加，而是取决于脂肪族残基是否形成**连续簇**。单个亮氨酸在孤立状态下具有最小的疏水驱动力，但三个相邻亮氨酸的序列创建了足够大的界面以释放多个水分子，从而产生不成比例的更强吸引力。
+
+实现过程分为两个阶段：
+
+1. **分组**：每个脂肪族残基 (A, V, I, L, M) 根据其最近邻中同样为脂肪族的数量被分配一个组号（0、1、2 或 3）。组 0 = 非脂肪族；组 1 = 孤立脂肪族；组 2 = 一个脂肪族相邻；组 3 = 两个或更多脂肪族相邻。
+
+2. **掩码乘法**：对称乘数表将组组合映射到缩放因子：
+
+| 组₁ \ 组₂ | 1 (孤立) | 2 (对) | 3 (簇) |
+|---|---|---|---|
+| **1** (孤立) | 1.0 | 1.0 | 1.0 |
+| **2** (对) | 1.0 | 1.5 | 1.5 |
+| **3** (簇) | 1.0 | 1.5 | **3.0** |
+
+最终加权矩阵为：`w_matrix = w_matrix * aliphatic_mask`。这意味着跨序列相互作用的两个成簇脂肪族区域其吸引相互作用获得 **3 倍提升**，而孤立脂肪族保留其未加权值（乘数 = 1.0）。表中的不对称性（簇 × 簇 = 3.0，而对 × 对 = 1.5）反映了水释放随界面尺寸的非线性缩放。
+
+来源：[parsing_aminoacid_sequences.py](/finches/parsing_aminoacid_sequences.py#L252-L341)
+
+## 基线分解与 Epsilon 聚合
+
+一旦构建了加权矩阵，`epsilon_stateless` 中的无状态函数会将其划分为吸引和排斥分量，并聚合每个残基或全序列的 epsilon 值。
+
+### 吸引-排斥分解
+
+**`get_attractive_repulsive_matrices(matrix, null_interaction_baseline)`** 执行阈值拆分：
+
+```python
+attractive_matrix = (matrix < null_interaction_baseline) * matrix
+repulsive_matrix  = (matrix > null_interaction_baseline) * matrix
+```
+
+恰好等于基线的元素在两个矩阵中均置零。然后从两个矩阵中减去基线，使得零代表非相互作用参考，负值表示吸引，正值表示排斥：
+
+```python
+attractive_matrix = attractive_matrix - null_interaction_baseline
+repulsive_matrix  = repulsive_matrix  - null_interaction_baseline
+```
+
+### Epsilon 向量
+
+**`get_sequence_epsilon_vectors(sequence1, sequence2, X, ...)`** 通过沿列轴投影分解后的矩阵（对序列 2 残基取均值，计算序列 1 每个残基的值）来生成每个残基的向量：
+
+```python
+attractive_vector = np.mean(attractive_matrix, axis=1)  # len == len(sequence1)
+repulsive_vector  = np.mean(repulsive_matrix, axis=1)
+```
+
+这些向量揭示了序列 1 中哪些区域相对于序列 2 是局部吸引或排斥的，并且是相互作用向量图的基础数据。
+
+### 标量 Epsilon
+
+**`get_sequence_epsilon_value(sequence1, sequence2, X, ...)`** 将向量折叠为单个标量：
+
+```python
+epsilon = np.sum(attractive_vector) + np.sum(repulsive_vector)
+```
+
+负 epsilon 表示净吸引相互作用（驱动凝聚）；正 epsilon 表示净排斥。该标量是构建 Flory-Huggins 相图的输入。
+
+来源：[epsilon_stateless.py](/finches/epsilon_stateless.py#L14-L268)
+
+## 结构域间 Epsilon：折叠结构域表面相互作用
+
+epsilon 计算的一种特殊变体用于处理**折叠结构域（FD）的溶剂可及表面**与相邻本征无序区（IDR）之间的相互作用。函数 `get_interdomain_epsilon_vectors()` 引入了一个空间可及性掩码（`SAFD_cords`），该掩码将相互作用限制在 IDR 链可及的 FD 表面残基上，给定 IDR 的附着点（C 端、N 端或自定义原点）：
+
+```python
+from finches.epsilon_stateless import get_interdomain_epsilon_value
+
+epsilon = get_interdomain_epsilon_value(
+    SAFD_sequence,   # 仅表面残基
+    idr_sequence,    # IDR
+    IMC,             # InteractionMatrixConstructor
+    SAFD_cords,      # 用于掩码的空间坐标
+    IDR_positon='Cterm',
+    sequence_of_ref='sequence2'  # 投影到 IDR 上
+)
+```
+
+与标准 epsilon 计算的关键区别：(1) 成对矩阵受空间可及性过滤器（`build_column_mask_based_on_xyz`）掩码处理，(2) **不应用脂肪族加权**，因为脂肪族分组仅在连续序列区域之间有意义，而折叠结构域表面残基在定义上是不连续的。电荷加权使用专用的 FD 变体（`get_charge_weighted_FD_mask`），其中 FD 残基被视为孤立（FD 侧无 ±1 窗口）。
+
+来源：[epsilon_stateless.py](/finches/epsilon_stateless.py#L271-L530)
+
+## 方法目录：InteractionMatrixConstructor
+
+下表总结了 `InteractionMatrixConstructor` 类上所有与 epsilon 相关的方法及其与无状态函数层的关系：
+
+| IMC 方法 | 委托给 | 返回 | 描述 |
+|---|---|---|---|
+| `calculate_pairwise_heterotypic_matrix(s1, s2)` | Cython/Python 查找 | `np.array (len_s1 × len_s2)` | 原始未加权矩阵 |
+| `calculate_pairwise_homotypic_matrix(s)` | heterotypic(s, s) | `np.array (n × n)` | 自相互作用矩阵 |
+| `calculate_weighted_pairwise_matrix(s1, s2, ...)` | 异型 + 加权 | `np.array (len_s1 × len_s2)` | 电荷 + 脂肪族加权矩阵 |
+| `calculate_epsilon_vectors(s1, s2, ...)` | `get_sequence_epsilon_vectors` | `(attr_vec, rep_vec)` | 每个残基的吸引/排斥向量 |
+| `calculate_epsilon_value(s1, s2, ...)` | `get_sequence_epsilon_value` | `float` | 标量 epsilon |
+| `calculate_sliding_epsilon(s1, s2, window_size, ...)` | Cython/Python 滑动窗口 | `(matrix, s2_idx, s1_idx)` | 局部 epsilon 分布 |
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L396-L872)
+
+## 加权标志组合及其语义
+
+`use_charge_weighting` 和 `use_aliphatic_weighting` 标志的四种可能组合会产生性质不同的相互作用模型：
+
+| 电荷 | 脂肪族 | 生物物理解释 | 适用场景 |
+|---|---|---|---|
+| ✗ | ✗ | 纯平均场：每个残基对贡献其裸力场值 | 基线比较；调试；力场验证 |
+| ✓ | ✗ | 电荷上下文感知：同电荷簇获得排斥缓解 | 具有显著电荷模式的序列 |
+| ✗ | ✓ | 脂肪族簇感知：疏水斑块获得吸引增强 | 具有脂肪族成簇但电荷最少的序列 |
+| ✓ | ✓ | 完整生物物理模型：两种效应均激活 | **默认且推荐用于生产环境** |
+
+`calculate_epsilon_value` 和 `calculate_epsilon_vectors` 的默认设置是**两者均启用**（`True`），这反映了在 finches 基准测试套件中经验验证的配置。
+
+来源：[epsilon_calculation.py](/finches/epsilon_calculation.py#L614-L701), [epsilon_stateless.py](/finches/epsilon_stateless.py#L120-L268)
+
+<CgxTip>`null_interaction_baseline` 是力场版本特定的——将一个力场版本的基线与另一版本的参数混合使用将导致静默的 epsilon 值错误。务必验证 `IMC.null_interaction_baseline` 是否与力场 `CONFIGS` 字典中的预期值匹配。</CgxTip>
+
+<CgxTip>电荷加权仅生成排斥修正（同电荷簇获得排斥缓解）。尽管代码计算了吸引掩码，但不存在吸引电荷加权——这是经验验证得出的有意设计决策，而非缺陷。</CgxTip>
+
+## 相关页面
+
+- `InteractionMatrixConstructor` 类的详细文档见 [InteractionMatrixConstructor](8-interactionmatrixconstructor)
+- 滑动窗口 epsilon 计算扩展了这些概念，见 [Sliding Window Matrix Computation](10-sliding-window-matrix-computation)
+- 此处描述的加权方案连接至更广泛的框架，见 [Sequence Context Weighting Schemes](19-sequence-context-weighting-schemes)
+- 输入到 epsilon 计算的力场参数对象：[Mpipi Forcefield Parameters](11-mpipi-forcefield-parameters) 和 [CALVADOS Forcefield Parameters](12-calvados-forcefield-parameters)
+- Epsilon 值流入相图构建，见 [Flory-Huggins Phase Diagrams](14-flory-huggins-phase-diagrams)
+
+---
+
+- [深入解析/核心计算/滑动窗口矩阵计算](https://zread.ai/idptools/finches/10-sliding-window-matrix-computation)
+
+---
+slug:10-sliding-window-matrix-computation
+blog_type:normal
+---
+
+
+滑动窗口矩阵计算将原始的成对交互矩阵转换为**空间平滑的 epsilon 景观**，揭示了两个序列之间的接触面上局部交互强度是如何变化的。滑动窗口方法没有将整个序列对折叠为单个标量 epsilon，而是系统地提取每个可能的固定大小连续子区域，计算每个子区域的 epsilon，并将结果组装成二维图谱。这是 finches 交互热图和区域交互分析的核心分析原语。
+
+## 算法基础
+
+滑动窗口计算在**预加权的成对交互矩阵**上操作——一个形状为 `(len(s1), len(s2))` 的二维数组，其中每个单元保存残基 `s1[i]` 和 `s2[j]` 之间的交互参数，已经过电荷和脂肪族加权调整。一个大小为 `w × w`（其中 `w` 为 `window_size` 参数）的方形窗口沿两个轴以单位增量在此矩阵上滑动。在每个位置，窗口包围的子矩阵使用 `null_interaction_baseline` 作为分割阈值，被分解为**吸引**和**排斥**分量，每个分量经过基线相减、行平均和求和——为该窗口位置生成单个 epsilon 值。
+
+生成的输出矩阵形状为 `((len(s1) - w + 1), (len(s2) - w + 1))`，其中每个单元代表以对应序列位置为中心的残基邻域之间的平均局部交互特征。该函数还返回**蛋白质空间索引数组**（从 1 开始索引），将矩阵坐标映射回序列残基编号，每个索引指向其窗口的中心残基。
+
+```mermaid
+flowchart TB
+    A["输入序列<br/>(s1, s2)"] --> B["加权的成对矩阵<br/>calculate_weighted_pairwise_matrix()"]
+    B --> C{"后端选择"}
+    C -->|"use_cython=True<br/>(默认)"| D["Cython matrix_scan()<br/>约 12 倍加速"]
+    C -->|"use_cython=False"| E["Python 回退<br/>每个窗口调用 __matrix2eps()"]
+    D --> F["滑动 Epsilon 矩阵<br/>形状: (L1-w+1) × (L2-w+1)"]
+    E --> F
+    F --> G["序列索引数组<br/>(1 索引, 蛋白质空间)"]
+    G --> H["返回元组:<br/>(epsilon_matrix, seq1_indices, seq2_indices)"]
+
+    style D fill:#2d6a4f,color:#fff
+    style E fill:#6a4d2d,color:#fff
+    style F fill:#1a3a5c,color:#fff
+```
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L705-L872), [matrix_manipulation.pyx](/finches/utils/matrix_manipulation.pyx#L33-L150)
+
+## `calculate_sliding_epsilon` 方法
+
+这是面向用户的主要入口，作为 [`InteractionMatrixConstructor`](8-interactionmatrixconstructor) 对象的方法暴露。它编排整个流程：矩阵构建 → 加权 → 窗口扫描 → 索引生成。
+
+```python
+from finches.forcefields.mpipi import Mpipi_model
+from finches.epsilon_calculation import InteractionMatrixConstructor
+
+# 初始化模型和构造器
+params = Mpipi_model(version='Mpipi_GGv1')
+IMC = InteractionMatrixConstructor(parameters=params)
+
+# 计算滑动窗口 epsilon
+s1 = "MDVFLKNRKRVTSRQRNELSLKEEFQSLKQ"
+s2 = "SGDDDVETLPGAEPEPSGKRRRGQNQQ"
+
+result = IMC.calculate_sliding_epsilon(
+    s1, s2,
+    window_size=31,                  # 必须为奇数；若为偶数则自动校正
+    use_charge_weighting=True,       # 应用电荷排斥阻尼
+    use_aliphatic_weighting=True,    # 应用脂肪族斑块增强
+    use_cython=True                  # 使用 Cython 后端（默认）
+)
+
+epsilon_matrix = result[0]    # 滑动 epsilon 值的二维数组
+seq1_indices  = result[1]    # 沿序列 1 的从 1 开始的索引位置
+seq2_indices  = result[2]    # 沿序列 2 的从 1 开始的索引位置
+```
+
+### 参数参考
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `sequence1` | `str` | *必需* | 第一个氨基酸序列 |
+| `sequence2` | `str` | *必需* | 第二个氨基酸序列 |
+| `window_size` | `int` | `31` | 滑动窗口的大小。必须为奇数；偶数值会自动校正为下一个奇数并发出警告 |
+| `use_charge_weighting` | `bool` | `True` | 在扫描前对成对矩阵应用基于电荷的排斥阻尼 |
+| `use_aliphatic_weighting` | `bool` | `True` | 在扫描前对成对矩阵应用脂肪族斑块增强加权 |
+| `use_cython` | `bool` | `True` | 使用 Cython 加速的 `matrix_scan()` 后端；`False` 回退到纯 Python |
+
+### 返回值
+
+该方法返回一个 **3 元组** `(epsilon_matrix, seq1_indices, seq2_indices)`：
+
+| 元素 | 形状 | 含义 |
+|---------|-------|---------|
+| `epsilon_matrix` | `(L1 - w + 1, L2 - w + 1)` | 局部 epsilon 值的二维矩阵。负值 = 净吸引，正值 = 净排斥 |
+| `seq1_indices` | `(L1 - w + 1,)` | 沿序列 1 的从 1 开始索引的残基位置（每个窗口的中心） |
+| `seq2_indices` | `(L2 - w + 1,)` | 沿序列 2 的从 1 开始索引的残基位置（每个窗口的中心） |
+
+其中 `L1 = len(sequence1)`，`L2 = len(sequence2)`，且 `w = window_size`。
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L705-L790)
+
+## 逐窗口 Epsilon 计算
+
+每个窗口子矩阵经历与全序列计算相同的 epsilon 分解，但是局部应用。内部逻辑如下：
+
+1. **分割** `w × w` 子矩阵为吸引和排斥分量，使用 `null_interaction_baseline` 阈值：低于基线的值为吸引；高于基线的值为排斥。
+2. **基线相减** 两个矩阵，使零代表零交互参考（等效于 poly(GS) 高斯链基线）。
+3. **行平均** 沿列轴（axis 1）对每个矩阵进行操作，产生每行的吸引和排斥贡献。
+4. **求和** 将吸引和排斥的行平均值相加，为该窗口位置生成单个标量 epsilon。
+
+在 **Python 回退** 路径中，这通过嵌套的 `__matrix2eps()` 辅助函数实现，该函数调用 `epsilon_stateless.get_attractive_repulsive_matrices()`，随后进行基线相减和先平均后求和的聚合。在 **Cython 路径** 中，这整个流程在 `matrix_scan()` 内作为原始 C 循环内联，完全消除了 Python 开销。
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L795-L816), [epsilon_stateless.py](/finches/epsilon_stateless.py#L16-L49)
+
+## Cython 加速：`matrix_scan()`
+
+`finches/utils/matrix_manipulation.pyx` 中的 `matrix_manipulation.matrix_scan()` 函数是性能关键实现。它接收预加权矩阵作为类型化内存视图（`double[:, :]`），并在启用了 Cython 编译器指令 `@cython.boundscheck(False)` 和 `@cython.cdivision(True)` 的情况下，完全在 C 级循环中操作，这些指令分别禁用了运行时边界检查和除零检查。
+
+该函数预分配四个 C 类型的 NumPy 数组——输出 `everything` 矩阵，以及工作缓冲区 `attractive_matrix`、`repulsive_matrix` 和 `sub`（大小均为 `window_size × window_size`）。对于每个窗口位置 `(i, j)`，它：
+
+1. 使用原始索引循环将窗口区域从内存视图复制到 `sub` 中
+2. 通过将每个元素与 `null_interaction_baseline` 比较并使用条件赋值，构造 `attractive_matrix` 和 `repulsive_matrix`——全在纯 C 中执行，无 Python 分支
+3. 通过嵌套累加循环计算先求行平均再求和的聚合
+4. 将结果存储在 `everything[i, j]` 中
+
+扫描完成后，它使用公式 `start = int((window_size - 1) / 2) + 1` 计算蛋白质空间索引数组，并通过断言验证索引数组长度与输出矩阵维度匹配。
+
+<CgxTip>Cython 实现避免了在热循环内创建所有 Python 对象——甚至吸引/排斥的分割也是通过对单个数组元素的 C 级 `if/else` 执行的，而不是 NumPy 布尔索引。这就是它比 Python 回退快约 12 倍的原因，因为 Python 回退必须为每个窗口位置构造中间 NumPy 数组。</CgxTip>
+
+来源: [matrix_manipulation.pyx](/finches/utils/matrix_manipulation.pyx#L33-L150)
+
+## Python 回退实现
+
+当 `use_cython=False` 时，该方法回退到纯 Python 实现，该实现遍历所有窗口位置并将每个子矩阵委托给 `__matrix2eps()` 闭包。此路径在功能上等效于 Cython 版本，但由于每窗口的 NumPy 数组切片以及为每个位置调用 `epsilon_stateless.get_attractive_repulsive_matrices()` 的开销，速度明显较慢。
+
+Python 路径还包含一个显式守卫，如果 `window_size` 超过任一序列长度则抛出异常，而 Cython 路径在 `matrix_scan()` 顶部执行相同的检查。
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L836-L872), [matrix_manipulation.pyx](/finches/utils/matrix_manipulation.pyx#L80-L81)
+
+## 索引映射与蛋白质空间约定
+
+一个关键的设计细节：返回的索引数组使用**从 1 开始索引的蛋白质空间编号**，而不是 Python 的从 0 开始索引的约定。对于长度为 `L` 的序列上大小为 `w` 的窗口，第一个索引是 `ceil(w/2)`，最后一个是 `L - ceil(w/2) + 1`。这意味着每个索引指向其对应窗口的**中心残基**，使得输出在 PDB 文件或序列注释的残基编号上下文中可直接解释。
+
+索引映射公式，以代码表示：
+
+```python
+start = int((window_size - 1) / 2) + 1   # 第一个有效中心位置（1 索引）
+end   = (sequence_length - start) + 1      # 最后一个有效中心位置（1 索引）
+indices = np.arange(start, end + 1)        # 包含两端的范围
+```
+
+对于长度为 100 且 `window_size=31` 的序列，这生成索引 16 到 85，意味着第一个窗口跨越残基 1–31（以 16 为中心），最后一个跨越残基 70–100（以 85 为中心）。
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L856-L865), [matrix_manipulation.pyx](/finches/utils/matrix_manipulation.pyx#L136-L148)
+
+## 可视化
+
+`calculate_sliding_epsilon` 的文档字符串包含一个使用 `matplotlib` 的推荐绘图模式：
+
+```python
+import matplotlib.pyplot as plt
+
+result = IMC.calculate_sliding_epsilon(s1, s2, window_size=31)
+
+fig, ax = plt.subplots(figsize=(10, 10))
+plt.imshow(
+    result[0],
+    extent=[result[1][0], result[1][-1], result[2][0], result[2][-1]],
+    aspect='auto',
+    vmax=4, vmin=-4,
+    cmap='seismic',
+    origin='lower'
+)
+plt.colorbar(label='ε')
+plt.xlabel('序列 1 位置')
+plt.ylabel('序列 2 位置')
+plt.show()
+```
+
+关键渲染注意事项：`aspect='auto'` 防止序列长度不同时产生失真；`origin='lower'` 确保残基位置 (1,1) 位于左下角；`extent` 参数将像素坐标映射到蛋白质空间残基编号；`vmax/vmin` 应根据力场进行调整（对于 Mpipi_GGv1，±4 效果良好）。
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L727-L748)
+
+## 计算复杂度
+
+滑动窗口扫描的时间复杂度为 **O((L₁ - w + 1) × (L₂ - w + 1) × w²)**，其中 `w²` 因子来自逐窗口的 epsilon 分解。对于长度为 `N` 的两个序列，在典型窗口大小为 31 的情况下，这意味着大约 `(N - 30)² × 961` 次浮点运算。Cython 实现通过避免中间数组分配和 Python 解释器开销，显著降低了常数因子。
+
+| 场景 | L₁ = L₂ = 200, w = 31 | L₁ = L₂ = 500, w = 31 | L₁ = L₂ = 1000, w = 31 |
+|----------|------------------------|------------------------|-------------------------|
+| 输出矩阵单元 | 170 × 170 = 28,900 | 470 × 470 = 220,900 | 970 × 970 = 940,900 |
+| 每单元运算量 | 961 | 961 | 961 |
+| 总浮点运算量 | ~27.8M | ~212M | ~904M |
+
+来源: [matrix_manipulation.pyx](/finches/utils/matrix_manipulation.pyx#L70-L132)
+
+## 与其他计算模式的关系
+
+滑动窗口计算是通过 `InteractionMatrixConstructor` 提供的三种 epsilon 计算模式之一。了解何时使用每种模式至关重要：
+
+| 模式 | 方法 | 输出 | 用例 |
+|------|--------|--------|----------|
+| **全矩阵** | `calculate_weighted_pairwise_matrix()` | 原始 `L₁ × L₂` 矩阵 | 可视化逐残基交互参数 |
+| **标量 epsilon** | `calculate_epsilon_value()` | 单个 `float` | 比较序列对GPT对之间的整体交互强度 |
+| **滑动窗口** | `calculate_sliding_epsilon()` | 平滑矩阵 + 索引 | 识别空间局部化的交互热点 |
+
+当你需要**空间分辨率**（交互集中在序列中的哪个位置？）而不仅仅是整体倾向时，滑动窗口模式是自然的选择。它可以被理解为原始成对矩阵的平滑版本，其中输出中的每个像素代表局部邻域上的平均交互特征，而不是单个残基对。
+
+<CgxTip>滑动窗口 epsilon 不是原始矩阵的简单卷积（移动平均）。每个窗口位置在平均之前都涉及带有基线相减的完整吸引/排斥分解，这意味着非线性分割操作是逐窗口应用的，而不是全局应用。这保留了每个)每个局部区域内吸引和排斥贡献的物理意义分离。</CgxTip>
+
+来源: [epsilon_calculation.py](/finches/epsilon_calculation.py#L606-L872)
+
+## 后续步骤
+
+- 关于向滑动窗口提供数据的底层矩阵构建，参见 [InteractionMatrixConstructor](8-interactionmatrixconstructor)
+- 关于 Cython 加速内部机制，参见 [Cython Matrix Acceleration](20-cython-matrix-acceleration)
+- 关于 epsilon 向量（逐残基特征）与滑动窗口方法的关系，参见 [Per-Residue Interaction Vectors](7-per-residue-interaction-vectors)
+- 关于在窗口扫描前应用的加权方案，参见 [Sequence Context!Context Weighting Schemes](19-sequence-context-weighting-schemes)
+
+---
+
+## 力场模型
+
+- [深入解析/力场模型/Mpipi 力场参数](https://zread.ai/idptools/finches/11-mpipi-forcefield-parameters)
+
+---
+slug:11-mpipi-forcefield-parameters
+blog_type:normal
+---
+
+
+**Mpipi 力场**是一个用于生物分子相分离的物理驱动粗粒化模型，在本质无序蛋白（IDR）相互作用方面实现了接近定量的准确性。它以 `Mpipi_model` 类的形式实现，定义了一整套成对残基参数和势能函数，这些参数和函数构成了 finches 中每个相互作用计算的基础。该模型结合了 **Wang-Frenkel** 短程势和 **Debye-Hückel 屏蔽库仑** 静电势，并根据实验相分离数据进行了校准。finches 附带了两个参数版本——`Mpipi_original`（源自 Joseph 等人 2021 年的基础论文）和 `Mpipi_GGv1`（一个改进的变体，修正了脂肪族相互作用，增加了 RNA 支持以及针对性的 epsilon/sigma 调整）。
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L1-L20), [mpipi.py](finches/forcefields/mpipi.py#L35-L102)
+
+## 势能架构
+
+在 Mpipi 模型中，两个残基之间的总成对相互作用能是两个独立势能的总和：
+
+$$U_{\text{total}}(r) = U_{\text{Wang-Frenkel}}(r) + U_{\text{Coulomb}}(r)$$
+
+这种分解将**非特异性短程相互作用**（π-π、阳离子-π、疏水）与**静电相互作用**分离开来，每种相互作用由不同的参数集控制。该架构反映在类方法 `compute_full_Mpipi()` 中，该方法委托给 `compute_wang_frenkel()` 和 `compute_colulomb()` 并对它们的结果求和。
+
+```mermaid
+graph TD
+    A["Mpipi_model"] --> B["compute_full_Mpipi(r)"]
+    B --> C["compute_wang_frenkel(r)"]
+    B --> D["compute_colulomb(r)"]
+    C --> E["Wang-Frenkel 势<br/>σ, ε, μ, ν 参数"]
+    D --> F["库仑 + Debye-Hückel<br/>电荷, 介电常数, 盐"]
+    E --> G["SIGMA_ALL, EPSILON_ALL<br/>MU_ALL, NU_ALL"]
+    F --> H["CHARGE_ALL<br/>介电常数, 盐"]
+    G --> I["20×20 成对<br/>pickle 字典"]
+    H --> I
+    B --> J["compute_interaction_parameter()"]
+    J --> K["∫₁σ³σ U_total(r) dr<br/>数值梯形积分"]
+```
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L289-L335), [mpipi.py](finches/forcefields/mpipi.py#L342-L415)
+
+## Wang-Frenkel 势
+
+Wang-Frenkel (WF) 势是一种可调的有限范围相互作用模型，它取代了早期粗粒化框架中使用的 Lennard-Jones 势。每对残基由**四个成对参数**控制：
+
+| 参数 | 符号 | 字典 | 量纲 | 物理意义 |
+|-----------|--------|------------|------------|------------------|
+| 尺寸 | σᵢⱼ | `SIGMA_ALL` | Å | 截断距离；WF 势过零点的位置 |
+| 势阱深度 | εᵢⱼ | `EPSILON_ALL` | kJ/mol | 相互作用势阱的最小能量 |
+| 宽度控制 | μᵢⱼ | `MU_ALL` | 无量纲 | 控制势阱宽度和陡度 |
+| 宽度控制 | νᵢⱼ | `NU_ALL` | 无量纲 | 第二个宽度/陡度参数 |
+
+势能计算如下：
+
+1. 定义相互作用范围：`R_ij = 3 × σ_ij`
+2. 根据 σ、μ、ν 和 R 计算归一化常数 αᵢⱼ
+3. 求值：`U_WF(r) = ε × α × [(σ/r)^(2μ) - 1] × [(R/r)^(2μ) - 1]^(2ν)`
+
+该势能在 `r = σ` 和 `r = R = 3σ` 处趋于零，势阱最小值出现在这些边界之间。这种有限范围的设计对于粗粒化模拟至关重要，因为它避免了 Lennard-Jones 势的长程尾迹伪影。
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L553-L608)
+
+## 具 Debye-Hückel 屏蔽的库仑势
+
+静电分量使用标准的库仑势，并通过 **Debye-Hückel 屏蔽** 进行增强，以模拟依赖于盐浓度的衰减：
+
+$$U_{\text{Coulomb}}(r_{ij}) = \frac{C^2 \cdot N_A \cdot q_i \cdot q_j}{4\pi \varepsilon_0 \cdot \varepsilon_r \cdot r_{ij}} \times e^{-\kappa \cdot r_{ij}}$$
+
+其中：
+- **qᵢ, qⱼ** 是来自 `CHARGE_ALL` 的残基电荷（以基本电荷单位计）
+- **ε_r** 是溶剂介电常数（默认值：水的 80.0）
+- **κ = √(salt) / 3.06** 是反 Debye 屏蔽长度，盐浓度单位为摩尔浓度
+- 指数项提供依赖于距离的屏蔽；在盐浓度为 0 时，屏蔽被禁用（κ = 0）
+
+该函数接受对 `dielectric` 和 `salt` 的逐次调用覆盖，使得无需重新实例化模型对象即可进行依赖于条件的探索。
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L481-L546)
+
+## 谐键势
+
+标准的谐势用于约束相邻珠子之间的主链键长：
+
+$$U_{\text{harmonic}}(r) = \frac{1}{2} k \cdot (100 \cdot (r - r_{\text{ref}}))^2 / 1000$$
+
+乘以 100 的因子将 Å 转换为 pm，除以 `/1000` 将 J 转换为 kJ。由模式定义了两种理想键长：
+
+| 模式 | r_ref (Å) | k (J·mol⁻¹·pm⁻²) | 应用 |
+|------|-----------|---------------------|-------------|
+| `protein` | 3.81 | 8.03 (默认) | 多肽主链 |
+| `nucleic` | 5.00 | 8.03 (默认) | RNA 主链 |
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L426-L476)
+
+## 相互作用参数计算
+
+`compute_interaction_parameter()` 方法通过在 1σ 到 3σ 之间对组合势能进行数值积分，将完整的距离依赖势能转换为**单一标量相互作用参数**：
+
+```python
+interaction_param = np.trapezoid(combo[s1:s3], x=r[s1:s3])
+```
+
+该积分捕获了在 WF 势的物理意义范围内净相互作用强度。该方法返回一个元组：`(interaction_param, full_potential_profile, idx_1σ, idx_3σ, distance_array)`，同时提供了汇总标量和用于可视化或进一步分析的原始数据。
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L342-L415)
+
+## 参数版本与配置
+
+`Mpipi_model` 类支持两个主要版本，每个版本都有独特的参数文件和校准常数：
+
+| 版本 | 参数文件 | charge_prefactor | null_interaction_baseline | 描述 |
+|---------|----------------|------------------|--------------------------|-------------|
+| `Mpipi_original` | `sigma.pickle`, `epsilon.pickle` 等 | 0.20 | -0.066265 | Joseph 等人 2021 年的原始参数 |
+| `Mpipi_GGv1` | `sigma_ggv1.pickle`, `epsilon_ggv1.pickle` 等 | 0.20 | -0.128533 | 经过脂肪族修正、RNA 支持及针对性微调的改进版 |
+| `OLD_Mpipi_GGv1` | `old_sigma_ggv1.pickle` 等 | 0.20 | -0.128533 | 旧版快照；与 `Mpipi_GGv1` 几乎相同 |
+
+**`charge_prefactor`**（两个版本均为 0.20）缩放电荷权重——这是一种减少带相反电荷残基之间排斥的机制，以反映侧链取向自由度和 pKa 偏移。**`null_interaction_baseline`** 定义了吸引/排斥阈值，经过校准使得 poly(GS) 重复序列产生 ε ≈ 0（即表现为高斯链）。
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L19-L34), [mpipi.py](finches/forcefields/mpipi.py#L115-L187)
+
+## 模型实例化
+
+`Mpipi_model` 构造函数加载预计算的 pickle 字典并配置环境：
+
+```python
+from finches.forcefields.mpipi import Mpipi_model
+
+# 默认: 生理条件下的 Mpipi_GGv1
+model = Mpipi_model(version='Mpipi_GGv1', dielectric=80.0, salt=0.150)
+
+# 原始 Joseph 等人的参数
+model_original = Mpipi_model(version='Mpipi_original')
+
+# 自定义参数目录（必须包含五个必需的 pickle 文件）
+model_custom = Mpipi_model(version='Mpipi_original', input_directory='/path/to/params')
+```
+
+对于自定义目录，需要五个 pickle 文件：`sigma.pickle`、`epsilon.pickle`、`nu.pickle`、`mu.pickle` 和 `charge.pickle`。每个文件都包含一个嵌套字典，以 `[residue_1][residue_2]`（或电荷的 `[residue]`）作为索引，涵盖所有 20 种标准氨基酸。`Mpipi_GGv1` 版本期望文件带有 `_ggv1` 后缀。
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L35-L102), [mpipi.py](finches/forcefields/mpipi.py#L107-L112)
+
+## 支持的残基类型
+
+该模型通过 `ALL_RESIDUES_TYPES` 定义了两个残基组：
+
+- **蛋白质残基** (20): `M, G, K, T, Y, A, D, E, V, L, Q, W, R, F, S, H, N, P, C, I`
+- **RNA 残基** (1): `U`
+
+`Mpipi_GGv1` 版本额外定义了**依赖于上下文的脂肪族伪残基**（小写 `a, l, m, i, v, b, o, x, y, z`），它们代表不同局部序列上下文中的脂肪族残基。这些由脂肪族加权方案在内部使用，并不在输入序列中直接指定。
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L16-L17), [mpipi.py](finches/forcefields/mpipi.py#L199-L199)
+
+## Mpipi_GGv1 参数推导流程
+
+`Mpipi_GGv1` 参数是通过一系列确定性的修改函数从 `Mpipi_original` 派生而来的，这些函数在构建笔记本中执行。流程顺序至关重要，因为后续步骤依赖于早期步骤创建的参数：
+
+```mermaid
+flowchart TD
+    A["Mpipi_original<br/>pickle 文件"] --> B["步骤 1: ADD_RNA_U_ALL<br/>添加 U 残基参数"]
+    B --> C["步骤 2: CORRECT_aliphatic_aliphatic_ALL<br/>使用 Kyte-Doolittle 标度<br/>重建 ILVAM:ILVAM epsilon"]
+    C --> D["步骤 3: CREATE_new_aliphatic_residues_ALL<br/>定义依赖于上下文的<br/>脂肪族伪残基"]
+    D --> E["步骤 4: SCALE_aliphatic_group_EPSILON<br/>根据局部脂肪族上下文<br/>缩放 epsilon (0×, 1.5×, 3×)"]
+    E --> F["步骤 5a: ENLARGE_Proline_SIGMA<br/>所有 P:X 对的 sigma +33%"]
+    E --> G["步骤 5b: STRENGTHEN_small_polar_EPSILON<br/>G:G 和 G:S 的 epsilon +119%"]
+    E --> H["步骤 5c: WEAKEN_Aromatic_Charge_EPSILON<br/>YFW:RED 对的 epsilon -60%"]
+    F --> I["Mpipi_GGv1<br/>pickle 文件"]
+    G --> I
+    H --> I
+```
+
+来源: [build_MpipiGG_v1.ipynb](finches/data/Mpipi/build_MpipiGG_v1.ipynb#L1-L376), [mPiPi_GGv1_modification_fxns.py](finches/data/Mpipi/mPiPi_GGv1_modification_fxns.py#L1-L12)
+
+### 逐步修改详情
+
+**步骤 1 — RNA 添加** (`ADD_RNA_U_ALL`)：为所有 20 个氨基酸:U 对注入尿嘧啶 (U) 参数，源自 `defined_RNA_params.py`。这必须首先执行，因为后续步骤假设参数字典中已存在 U。U 的电荷为 −0.75，并具有独特的逐对 sigma/epsilon 值。
+
+**步骤 2 — 脂肪族:脂肪族修正** (`CORRECT_aliphatic_aliphatic_ALL`)：将原始的 ILVAM:ILVAM epsilon 值替换为从 **Kyte-Doolittle 疏水性标度** 派生的值。原始 Mpipi 表现出违反直觉的现象，即 epsilon 随疏水性增加而减小；此修正反转了这种依赖关系：`NEW_ε = |slope| × (KD₁ + KD₂) + intercept/α`，其中斜率 = 0.00839，截距 = 0.07555，α = 4.3。同时将 I:I 和 I:V 的 MU 修正为 2.0。
+
+**步骤 3 — 依赖上下文的脂肪族残基** (`CREATE_new_aliphatic_residues_ALL`)：创建 10 个新的伪残基代码（"group 1" 的 a,l,m,i,v 和 "group 2" 的 b,o,x,y,z），它们镜像 A,L,M,I,V，但允许基于局部脂肪族邻居数量具有不同的相互作用强度。每个伪残基从其父氨基酸继承所有成对参数。
+
+**步骤 4 — 脂肪族组 Epsilon 缩放** (`SCALE_aliphatic_group_EPSILON`)：对三个脂肪族组应用依赖于上下文的缩放：
+
+| 组 | 残基 | 上下文 | Epsilon 缩放因子 | 有效乘数 |
+|-------|----------|---------|---------------|---------------------|
+| grp0 | A, L, M, I, V | 无脂肪族邻居 | 0 | 1.0× (不变) |
+| grp1 | a, l, m, i, v | 一个脂肪族邻居 | 0.5 | 1.5× |
+| grp2 | b, o, x, y, z | 两个脂肪族邻居 | 2.0 | 3.0× |
+
+**步骤 5a — 脯氨酸 Sigma 放大** (`ENLARGE_Proline_SIGMA`)：将所有 P:X 对的 σ 增加 33%，反映了脯氨酸的结构刚性和更大的有效排除体积。
+
+**步骤 5b — 小极性强化** (`STRENGTHEN_small_polar_EPSILON`)：将 G:G 和 G:S 的 epsilon 增加 119%，反映了原始参数化中甘氨酸和丝氨酸小极性相互作用的低估。
+
+**步骤 5c — 芳香族:电荷减弱** (`WEAKEN_Aromatic_Charge_EPSILON`)：将 YFW:RED 对的 epsilon 减少 60%，修正了高估的芳香族-带电残基阳离子-π 相互作用。
+
+来源: [mPiPi_GGv1_modification_fxns.py](finches/data/Mpipi/mPiPi_GGv1_modification_fxns.py#L17-L89), [mPiPi_GGv1_modification_fxns.py](finches/data/Mpipi/mPiPi_GGv1_modification_fxns.py#L95-L193), [mPiPi_GGv1_modification_fxns.py](finches/data/Mpipi/mPiPi_GGv1_modification_fxns.py#L199-L373), [mPiPi_GGv1_modification_fxns.py](finches/data/Mpipi/mPiPi_GGv1_modification_fxns.py#L376-L467), [defined_RNA_params.py](finches/data/Mpipi/defined_RNA_params.py#L1-L28)
+
+## RNA (尿嘧啶) 参数
+
+`Mpipi_GGv1` 版本包含了 RNA 尿嘧啶 (U) 残基与所有 20 种氨基酸相互作用的参数，源自 LAMMPS 输入文件 (`lammps_Mpipi_v5_NEWPARAMS.in`)。主要特征：
+
+- **电荷**：U = −0.75（核苷酸碱基上的部分负电荷）
+- **U:U 自相互作用**：ε = 0.305，σ = 8.17 Å，ν = 1.0，μ = 3.0
+- **AA:U 相互作用**：Epsilon 范围从 0.097 (K:U，最弱) 到 0.428 (W:U，最强)，反映了芳香族残基与 RNA 碱基之间 π-π 堆积的主导地位
+- **Sigma 值**：范围从 6.43 Å (G:U) 到 8.17 Å (U:U)，所有 AA:U 对的 ν = 1.0 且 μ = 3.0
+
+来源: [defined_RNA_params.py](finches/data/Mpipi/defined_RNA_params.py#L1-L28)
+
+## 参数数据文件
+
+所有参数都作为序列化的 Python pickle 字典存储在 `finches/data/Mpipi/` 中：
+
+| 文件 | 版本 | 结构 | 内容 |
+|------|---------|-----------|----------|
+| `sigma.pickle` | original | `dict[R1][R2] → float` | 20×20 成对尺寸参数 (Å) |
+| `epsilon.pickle` | original | `dict[R1][R2] → float` | 20×20 成对势阱深度 (kJ/mol) |
+| `nu.pickle` | original | `dict[R1][R2] → float` | 20×20 ν 宽度参数 |
+| `mu.pickle` | original | `dict[R1][R2] → float` | 20×20 μ 宽度参数 |
+| `charge.pickle` | original | `dict[R] → float` | 20 个单残基电荷 |
+| `*_ggv1.pickle` | GGv1 | 相同结构，已扩展 | 包含 U 和脂肪族伪残基 |
+| `old_*_ggv1.pickle` | legacy | 与 GGv1 相同 | 动态计算的 GGv1 值的快照 |
+
+<CgxTip>`Mpipi_GGv1` pickle 文件包含**超过 20 个残基**——它们包括 U（尿嘧啶）和 10 个小写脂肪族伪残基。如果你直接加载这些文件，预计字典将由 31 个残基代码作为键，而不是 20 个。</CgxTip>
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L115-L184), [build_MpipiGG_v1.ipynb](finches/data/Mpipi/build_MpipiGG_v1.ipynb#L337-L350)
+
+## 与前端和 IMC 的连接
+
+`Mpipi_model` 对象作为两个上游组件的参数后端：
+
+1. **`InteractionMatrixConstructor`** — 接受 `Mpipi_model` 实例，并通过 `compute_interaction_parameter()` 构建成对相互作用参数的查找表，然后提供带有电荷和脂肪族加权方案的滑动窗口 epsilon 计算。
+
+2. **`Mpipi_frontend`** — 最高级别的用户界面，自动实例化 `Mpipi_model("Mpipi_GGv1")` 并将其包装在 `InteractionMatrixConstructor` 中，暴露出 `epsilon()`、`intermolecular_idr_matrix()` 和 `interaction_figure()` 方法。
+
+```mermaid
+graph LR
+    A["Mpipi_frontend"] -->|实例化| B["Mpipi_model<br/>(version='Mpipi_GGv1')"]
+    A -->|包装于| C["InteractionMatrixConstructor"]
+    C -->|调用| D["compute_interaction_parameter()"]
+    D --> B
+    B --> E["Pickle 参数文件<br/>(finches/data/Mpipi/)"]
+```
+
+<CgxTip>使用前端时，你永远不需要直接实例化 `Mpipi_model`——它会在内部以 `Mpipi_GGv1` 创建。如果你需要 `Mpipi_original` 或自定义条件，请自行实例化 `Mpipi_model` 和 `InteractionMatrixConstructor` 以获得完全控制。</CgxTip>
+
+来源: [mpipi_frontend.py](finches/frontend/mpipi_frontend.py#L7-L21), [epsilon_calculation.py](finches/epsilon_calculation.py#L18-L165)
+
+## 核心 API 参考
+
+| 方法 | 签名 | 返回值 | 描述 |
+|--------|-----------|---------|-------------|
+| `compute_wang_frenkel` | `(residue_1, residue_2, r)` | float 或 np.array | 距离 r 处的 WF 势 |
+| `compute_colulomb` | `(residue_1, residue_2, r, dielectric, salt)` | float 或 np.array | 距离 r 处的屏蔽库仑势 |
+| `compute_full_Mpipi` | `(residue_1, residue_2, r, dielectric, salt)` | float 或 np.array | 总势能 = WF + 库仑 (J/mol) |
+| `compute_interaction_parameter` | `(residue_1, residue_2, r, dielectric, salt)` | tuple | (积分, 轮廓, idx_1σ, idx_3σ, r_array) |
+
+来源: [mpipi.py](finches/forcefields/mpipi.py#L209-L238), [mpipi.py](finches/forcefields/mpipi.py#L243-L283), [mpipi.py](finches/forcefields/mpipi.py#L289-L335), [mpipi.py](finches/forcefields/mpipi.py#L342-L415)
+
+## 延伸阅读
+
+- 对于使用这些参数的已校准前端：[Mpipi 与 CALVADOS 前端](5-mpipi-and-calvados-frontends)
+- 对于相互作用参数如何输入到矩阵构建中：[InteractionMatrixConstructor](8-interactionmatrixconstructor)
+- 对于替代的 CALVADOS 参数化：[CALVADOS 力场参数](12-calvados-forcefield-parameters)
+- 对于定义你自己的力场：[自定义力场定义](13-custom-forcefield-definition)
+
+---
+
+- [深入解析/力场模型/CALVADOS 力场参数](https://zread.ai/idptools/finches/12-calvados-forcefield-parameters)
+
+---
+slug:12-calvados-forcefield-parameters
+blog_type:normal
+---
+
+
+**CALVADOS**（CoArse-grained LAttice model for Variable DesOrdered Sequences，可变无序序列粗粒化晶格模型）力场为本质无序蛋白质相互作用提供了一种基于物理的粗粒化模型。在 finches 中，CALVADOS 被实现为一种对势，它结合了 **Ashbaugh-Hatch Lennard-Jones** 势（用于捕获空间位阻与粘性相互作用）与 **Debye-Hückel Yukawa** 势（用于捕获屏蔽静电相互作用）。该模型依赖于条件——盐浓度、pH 值和温度均会调节最终的相互作用参数，这使得 CALVADOS 在探索溶液条件如何重塑相行为方面具有独特的优势。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L1-L51)
+
+## 模型架构
+
+CALVADOS 将两个粗粒化残基之间的对相互作用能分解为两种物理上独立的贡献。**Ashbaugh-Hatch (AH) 势**是一种修正的 Lennard-Jones 势，它引入了逐残基的“粘性”参数 (λ)，使得吸引势阱的深度可以随氨基酸类型变化，同时保持排斥核心不变。**Yukawa 势**实现了 Debye-Hückel 静电学，其指数衰减由反 Debye 长度 (κ) 控制，而 κ 本身取决于盐浓度和温度。这两个势独立计算并求和，得出总对势能。
+
+```mermaid
+graph TD
+    A[calvados_model] --> B[Ashbaugh-Hatch Potential]
+    A --> C[Yukawa Potential]
+    
+    B --> B1[σ: pairwise sigma<br/>from residue diameter]
+    B --> B2[λ: pairwise lambda<br/>from stickiness matrix]
+    B --> B3[ε_LJ: LJ epsilon<br/>4.184 × 0.2]
+    
+    C --> C1[κ: inverse Debye length<br/>salt & temp dependent]
+    C --> C2[q_i × q_j: charge cross-product<br/>pH dependent for His]
+    C --> C3[l_B: Bjerrum length<br/>temp dependent]
+    
+    B & C --> D[Total Energy:<br/>E_AH + E_Yukawa]
+    D --> E[compute_interaction_parameter<br/>Finite integral σ to 3σ]
+```
+
+其核心架构洞察在于，CALVADOS 参数**并非静态查找表**——每当使用新条件实例化模型时，Yukawa 预因子都会被重新计算，这意味着同一个 `calvados_model` 对象在不同的盐浓度、pH 值或温度条件下会产生不同的对势能。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L75-L201), [calvados.py](finches/forcefields/calvados.py#L402-L483)
+
+## 版本配置
+
+CALVADOS 提供了两组参数集，它们在校准的粘性值 (λ) 和经验校正常数上有所不同：
+
+| 属性 | CALVADOS1 | CALVADOS2 |
+|---|---|---|
+| **charge_prefactor** | `nan`（未预计算） | `0.7` |
+| **null_interaction_baseline** | `nan`（未预计算） | `-0.45` |
+| **状态** | 遗留 / 未校准 | **推荐** |
+| **RNA 支持** | 否 | 否 |
+
+**`charge_prefactor`** 用于缩放在计算 epsilon 时应用局部电荷上下文权重的强度。**`null_interaction_baseline`** 定义了相互作用阈值，低于该阈值的对项将被归类为“吸引”——该校准使得 poly(GS) 重复序列产生 ε ≈ 0，代表非相互作用的高斯链参考态。对于 CALVADOS2，该基线设定为 −0.45（从原始值 −0.478 略微调，以改善经验吻合度）。
+
+<CgxTip>CALVADOS1 缺少预计算的 `charge_prefactor` 和 `null_interaction_baseline` 值。如果你需要这些值，请在构造 `InteractionMatrixConstructor` 时设置 `compute_forcefield_dependencies=True`，或者使用自带经验证默认值的 CALVADOS2。</CgxTip>
+
+来源：[calvados.py](finches/forcefields/calvados.py#L63-L71)
+
+## 依赖条件的参数
+
+`_genParams` 方法在模型初始化时会重新计算静电参数，这使得 CALVADOS 对溶液条件具有独特的响应能力。该方法推导出三个物理量：
+
+**Bjerrum 长度 (l_B)**——两个单位电荷之间的静电能等于热能 (k_BT) 时的距离。利用经验公式 `ε_w(T) = 5321/T + 233.76 − 0.9297T + 0.001417T² − 0.8292×10⁻⁶T³`，根据水的温度依赖介电常数计算得出，随后计算 `l_B = e²/(4πε₀ε_w) × N_A × 1000 / (RT)`。
+
+**反 Debye 长度 (κ)**——设定 Yukawa 势的屏蔽衰减长度。计算公式为 `κ = √(8π × l_B × I × N_A/10)`，其中 `I` 为离子强度（以 M 为单位的盐浓度）。盐浓度越高 → κ 越大 → 静电作用范围越短。
+
+**组氨酸电荷**——His 通过 `q_His = 1/(1 + 10^(pH−6))` 接收一个依赖于 pH 的分数电荷，反映了其 pKa ≈ 6。在生理 pH (7.4) 下，His 带有 ≈ 0.038 个电荷；在 pH 6 时，带有 0.5 个电荷。
+
+| 条件 | 默认值 | 物理效应 |
+|---|---|---|
+| `salt` | 0.150 M | 屏蔽静电相互作用；盐浓度越高，Yukawa 衰减越快 |
+| `pH` | 7.4 | 调节 His 电荷；对其他残基影响极小 |
+| `temp` | 288 K | 缩放热能、Bjerrum 长度和 Debye 屏蔽 |
+
+来源：[calvados.py](finches/forcefields/calvados.py#L205-L254)
+
+## 逐残基参数表
+
+CALVADOS 模型从序列化的 pickle 文件 (`calvados_residues.pickle`) 中加载逐残基参数，该文件同时以三字母和单字母氨基酸代码进行索引。每个残基条目包含：
+
+| 参数 | 符号 | 描述 |
+|---|---|---|
+| **sigma** | σ | 范德华直径——设定 LJ 接触距离 |
+| **lambda** | λ | 粘性参数——缩放 LJ 吸引势阱深度（特定于版本） |
+| **charge** | q | 参考 pH 下的残基净电荷 |
+
+**对 sigma 映射**和**对 lambda 映射**使用 Lorentz 组合规则（算术平均值）构建：`σ_ij = (σ_i + σ_j)/2` 和 `λ_ij = (λ_i + λ_j)/2`。这些 20×20 的对称矩阵作为 `self.sigmamap` 和 `self.lambdamap` 存储在模型对象上。
+
+支持 20 种标准氨基酸：M, G, K, T, Y, A, D, E, V, L, Q, W, R, F, S, H, N, P, C, I。**不支持 RNA 残基 (U)**——如果输入序列中出现尿嘧啶，前端的专用 `RNA_check` 装饰器将抛出 `ValueError`。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L186-L200), [calvados_frontend.py](finches/frontend/calvados_frontend.py#L16-L25), [fingerprints.py](finches/data/fingerprints.py#L39-L74)
+
+## Ashbaugh-Hatch 势
+
+Ashbaugh-Hatch 势是一种移位的 Lennard-Jones 势，带有逐对粘性参数 λ，它在不改变排斥核心的情况下调节吸引势阱。这使得不同的氨基酸对在共享共同排除体积直径的同时，可以具有不同的相互作用强度：
+
+**对于 r < 2^(1/6) × σ**（LJ 极小值内部）：
+```
+E_AH = 4ε[(σ/r)¹² − (σ/r)⁶ − λ·shift] + ε(1−λ)
+```
+
+**对于 r ≥ 2^(1/6) × σ**（LJ 极小值外部）：
+```
+E_AH = 4ελ[(σ/r)¹² − (σ/r)⁶ − shift]
+```
+
+其中 `shift = (σ/r_c)¹² − (σ/r_c)⁶` 确保势能在截断处趋于零，`ε_LJ = 4.184 × 0.2 = 0.8368 kJ/mol`（LJ 能量标度）。默认的 LJ 截断为 `r_c = 2.0 nm`。请注意，Ashbaugh-Hatch 势**不依赖于温度**——只有 Yukawa 项会随温度变化而改变。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L449-L474)
+
+## Yukawa (Debye-Hückel) 势
+
+Yukawa 势实现了带有指数衰减的屏蔽库仑静电学：
+
+```
+E_Yukawa = q_ij × [exp(−κr)/r − shift]
+```
+
+其中 `q_ij = q_i × q_j × l_B × RT` 为对电荷预因子（由残基电荷的交叉乘积构建的 20×20 矩阵），`shift = exp(−κ × r_cut)/r_cut` 确保势能在 Yukawa 截断处（默认 `r_cut = 4.0 nm`）消失。任意距离处的**总能量**即为二者之和：`E_total = E_AH + E_Yukawa`。
+
+<CgxTip>`compute_calvados_energy` 函数期望距离单位为**纳米**（与 CALVADOS 原生单位一致），而 `compute_full_calvados` 接受的距离单位为**埃**并在内部执行转换。这一单位边界是常见的混淆源——务必向模型方法传递埃，而仅向独立能量函数传递纳米。</CgxTip>
+
+来源：[calvados.py](finches/forcefields/calvados.py#L476-L483)
+
+## 相互作用参数计算
+
+`compute_interaction_parameter` 方法将完整的依赖于距离的势能转换为单个标量相互作用强度。它通过使用梯形法则在 **σ 到 3σ** 之间对组合的 AH + Yukawa 势进行数值积分来实现这一点：
+
+```python
+interaction_param = np.trapezoid(combo[s1:s3], x=r_angstroms[s1:s3])
+```
+该有限积分捕获了势能中与热相关的区域——在 σ 内部，能量由排除体积主导；而在 3σ 之外，相互作用可忽略不计。返回的元组包含：
+
+| 索引 | 类型 | 内容 |
+|---|---|---|
+| `[0]` | float | 相互作用参数（从 σ 到 3σ 的积分） |
+| `[1]` | np.array | 完整的对势能与距离关系曲线 |
+| `[2]` | int | 距离数组中 σ 的索引 (Å) |
+| `[3]` | int | 距离数组中 3σ 的索引 (Å) |
+| `[4]` | np.array | 距离数组 (Å) |
+
+这些相互作用参数填充了由 `InteractionMatrixConstructor` 使用的查找表，用于所有下游的 epsilon 计算、滑动窗口矩阵和相图计算。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L327-L396)
+
+## 实例化与使用
+
+`calvados_model` 类是 CALVADOS 参数的直接接口。它通过版本字符串和可选的条件参数进行构造：
+
+```python
+from finches.forcefields.calvados import calvados_model
+
+# 生理条件下的默认 CALVADOS2
+model = calvados_model('CALVADOS2', salt=0.150, pH=7.4, temp=288)
+
+# 高盐条件——静电屏蔽更强
+model_high_salt = calvados_model('CALVADOS2', salt=0.500, pH=7.4, temp=310)
+
+# 计算精氨酸和天冬氨酸之间的对相互作用
+result = model.compute_interaction_parameter('R', 'D')
+print(f"Interaction parameter: {result[0]:.4f}")
+
+# 计算特定距离下的完整势能（单位为埃）
+distances = [3.0, 5.0, 8.0, 12.0]
+energies = model.compute_full_calvados('R', 'D', distances)
+```
+
+随后，该模型对象被传递给 `InteractionMatrixConstructor` 以进行更高层级的计算。对于大多数用户，`CALVADOS_frontend` 提供了更便捷的接口——它会自动实例化一个 CALVADOS2 模型并封装 `InteractionMatrixConstructor`：
+
+```python
+from finches.frontend.calvados_frontend import CALVADOS_frontend
+
+calvados = CALVADOS_frontend(salt=0.150, pH=7.4, temp=288)
+
+# 标量 epsilon 值
+eps = calvados.epsilon('RGGGGGGGGG', 'DDDDDDDDDD')
+
+# 滑动窗口相互作用矩阵
+matrix_result = calvados.intermolecular_idr_matrix(seq1, seq2, window_size=31)
+```
+
+来源：[calvados.py](finches/forcefields/calvados.py#L75-L125), [calvados_frontend.py](finches/frontend/calvados_frontend.py#L28-L44)
+
+## 内置参数常数
+
+在 `calvados_model` 构造函数中硬编码了几个常数，反映了原始 CALVADOS 模拟参数：
+
+| 常数 | 值 | 来源 |
+|---|---|---|
+| `eps_factor` | 0.2 | LJ 能量缩放因子 |
+| `lj_eps` | 0.8368 kJ/mol | `4.184 × eps_factor` |
+| `cutoff` | 2.0 nm | AH 势截断距离 |
+| `yukawa_r_cut` | 4.0 nm | Yukawa 势截断距离 |
+
+这些数值源自 CALVADOS 源码：`eps_factor` 和 `lj_eps` 来自 `single_chain/simulate.py` 的第 65 行，`cutoff` 来自 `direct_coexistence/submit.py` 的第 29 行，`yukawa_r_cut` 来自模拟脚本的第 104–105 行。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L164-L176)
+
+## CALVADOS 与 Mpipi 对比
+
+CALVADOS 和 Mpipi 代表了 IDP 相互作用的两种截然不同的粗粒化哲学：
+
+| 特性 | CALVADOS | Mpipi |
+|---|---|---|
+| **势能形式** | Ashbaugh-Hatch + Yukawa | 修正 Mie + Debye-Hückel |
+| **粘性** | 逐残基 λ 参数 | 逐对 ε 参数 |
+| **条件依赖性** | 盐浓度、pH、温度均调节参数 | 盐浓度调节；温度/pH 暴露较少 |
+| **RNA 支持** | ❌ 不支持 | ✅ 支持 |
+| **版本** | CALVADOS1, CALVADOS2 | Mpipi_original, Mpipi_GGv1 |
+| **null_interaction_baseline** | −0.45 (CALVADOS2) | −0.1285 (Mpipi_GGv1) |
+| **charge_prefactor** | 0.7 (CALVADOS2) | 0.20 (Mpipi_GGv1) |
+
+CALVADOS2 中较高的 `charge_prefactor`（0.7 对比 0.2）意味着电荷上下文权重在 CALVADOS 的 epsilon 计算中发挥着大得多的作用。相反，CALVADOS2 中更负的 `null_interaction_baseline`（−0.45 对比 −0.13）移动了吸引/排斥的阈值，反映了两种力场不同的能量标度。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L63-L71), [mpipi.py](finches/forcefields/mpipi.py#L19-L33)
+
+## 自定义参数目录
+
+默认情况下，`calvados_model` 从内置的 `finches/data/calvados/` 目录加载参数。你可以指向一个包含 `calvados_residues.pickle` 文件的自定义目录，以替换替代的逐残基参数（例如，修改后的粘性值或非标准残基类型）：
+
+```python
+model = calvados_model('CALVADOS2', input_directory='/path/to/custom/params')
+```
+
+该 pickle 文件必须是一个 DataFrame，包含残基属性列（三字母代码、单字母代码、sigma、电荷以及特定版本的 lambda 列）。如果指定的版本列在 pickle 中不存在，将抛出异常并提示检查可用版本。
+
+来源：[calvados.py](finches/forcefields/calvados.py#L130-L153)
+
+## 相关页面
+
+- 关于封装此模型的高层前端 API，请参阅 [Mpipi 和 CALVADOS 前端](5-mpipi-and-calvados-frontends)
+- 关于使用这些参数的 `InteractionMatrixConstructor`，请参阅 [InteractionMatrixConstructor](8-interactionmatrixconstructor)
+- 关于 Mpipi 力场的对应部分，请参阅 [Mpipi 力场参数](11-mpipi-forcefield-parameters)
+- 关于定义完全自定义力场，请参阅 [自定义力场定义](13-custom-forcefield-definition)
+- 关于这些参数如何输入相行为分析，请参阅 [Flory-Huggins 相图](14-flory-huggins-phase-diagrams)
+
+---
+
+- [深入解析/力场模型/自定义力场定义](https://zread.ai/idptools/finches/13-custom-forcefield-definition)
+
+---
+slug:13-custom-forcefield-definition
+blog_type:normal
+---
+
+
+finches 中的 `custom_model` 类提供了一个**用户自定义力场接口**，允许你在任意残基类型集合之间定义任意的成对相互作用参数，然后在整个 finches 分析流水线中无缝使用这些参数——从 [InteractionMatrixConstructor](8-interactionmatrixconstructor) 一直到 [Flory-Huggins 相图](14-flory-huggins-phase-diagrams)。返回的对象在架构上与内置的 `Mpipi_model` 和 `calvados_model` 对象完全一致，实现了 finches 其余部分所期望的相同 `compute_interaction_parameter` 契约。这意味着你可以在任何接受内置力场的地方替换为自定义力场，而无需修改下游代码。
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L1-L8), [epsilon_calculation.py](finches/epsilon_calculation.py#L17-L70)
+
+## 力场接口契约
+
+finches 中的每个力场对象——无论是内置还是自定义——都必须暴露 `InteractionMatrixConstructor` 所依赖的三个属性。这种**接口模式**使得系统具有可扩展性：
+
+| 必需属性 | 类型 | 用途 |
+|---|---|---|
+| `compute_interaction_parameter(r1, r2, **conditions)` | 方法 | 返回残基对的 `(interaction_value, condition_dict)` |
+| `ALL_RESIDUES_TYPES` | 列表的列表 | 定义哪些残基可以在同一序列中共存 |
+| `CONFIGS` | 字典 | 包含 `'charge_prefactor'` 和 `'null_interaction_baseline'` |
+
+`InteractionMatrixConstructor` 调用 `parameters.compute_interaction_parameter(r1, r2)[0]` 来构建其内部查找表，并读取 `ALL_RESIDUE_TYPES` 来验证序列组成。`CONFIGS` 字典提供了电荷加权和吸引/排斥基线的默认校准值。
+
+来源: [epsilon_calculation.py](finches/epsilon_calculation.py#L72-L89), [epsilon_calculation.py](finches/epsilon_calculation.py#L227-L251)
+
+## 类签名与参数
+
+```python
+from finches.forcefields.custom_model import custom_model
+
+my_model = custom_model(
+    version,
+    input_dictionary,
+    valid_residue_groups=[],
+    condition_dictionary={},
+    condition_dependence_function=None
+)
+```
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L29-L135)
+
+### `version` : str
+
+映射到模块顶部 `CUSTOM_MODEL_CONFIGS` 字典中某个键的字符串标识符。该字典存储特定版本的校准常数——具体为 `charge_prefactor` 和 `null_interaction_baseline`。如果你的版本字符串在 `CUSTOM_MODEL_CONFIGS` 中不存在，初始化时将引发 `KeyError`。
+
+**要添加新版本**，你必须在实例化之前扩展 `CUSTOM_MODEL_CONFIGS` 字典：
+
+```python
+from finches.forcefields.custom_model import CUSTOM_MODEL_CONFIGS
+
+CUSTOM_MODEL_CONFIGS['MY_VERSION'] = {}
+CUSTOM_MODEL_CONFIGS['MY_VERSION']['charge_prefactor'] = 0.25
+CUSTOM_MODEL_CONFIGS['MY_VERSION']['null_interaction_baseline'] = -0.12
+```
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L17-L26), [custom_model.py](finches/forcefields/custom_model.py#L236-L239)
+
+### `input_dictionary` : dict
+
+定义所有成对相互作用参数的核心数据结构。键是**以下划线分隔的残基对**，其中每个残基是单个字符；值是相互作用强度（float 或 int）。**每种成对组合必须且只能定义一次。** 该类会自动将输入对称化——如果你定义了 `'A_B': 1.0`，则反向对 `B_A` 会被隐式设置为相同的值。
+
+```python
+my_dict = {
+    'A_A': -1, 'A_B':  1, 'A_C': -2.4,
+    'B_B': -2, 'B_C':  1,
+    'C_C':  2
+}
+```
+
+这个扁平字典在内部被转换为**嵌套的字典的字典**，存储为 `self.parameters`，从而实现 `O(1)` 查找：
+
+```python
+self.parameters = {
+    'A': {'A': -1,   'B':  1,   'C': -2.4},
+    'B': {'A':  1,   'B': -2,   'C':  1},
+    'C': {'A': -2.4, 'B':  1,   'C':  2}
+}
+```
+
+在初始化时强制执行的**验证规则**：
+- 每个键的长度必须正好是 3 个字符（例如 `X_Y`）
+- 键必须只包含一个下划线分隔符
+- 重复的对定义会引发异常
+- 缺少对会在计算时导致 `KeyError`
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L137-L164)
+
+### `valid_residue_groups` : 列表的列表
+
+定义允许在同一序列链中共存的残基类型。每个内部列表是一个**共存组**——来自不同组的残基不能出现在同一序列中。
+
+```python
+# 所有残基都允许在同一链中（默认行为）
+valid_residue_groups = []
+
+# 蛋白质残基和 RNA 残基分为不同的组
+valid_residue_groups = [['A', 'B', 'C'], ['U']]
+```
+
+当 `valid_residue_groups` 为空（默认）时，`input_dictionary` 中的所有残基将被放置在单个组中：`self.ALL_RESIDUES_TYPES = [list(self.parameters.keys())]`。当显式提供时，所有组的并集**必须完全匹配** `input_dictionary` 中的残基——任何不匹配都会引发异常。
+
+这对于**蛋白质-核酸系统**尤其重要，因为 RNA 珠子（例如 `'U'`）不应出现在氨基酸序列中，反之亦然。
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L71-L92), [custom_model.py](finches/forcefields/custom_model.py#L218-L233)
+
+### `condition_dictionary` : dict
+
+定义可以在计算时调节相互作用参数的**环境条件**（例如盐浓度、pH 值、温度）。每个键及其对应的值都会被设置为返回对象的属性：
+
+```python
+condition_dict = {'pH': 7.5, 'salt': 0.2}
+# 结果为: self.pH = 7.5, self.salt = 0.2
+```
+
+值应作为**元组**提供——第一个元素通过 `setattr(self, key, value[0])` 成为默认值。条件键存储在 `self.conditions` 中用于运行时查找。
+
+**不能用作条件键的保留名称：**
+
+| 保留名称 | 原因 |
+|---|---|
+| `ALL_RESIDUES_TYPES` | 残基组定义的核心属性 |
+| `conditions` | 条件名称的内部列表 |
+| `compute_interaction_parameter` | 核心接口方法 |
+| `condition_dependence_function` | 内部函数引用 |
+| `valid_residue_groups` | 残基组定义的核心属性 |
+| `version` | 版本标识的核心属性 |
+
+如果 `condition_dictionary` 非空，则**必须**同时提供 `condition_dependence_function`。
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L94-L116), [custom_model.py](finches/forcefields/custom_model.py#L170-L214)
+
+### `condition_dependence_function` : 可调用对象
+
+一个用户定义的函数，作为环境条件的函数**重新计算相互作用参数**。每当指定条件时，`compute_interaction_parameter` 就会调用它。函数签名必须是：
+
+```python
+def my_condition_function(i, j, base_value, **conditions):
+    """
+    Parameters
+    ----------
+    i : str
+        第一个残基类型
+    j : str
+        第二个残基类型
+    base_value : float
+        来自 self.parameters[i][j] 的值
+    **conditions : keyword arguments
+        condition_dictionary 中定义的所有条件
+
+    Returns
+    -------
+    float
+        更新后的相互作用参数值
+    """
+    ...
+```
+
+**示例**——静电相互作用的盐依赖性缩放：
+
+```python
+def salt_scale(i, j, base_value, salt=None, pH=None):
+    # 通过德拜屏蔽缩放静电对
+    if i in ['D', 'E', 'K', 'R'] or j in ['D', 'E', 'K', 'R']:
+        return base_value * (0.15 / salt)  # 随离子强度缩放
+    return base_value
+```
+
+该函数在初始化时会被验证：它必须是可调用的，并且必须接受 `condition_dictionary` 中定义的所有条件名称作为关键字参数。
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L117-L128), [custom_model.py](finches/forcefields/custom_model.py#L196-L210)
+
+## `compute_interaction_parameter` 的工作原理
+
+这是 `InteractionMatrixConstructor` 调用以填充其查找表的方法。其行为根据是否定义了条件进行分支：
+
+```mermaid
+flowchart TD
+    A["compute_interaction_parameter(r1, r2, **conditions)"] --> B{已定义条件?}
+    B -->|是| C["解析每个条件: 传入的 kwarg 或默认属性"]
+    C --> D["调用 condition_dependence_function(r1, r2, base_value, **resolved_conditions)"]
+    D --> E["Return (scaled_value, condition_dict)"]
+    B -->|否| F["Return (self.parameters[r1][r2], {'ALL': None})"]
+```
+
+当条件处于活动状态时，通过检查每个条件是否作为关键字参数传递给了 `compute_interaction_parameter` 来解析它；如果不是，则使用默认值（在 `__init__` 期间设置）。然后，`condition_dependence_function` 接收基础参数值和所有已解析的条件，返回调整后的相互作用强度。
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L246-L285)
+
+## 完整工作示例
+
+以下示例演示了构建具有盐依赖性条件的自定义 3 珠子模型，并将其与 `InteractionMatrixConstructor` 集成：
+
+```python
+from finches.forcefields.custom_model import custom_model, CUSTOM_MODEL_CONFIGS
+from finches.epsilon_calculation import InteractionMatrixConstructor
+
+# 步骤 1: 定义版本配置
+CUSTOM_MODEL_CONFIGS['my_model_v1'] = {
+    'charge_prefactor': 0.2,
+    'null_interaction_baseline': -0.1
+}
+
+# 步骤 2: 定义成对相互作用字典
+#   'P' = pi-pi 珠子, 'C' = 带电珠子, 'H' = 疏水珠子
+input_dict = {
+    'P_P': -3.0, 'P_C': -1.0, 'P_H': -2.0,
+    'C_C':  2.0, 'C_H':  0.5,
+    'H_H': -2.5
+}
+
+# 步骤 3: 定义条件依赖函数
+def salt_dependent(i, j, base_value, salt=None):
+    """通过离子强度缩放带电相互作用。"""
+    charged = {'C'}
+    if i in charged and j in charged:
+        return base_value * (0.15 / salt)
+    return base_value
+
+# 步骤 4: 实例化自定义模型
+my_model = custom_model(
+    version='my_model_v1',
+    input_dictionary=input_dict,
+    valid_residue_groups=[['P', 'C', 'H']],
+    condition_dictionary={'salt': (0.15,)},   # 默认 0.15 M
+    condition_dependence_function=salt_dependent
+)
+
+# 步骤 5: 与 InteractionMatrixConstructor 一起使用
+IMC = InteractionMatrixConstructor(my_model)
+```
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L29-L135), [epsilon_calculation.py](finches/epsilon_calculation.py#L18-L25)
+
+## 真实示例：21 残基自定义力场
+
+finches 测试套件在 `example_forcefield.py` 中包含了一个完整的 21 残基自定义力场（20 种标准氨基酸加上一个 `'X'` 占位符）。这演示了生产级的 `input_dictionary`，具有覆盖所有对称对的 231 个成对条目：
+
+```python
+from finches.tests.test_data.example_forcefield import input_dictionary
+# input_dictionary 包含类似 'M_W': -2, 'G_W': -6, 'W_W': -19 等键
+```
+
+此示例中的显著模式：
+- **π–π 相互作用**最强（例如 `'W_W': -19`，`'Y_Y': -16`，`'F_F': -13`）
+- **电荷-电荷排斥**呈强正值（例如 `'D_D': 29`，`'K_K': 24`，`'R_R': 21`）
+- **电荷-电荷吸引**呈强负值（例如 `'E_K': -27`，`'D_R': -27`）
+- **`'X'` 占位符**与所有残基的相互作用为零（`'X_X': 0`，`'A_X': 0` 等）
+
+来源: [example_forcefield.py](finches/tests/test_data/example_forcefield.py#L1-L30)
+
+## 与内置力场的比较
+
+自定义模型与内置的 Mpipi 和 CALVADOS 模型的根本区别在于相互作用参数的推导方式：
+
+| 方面 | `custom_model` | `Mpipi_model` | `calvados_model` |
+|---|---|---|---|
+| 参数来源 | 用户提供的 `input_dictionary` | 预计算的 pickle 文件 (σ, ε, ν, μ, charge) | 预计算的 pickle 文件 (σ, λ, charge) |
+| 相互作用计算 | 直接字典查找 | Wang-Frenkel + 库仑势的有限积分 | Ashbaugh-Hatch + Yukawa 势的有限积分 |
+| 条件处理 | 用户定义的 `condition_dependence_function` | 内置盐/介电调制 | 内置盐/pH/温度调制 |
+| 参数物理意义 | 任意（用户自定义） | π–π + 静电 (Joseph et al. 2021) | 粘附性 + Debye-Hückel (CALVADOS) |
+| 残基类型 | 任意单字符符号 | 20 种氨基酸 + `'U'` (RNA) | 20 种氨基酸 |
+| `compute_interaction_parameter` 返回 | `(float, dict)` | `(float, np.array, int, int, np.array)` | `(float, np.array, int, int, np.array)` |
+
+<CgxTip>`InteractionMatrixConstructor` 只使用 `compute_interaction_parameter` 返回元组的索引 `[0]`——即标量相互作用值。Mpipi 和 CALVADOS 返回的附加数组数据（能量分布、sigma 索引、距离数组）可用于直接的模型检查，但不会被 IMC 流水线消耗。这意味着你的自定义模型只需返回一个 2 元组 `(float, dict)` 即可完全兼容。</CgxTip>
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L246-L285), [mpipi.py](finches/forcefields/mpipi.py#L342-L381), [calvados.py](finches/forcefields/calvados.py#L327-L396)
+
+## 校准：设置 `null_interaction_baseline`
+
+`null_interaction_baseline` 是在相互作用矩阵中区分**吸引**和**排斥**相互作用的阈值。对于内置模型，这是根据 poly(GS) 重复序列校准的，该序列被假设为表现得像 ε ≈ 0 的高斯链。
+
+对于自定义模型，你有两种选择：
+
+**选项 1 — 预计算并添加到 CONFIGS：**
+
+```python
+from finches.data.forcefield_dependencies import get_null_interaction_baseline
+from finches.epsilon_calculation import InteractionMatrixConstructor
+
+# 首先构建 IMC（基线将显示警告）
+IMC = InteractionMatrixConstructor(my_model, compute_forcefield_dependencies=True)
+baseline = IMC.null_interaction_baseline
+
+# 然后添加到 CONFIGS 以供将来使用
+CUSTOM_MODEL_CONFIGS['my_model_v1']['null_interaction_baseline'] = baseline
+```
+
+**选项 2 — 在 IMC 构造时显式传递：**
+
+```python
+IMC = InteractionMatrixConstructor(
+    my_model,
+    null_interaction_baseline=-0.1  # 你的校准值
+)
+```
+
+`get_null_interaction_baseline` 函数使用 `scipy.optimize.root_scalar` 来寻找使 poly(GS) 序列产生 ε = 0 的基线值，默认在 `[-10.0, 10.0]` 区间内搜索。
+
+<CgxTip>如果既未设置预计算的基线，也未设置 `compute_forcefield_dependencies=True`，`InteractionMatrixConstructor` 将打印警告但继续运行。然而，任何依赖于吸引/排斥分解的下游分析（例如 epsilon 向量、相图）在没有适当基线的情况下都会产生不正确的结果。在依赖有符号相互作用分解之前，务必校准你的自定义模型。</CgxTip>
+
+来源: [forcefield_dependencies.py](finches/data/forcefield_dependencies.py#L17-L68), [epsilon_calculation.py](finches/epsilon_calculation.py#L167-L180)
+
+## 架构：力场流水线中的自定义模型
+
+```mermaid
+flowchart TB
+    subgraph UserSpace["用户空间"]
+        ID["input_dictionary<br/>{'A_B': value, ...}"]
+        CD["condition_dictionary<br/>{'salt': (0.15,), ...}"]
+        CF["condition_dependence_function<br/>(i, j, base, **conds) → float"]
+        VC["CUSTOM_MODEL_CONFIGS<br/>version → calibration constants"]
+    end
+
+    subgraph CustomModel["custom_model"]
+        INIT["__init__()"]
+        CIP["compute_interaction_parameter(r1, r2)"]
+        PARAMS["self.parameters<br/>(nested dict-of-dicts)"]
+        ART["self.ALL_RESIDUES_TYPES"]
+        CONDS["self.conditions"]
+    end
+
+    subgraph Pipeline["finches 流水线"]
+        IMC["InteractionMatrixConstructor"]
+        EPS["ε 计算"]
+        FH["Flory-Huggins 相图"]
+    end
+
+    ID --> INIT
+    CD --> INIT
+    CF --> INIT
+    VC --> INIT
+    INIT --> PARAMS
+    INIT --> ART
+    INIT --> CONDS
+    CIP --> IMC
+    ART --> IMC
+    IMC --> EPS
+    EPS --> FH
+```
+
+自定义模型在流水线中与 [Mpipi 力场参数](11-mpipi-forcefield-parameters) 或 [CALVADOS 力场参数](12-calvados-forcefield-parameters) 处于相同的位置。一旦实例化并传递给 `InteractionMatrixConstructor`，无论计算背后是哪种力场，所有下游功能——滑动窗口矩阵、每残基向量、epsilon 值和相图——的工作方式都完全相同。
+
+来源: [custom_model.py](finches/forcefields/custom_model.py#L29-L135), [epsilon_calculation.py](finches/epsilon_calculation.py#L18-L131)
+
+## 下一步
+
+定义好自定义力场后，你可以继续进行：
+- 使用 [InteractionMatrixConstructor](8-interactionmatrixconstructor) 与你的自定义模型**计算相互作用矩阵**
+- 通过 [每残基相互作用向量](7-per-residue-interaction-vectors) **计算每残基相互作用向量**
+- 使用 [Flory-Huggins 相图](14-flory-huggins-phase-diagrams) 与你的自定义能量学**生成相图**
+- 通过 [条件依赖的相行为](15-condition-dependent-phase-behavior) 改变你的自定义条件来**探索条件依赖行为**
+
+---
+
+## 相图
+
+- [深入解析/相图/Flory-Huggins 相图](https://zread.ai/idptools/finches/14-flory-huggins-phase-diagrams)
+
+---
+slug:14-flory-huggins-phase-diagrams
+blog_type:normal
+---
+
+
+Finches 通过将**平均场相互作用参数** (ε) 与 **Flory-Huggins 理论的解析解**相联系，预测同型液-液相分离 (LLPS) 相图。该流程将蛋白质序列转化为温度-浓度 (T vs. φ) 相图，并同时生成双节线和旋节线，从而无需模拟即可快速实现序列解析的相行为预测。
+
+## 理论基础
+
+相图引擎构建于 Qian, Michaels 与 Knowles (2022) 推导的双组分 Flory-Huggins 模型的解析解之上，该解析解提供了**双节线和旋节线的解析表达式**，而以往这需要通过数值求根才能实现。在 Flory-Huggins 理论中，核心相互作用参数为 χ (chi)，其定义为：
+
+> **χ = ε / (k_B × T)**
+
+其中 ε 为位点间接触能，k_B 为玻尔兹曼常数，T 为温度。更大的正 χ 值对应于更强的吸引相互作用，从而产生更大的相分离驱动力。**临界点**——低于该热力学边界时无论浓度如何均不发生相分离——的解析表达式为：
+
+| 量 | 表达式 |
+|---|---|
+| 临界体积分数 (φ_c) | 1 / (1 + √n) |
+| 临界 chi (χ_c) | 0.5 × (1 + 1/√n)² |
+
+其中 n 为聚合物链长。当 n = 1（对称溶质-溶剂体系）时，可还原为经典结果 χ_c = 2, φ_c = 0.5。
+
+来源: [backend.py](finches/analytical_fh/backend.py#L31-L48), [floryhuggins.py](finches/analytical_fh/floryhuggins.py#L1-L30)
+
+## 架构：从序列到相图
+
+从蛋白质序列到相图的转换通过一个定义明确的计算流程进行。Finches 首先使用力场模型根据序列计算平均场相互作用参数 ε，随后将 ε 转换为每个残基的接触能 (δ_ε)，利用解析 FH 解构建 χ vs. φ 图，最后通过 T = δ_ε / χ 将 χ 重新映射为温度。
+
+```mermaid
+flowchart LR
+    A["蛋白质序列"] --> B["ε 计算<br/>(力场模型)"]
+    B --> C["δ_ε = -ε / L<br/>(每个残基的接触能)"]
+    C --> D["χ vs. φ 图<br/>(解析 FH 双节线/旋节线)"]
+    D --> E["T vs. φ 图<br/>(T = δ_ε / χ)"]
+    
+    style A fill:#e8f4fd,stroke:#2980b9
+    style B fill:#fdf2e8,stroke:#e67e22
+    style C fill:#fdf2e8,stroke:#e67e22
+    style D fill:#e8f8e8,stroke:#27ae60
+    style E fill:#e8f8e8,stroke:#27ae60
+```
+
+**符号约定**至关重要：finches 将负 ε 定义为吸引作用（促进相分离）。在转换为 Flory-Huggins 的 χ 时，符号会反转，因为 χ 为正值时表示吸引相互作用。除以每个残基的长度 (`-ε / len(seq)`) 是必要的，因为 ε 是链级别的量，而 FH 解已通过 n 考虑了聚合物长度，因此只有每个残基的平均贡献才应代入 χ 中。
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L399-L448), [floryhuggins.py](finches/analytical_fh/floryhuggins.py#L72-L130)
+
+## 三种双节线计算模式
+
+解析 FH 后端提供了三种计算双节线的模式，它们均共享相同的输入签名 `(chi, n)`：
+
+| 模式 | 函数 | 描述 | 适用场景 |
+|---|---|---|---|
+| `analytic_binodal` | `backend.analytic_binodal()` | 来自 Qian 等人论文的封闭解析解 | 所有情况下的**默认且推荐**选项 |
+| `binodal` | `backend.binodal()` | 自洽迭代解（默认 5 次迭代），可选改进的牛顿映射 | 用于验证或与解析结果进行对比 |
+| `GL_binodal` | `backend.GL_binodal()` | 临界点附近的 Ginzburg-Landau 展开 | 仅在 χ_c 附近有效；为完整性而提供 |
+
+`analytic_binodal` 模式对 n = 1（对称混合物，使用基于 `tanh` 的表达式）和 n > 1（不对称，使用基于 `coth` 的表达式及无量纲距离参数 D = (χ - χ_c) / χ_c）采用不同的函数形式。对于 n > 1，该解涉及辅助变量 `a = n^(1/4)`、双曲余切项以及指数映射，以恢复浓相和稀相的体积分数。
+
+<CgxTip>如果 ε 为正（净排斥），finches 会将其覆盖为 -0.01——一个可忽略的吸引值——因为排斥性的 ε 会使 χ 到 T 的转换反转，从而产生非物理的“逆”相图。这是一种务实的权宜之计；具有排斥性 ε 的序列根本不会发生相分离。</CgxTip>
+
+来源: [backend.py](finches/analytical_fh/backend.py#L200-L316), [floryhuggins.py](finches/analytical_fh/floryhuggins.py#L55-L97)
+
+## API 参考
+
+### 底层：`analytical_fh` 模块
+
+这些函数直接在 χ–φ 空间中操作，需要你显式指定 χ 值。
+
+**`floryhuggins.calculate_binodal(L, mode, chi_min, chi_max, n_points)`** —— 在 `chi_min` 到 `chi_max` 范围内以 `n_points` 个等距值扫描 χ，并在每个点计算双节线。返回包含 5 个元素的元组：`(chi_values, dilute_φ, dense_φ, critical_φ, critical_χ)`。
+
+**`floryhuggins.calculate_spinodal(L, chi_min, chi_max, n_points)`** —— 对旋节线采用相同的扫描结构。返回相同的 5 元素元组格式。
+
+**`backend.critical(n)`** —— 返回聚合物长度为 n 时的 `[φ_c, χ_c]`。
+
+**`backend.spinodal(chi, n)`** / **`backend.binodal(chi, n)`** / **`backend.analytic_binodal(chi, n)`** / **`backend.GL_binodal(chi, n)`** —— 计算各自曲线上的一点。每个函数均返回 `[dense_φ, dilute_φ]`（若 χ < χ_c 则抛出 `ValueError`）。
+
+来源: [floryhuggins.py](finches/analytical_fh/floryhuggins.py#L8-L197), [backend.py](finches/analytical_fh/backend.py#L31-L316)
+
+### 中层：`epsilon_to_FHtheory` 模块
+
+这些函数将序列级别的 ε 计算与 FH 后端衔接，生成 T–φ 相图。
+
+**`return_phase_diagram(seq, X_class)`** —— 使用提供的 `InteractionMatrixConstructor` 根据序列计算 ε，然后委派给 `epsilon_to_phase_diagram`。这是单序列相图最常用的入口点。
+
+**`epsilon_to_phase_diagram(seq, epsilon)`** —— 给定预计算的 ε 值和序列（仅用于获取长度），构建完整的 T–φ 相图。返回包含 8 个元素的列表：
+
+| 索引 | 内容 |
+|---|---|
+| `[0]` | 稀相 φ (双节线) |
+| `[1]` | 浓相 φ (双节线) |
+| `[2]` | `[critical_φ, critical_T]` (双节线) |
+| `[3]` | 温度数组 (双节线) |
+| `[4]` | 稀相 φ (旋节线) |
+| `[5]` | 浓相 φ (旋节线) |
+| `[6]` | `[critical_φ, critical_T]` (旋节线) |
+| `[7]` | 温度数组 (旋节线) |
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L241-L399)
+
+### 高层：前端方法
+
+前端对象（`Mpipi_frontend`, `CALVADOS_frontend`）提供了最便捷的 API。
+
+**`frontend.build_phase_diagram(seq)`** —— 通过 `self.epsilon(seq, seq)` 在内部计算 ε，并调用 `epsilon_to_phase_diagram`。返回与上述相同的 8 元素列表。
+
+**`frontend.plot_phase_diagram(seq, ...)`** —— 在单次调用中构建并渲染相图。接受 `line_color`, `line_width`, `xlim`, `ylim`, `xlog`, `width`, `height` 和 `filename` 用于自定义。返回 `[phase_data, fig, ax]`。
+
+**`frontend.plot_multiple_phase_diagrams(seqdict, tc_ref, ...)`** —— 将多个相图叠加在同一图上。`seqdict` 将序列名称映射为 `[sequence_string, color]`，`tc_ref` 指定使用哪个序列的临界温度来归一化 y 轴 (T/T_c)。
+
+```python
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+
+mf = Mpipi_frontend()
+seq = 'MASNDYTQQATQSYGAYPTQPGQGYSQQSSQPYGQQSYSGYSQSTDTSGYGQSSYSSYGQSQNTGYGTQSTPQGYGSTGGYGSSQSSQSSYGQQSSYPGYGQQPAPSSTSGSYGSSSQSSSYGQPQSGSYSQQPSYGGQQQSYGQQQSYNPPQGYGQQNQYNS'
+
+# 单次调用内构建并绘图
+result = mf.plot_phase_diagram(seq, ylim=[0.7, 1.05])
+
+# 或者分别构建数据以便自定义绘图
+B = mf.build_phase_diagram(seq)
+plt.plot(B[0], B[3], 'blue', label='Binodal (dilute arm)')
+plt.plot(B[1], B[3], 'blue', label='Binodal (dense arm)')
+plt.plot(B[4], B[7], 'blue', ls='--', label='Spinodal (dilute)')
+plt.plot(B[5], B[7], 'blue', ls='--', label='Spinodal (dense)')
+plt.plot(B[2][0], B[2][1], 'ko', ms=4, label='Critical point')
+```
+
+来源: [frontend_base.py](finches/frontend/frontend_base.py#L1000-L1199), [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L241-L330)
+
+## 依赖条件的相图
+
+Finches 提供了三个构建器函数，用于遍历环境条件，并在每一步重新初始化力场，以捕捉相边界随溶液化学性质的变化。每个函数均返回 `[condition_list, diagrams_dict, epsilons_dict]`。
+
+| 函数 | 条件参数 | 对相行为的影响 |
+|---|---|---|
+| `build_SALT_dependent_phase_diagrams(seq, X_class, condition_list)` | `X_class.parameters.salt` | 盐浓度越高，静电排斥被屏蔽得越强，通常会扩大两相区 |
+| `build_PH_dependent_phase_diagrams(seq, X_class, condition_list, ...)` | `X_class.parameters.pH` | 改变残基的电荷状态（尤其是 His, Asp, Glu），重塑静电贡献 |
+| `build_DIELECTRIC_dependent_phase_diagrams(seq, X_class, condition_list, ...)` | `X_class.parameters.dielectric` | 改变溶剂的介电常数，调节所有静电项 |
+
+每个函数都会验证力场模型上是否存在所请求的条件参数，遍历条件列表并在每一步更新查找字典，计算相图和 ε 值，并在完成后**恢复原始参数**。对于依赖盐浓度的相图，`build_SALT_dependent_phase_diagrams` 还会从 `X_class` 中读取并保留 `charge_prefactor` 和 `null_interaction_baseline`。
+
+```python
+from finches import epsilon_to_FHtheory
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+
+mf = Mpipi_frontend()
+salts = [0.01, 0.05, 0.1, 0.15, 0.2, 0.3]
+
+result = epsilon_to_FHtheory.build_SALT_dependent_phase_diagrams(
+    seq, mf.IMC_object, salts
+)
+
+# result[0] = 盐浓度值
+# result[1] = 盐浓度 -> 相图数据的字典映射
+# result[2] = 盐浓度 -> epsilon 值的字典映射
+```
+
+有关相图如何响应环境条件的更深入探讨，请参阅 [依赖条件的相行为](15-condition-dependent-phase-behavior)。
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L44-L237)
+
+## 重要注意事项
+
+**排斥性 ε 的处理**：当 ε > 0（净排斥）时，代码在计算相图前会将 ε 设置为 -0.01。这避免了 χ 到 T 转换中的除以零错误，并防止了非物理的逆相图。生成的相图将显示一个极其狭窄的两相区，这实际上标志着“不发生相分离”。如果你需要区分真正边缘相分离的序列与不分离的序列，请在调用相图构建器之前检查原始 ε 值。
+
+**χ 范围默认值**：`epsilon_to_phase_diagram` 函数对双节线使用 `chi_max=0.8` 及 `n_points=50000`，对旋节线使用 `n_points=10000`。对于极长的聚合物 (n > 1000)，临界 χ 从上方趋近于 0.5，因此默认的 `chi_min=0.5` 是合适的。然而，对于短聚合物或极强相互作用，你可能需要直接调用 `floryhuggins.calculate_binodal` 来增加 `chi_max`。
+
+**平均场近似**：这些相图源自平均场晶格模型 (Flory-Huggins)，无法捕捉浓度涨落、有限尺寸效应或多组分相互作用。最好将其定性解释为相分离的*趋势*和*近似边界*的预测。
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L399-L448)
+
+## 建议阅读路径
+
+- 关于输入到相图中的 ε 计算：[Epsilon 计算与权重](9-epsilon-calculation-and-weighting)
+- 关于环境条件如何重塑相边界：[依赖条件的相行为](15-condition-dependent-phase-behavior)
+- 关于封装这些函数的前端 API：[Mpipi 和 CALVADOS 前端](5-mpipi-and-calvados-frontends)
+- 关于力场参数详情：[Mpipi 力场参数](11-mpipi-forcefield-parameters)
+
+---
+
+- [深入解析/相图/条件依赖的相行为](https://zread.ai/idptools/finches/15-condition-dependent-phase-behavior)
+
+---
+slug:15-condition-dependent-phase-behavior
+blog_type:normal
+---
+
+
+Finches 提供了专用基础设施，用于探索**环境条件**（盐浓度、pH 和介电常数）如何重塑内在无序蛋白质的相边界。与其计算单一的静态相图，`epsilon_to_FHtheory` 模块迭代地重新参数化力场，重新计算平均场相互作用参数 (ε)，并在每个条件值下重建 Flory-Huggins 双节线，从而生成一系列相图，揭示溶液化学如何调制液-液相分离。
+
+## 架构概述
+
+依赖条件的相图流程链由三个计算阶段组成：**参数重新初始化**、**ε 重计算**和 **χ→T 转换**。在每一步中，`InteractionMatrixConstructor` 都会通过 `_update_lookup_dict()` 进行原地修改，确保在执行任何下游计算之前，残基间的相互作用查找表能够反映新的静电环境。
+
+```mermaid
+flowchart TD
+    A[condition_list] --> B{For each condition value}
+    B --> C[Set X_class.parameters.salt / pH / dielectric]
+    C --> D[X_class._update_lookup_dict]
+    D --> E[get_sequence_epsilon_value]
+    E --> F[epsilon_to_phase_diagram]
+    F --> G[floryhuggins.calculate_binodal]
+    G --> H[Convert chi → T: delta_eps / chi]
+    H --> I[Store diagram + epsilon]
+    I --> B
+    B -->|Done| J[Reset base parameters]
+    J --> K["Return [conditions, diagrams_dict, epsilons_dict]"]
+```
+
+关键的洞察在于，改变盐浓度、pH 或介电常数并不会改变序列——它通过内置于每个力场模型中的德拜屏蔽长度和电荷状态计算，改变了 ε 的**静电贡献**。这意味着同一序列在不同的缓冲条件下会表现出截然不同的相行为。
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L1-L23), [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L194-L270)
+
+## 特定条件的构建函数
+
+三个并行函数提供了依赖条件的相图构建，每个函数针对一个不同的环境变量。它们都共享相同的返回结构：包含 `[condition_list, out_diagrams, out_epsilons]` 的三元素列表，其中 `out_diagrams` 和 `out_epsilons` 是以条件值为键的字典。
+
+| 函数 | 修改的参数 | 验证检查 | 重置行为 |
+|---|---|---|---|
+| `build_SALT_dependent_phase_diagrams` | `X_class.parameters.salt` | 确认 `parameters.salt` 存在 | `X_class.parameters.salt = base_value` + `_update_lookup_dict()` |
+| `build_PH_dependent_phase_diagrams` | `X_class.parameters.pH` | 确认 `parameters.pH` 存在 | `X_class.parameters.salt = base_value` + `_update_parameters(base_params)` |
+| `build_DIELECTRIC_dependent_phase_diagrams` | `X_class.parameters.dielectric` | 确认 `parameters.dielectric` 存在 | `X_class.parameters.salt = base_value` + `_update_parameters(base_params)` |
+
+<CgxTip>依赖盐浓度的构建器使用了更健壮的重置策略——直接调用 `_update_lookup_dict()`——而 pH 和介电常数构建器则通过 `_update_parameters(base_params)` 进行恢复。这种不对称性反映出盐浓度变化仅修改查找表，而 pH/介电常数的变化会改变单个残基的电荷状态，因此需要完整的参数重新初始化。</CgxTip>
+
+### 依赖盐浓度的相图
+
+`build_SALT_dependent_phase_diagrams` 函数是最常用的变体，因为盐浓度直接控制着德拜屏蔽长度，进而控制静电相互作用的范围和强度。`condition_list` 中的每个盐浓度值都会被设置到 `X_class.parameters.salt` 上，查找字典会被刷新，并同时计算相图和 ε 值：
+
+```python
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+from finches.epsilon_to_FHtheory import build_SALT_dependent_phase_diagrams
+
+mf = Mpipi_frontend(salt=0.150)  # 初始盐浓度 = 150 mM
+seq = "MGDEDWEAEINPHMSSYVPIFEKDRYSGENGDNFNRTPASSSEMDDGPSRRDHFMKSGFASGRNFGNRDAGECNKRDNTSTMGGFGVGKSFGNRGFSNSRFEDGDSSGFWRESSNDCEDNPTRNRGFSKRGGYRDGNNSEASGPYRRGGRGSFRGCRGGFGLGSPNNDLDPDECMQRTGGLFGSRRPVLSGTGNGDTSQSRSGSGSERGGYKGLNEEVITGSGKNSWKSEAEGGES"
+
+salt_values = [0.100, 0.200, 0.300, 0.400, 0.500]
+results = build_SALT_dependent_phase_diagrams(seq, mf.IMC_object, salt_values)
+
+# results[0] → [0.100, 0.200, 0.300, 0.400, 0.500]
+# results[1] → {0.100: phase_diagram, 0.200: phase_diagram, ...}
+# results[2] → {0.100: epsilon_value, 0.200: epsilon_value, ...}
+```
+
+迭代完成后，该函数会在 `InteractionMatrixConstructor` 上**恢复原始的盐浓度值**，确保没有副作用泄漏到后续计算中。
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L194-L270)
+
+### 依赖 pH 的相图
+
+`build_PH_dependent_phase_diagrams` 函数遍历 pH 值，这会改变力场模型中可电离残基（His、Asp、Glu、Lys 等）的**质子化状态**。这改变了每个残基的净电荷，进而改变了整个静电图景。其用法与盐浓度变体类似：
+
+```python
+from finches.epsilon_to_FHtheory import build_PH_dependent_phase_diagrams
+
+ph_values = [6.0, 7.0, 7.4, 8.0]
+results = build_PH_dependent_phase_diagrams(seq, mf.IMC_object, ph_values,
+                                            prefactor=None,
+                                            null_interaction_baseline=None)
+```
+
+依赖 pH 的行为对于具有高组氨酸含量的序列，或者在局部 pH 变化显著的细胞区室化建模（例如，溶酶体 pH 约为 5，而细胞质 pH 约为 7.4）中尤为相关。
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L113-L189)
+
+### 依赖介电常数的相图
+
+`build_DIELECTRIC_dependent_phase_diagrams` 函数修改介电常数，该常数均匀地缩放所有静电相互作用。较低的介电常数值会增强电荷-电荷相互作用（模拟极性较弱的溶剂环境），而较高的值则会减弱它们：
+
+```python
+from finches.epsilon_to_FHtheory import build_DIELECTRIC_dependent_phase_diagrams
+
+dielectric_values = [40.0, 60.0, 80.0, 100.0]
+results = build_DIELECTRIC_dependent_phase_diagrams(seq, mf.IMC_object, dielectric_values)
+```
+
+默认的水相介电常数约为 80.0。探索较低的值可以近似模拟由拥挤效应引起的有效介电常数变化，或者膜附近的环境。
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L33-L109)
+
+## Epsilon 到相图的转换
+
+核心转换逻辑位于 `epsilon_to_phase_diagram(seq, epsilon)` 中，它桥接了计算出的平均场 ε 和 Flory-Huggins 双节线。此函数执行四个关键转换：
+
+1. **排斥性 epsilon 守卫**: 如果 ε > 0（排斥性），则将其设置为 −0.01。在转换 χ→T 时，正的 ε 会产生数学上无效的“反向”相图，因为该转换假设 δ_ε 代表净吸引的位点特异性能量。
+
+2. **残基级缩放**: 链级别的 ε 除以序列长度得到 δ_ε（每个残基的接触能），因为 `calculate_binodal` 已经通过 Flory-Huggins 聚合度参数考虑了聚合物长度。
+
+3. **双节线计算**: `floryhuggins.calculate_binodal(len(seq), 'analytic_binodal', n_points=50000, chi_max=0.8)` 使用 Qian, Michaels & Knowles (2022) 的解析解计算 χ 与 φ 的双节线。
+
+4. **χ→T 转换**: 温度通过 `T = δ_ε / χ` 恢复，利用了 Flory-Huggins 关系式 χ = δ_ε / (k_B T)。当 k_B = 1 时，这给出了以 δ_ε 为单位的 T。
+
+该函数还使用 `calculate_spinodal` 计算出**旋节线**，并应用相同的 χ→T 转换，在单个 8 元素列表中返回两条曲线：
+
+| 索引 | 内容 | 空间 |
+|---|---|---|
+| 0 | 稀相浓度 (双节线) | φ |
+| 1 | 密相浓度 (双节线) | φ |
+| 2 | 临界点 `[φ_c, T_c]` (双节线) | φ, T |
+| 3 | 温度数组 (双节线) | T |
+| 4 | 稀相浓度 (旋节线) | φ |
+| 5 | 密相浓度 (旋节线) | φ |
+| 6 | 临界点 `[φ_c, T_c]` (旋节线) | φ, T |
+| 7 | 温度数组 (旋节线) | T |
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L356-L448)
+
+## 通过前端重新初始化进行手动条件变化
+
+构建函数的一种替代方法是在每个条件值处**重新实例化前端**。这是 DDX4 盐浓度依赖性演示中使用的方法，当你需要完全控制模型构建或希望同时改变多个条件时，这种方法有时更可取：
+
+```python
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+from finches.epsilon_to_FHtheory import return_phase_diagram
+
+DDX4_WT = "MGDEDWEAEINPHMSSYVPIFEKDRYSGENGDNFNRTPASSSEMD..."
+
+# 通过构建具有不同盐参数的新前端，计算不同盐浓度下的相图
+B_100mM = return_phase_diagram(DDX4_WT, Mpipi_frontend(salt=0.100).IMC_object)
+B_200mM = return_phase_diagram(DDX4_WT, Mpipi_frontend(salt=0.200).IMC_object)
+B_300mM = return_phase_diagram(DDX4_WT, Mpipi_frontend(salt=0.300).IMC_object)
+
+# 根据参考临界温度归一化温度
+T_ref = max(B_200mM[3])  # 200 mM 下的参考 T_c
+
+import matplotlib.pyplot as plt
+plt.plot(B_100mM[0], B_100mM[3] / T_ref, label='100 mM NaCl')
+plt.plot(B_100mM[1], B_100mM[3] / T_ref)
+plt.plot(B_300mM[0], B_300mM[3] / T_ref, label='300 mM NaCl')
+plt.plot(B_300mM[1], B_300mM[3] / T_ref)
+plt.xlabel(r'$\phi$')
+plt.ylabel(r'$T / T_{c,ref}$')
+```
+
+这种方法为每个条件创建一个新的 `Mpipi_model` 和 `InteractionMatrixConstructor`，避免了构建函数使用的原地修改模式。当条件稀疏时，这种方法更简洁，但在大规模条件扫描时效率较低，因为每次实例化都会从头重建完整的相互作用查找表。
+
+来源: [phase_diagram_demo.ipynb](demo/phase_diagrams/phase_diagram_demo.ipynb#L443-L484)
+
+## 参数重置与副作用安全
+
+所有三个构建函数在迭代完成后都实现了**重置协议**，以确保 `InteractionMatrixConstructor` 恢复到其原始状态。这一点至关重要，因为构造器在循环期间会被原地修改——如果不重置，后续使用同一构造器对象的调用将在最后一次迭代的条件下运行，而不是用户预期的基线条件。
+
+各函数的重置协议略有不同：
+
+- **盐浓度构建器**: 直接恢复 `X_class.parameters.salt = base_value` 并调用 `X_class._update_lookup_dict()`。这就足够了，因为盐浓度只影响德拜长度，不影响残基电荷状态。
+
+- **pH / 介电常数构建器**: 通过 `X_class.parameters.salt = base_value` 恢复，随后调用 `X_class._update_parameters(base_params)`。完整参数更新是必要的，因为 pH 和介电常数的变化会改变残基级别的电荷计算，其影响会传播到查找字典之外。
+
+<CgxTip>pH 和介电常数构建器中存在一个细微的不一致：两者都重置 `X_class.parameters.salt = base_value`，而不是重置它们各自的参数（pH 或介电常数）。随后的 `_update_parameters(base_params)` 调用确实恢复了完整的参数集，使得盐浓度的重置显得冗余但无害。如果你在构建器调用后依赖该构造器，请验证参数是否处于预期状态。</CgxTip>
+
+来源: [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L103-L108), [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L183-L188)
+
+## 解读依赖条件的相图
+
+在可视化一系列依赖条件的相图时，通常有两种约定：
+
+1. **温度归一化**: 将所有温度数组除以一个参考临界温度（通常是最低盐浓度或野生型的 T_c）。这会将所有曲线放在共享的 `T/T_c` 轴上，便于观察**饱和浓度**（给定温度下双节线的稀相分支）如何随条件变化而移动。
+
+2. **对数刻度浓度**: 在 φ 轴上使用 `plt.xscale('log')`。稀相浓度跨越多个数量级（尤其是对于强相分离序列），对数刻度可防止密相分支在视觉上主导图表。
+
+对于依赖盐浓度的相图，预期的物理趋势是**增加盐浓度会缩小两相区**：更高的离子强度会屏蔽静电相互作用，减少净吸引 ε，降低 T_c，并提高饱和浓度。其相分离主要由 π-π 和阳离子-π 相互作用（而非静电作用）驱动的序列，将表现出较弱的盐敏感性。
+
+来源: [phase_diagram_demo.ipynb](demo/phase_diagrams/phase_diagram_demo.ipynb#L443-L484), [epsilon_to_FHtheory.py](finches/epsilon_to_FHtheory.py#L275-L334)
+
+## API 摘要
+
+| 函数 | 签名 | 返回值 |
+|---|---|---|
+| `build_SALT_dependent_phase_diagrams` | `(seq, X_class, condition_list)` | `[conditions, {salt: diagram}, {salt: epsilon}]` |
+| `build_PH_dependent_phase_diagrams` | `(seq, X_class, condition_list, prefactor, null_interaction_baseline)` | `[conditions, {pH: diagram}, {pH: epsilon}]` |
+| `build_DIELECTRIC_dependent_phase_diagrams` | `(seq, X_class, condition_list, prefactor, null_interaction_baseline)` | `[conditions, {ε_r: diagram}, {ε_r: epsilon}]` |
+| `return_phase_diagram` | `(seq, X_class)` | 8 元素的双节线+旋节线列表 |
+| `epsilon_to_phase_diagram` | `(seq, epsilon)` | 8 元素的双节线+旋节线列表 |
+
+关于底层的 Flory-Huggins 计算引擎，请参阅 [Flory-Huggins Phase Diagrams](14-flory-huggins-phase-diagrams)。关于输入到这些相图中的 epsilon 计算，请参阅 [Epsilon Calculation and Weighting](9-epsilon-calculation-and-weighting)。要了解力场参数如何响应条件变化，请参阅 [Mpipi Forcefield Parameters](11-mpipi-forcefield-parameters) 和 [CALVADOS Forcefield Parameters](12-calvados-forcefield-parameters)。
+
+---
+
+## 折叠域相互作用
+
+- [深入解析/折叠域相互作用/PDB 表面残基提取](https://zread.ai/idptools/finches/16-pdb-surface-residue-extraction)
+
+---
+slug:16-pdb-surface-residue-extraction
+blog_type:normal
+---
+
+
+Finches 提供了两个互补的系统，用于从折叠结构域的 PDB 结构中提取溶剂可及的表面残基——一个基于 `soursop` 构建的**过程式函数 API**，以及一个基于 `mdtraj` 构建的**基于类的 API**。两者共享相同的概念流程：解析 PDB → 计算每个残基的溶剂可及表面积 (SASA) → 根据阈值将残基划分为表面残基与埋藏残基 → 返回序列、索引和三维坐标，用于下游的交互计算。
+
+## 架构概述
+
+表面残基提取子系统的存在，是为了将**静态结构数据**（PDB 文件）与**基于序列的交互模型**连接起来。折叠结构域将残基包埋在内部；只有暴露在表面的残基才能参与与侧翼固有无序区 (IDR) 的结构域间相互作用。因此，正确提取这些残基是计算 IDR 与折叠结构域之间任何具有物理意义的 epsilon 值的先决条件。
+
+```mermaid
+flowchart TB
+    subgraph Input
+        PDB["PDB File"]
+        FD_BOUNDS["FD_start, FD_end<br/>(domain bounds)"]
+    end
+
+    subgraph "Procedural API<br/>(PDB_structure_tools)"
+        A1["_accessibility_parse()"] --> A2["_get_accessible_indicies()"]
+        A2 --> A3["_filter_indicies()"]
+        A3 --> A4["pdb_to_SDFDresidues_and_xyzs()"]
+        A4 --> OUT1["SAFD_seq, SAFD_idxs,<br/>SAFD_cords"]
+    end
+
+    subgraph "Class-based API<br/>(FoldedDomain)"
+        B1["mdtraj: shrake_rupley()"] --> B2["SASA vs. MAX_SASA<br/>threshold"]
+        B2 --> B3["surface_vector,<br/>surface_indices"]
+        B3 --> B4["surface_positions<br/>(sidechain CoM)"]
+        B4 --> B5["Neighbour graph<br/>(networkx)"]
+    end
+
+    PDB --> A1
+    PDB --> B1
+    FD_BOUNDS --> A4
+    FD_BOUNDS --> B2
+
+    OUT1 --> DOWNSTREAM["Downstream:<br/>epsilon vectors, masking"]
+    B5 --> DOWNSTREAM
+```
+
+**过程式 API** (`PDB_structure_tools`) 是早期的实现，提供了可组合的细粒度函数，适用于自定义工作流。**基于类的 API** (`FoldedDomain`) 是较新且功能更丰富的系统，它将表面识别与空间图构建、邻居分析以及表面斑块上的直接 epsilon 计算捆绑在一起。
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L1-L11), [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L1-L66)
+
+## FoldedDomain 类
+
+`finches.utils.folded_domain_utils` 中的 `FoldedDomain` 类是提取表面残基的主要推荐接口。它封装了完整的生命周期：PDB 加载、SASA 计算、表面分类、空间坐标提取，以及派生属性（邻居图、距离矩阵、epsilon 值）的惰性求值。
+
+### 初始化与核心属性
+
+在构造时，`FoldedDomain` 对象会计算并暴露以下属性：
+
+| 属性 | 类型 | 描述 |
+|---|---|---|
+| `self.sequence` | `str` | 折叠结构域的完整氨基酸序列 |
+| `self.traj` | `mdtraj.Trajectory` | PDB 的 mdtraj 轨迹对象 |
+| `self.sasa` | `np.ndarray` | 每个残基的 SASA，单位为 Å²（由 nm² 转换而来） |
+| `self.surface_vector` | `list[int]` | 二值向量：1 = 表面，0 = 埋藏 |
+| `self.surface_indices` | `list[int]` | 被划分为表面的残基索引 |
+| `self.surface_positions` | `dict[int→np.ndarray]` | 每个表面残基的侧链质心 XYZ 坐标 |
+| `self.surface_fraction` | `float` | 被划分为表面暴露的残基比例 |
+
+这些属性在 `__init__` 期间立即计算。其他一些开销较大的属性则通过 `@property` 描述符在首次访问时进行惰性求值。
+
+来源: [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L66-L149)
+
+### 构造函数参数
+
+```python
+from finches.utils.folded_domain_utils import FoldedDomain
+
+fd = FoldedDomain(
+    pdbfilename='my_domain.pdb',
+    start=None,                # 起始残基索引（可选切片）
+    end=None,                  # 结束残基索引（可选切片）
+    probe_radius=1.4,          # Å，SASA 的溶剂探针半径
+    residue_overide_mapping={}, # 映射非标准残基名称
+    surface_thresh=0.10,       # 最大 SASA 的比例，用于分类
+    sasa_mode='v1',            # 'v1' 或 'v2' 阈值策略
+    ignore_warnings=False,
+    SASA_ONLY=False            # 若为 True，则跳过表面分类
+)
+```
+
+| 参数 | 默认值 | 用途 |
+|---|---|---|
+| `pdbfilename` | *(必需)* | PDB 文件路径 |
+| `start` / `end` | `None` | 在分析前将 PDB 按残基范围进行切片 |
+| `probe_radius` | `1.4` | 溶剂探针半径，单位为 Å（1.4 = 水）；在内部会转换为 nm 以供 mdtraj 使用 |
+| `residue_overide_mapping` | `{}` | 将非标准 3 字母残基名称映射为标准名称的字典 |
+| `surface_thresh` | `0.10` | 最大 SASA 的比例；SASA 占比超过此值的残基被视为表面暴露 |
+| `sasa_mode` | `'v1'` | 控制用于阈值的参考最大 SASA（见下文） |
+| `SASA_ONLY` | `False` | 若为 `True`，则仅计算 SASA 并跳过所有表面分析 |
+
+来源: [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L70-L149)
+
+### 两种 SASA 阈值模式
+
+将残基分类为表面暴露取决于如何将阈值与参考最大 SASA 值进行比较。Finches 附带了预计算的 `MAX_SASA_DATA`——这是一个基于 GXG 三肽的全原子排斥体积模拟推导出的每种氨基酸最大 SASA 值的字典，其中每个条目为 `[sidechain_max_SASA, backbone_max_SASA]`。
+
+**模式 `v1`**（默认）将残基的计算 SASA 仅与**侧链**最大 SASA 进行比较：
+
+```python
+solvent_accessible = sasa[i] > surface_thresh * MAX_SASA_DATA[sequence[i]][0]
+```
+
+在 v1 模式下，甘氨酸（侧链最大 SASA = 0）仅当其计算 SASA 也精确为零（这意味着它被完全埋藏）时，才会被分类为表面暴露。实际上，具有任何暴露的甘氨酸几乎总是被分类为表面残基，因为一旦残基有任何暴露，`sasa > 0` 就能轻易满足。
+
+**模式 `v2`** 将与侧链和主链最大 SASA 的**总和**进行比较，使得判定标准更为严格：
+
+```python
+solvent_accessible = sasa[i] > surface_thresh * (MAX_SASA_DATA[sequence[i]][0] + MAX_SASA_DATA[sequence[i]][1])
+```
+
+这考虑了主链的贡献，通常会将较少的残基分类为表面暴露。
+
+来源: [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L14-L36), [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L198-L213)
+
+### 表面位置计算
+
+对表面残基进行分类后，`FoldedDomain` 会计算每个表面残基的三维位置。它不使用 Cα 坐标，而是使用**侧链质心**——这能更好地代表表面残基化学基团的实际位置：
+
+```python
+atom_indices = p.topology.select(f'sidechain and resid {idx}')
+if len(atom_indices) == 0:
+    atom_indices = p.topology.select(f'resid {idx} and name CA')  # 针对 Gly 的回退机制
+self.surface_positions[idx] = md.compute_center_of_mass(p.atom_slice(atom_indices))[0]
+```
+
+甘氨酸残基没有侧链原子，因此该方法对它们回退使用 Cα 坐标。这种区别对于下游的邻居图构建和距离计算非常重要，因为这些位置是空间邻近性计算的基础。
+
+来源: [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L220-L230)
+
+## 过程式 API (PDB_structure_tools)
+
+`finches.PDB_structure_tools` 模块提供了一组可组合的函数，用于使用 `soursop` 作为后端 PDB 解析器提取表面残基。这些函数属于底层函数，但为自定义流水线提供了灵活性。
+
+### 核心流水线函数
+
+主要入口点是 `pdb_to_SDFDresidues_and_xyzs()`，它通过单次调用即可编排整个提取过程：
+
+```python
+from finches.PDB_structure_tools import pdb_to_SDFDresidues_and_xyzs
+
+SAFD_seq, SAFD_idxs, SAFD_cords = pdb_to_SDFDresidues_and_xyzs(
+    pdb='protein.pdb',
+    FD_start=50,
+    FD_end=120,
+    issolate_domain=False
+)
+```
+
+该函数返回三个对象：**SAFD_seq**（溶剂可及折叠结构域残基的字符串）、**SAFD_idxs**（它们在完整序列中的索引）和 **SAFD_cords**（来自 PDB 的 Cα XYZ 坐标）。`issolate_domain` 标志保留用于在脱离周围链的情况下独立计算结构域的 SASA，但尚未实现。
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L249-L339)
+
+### 内部流水线步骤
+
+完整的流水线可分解为四个步骤，每一步都作为独立函数公开：
+
+| 步骤 | 函数 | 输入 → 输出 |
+|---|---|---|
+| 1. SASA 计算 | `_accessibility_parse(PO)` | soursop ProteinTrajectory → 逐残基 SASA 列表 |
+| 2. 阈值判定 | `_get_accessible_indicies(l_acc, threshold=10)` | SASA 列表 → SASA > threshold 的索引 |
+| 3. 结构域过滤 | `_filter_indicies(l_acc_idxs, FD_start, FD_end)` | 可及索引 → 结构域边界内的索引 |
+| 4. 坐标提取 | via `PO.get_multiple_CA_index()` | SAFD 索引 → Cα XYZ 坐标 |
+
+过程式 API 中的默认可及性阈值为 **10**（采用 soursop 在 `stride=1, probe_radius=7` 时返回的 SASA 单位），这与 `FoldedDomain` 使用的分数阈值是不同的约定。
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L22-L99)
+
+### 替代入口点
+
+该模块还提供了接受预计算数据的函数，从而避免冗余的 PDB 解析：
+
+- **`accesssvector_to_SAFD_residues(sequence, FD_start, FD_end, accessibility_track)`** —— 给定预计算的 SASA 轨迹和序列，返回不含坐标的 `SAFD_seq` 和 `SAFD_idxs`。
+- **`tracks_to_SAFD_residues_and_xyzs(sequence, FD_start, FD_end, accessibility_track, full_cordinate_track)`** —— 给定 SASA 轨迹和坐标轨迹，返回所有三个输出，无需重新解析 PDB。
+- **`pdb_to_xyz_cordinate_track(pdb)`** —— 从 PDB 中提取完整的 Cα 坐标轨迹以供后续使用。
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L344-L491)
+
+### 结构域侧翼分析
+
+`extract_flanking_domain_combinations()` 函数使用 `metapredict` 来识别 PDB 序列中的 IDR/折叠结构域边界，然后返回直接相邻的 IDR 和 FD 区域对。这对于需要识别哪些 IDR 与哪些折叠结构域相互作用的自动化流水线非常有用：
+
+```python
+from finches.PDB_structure_tools import extract_flanking_domain_combinations
+
+flanking_combinations, IDRs, FDs = extract_flanking_domain_combinations(
+    pdb='protein.pdb',
+    return_domain_lists=True
+)
+# flanking_combinations: (idr_bounds, fd_bounds) 元组列表
+```
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L572-L627)
+
+## 将 SAFD 向量映射回完整结构域
+
+在仅针对溶剂可及残基计算交互向量后，你通常需要将这些值投影回完整的折叠结构域以进行可视化。`map_SAFD_vector_to_full_folded_domain()` 函数负责处理此操作：
+
+```python
+from finches.PDB_structure_tools import map_SAFD_vector_to_full_folded_domain
+
+FULL_FD_vector, FULL_FD_idxs = map_SAFD_vector_to_full_folded_domain(
+    partial_vector=attractive_vector,  # 例如，来自 epsilon_calculation
+    SAFD_idxs=SAFD_idxs,
+    FD_start=50,
+    FD_end=120,
+    null_value=0  # 埋藏/不可及位置的值
+)
+```
+
+返回的 `FULL_FD_vector` 长度为 `(FD_end - FD_start + 1)`，SAFD 值被放置在正确的位置，空隙则由 `null_value` 填充。这可以直接用作 PyMOL 或类似可视化工具的颜色映射。
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L495-L567)
+
+## 空间可及性掩码
+
+`build_column_mask_based_on_xyz()` 函数在交互矩阵上构建一个 **2D 二值掩码**，编码在给定聚合物链约束下，哪些（FD 表面残基，IDR 残基）对在物理上是可及的。对于每个表面残基，它计算该残基到 FD-IDR 连接点的 3D 距离，然后将该距离与在 IDR 残基位置处等效长度 (GS)ₙ 聚合物的预期末端距进行比较。如果表面残基比聚合物能达到的距离更近，则该矩阵位置被掩码处理为 0。
+
+```python
+from finches.PDB_structure_tools import build_column_mask_based_on_xyz
+
+mask = build_column_mask_based_on_xyz(
+    matrix=interaction_matrix,
+    SAFD_cords=SAFD_cords,
+    IDR_positon='Cterm',  # 'Cterm', 'Nterm', 或 'CUSTOM'
+    origin_index=None      # 当 IDR_positon='CUSTOM' 时必需
+)
+```
+
+<CgxTip>`IDR_positon` 参数（注意：保留此拼写错误以实现向后兼容）决定了 IDR 连接到折叠结构域的位置。`'Cterm'` 使用最后一个 SAFD 坐标作为连接点；`'Nterm'` 使用第一个；`'CUSTOM'` 需要一个显式的 `origin_index` 指向 `SAFD_cords`。</CgxTip>
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L157-L244)
+
+## 对比：过程式 API vs. FoldedDomain 类
+
+| 方面 | `PDB_structure_tools` (过程式) | `FoldedDomain` (类) |
+|---|---|---|
+| **PDB 后端** | soursop | mdtraj |
+| **SASA 方法** | `PO.get_all_SASA(probe_radius=7)` | `md.shrake_rupley(probe_radius=1.4)` |
+| **阈值类型** | 绝对值 (默认: 10) | 分数 (默认: 0.10 × max SASA) |
+| **坐标类型** | Cα 原子 | 侧链质心（Gly 回退至 Cα） |
+| **表面位置** | 作为数组切片返回 | 存储为 `{index: xyz}` 字典 |
+| **邻居图** | 不可用 | 带有边权重的惰性 `networkx` 图 |
+| **表面 Epsilon** | 不可用 | `calculate_surface_epsilon()`, `calculate_mean_surface_epsilon()` |
+| **结构域提取** | `extract_flanking_domain_combinations()` | 不包含（请使用 `extract_and_write_domains()`） |
+| **可视化导出** | 通过 `map_SAFD_vector_to_full_folded_domain()` 手动处理 | `write_SASA_vis_file()`, `write_epsilon_vis_file()` |
+| **推荐用途** | 旧版流水线，逐步控制 | 新代码，集成分析 |
+
+来源: [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L1-L40), [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L66-L149)
+
+## 结构域提取工具
+
+独立的 `extract_and_write_domains()` 函数提供了一种简洁的方式，从 PDB 中裁剪出特定的残基范围并将其写入具有重新编号索引的新文件——这是在独立结构域上运行 `FoldedDomain` 之前常见的预处理步骤：
+
+```python
+from finches.utils.folded_domain_utils import extract_and_write_domains
+
+extract_and_write_domains(
+    pdb_file='full_protein.pdb',
+    outfile='domain_only.pdb',
+    start=50,
+    end=120,
+    reset_indices=True  # 从 1 开始重新编号残基和原子
+)
+```
+
+来源: [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L995-L1044)
+
+## 实践工作流
+
+将表面提取与交互分析结合的典型端到端工作流如下：
+
+```python
+from finches.utils.folded_domain_utils import FoldedDomain
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+
+# 1. 初始化前端以进行 epsilon 计算
+mf = Mpipi_frontend()
+
+# 2. 加载 PDB 并提取表面残基
+fd = FoldedDomain('my_folded_domain.pdb', surface_thresh=0.10, sasa_mode='v1')
+
+# 3. 检查表面组成
+print(f"Surface fraction: {fd.surface_fraction:.2f}")
+print(f"Surface residues: {''.join(fd.sequence[i] for i in fd.surface_indices)}")
+
+# 4. 针对 IDR 序列计算表面 epsilon
+idr_sequence = "GSDEKRRGSDEKRRGSDEKRR"
+surface_eps = fd.calculate_surface_epsilon(idr_sequence, mf.IMC_object)
+
+# 5. 获取平均表面 epsilon
+mean_eps = fd.calculate_mean_surface_epsilon(idr_sequence, mf.IMC_object)
+```
+
+<CgxTip>`FoldedDomain` 类在首次访问 `surface_neighbours`、`surface_graph` 或任何表面距离属性时，会惰性求值邻居图。如果你只需要 SASA 和表面分类，则永远不会构建图——从而避免开销较大的 `networkx` 最短路径计算。如果你希望在任意惰性触发之前控制邻居距离阈值，请显式调用 `fd.get_nearest_neighbour_res(distance_thresh=9.0)`。</CgxTip>
+
+来源: [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L486-L584)
+
+## 下一步
+
+- **[空间可及性掩码](17-spatial-accessibility-masking)** —— SAFD 坐标如何馈入交互矩阵的 2D 聚合物约束掩码
+- **[Epsilon 计算与加权](9-epsilon-calculation-and-weighting)** —— 如何从逐残基交互对计算表面 epsilon 值
+- **[结构域分解与区域](18-domain-decomposition-and-regions)** —— 在完整序列中自动识别 IDR/FD 边界
+
+---
+
+- [深入解析/折叠域相互作用/空间可及性掩蔽](https://zread.ai/idptools/finches/17-spatial-accessibility-masking)
+
+---
+slug:17-spatial-accessibility-masking
+blog_type:normal
+---
+
+
+空间可及性掩码是 finches 将折叠结构域的三维结构转换为二值掩码和几何掩码的计算流程，这些掩码用于过滤参与结构域间相互作用计算的残基。其核心原理很直观：**埋藏残基无法参与分子间接触**，因此必须将它们从 epsilon 计算中排除。finches 通过两个互补的子系统来实现这一点——`FoldedDomain` 类用于基于逐残基 SASA 的表面分类，`PDB_structure_tools` 模块用于基于坐标驱动的交互矩阵几何掩码计算。
+
+## 概念基础：为何掩码如此重要
+
+当计算内禀无序区（IDR）与折叠结构域（FD）之间的相互作用强度时，一种朴素的方法会将 FD 中的每个残基视为同等可用于接触。但这在物理上是不正确的：埋藏在蛋白质内部的残基对 IDR 链是不可及的。如果没有掩码处理，由于埋藏残基会产生虚假的吸引或排斥项，epsilon 值会被系统性放大。空间可及性掩码通过构建二值表面向量（1 代表溶剂暴露，0 代表埋藏）来解决此问题，然后将其作为逐残基 epsilon 向量的直接过滤器，或作为交互矩阵的二维掩码应用，其中额外的几何约束会排除在给定聚合物链连通性下物理上不可及的残基对。
+
+```mermaid
+graph TD
+    A[PDB Structure] --> B[SASA Computation]
+    B --> C{Surface Classification}
+    C -->|v1: sidechain only| D[Binary Surface Vector]
+    C -->|v2: sidechain + backbone| D
+    D --> E[Surface Positions xyz]
+    E --> F[Two Masking Strategies]
+    F --> G[Per-Residue Filter<br/>surface_vector × epsilon_vector]
+    F --> H[2D Geometric Mask<br/>build_column_mask_based_on_xyz]
+    G --> I[Masked Epsilon Values]
+    H --> I
+```
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L66-L248), [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L157-L244)
+
+## FoldedDomain 类：基于 SASA 的表面分类
+
+`FoldedDomain` 类是空间可及性分析的主要入口点。它通过 mdtraj 加载 PDB 结构，使用 Shrake-Rupley 算法计算逐残基的溶剂可及表面积（SASA），并参照由 GXG 三肽模拟推导出的最大 SASA 参考值，将每个残基分类为表面暴露或埋藏。
+
+### 初始化与表面向量构建
+
+在构造时，`FoldedDomain` 会执行一系列紧密耦合的序列：PDB 加载 → SASA 计算 → 表面分类 → 三维位置提取。**表面向量**是核心数据结构——一个由 0/1 值组成的列表，每个残基对应一个值，其中 1 表示溶剂可及。分类取决于 `sasa_mode` 参数，该参数控制阈值比较中使用的参考 SASA：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `pdbfilename` | *(必填)* | 待分析的 PDB 文件路径 |
+| `start` / `end` | `None` | 残基索引切片（两者必须同时提供或同时省略） |
+| `probe_radius` | `1.4` | SASA 探针半径，单位为埃（内部转换为 nm 供 mdtraj 使用） |
+| `surface_thresh` | `0.10` | 表面分类的分数阈值 |
+| `sasa_mode` | `'v1'` | 表面分类模式（v1 或 v2） |
+| `residue_overide_mapping` | `{}` | 将非标准残基名称映射到标准残基名称的字典 |
+| `ignore_warnings` | `False` | 抑制起始/终止残基警告 |
+| `SASA_ONLY` | `False` | 仅计算 SASA，跳过所有下游分析 |
+
+```python
+from finches.utils.folded_domain_utils import FoldedDomain
+
+# 基本用法 - 加载 PDB 并分类表面残基
+fd = FoldedDomain('my_protein.pdb')
+
+# 访问二值表面向量
+print(fd.surface_vector)      # 例如 [0, 1, 1, 0, 1, ...]
+print(fd.surface_fraction)    # 表面残基所占比例
+print(fd.surface_indices)     # 表面暴露残基的索引
+print(fd.sequence)            # 完整的氨基酸序列字符串
+```
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L71-L149)
+
+### SASA 模式：v1 对比 v2
+
+两种 SASA 模式的区别在于它们比较的参考最大 SASA 不同，这控制了残基必须暴露到何种程度才能被分类为“表面”：
+
+**v1（默认）** 将残基的计算 SASA 仅与**侧链**最大 SASA 进行比较。这意味着甘氨酸（其侧链 SASA 为零）会被分类为表面暴露，除非它被完全埋藏（残基 SASA = 0 且最大侧链 SASA = 0，因此 0 > 0 的求值结果为假）。分类标准为：
+
+```
+residue_sasa[i] > surface_thresh × MAX_SASA_DATA[residue][0]
+```
+
+**v2** 与侧链和主链最大 SASA 的**总和**进行比较，这使得其更为严格——残基必须暴露得更多（相对于其总可能暴露度）才能被分类为表面：
+
+```
+residue_sasa[i] > surface_thresh × (MAX_SASA_DATA[residue][0] + MAX_SASA_DATA[residue][1])
+```
+
+`MAX_SASA_DATA` 字典存储了每种氨基酸的 `[sidechain_max, backbone_max]` 对，这些数据是根据 GXG 三肽的全原子排斥体积模拟计算得出的。这些是固定的经验常数——不可由用户配置——它们将分数阈值锚定到具有物理意义的参考值上。
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L17-L36), [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L198-L217)
+
+### 表面位置与三维几何
+
+对于每个表面残基，`FoldedDomain` 计算侧链原子的**质心**作为代表性三维坐标。如果残基缺乏侧链原子（例如甘氨酸），则使用 Cα 原子位置。这些位置存储在 `surface_positions` 中，形式为将残基索引映射到三维坐标（单位为 nm，由 mdtraj 返回）的字典。此坐标信息对于下游几何掩码计算和构建表面邻居图至关重要。
+
+```python
+fd = FoldedDomain('my_protein.pdb')
+
+# 访问表面残基的三维位置
+for idx, pos in fd.surface_positions.items():
+    print(f"Residue {idx} ({fd.sequence[idx]}) at x={pos[0]:.2f}, y={pos[1]:.2f}, z={pos[2]:.2f}")
+```
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L220-L231)
+
+## 表面邻居图与距离度量
+
+除了二值表面向量外，`FoldedDomain` 还会惰性构造一个由空间邻近关系连接的表面残基 **networkx 图**。该图不会在初始化时构建——它会在首次访问任何惰性属性（`surface_graph`、`surface_neighbours`、`surface_distance_surface`、`surface_distance_straight_line`、`all_shortest_paths`）时进行计算。
+
+### 通过 `get_nearest_neighbour_res` 构建
+
+`get_nearest_neighbour_res(distance_thresh=9.0)` 方法通过计算所有表面残基位置之间的成对欧氏距离矩阵来构建邻居图，然后将阈值（默认 9 Å）内的残基连接起来。每条边的权重为所连残基间的欧氏距离。从该图中可推导出两种距离度量：
+
+| 度量 | 属性 | 描述 |
+|---|---|---|
+| **表面距离** | `surface_distance_surface` | 穿过图的最短路径距离（Dijkstra），反映沿蛋白质表面的测地路径 |
+| **直线距离** | `surface_distance_straight_line` | 直接欧氏距离，忽略表面拓扑 |
+
+对于大多数应用，表面距离是具有物理意义的度量——两个残基在欧氏空间中可能很近，但沿蛋白质表面却相距甚远（例如，位于结构域的相对面上）。`surface_neighbours` 字典将每个残基索引映射到 `[neighbor_index, distance]` 对列表，而 `surface_neighbour_sequences` 将邻近残基的单字母编码连接成字符串，对应于每个表面位置。
+
+```python
+fd = FoldedDomain('my_protein.pdb')
+
+# 访问表面邻居图（触发惰性计算）
+graph = fd.surface_graph
+print(f"Surface graph: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+
+# 比较两个残基之间的表面距离与直线距离
+i, j = fd.surface_indices[0], fd.surface_indices[5]
+print(f"Surface dist: {fd.surface_distance_surface[i][j]:.1f} Å")
+print(f"Straight-line: {fd.surface_distance_straight_line[i][j]:.1f} Å")
+```
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L324-L438), [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L256-L305)
+
+## 交互矩阵的几何掩码
+
+`FoldedDomain` 类提供逐残基的表面分类，而 `PDB_structure_tools` 模块则提供了一种补充方法：对整个交互矩阵进行**二维几何掩码**处理。核心函数是 `build_column_mask_based_on_xyz`，它根据给定聚合物链约束下每个 IDR-FD 残基对的几何可及性来构建二值掩码。
+
+### `build_column_mask_based_on_xyz`
+
+该函数接收一个交互矩阵（行 = FD 残基，列 = IDR 残基）、溶剂可及折叠结构域（SAFD）残基的三维坐标，以及 IDR 附着点（N 端、C 端或自定义）的位置。对于每个 SAFD 残基，它计算从 FD 上的 IDR 附着点到该残基的欧氏距离。如果该距离小于相应 IDR 残基位置的扩展聚合物极限，则矩阵项设为 1（可及），否则设为 0。聚合物极限来源于 `GS_seqs_dic` 参考数据，该数据提供了等长高斯链的预期末端距。
+
+| 参数 | 描述 |
+|---|---|
+| `matrix` | 形状为 (FD_sequence, IDR_sequence) 的二维交互数组 |
+| `SAFD_cords` | SAFD 残基的三维坐标（来自 `pdb_to_SDFDresidues_and_xyzs`） |
+| `IDR_positon` | `'Cterm'`、`'Nterm'` 或 `'CUSTOM'`——IDR 附着到 FD 的位置 |
+| `origin_index` | 自定义附着点索引（当 `IDR_positon='CUSTOM'` 时必填） |
+
+<CgxTip>`build_column_mask_based_on_xyz` 函数在源代码中被标记为 "BROKEN"——使用时应谨慎。对于生产环境，通过 `FoldedDomain.surface_vector` 进行的逐残基掩码方法是更为稳健且经过充分测试的途径。</CgxTip>
+
+来源：[PDB_structure_tools.py](/finches/PDB_structure_tools.py#L157-L244)
+
+### SAFD 提取流程
+
+在构建几何掩码之前，你必须提取溶剂可及折叠结构域（SAFD）残基及其坐标。`pdb_to_SDFDresidues_and_xyzs` 函数通过单次调用即可提供此功能：
+
+```python
+from finches.PDB_structure_tools import pdb_to_SDFDresidues_and_xyzs
+
+SAFD_seq, SAFD_idxs, SAFD_cords = pdb_to_SDFDresidues_and_xyzs(
+    pdb='my_protein.pdb',
+    FD_start=50,    # 折叠结构域起始索引
+    FD_end=150      # 折叠结构域终止索引
+)
+```
+
+该函数返回三个值：溶剂可及残基的拼接序列、它们在完整蛋白质中的索引，以及它们在三维空间中的 Cα 坐标。在内部，它使用 `soursop` 库进行 SASA 计算（探针半径为 7，步长为 1），并使用阈值 10 进行可及性分类。对于 PDB 已被解析的工作流，`tracks_to_SAFD_residues_and_xyzs` 接受预计算的可及性和坐标轨迹，以避免冗余的 I/O 操作。
+
+来源：[PDB_structure_tools.py](/finches/PDB_structure_tools.py#L249-L339), [PDB_structure_tools.py](/finches/PDB_structure_tools.py#L70-L99)
+
+### 将 SAFD 向量映射回完整结构域
+
+当仅使用 SAFD 序列计算 epsilon 向量时，必须将其映射回完整的折叠结构域以进行可视化。`map_SAFD_vector_to_full_folded_domain` 函数将部分向量（长度 = SAFD 残基数量）扩展为全长度向量（长度 = FD_end - FD_start + 1），并为埋藏位置插入 `null_value`（默认为 0）：
+
+```python
+from finches.PDB_structure_tools import map_SAFD_vector_to_full_folded_domain
+
+full_vector, full_indices = map_SAFD_vector_to_full_folded_domain(
+    partial_vector=epsilon_vector,
+    SAFD_idxs=SAFD_idxs,
+    FD_start=50,
+    FD_end=150,
+    null_value=0
+)
+```
+
+来源：[PDB_structure_tools.py](/finches/PDB_structure_tools.py#L495-L567)
+
+## 表面 Epsilon：将掩码应用于交互计算
+
+`FoldedDomain` 类提供了三种直接将空间掩码应用于 epsilon 计算的方法，可产生考虑局部表面化学性质的逐残基或逐斑块交互值。
+
+### `calculate_surface_epsilon`
+
+这是核心方法。对于每个溶剂可及残基，它：（1）收集距离阈值内的邻近表面残基；（2）重新排列邻近序列，以优先排列与中心残基化学性质相似的相邻残基（疏水残基靠近疏水残基，带电残基靠近同种电荷残基）；（3）计算重排后的邻近字符串与输入序列之间的平均场 epsilon，并按邻近字符串长度归一化。这会产生一个将残基索引映射到 `[residue_type, neighbor_string, surface_epsilon_value]` 的字典。
+
+### `calculate_attractive_surface_epsilon` / `calculate_repulsive_surface_epsilon`
+
+这些便捷方法用于过滤表面 epsilon 值，仅返回低于阈值（吸引）或大于等于阈值（排斥）的值（默认为 0）。它们有助于识别哪些表面斑块会驱动与给定 IDR 序列的有利或不利的相互作用。
+
+```python
+from finches.utils.folded_domain_utils import FoldedDomain
+from finches.frontend.mpipi_frontend import Mpipi_frontend
+
+# 初始化 FoldedDomain 和前端
+fd = FoldedDomain('my_protein.pdb')
+mf = Mpipi_frontend()
+
+# 计算针对 IDR 序列的逐残基表面 epsilon
+idr_sequence = "MSTPQKLEREVD"
+surface_eps = fd.calculate_surface_epsilon(idr_sequence, mf.IMC_object)
+
+# 仅提取吸引性斑块
+attractive = fd.calculate_attractive_surface_epsilon(idr_sequence, mf.IMC_object)
+print(f"Attractive surface residues: {len(attractive)} out of {len(fd.surface_indices)}")
+```
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L486-L584), [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L619-L696)
+
+### IDR-表面斑块相互作用
+
+为了进行更高分辨率的分析，`calculate_idr_surface_patch_interactions` 计算一个**逐斑块、逐 IDR 窗口**的 epsilon 矩阵。它将 IDR 序列划分为大小为 `idr_tile_size`（必须为奇数）的重叠窗口，并计算每个窗口与每个表面斑块（由距中心残基 `patch_radius` Å 范围内的残基定义）之间的 epsilon。返回值为一个元组，包含：交互字典、完整的 epsilon 矩阵（非表面残基位置为 NaN），以及所有斑块的平均 epsilon 向量。
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L891-L985)
+
+## 表面残基聚类的逆加权距离（IWD）
+
+`calculate_IWD` 方法使用 Schueler-Furman 和 Baker (2003) 提出的逆加权距离度量来量化特定残基类型在蛋白质表面的空间聚类。给定一组残基（按类型或显式位置指定），它计算所有残基对之间 1/d 的平均值，其中 d 为表面距离或直线距离。可以通过在表面上随机化残基位置来生成可选的零分布，从而能够统计评估观察到的聚类是否超出了随机期望。
+
+```python
+fd = FoldedDomain('my_protein.pdb')
+
+# 表面疏水残基的 IWD
+iwd, n_res, null_dist = fd.calculate_IWD(
+    residues=['I', 'V', 'L', 'A', 'M'],
+    distance_mode='surface',
+    calculate_null=True,
+    number_null_iterations=1000
+)
+```
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L703-L820)
+
+## 完整工作流：从 PDB 到掩码 Epsilon
+
+下图展示了将空间可及性掩码应用于 IDR-FD 相互作用计算的端到端流程：
+
+```mermaid
+flowchart LR
+    A["PDB File"] --> B["FoldedDomain()"]
+    B --> C["surface_vector<br/>(binary mask)"]
+    B --> D["surface_positions<br/>(3D coords)"]
+    B --> E["surface_graph<br/>(neighbor network)"]
+    C --> F["Filter SAFD residues<br/>from epsilon vector"]
+    E --> G["calculate_surface_epsilon()<br/>per-residue mean-field ε"]
+    D --> H["build_column_mask_based_on_xyz<br/>2D geometric mask"]
+    G --> I["Masked Interaction<br/>Values"]
+    F --> I
+    H --> I
+```
+
+<CgxTip>`FoldedDomain` 类被别名为 `FoldeDomain`（缺少末尾的 'd'）以实现向后兼容。两个名称指向同一个类——在新代码中请使用 `FoldedDomain`。</CgxTip>
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L62-L65), [folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L987-L989)
+
+## 可视化输出
+
+有两种方法支持将掩码数据导出供外部可视化工具（例如 PyMOL 着色脚本）使用：`write_SASA_vis_file` 写入逐残基的二值表面分类，`write_epsilon_vis_file` 写入逐残基的表面 epsilon 值。两者均使用 `<residue_index> A <value>` 格式，每行对应一个残基。
+
+来源：[folded_domain_utils.py](/finches/utils/folded_domain_utils.py#L827-L888)
+
+---
+
+**下一步**：关于向空间可及性掩码提供输入的 PDB 解析与表面残基提取，请参阅 [PDB 表面残基提取](16-pdb-surface-residue-extraction)。关于掩码 epsilon 值如何传播到相图计算中，请参阅 [Flory-Huggins 相图](14-flory-huggins-phase-diagrams)。关于 epsilon 计算引擎本身，请参阅 [Epsilon 计算与加权](9-epsilon-calculation-and-weighting)。
+
+---

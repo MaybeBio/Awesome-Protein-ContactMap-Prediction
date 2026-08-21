@@ -1,0 +1,44 @@
+# idptools/finches
+
+Source: https://zread.ai/idptools/finches
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/安装指南](3-installation-guide.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/域分解与区域](18-domain-decomposition-and-regions.md)
+- [深入解析/序列上下文加权方案](19-sequence-context-weighting-schemes.md)
+- [深入解析/Cython 矩阵加速](20-cython-matrix-acceleration.md)
+### 前端 API
+
+- [深入解析/前端 API/Mpipi 与 CALVADOS 前端](5-mpipi-and-calvados-frontends.md)
+- [深入解析/前端 API/交互A图与图形](6-interaction-maps-and-figures.md)
+- [深入解析/前端 API/残基级交互向量](7-per-residue-interaction-vectors.md)
+
+### 核心计算
+
+- [深入解析/核心计算/交互矩阵构造器](8-interactionmatrixconstructor.md)
+- [深入解析/核心计算/Epsilon 计算与加权](9-epsilon-calculation-and-weighting.md)
+- [深入解析/核心计算/滑动窗口矩阵计算](10-sliding-window-matrix-computation.md)
+
+### 力场模型
+
+- [深入解析/力场模型/Mpipi 力场参数](11-mpipi-forcefield-parameters.md)
+- [深入解析/力场模型/CALVADOS 力场参数](12-calvados-forcefield-parameters.md)
+- [深入解析/力场模型/自定义力场定义](13-custom-forcefield-definition.md)
+
+### 相图
+
+- [深入解析/相图/Flory-Huggins 相图](14-flory-huggins-phase-diagrams.md)
+- [深入解析/相图/条件依赖的相行为](15-condition-dependent-phase-behavior.md)
+
+### 折叠域相互作用
+
+- [深入解析/折叠域相互作用/PDB 表面残基提取](16-pdb-surface-residue-extraction.md)
+- [深入解析/折叠域相互作用/空间可及性掩蔽](17-spatial-accessibility-masking.md)
+
