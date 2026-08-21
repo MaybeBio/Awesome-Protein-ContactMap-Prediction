@@ -16,6 +16,16 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 > **⚠️ Admission criteria:** A tool must produce `a complete 2D matrix across all residue pairs`, with values corresponding to contact probabilities or predicted inter-residue distances. Tools that output only per-residue binding-site scalar scores — without explicit residue-pair coupling information — are excluded from the main track and may only be presented as low-resolution baselines.
 
+---
+
+> ⚠️ `It should be noted that there exist some essential differences between the structure prediction task and the contact‑map prediction task, which need to be discussed here.`
+>
+> although we all know MDS(multi-dimensional scaling) can convert a distance matrix to a 3D structure, the reverse is not true. A 3D structure can be converted to a distance matrix, but it is not guaranteed that the distance matrix can be converted back to the original 3D structure. This is because the distance matrix may not contain enough information to uniquely determine the 3D structure, especially if there are multiple conformations or if the structure is flexible. Therefore, while contact-map prediction can provide valuable information about protein-protein interactions, it may not always be sufficient for accurate structure prediction.
+>
+> 🌟 `But in this repository, we will try to discuss what within contact-map is more fundamental and important than structure prediction.` 
+
+---
+
 ## Menu
 
 - [Models & Tools](#models--tools)
@@ -26,16 +36,7 @@ A curated collection of computational tools for `intermolecular interaction pred
   - [C. IDR-specific](#c-idr--fuzzy-binding-specific)
 - [Datasets](#datasets)
 - [Bench](#bench)
-- [Entry template](#entry-template)
 - [Contributing](#contributing)
-
----
-
-> ⚠️ `It should be noted that there exist some essential differences between the structure prediction task and the contact‑map prediction task, which need to be discussed here.`
->
-> although we all know MDS(multi-dimensional scaling) can convert a distance matrix to a 3D structure, the reverse is not true. A 3D structure can be converted to a distance matrix, but it is not guaranteed that the distance matrix can be converted back to the original 3D structure. This is because the distance matrix may not contain enough information to uniquely determine the 3D structure, especially if there are multiple conformations or if the structure is flexible. Therefore, while contact-map prediction can provide valuable information about protein-protein interactions, it may not always be sufficient for accurate structure prediction.
->
-> 🌟 `But in this repository, we will try to discuss what within contact-map is more fundamental and important than structure prediction.` 
 
 ---
 
@@ -688,46 +689,42 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 </details>
 
-## Entry template
+## Contributing 
 
-> ⚠️ Note that deepwiki must use `https://github.com/zxmfke/deepwiki-md-chrome-extension`, and if there are any code/graph missing pages, please use the plugin to redownload the missing pages only again, and manually check it
+### Entry template for `Models & Tools` part
 
-Each tool uses a collapsible `<details>` block with consistent fields. The `<summary>` is a minimal **type tag** (the tool name lives in the `####` heading, so it is not repeated):
+Each tool uses a collapsible `<details>` block with consistent fields: 
 
 ```markdown
-#### <Tool name>
-
 <details>
-<summary><Type tag> · <subtype></summary>
+<summary> Tool name </summary>
 
-- **Paper:** [Title](link) (Journal, year) | [preprint](link)
-- **Docs:** [Read more →](docs/<tool>/) — abstract/method + deepwiki/zread annotations
+- **Paper:** [Title](link) (Journal, year) 
+- **Docs:** [Read more →](docs/<Tool name>/) 
 - **Code:** official implementation repo (N/A if none)
 - **Web server:** link (only when it exists)
 - **Approach:** DL / docking / MD (here DL = deep learning, docking = molecular docking, MD = molecular dynamics simulation)
 - **For IDR:** optional, only if the method is designed for intrinsically disordered proteins (IDPs)
 </details>
+
 ```
 
-Fields are flat — no nested `Access:` group. The entry keeps only the official access routes (Code + Web server). **Reimplementations, extra resources and other secondary links live in `docs/<tool>/README.md`** (a `Reimplementations / Resources` section), so the list stays uniform even when a tool has many third-party implementations.
+as for `docs/<Tool name>/` file folder for each tool: 
 
-Type tags used in this repo:
-- `Structure-based · single-structure`
-- `Structure-based · ensemble`
-- `Sequence-based · contact predictor`
-- `IDR-specific · ensemble`
-- `IDR-specific · binding-site baseline`
+```markdown 
+> ⚠️ create a `docs/<Tool name>/` file folder for each tool, and within the folder, some necessary files should be created:
+> 1️⃣ README.md (abstract from the paper, method, input/output)
+> 2️⃣ Some Agent wiki anotations 
+  > Deepwiki: https://deepwiki.com/
+  > Zread: https://zread.ai/
+  > Google code wiki: https://codewiki.google/
+  > readmex: https://readmex.com/
+  > 🌟 Or other wiki tools you know!
 
-## Contributing
+> download the above wiki pages and save them in the `docs/<Tool name>/` folder, name it appropriately according to the tool name, and if there are any code/graph missing pages, please redownload only the missing pages again, and manually check it, then push it to the repository.
+```
 
-- Keep README entries lean: flat **Paper, Code, Web server, Docs, Input, Output** fields (no nested `Access:` group).
-- Per-tool detailed content (abstract, method, deepwiki/zread annotations) lives in `docs/<tool>/`; README links via `Docs:`.
-- **Reimplementations and extra resources go in `docs/<tool>/README.md`, not in the README entry** — the entry lists only the official Code + Web server.
-- For unpublished tools, add a Note (⚠️ not peer-reviewed; experimental) and cite a verifiable source (preprint / leaderboard).
-- Provide at least one working Code or Web server link.
-- When unsure about category placement, follow the three-category split in the design doc (`README_cn.md`).
-
-## TODO / placeholders
+## TODO 
 
 Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to flag "known but not yet filled" entries and "empty niches to be added".
 
