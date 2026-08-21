@@ -567,19 +567,17 @@ A curated collection of computational tools for `intermolecular interaction pred
 <summary>DeepInteract</summary>
 
 - **Paper:** [Geometric Transformers for Protein Interface Contact Prediction](https://arxiv.org/abs/2110.02423) (arXiv, 2022)
-- **Docs:** [Read more →](docs/DeepInteract/)
+- **Docs:** [Read more →](docs/DeepInteract/) *to be written*
 - **Code:** https://github.com/BioinfoMachineLearning/DeepInteract
 </details>
 
-#### GLINTER
+--- 
 
 <details>
-<summary>Sequence-based · contact predictor</summary>
+<summary>GLINTER</summary>
 
-- **Paper:** [Deep graph learning of inter-protein contacts](https://academic.oup.com/bioinformatics/article/38/1/280/6438575) (Bioinformatics, 2021)
-- **Docs:** [Read more →](docs/glinter/) *to be written*
-- **Input:** two-chain sequence features
-- **Output:** L1×L2 inter-chain contact-probability matrix
+- **Paper:** [Deep graph learning of inter-protein contacts](https://academic.oup.com/bioinformatics/article/38/4/947/6424887) (Bioinformatics, 2021)
+- **Docs:** [Read more →](docs/GLINTER/) *to be written*
 - **Code:** https://github.com/zw2x/glinter
 </details>
 
