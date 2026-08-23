@@ -1,0 +1,3088 @@
+# ChengfeiYan/DRN-1D2D_Inter
+
+Source: https://zread.ai/ChengfeiYan/DRN-1D2D_Inter
+
+# 入门
+
+- [入门/概述](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**DRN-1D2D_Inter** 是一个用于**蛋白质间接触预测**的深度学习系统——该任务旨在确定两个相互作用蛋白质中哪些残基对在空间上相近。它结合了**带有混合 1D-2D 卷积块的空洞残差网络**和**蛋白质语言模型特征**（ESM-1b 和 ESM-MSA-1b），根据两条相互作用蛋白质链的序列和多重序列比对（MSA）来预测接触概率图。
+
+![main_fig](https://github.com/ChengfeiYan/DRN-1D2D_Inter/blob/main/data/main_fig.jpg?raw=true)
+
+来源: [README.md](/README.md#L1-L53)
+
+## 项目功能
+
+给定两条相互作用蛋白质链（A 和 B）的 FASTA 序列和 MSA，DRN-1D2D_Inter 会生成一个 **L_A × L_B 接触概率图**，其中每个单元格 (i, j) 表示链 A 中的残基 i 与链 B 中的残基 j 接触的可能性。该系统完全基于序列信息运行——无需输入 3D 结构。
+
+预测流程接收跨越进化、统计和语言模型信号的**九种不同特征来源**，将其转换为**4,944 通道的 2D 输入张量**，并送入一个 9 块空洞残差网络。在推理期间，跨越两种链方向（A→B 和 B→A）集成**7 个训练好的模型**，以获得稳健的预测结果。
+
+来源: [predict.py](/predict.py#L136-L178), [model.py](/model.py#L157-L218)
+
+## 核心架构概览
+
+该系统由四个相互关联的子系统组成。下图说明了数据如何从原始序列输入经过特征工程流入神经网络，最终得到预测的接触图。
+
+```mermaid
+graph TD
+    subgraph Input["📥 Input Data"]
+        FA["FASTA A"]
+        MA["MSA A (.a3m)"]
+        FB["FASTA B"]
+        MB["MSA B (.a3m)"]
+    end
+
+    subgraph PairedMSA["🔗 Paired MSA Construction"]
+        PM["pair_msa.py"]
+        CS["cluster_species.py"]
+        RW["rw_a2m.py"]
+    end
+
+    subgraph FeatureEng["⚙️ Feature Engineering"]
+        direction TB
+        subgraph PLM["Protein Language Models"]
+            E1A["ESM-1b Attention"]
+            E1R["ESM-1b Representation"]
+            M1A["MSA-1b Attention"]
+            M1R["MSA-1b Representation"]
+        end
+        subgraph EvoFeatures["Evolutionary Features"]
+            PSSM["PSSM (HHM)"]
+            CCM["CCMpred"]
+            ALN["alnstats"]
+        end
+    end
+
+    subgraph Network["🧠 Dilated Residual Network"]
+        FL["1×1 Projection<br/>(4944→96 ch)"]
+        HL["9× BasicBlock<br/>(Hybrid 1D-2D Dilated Conv)"]
+        OL["1×1 Output<br/>(96→1 ch)"]
+        SIG["Sigmoid"]
+    end
+
+    subgraph Output["📤 Output"]
+        CMAP["Contact Probability Map<br/>L_A × L_B"]
+    end
+
+    FA & MA & FB & MB --> PM
+    PM --> CS & RW
+    PM --> EvoFeatures
+    FA & FB --> E1R & E1A & M1R
+    MA & MB --> M1A & M1R
+    PM --> M1A
+
+    EvoFeatures & PLM -->|concat| FL
+    FL --> HL --> OL --> SIG --> CMAP
+```
+
+来源: [predict.py](/predict.py#L1-L178), [model.py](/model.py#L1-L218), [load_feature.py](/load_feature.py#L1-L131)
+
+## 项目结构
+
+```
+DRN-1D2D_Inter/
+├── model.py                  # 空洞残差网络 (BasicBlock + ResNet)
+├── load_feature.py           # 特征加载、拼接与重塑
+├── predict.py                # 端到端预测流程
+├── train.py                  # 带有 top-L/k 模型选择的训练循环
+├── plm/                      # 蛋白质语言模型特征提取器
+│   ├── esm1b_attn.py         #   ESM-1b 交叉注意力 (2D 特征)
+│   ├── esm1b_repr.py         #   ESM-1b 逐残基表示 (1D 特征)
+│   ├── msa1b_attn.py         #   ESM-MSA-1b 行注意力 (2D 特征)
+│   ├── msa1b_repr.py         #   ESM-MSA-1b MSA 表示 (1D 特征)
+│   └── LoadHHM.py            #   HMM → PSSM/PSFM 解析器
+├── paired/                   # 基于分类学的配对 MSA 构建
+│   ├── pair_msa.py           #   主配对编排器
+│   ├── cluster_species.py    #   TaxID 分组与相似度排序
+│   ├── rw_a2m.py             #   A2M/MSA 文件读取与解析
+│   └── hhfilter_paired.py    #   配对后 MSA 过滤
+├── data/                     # 基准数据集和回归权重
+│   ├── trainset/             #   7,362 个训练二聚体
+│   ├── HomoPDB/              #   400 个同源二聚体测试用例
+│   ├── HeteroPDB/            #   200 个异源二聚体测试用例
+│   ├── DB5.5/                #   59 个 Docking Benchmark 5.5 测试用例
+│   ├── DHTest/               #   130 个 DeepHomo 测试用例
+│   └── regression/           #   ESM 接触回归权重
+├── example/                  # 示例输入文件 (1GL1)
+└── model/                    # 训练好的模型权重 (7 个模型，需单独下载)
+```
+
+来源: [data/README.md](/data/README.md#L1-L10), [README.md](/README.md#L1-L53)
+
+## 特征类别
+
+系统从两种互补的范式中提取特征——表征单个残基的**单链 (1D)** 信号，以及捕获链间关系的**成对 (2D)** 信号。1D 特征在与原生 2D 特征拼接之前，通过轴向重复广播到 2D 平面。
+
+| 类别 | 特征 | 维度 | 来源 | 描述 |
+|----------|---------|:-:|--------|-------------|
+| **1D** | PSSM | 每个残基 20 | HH-suite → `LoadHHM.py` | 来自轮廓 HMM 的位置特异性得分矩阵 |
+| **1D** | ESM-1b Representation | 每个残基 1,280 | `esm1b_repr.py` | 来自 ESM-1b (第 33 层) 的逐残基嵌入 |
+| **1D** | ESM-MSA-1b Representation | 每个残基 768 | `msa1b_repr.py` | 来自 ESM-MSA-1b (第 12 层) 的 MSA 感知嵌入 |
+| **2D** | CCMpred | 1 个通道 | CCMpred | 来自配对 MSA 的共进化接触分数 |
+| **2D** | alnstats | 3 个通道 | alnstats | 成对统计势 (单体 + 配对) |
+| **2D** | ESM-1b Attention | 33×20 = 660 个通道 | `esm1b_attn.py` | 链 A 与链 B 之间的交叉注意力 |
+| **2D** | ESM-MSA-1b Attention | 12×20 = 240 个通道 | `msa1b_attn.py` | 跨越链边界的行注意力 |
+
+每条链的 **1D 特征**被拼接 (PSSM + ESM-1b repr + MSA-1b repr = 每条链 2,068 个通道)，然后进行广播：链 A 的 1D 特征沿列重复，链 B 的 1D 特征沿行重复。结合 2D 成对特征 (1 + 3 + 660 + 240 = 904 个通道)，最终生成 **2 × 2,068 + 808 = 4,944 个通道**的总输入 (两个注意力方向共享 CCMpred 和 alnstats，分别贡献给 rt/sw 输入路径)。
+
+来源: [load_feature.py](/load_feature.py#L44-L131), [plm/esm1b_repr.py](/plm/esm1b_repr.py#L44-L56), [plm/msa1b_repr.py](/plm/msa1b_repr.py#L49-L61), [plm/esm1b_attn.py](/plm/esm1b_attn.py#L48-L69), [plm/msa1b_attn.py](/plm/msa1b_attn.py#L50-L71)
+
+## 网络架构摘要
+
+**空洞残差网络**遵循投影-变换-输出模式，包含三个不同阶段：
+
+| 阶段 | 操作 | 形状转换 | 核心细节 |
+|-------|-----------|:----------------|------------|
+| **投影** | 1×1 Conv + InstanceNorm + LeakyReLU | 4,944 → 96 通道 | 将异构特征压缩至均匀的通道空间 |
+| **隐藏层** | 9× BasicBlock (rate 1) | 96 → 96 通道 | 带有残差连接的混合 3×3 + 1×15 + 15×1 空洞卷积 |
+| **输出** | 1×1 Conv → Clamp → Sigmoid | 96 → 1 通道 | 生成逐对接触概率 |
+
+每个 **BasicBlock** 包含三个在空洞率 1、20 和 40 下的并行卷积路径：标准 **3×3 空洞卷积**、**1×15 逐行**卷积和 **15×1 逐列**卷积。行/列卷积捕获接触图中的各向异性模式——水平条带（链 A 中的同一残基接触链 B 中的多个残基）和垂直条带（链 B 中的同一残基接触链 A 中的多个残基）。所有路径均使用带有可选 InstanceNorm 和 LeakyReLU 的双卷积，求和后通过残差跳跃连接相加。
+
+来源: [model.py](/model.py#L55-L218)
+
+## 预测策略
+
+在推理期间，系统跨越 **7 个独立训练的模型**和 **2 种链方向**（A→B 和 B→A）集成预测结果，产生 14 个总预测并求平均值。双向策略利用了这样一个观察结果：交换的注意力图（链 B 关注链 A）提供了互补信息。最终输出以纯文本矩阵的形式保存在 `pred.txt` 中。
+
+来源: [predict.py](/predict.py#L155-L178)
+
+## 主要依赖
+
+| 依赖 | 作用 | 备注 |
+|------------|------|-------|
+| **PyTorch 1.9** | 深度学习框架 | 模型定义、推理、训练 |
+| **ESM (Facebook)** | 蛋白质语言模型 | 提供 ESM-1b (650M 参数) 和 ESM-MSA-1b (100M 参数) |
+| **Biopython** | 序列 I/O | FASTA/MSA 文件解析 |
+| **HH-suite** | HMM 构建 | `hhmake` 用于轮廓 HMM，`hhfilter` 用于 MSA 过滤 |
+| **CCMpred** | 共进化分析 | 伪似然共进化接触预测 |
+| **alnstats** | 统计势 | 来自比对的单体和成对得分 |
+
+<CgxTip>工具路径 (CCMpred, alnstats, hhmake, hhfilter) 和 ESM 模型权重路径在 `predict.py` 中是硬编码的，在运行预测之前必须修改以匹配你的本地环境。</CgxTip>
+
+来源: [predict.py](/predict.py#L19-L27), [README.md](/README.md#L4-L17)
+
+## 引用
+
+Yunda Si, Chengfei Yan, *Improved inter-protein contact prediction using dimensional hybrid residual networks and protein language models*, Briefings in Bioinformatics, 2023, bbad039, [https://doi.org/10.1093/bib/bbad039](https://doi.org/10.1093/bib/bbad039)
+
+来源: [README.md](/README.md#L49-L51)
+
+## 后续阅读
+
+从实用的设置页面开始，然后深入探索各个子系统：
+
+1. **[快速开始](2-quick-start)** — 使用提供的示例运行你的首次蛋白质间接触预测
+2. **[安装与依赖](3-installation-and-dependencies)** — 配置工具路径并下载模型权重
+3. **[架构概览](4-architecture-overview)** — 网络数据流和层结构的详细解析
+4. **[特征工程流水线](5-feature-engineering-pipeline)** — 9 种特征类型如何计算并组装成输入张量
+5. **[预测流水线](13-prediction-pipeline)** — `predict.py` 的逐步执行追踪
+
+---
+
+- [入门/快速上手](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+五分钟内运行起 DRN-1D2D_Inter。本页将带你了解如何克隆仓库、配置外部工具路径、下载模型权重，并使用附带的示例数据执行你的首次蛋白质间接触预测。最终目标是完成一个端到端的预测，生成如下所示的接触概率图。
+
+![DRN-1D2D_Inter 输出示例](https://github.com/ChengfeiYan/DRN-1D2D_Inter/blob/main/data/drn.jpg?raw=true)
+
+来源：[README.md](/README.md#L1-L53), [predict.py](/predict.py#L1-L178)
+
+## 前置条件速览
+
+在接触代码之前，请验证你的环境是否满足这些要求。DRN-1D2D_Inter 同时依赖 **Python 包**和**编译好的生物信息学工具**——后者对于特征生成是不可或缺的。
+
+| 类别 | 依赖项 | 版本 / 备注 | 用途 |
+|---|---|---|---|
+| **Python** | Python | 3.8 | 运行时环境 |
+| | PyTorch | 1.9 | 深度学习框架 |
+| | Biopython | — | FASTA/MSA 解析 |
+| | esm (Facebook) | — | ESM-1b 与 ESM-MSA-1b 模型 |
+| | NumPy | — | 数值计算 |
+| **外部工具** | CCMpred | 可执行二进制文件 | 共进化接触得分 |
+| | alnstats | 可执行二进制文件 | 比对统计（单点/成对） |
+| | fasta2aln | 可执行二进制文件 | MSA 格式转换 |
+| | hh-suite | 已编译 | HMM 生成与 MSA 过滤 |
+
+<CgxTip>ESM-1b 和 ESM-MSA-1b 模型权重必须从 [esm 仓库的 "Available Models and Datasets" 表格](https://github.com/facebookresearch/esm)单独下载。`data/regression/` 中附带的回归检查点文件也需要放置在这些权重所在的目录下。</CgxTip>
+
+来源：[README.md](/README.md#L4-L17)
+
+## 步骤 1 — 克隆仓库
+
+```bash
+git clone https://github.com/ChengfeiYan/DRN-1D2D_Inter.git
+cd DRN-1D2D_Inter
+```
+
+你将看到的顶层目录结构：
+
+```
+DRN-1D2D_Inter/
+├── predict.py          ← 主预测入口
+├── train.py            ← 训练脚本
+├── model.py            ← DRN-1D2D 网络定义
+├── load_feature.py     ← 特征加载与拼接
+├── plm/                ← 蛋白质语言模型模块
+│   ├── esm1b_attn.py   ← ESM-1b 注意力提取
+│   ├── esm1b_repr.py   ← ESM-1b 表征提取
+│   ├── msa1b_attn.py   ← ESM-MSA-1b 注意力提取
+│   └── msa1b_repr.py   ← ESM-MSA-1b 表征提取
+├── paired/             ← 配对 MSA 构建
+├── example/            ← 附带示例 (1GL1)
+└── data/               ← 回归权重与基准测试数据
+```
+
+来源：[README.md](/README.md#L19-L21), [predict.py](/predict.py#L1-L19)
+
+## 步骤 2 — 下载训练好的模型权重
+
+该仓库**不包含** 7 个训练好的模型检查点文件。请从 Google Drive 链接下载它们，并解压到项目根目录的 `model/` 目录中：
+
+```bash
+# 下载链接: https://drive.google.com/file/d/1ICqJSNc01E2cGYhVj1IxzIkmnS-FMT2C/view
+# 下载后，解压至项目根目录 —— 这将创建包含 7 个权重文件的 model/ 目录
+unzip trained_models.zip -d .
+```
+
+预测脚本需要在 `model/1` 到 `model/7` 路径下精确存在 7 个权重文件，它们将作为集成模型被加载以进行最终平均。
+
+来源：[README.md](/README.md#L24-L25), [predict.py](/predict.py#L158-L177)
+
+## 步骤 3 — 配置工具与模型路径
+
+打开 [predict.py](predict.py) 并更新文件顶部（第 24–31 行）的**路径变量**以匹配你的系统。这些路径告诉流水线去哪里查找外部二进制文件和 ESM 模型权重。
+
+| 变量 | 当前默认值 | 应设置为何值 |
+|---|---|---|
+| `CCMPred` | `/home/.../ccmpred` | CCMpred 二进制文件的绝对路径 |
+| `reformat` | `/home/.../fasta2aln` | fasta2aln 二进制文件的绝对路径 |
+| `alnstats` | `/home/.../alnstats` | alnstats 二进制文件的绝对路径 |
+| `hhmake` | `/home/.../hhmake` | hhmake 二进制文件的绝对路径 |
+| `hhfilter` | `/home/.../hhfilter` | hhfilter 二进制文件的绝对路径 |
+| `LoadHHM` | `/home/.../LoadHHM.py` | 本仓库中 `plm/LoadHHM.py` 的绝对路径 |
+| `esm1b_location` | `/home/.../esm1b_t33_650M_UR50S.pt` | ESM-1b 模型权重的绝对路径 |
+| `esm_msa1b_location` | `/home/.../esm_msa1b_t12_100M_UR50S.pt` | ESM-MSA-1b 模型权重的绝对路径 |
+
+<CgxTip>`LoadHHM` 变量必须指向本仓库内 `plm/LoadHHM.py` 的**本地副本**（例如 `/your/path/DRN-1D2D_Inter/plm/LoadHHM.py`），而非远程位置。该脚本在特征准备阶段负责将 `.hhm` 文件解析为 PSSM pickle 文件。</CgxTip>
+
+此外，将 ESM-1b **接触回归检查点**从仓库中复制到与你的 ESM-1b 模型权重相同的目录下：
+
+```bash
+cp data/regression/esm1b_t33_650M_UR50S-contact-regression.pt /path/to/esm/weights/
+```
+
+来源：[predict.py](/predict.py#L22-L31), [README.md](/README.md#L22-L23)
+
+## 步骤 4 — 运行你的首次预测
+
+预测流水线接受六个命令行参数：
+
+```bash
+python predict.py sequenceA msaA sequenceB msaB result_path device
+```
+
+| 参数 | 描述 | 示例 |
+|---|---|---|
+| `sequenceA` | 蛋白质链 A 的 FASTA 文件 | `./example/1GL1_A.fasta` |
+| `msaA` | 链 A 的 A3M 多序列比对 (UniRef90/100) | `./example/1GL1_A_uniref100.a3m` |
+| `sequenceB` | 蛋白质链 B 的 FASTA 文件 | `./example/1GL1_I.fasta` |
+| `msaB` | 链 B 的 A3M 多序列比对 | `./example/1GL1_I_uniref100.a3m` |
+| `result_path` | 输出目录（若不存在则会创建） | `./example/result` |
+| `device` | PyTorch 设备标识符 | `cpu` 或 `cuda:0` |
+
+执行附带示例：
+
+```bash
+python predict.py \
+  ./example/1GL1_A.fasta ./example/1GL1_A_uniref100.a3m \
+  ./example/1GL1_I.fasta ./example/1GL1_I_uniref100.a3m \
+  ./example/result cpu
+```
+
+示例目标是 **1GL1**，一个胰凝乳蛋白酶–BPTI 复合体。链 A（胰凝乳蛋白酶，199 个残基）和链 I（BPTI，36 个残基）构成了一个经典的蛋白质-蛋白质相互作用，具有被充分研究的蛋白质间接触。
+
+来源：[predict.py](/predict.py#L35-L41), [README.md](/README.md#L27-L39), [example/1GL1_A.fasta](/example/1GL1_A.fasta#L1-L2), [example/1GL1_I.fasta](/example/1GL1_I.fasta#L1-L2)
+
+## 预测过程中的运作机制
+
+`predict.py` 脚本编排了一个**九阶段特征工程流水线**，随后是一个**集成推理**步骤。以下是完整流程：
+
+```mermaid
+flowchart TD
+    A["输入: fastaA, msaA, fastaB, msaB"] --> B
+
+    subgraph 配对特征
+        B["1. 按分类法配对 MSA"] --> C["2. 过滤并重新格式化配对 MSA"]
+        C --> D["3. 拼接配对序列"]
+        D --> E["4. 运行 CCMpred + alnstats"]
+        E --> F["5. 提取 ESM-1b 蛋白质间注意力"]
+        F --> G["6. 提取 ESM-MSA-1b 蛋白质间注意力"]
+    end
+
+    subgraph 每条链的 1D 特征
+        G --> H["7. 通过 hhmake 计算 PSSM"]
+        H --> I["8. 提取 ESM-1b 表征"]
+        I --> J["9. 提取 ESM-MSA-1b 表征"]
+    end
+
+    subgraph 推理
+        J --> K["加载并拼接所有特征"]
+        K --> L["集成: 7 个模型检查点 × 2 种方向"]
+        L --> M["输出: pred.txt 接触概率图"]
+    end
+```
+
+每个阶段都会在 `result_path` 目录下生成中间文件。最终输出为 **`pred.txt`**——一个矩阵，其中条目 *(i, j)* 表示链 A 的残基 *i* 与链 B 的残基 *j* 发生接触的预测概率。
+
+来源：[predict.py](/predict.py#L44-L177), [load_feature.py](/load_feature.py#L42-L102)
+
+## 理解输出结果
+
+流水线会将以下关键文件写入你的 `result_path` 目录：
+
+| 文件 | 格式 | 描述 |
+|---|---|---|
+| `pred.txt` | 纯文本矩阵 | **最终预测** — 蛋白质间接触概率 (0–1) |
+| `paired.a3m` | A3M | 通过基于分类法配对构建的配对 MSA |
+| `paired.ccmpred` | 文本 | 配对 MSA 的 CCMpred 共进化得分 |
+| `paired.pairout` | 文本 | alnstats 成对统计信息 |
+| `esm1b_rt.attn.npy` | NumPy | ESM-1b 右向交叉注意力图 |
+| `esm1b_sw.attn.npy` | NumPy | ESM-1b 交换交叉注意力图 |
+| `msa1b_rt.attn.npy` | NumPy | ESM-MSA-1b 右向交叉注意力图 |
+| `msa1b_sw.attn.npy` | NumPy | ESM-MSA-1b 交换交叉注意力图 |
+| `A_esm1b.repr.npy` | NumPy | 链 A 的 ESM-1b 逐残基表征 |
+| `B_esm1b.repr.npy` | NumPy | 链 B 的 ESM-1b 逐残基表征 |
+
+预测集成模型加载全部 7 个检查点，在每个检查点上同时运行右向（A→B）和交换（B→A）两种输入方向，并将得到的 14 个预测结果取平均。这种具有对称性感知的集成机制，正是最终在代码中除以 14（`all_preds/14`）的原因。
+
+来源：[predict.py](/predict.py#L158-L177), [load_feature.py](/load_feature.py#L16-L27)
+
+## 准备你自己的数据
+
+若要为一对新颖的蛋白质预测接触，你需要四个输入文件：
+
+1. **链 A 的 FASTA** — 包含蛋白质 A 氨基酸序列的单序列 FASTA 文件
+2. **链 A 的 MSA** — 使用 HHblits 或 JackHMMER 等工具从 **UniRef90 或 UniRef100** 派生出的 A3M 格式多序列比对
+3. **链 B 的 FASTA** — 格式同上，对应蛋白质 B
+4. **链 B 的 MSA** — 格式同上，对应蛋白质 B
+
+FASTA 文件必须刚好包含两行：标题行（以 `>` 开头）和序列行。MSA 的质量直接影响预测准确度——越深、越多样的比对能产生更好的共进化信号。
+
+```bash
+python predict.py \
+  /path/to/your/proteinA.fasta /path/to/your/proteinA_uniref100.a3m \
+  /path/to/your/proteinB.fasta /path/to/your/proteinB_uniref100.a3m \
+  /path/to/output_dir cuda:0
+```
+
+来源：[README.md](/README.md#L27-L36), [example/1GL1_A.fasta](/example/1GL1_A.fasta#L1-L2)
+
+## 常见问题排查
+
+| 症状 | 可能原因 | 解决方法 |
+|---|---|---|
+| CCMpred/alnstats 出现 `FileNotFoundError` | 工具路径未配置 | 更新 [predict.py](/predict.py#L24-L31) 中的路径变量 |
+| ESM 模型权重出现 `FileNotFoundError` | 权重未下载 | 从 [esm 仓库](https://github.com/facebookresearch/esm)下载并设置 `esm1b_location` / `esm_msa1b_location` |
+| 回归检查点出现 `FileNotFoundError` | 缺少 `.pt` 文件 | 将 `data/regression/esm1b_t33_650M_UR50S-contact-regression.pt` 复制到 ESM 权重目录 |
+| 找不到 `model/1` | 训练模型未下载 | 从 [Google Drive](https://drive.google.com/file/d/1ICqJSNc01E2cGYhVj1IxzIkmnS-FMT2C/view)下载并解压至 `model/` 目录 |
+| CUDA 内存不足 | ESM-MSA-1b 非常占用内存 | 使用 `cpu` 设备或显存 ≥16 GB 的 GPU |
+| 预测结果为空/稀疏 | MSA 太浅 | 确保 MSA 源自 UniRef90/100 且具有足够的序列多样性 |
+
+来源：[predict.py](/predict.py#L22-L31), [README.md](/README.md#L22-L25)
+
+## 接下来的去向
+
+现在你已经成功运行了一次预测，可以深入探索该系统：
+
+- **[安装与依赖](3-installation-and-dependencies)** — 所有外部工具和 Python 包的详细配置
+- **[架构概览](4-architecture-overview)** — 了解膨胀残差网络如何处理 1D 和 2D 特征
+- **[特征工程流水线](5-feature-engineering-pipeline)** — 深入剖析九个特征计算阶段
+- **[预测流水线](13-prediction-pipeline)** — 完整的端到端推理演练
+
+---
+
+- [入门/安装与依赖](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/3-installation-and-dependencies)
+
+---
+slug:3-installation-and-dependencies
+blog_type:normal
+---
+
+
+设置 DRN-1D2D_Inter 涉及三个不同的软件层：带有深度学习和生物信息学包的 **Python 环境**、一组用于 MSA 处理和共进化分析的**编译外部生物信息学工具**，以及蛋白质语言模型和 DRN-1D2D_Inter 网络本身的**预训练模型权重**。本指南将逐步引导你完成每一层的配置，并提供明确的验证检查点，以便你在运行预测之前及早发现问题。
+
+## 系统要求
+
+DRN-1D2D_Inter 使用 PyTorch 在 CPU 或 GPU 上执行推理。蛋白质语言模型（参数量为 650M 的 ESM-1b 和参数量为 100M 的 ESM-MSA-1b）是内存密集型的——强烈建议使用具有 **≥16 GB VRAM** 且支持 CUDA 的 GPU，以获得实际的运行耗时。支持 CPU 推理，但在执行 ESM 前向传播时会显著变慢。确保你的系统拥有 **≥32 GB RAM**，以满足 MSA 处理和特征组装的需求。
+
+| 需求 | 最低要求 | 推荐配置 |
+|---|---|---|
+| Python | 3.8 | 3.8 |
+| GPU VRAM | 8 GB | ≥16 GB |
+| 系统 RAM | 16 GB | ≥32 GB |
+| 磁盘空间 | 5 GB | 10 GB |
+
+来源: [README.md](/README.md#L4-L10), [predict.py](/predict.py#L17-L19)
+
+## 步骤 1 — 克隆仓库
+
+```bash
+git clone https://github.com/ChengfeiYan/DRN-1D2D_Inter.git
+cd DRN-1D2D_Inter
+```
+
+这将为你提供项目源代码、示例数据，以及 `data/regression/` 下的 ESM 回归权重占位文件。本仓库基于 **Apache 2.0** 许可证授权。
+
+来源: [README.md](/README.md#L19-L20), [LICENSE](/LICENSE#L1-L2)
+
+## 步骤 2 — 创建 Python 环境
+
+项目指定 **Python 3.8** 为目标版本。使用你首选的环境管理器来创建一个隔离环境：
+
+```bash
+# 使用 conda（推荐）
+conda create -n drn python=3.8
+conda activate drn
+
+# 或使用 venv
+python3.8 -m venv drn-env
+source drn-env/bin/activate
+```
+
+核心 Python 依赖项及其在项目中的作用总结如下：
+
+| 包 | 版本 | 作用 | 使用位置 |
+|---|---|---|---|
+| **PyTorch** | 1.9 | 张量操作、模型推理、CUDA 调度 | `predict.py`, `model.py`, `load_feature.py` |
+| **esm** | （与 PyTorch 1.9 兼容） | Facebook Research 的蛋白质语言模型库 — 提供 `pretrained.load_model_and_alphabet_local()` | `plm/esm1b_attn.py`, `plm/esm1b_repr.py`, `plm/msa1b_attn.py`, `plm/msa1b_repr.py` |
+| **Biopython** | — | `Bio.SeqIO`，用于 FASTA/MSA 文件解析 | `plm/esm1b_attn.py`, `plm/esm1b_repr.py`, `plm/msa1b_attn.py`, `plm/msa1b_repr.py` |
+| **NumPy** | — | 数组 I/O（`np.load`, `np.savetxt`），贯穿特征加载过程的数值计算 | `load_feature.py`, `predict.py`, `paired/cluster_species.py`, `plm/LoadHHM.py` |
+
+使用以下命令安装它们：
+
+```bash
+# PyTorch 1.9 配合 CUDA 11.1（根据你的驱动调整 CUDA 版本）
+pip install torch==1.9.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
+
+# 或仅使用 CPU
+pip install torch==1.9.0
+
+# 生物信息学和语言模型包
+pip install biopython
+pip install "fair-esm[all]"   # 从 Facebook Research 安装 esm 包
+pip install numpy
+```
+
+<CgxTip>PyPI 上的 `esm` 包发布名称为 `fair-esm`。在安装 `fair-esm` 后，`plm/` 中通篇使用的 `import esm` 语句将能正确解析。请确保你的 PyTorch 和 esm 版本兼容 — esm ≥ 1.0 需要 PyTorch ≥ 1.8，而本项目是基于 PyTorch 1.9 开发的。</CgxTip>
+
+通过运行以下命令**验证 Python 环境**：
+
+```bash
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+python -c "import esm; print('esm OK')"
+python -c "from Bio import SeqIO; print('Biopython OK')"
+```
+
+来源: [README.md](/README.md#L5-L9), [plm/esm1b_attn.py](/plm/esm1b_attn.py#L9-L14), [plm/msa1b_repr.py](/plm/msa1b_repr.py#L13-L14)
+
+## 步骤 3 — 安装外部生物信息学工具
+
+DRN-1D2D_Inter 在预测流程中通过 `os.system()` 调用四个编译好的生物信息学工具。它们**不是** Python 包 — 而是必须单独编译或下载的独立 C/C++ 可执行文件。
+
+| 工具 | 来源 | 流程中的作用 | 调用位置 |
+|---|---|---|---|
+| **CCMpred** | [soedinglab/CCMpred](https://github.com/soedinglab/CCMpred) | 对配对的 MSA 进行伪似然共进化接触预测 | `predict.py` 第 88 行 |
+| **alnstats** | [psipred/metapsicov `src/alnstats`](https://github.com/psipred/metapsicov/tree/master/src/alnstats) | 计算单点和双点比对统计量 | `predict.py` 第 92 行 |
+| **hh-suite** | [soedinglab/hh-suite](https://github.com/soedinglab/hh-suite) | 提供 `hhmake`（HMM 构建）和 `hhfilter`（MSA 过滤） | `predict.py` 第 62, 68, 70, 120, 122 行 |
+| **fasta2aln** | [kad-ecoli/hhsuite2 `bin/fasta2aln`](https://github.com/kad-ecoli/hhsuite2/blob/master/bin/fasta2aln) | 将 a3m MSA 重新格式化为 CCMpred/alnstats 所需的 a3l 比对格式 | `predict.py` 第 65 行 |
+
+### 安装命令
+
+```bash
+# 1. CCMpred — 从源码编译
+git clone https://github.com/soedinglab/CCMpred.git
+cd CCMpred && mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+# 可执行文件: CCMpred/build/bin/ccmpred
+
+# 2. hh-suite — 从源码编译（提供 hhmake 和 hhfilter）
+git clone https://github.com/soedinglab/hh-suite.git
+cd hh-suite && mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+# 可执行文件: hh-suite/build/bin/hhmake, hh-suite/build/bin/hhfilter
+
+# 3. alnstats — 从 metapsicov 下载预编译二进制文件
+git clone https://github.com/psipred/metapsicov.git
+# 可执行文件: metapsicov/src/alnstats/alnstats  （若无二进制文件则进行编译）
+chmod +x metapsicov/src/alnstats/alnstats
+
+# 4. fasta2aln — 下载预编译二进制文件
+wget https://github.com/kad-ecoli/hhsuite2/raw/master/bin/fasta2aln
+chmod +x fasta2aln
+```
+
+<CgxTip>`alnstats` 和 `fasta2aln` 工具以预编译二进制文件的形式分发。下载后，你**必须**使用 `chmod +x` 赋予其可执行权限。如果这些二进制文件与你的平台不兼容，请使用提供的 Makefile 从 metapsicov 源码编译 `alnstats`。</CgxTip>
+
+**记录每个可执行文件的绝对路径** — 你将在步骤 4 中用到它们：
+
+| 变量 | 示例路径 |
+|---|---|
+| `CCMPred` | `/path/to/CCMpred/build/bin/ccmpred` |
+| `alnstats` | `/path/to/metapsicov/bin/alnstats` |
+| `hhmake` | `/path/to/hh-suite/build/bin/hhmake` |
+| `hhfilter` | `/path/to/hh-suite/build/bin/hhfilter` |
+| `reformat` | `/path/to/fasta2aln` |
+
+来源: [README.md](/README.md#L12-L16), [predict.py](/predict.py#L24-L28), [predict.py](/predict.py#L62-L92)
+
+## 步骤 4 — 下载 ESM 模型权重
+
+两个蛋白质语言模型需要其预训练权重文件，这些文件**未**包含在本仓库中。请从 [esm GitHub 页面](https://github.com/facebookresearch/esm)的 "Available Models and Datasets" 表格中下载它们：
+
+| 模型 | 权重文件 | 参数量 |
+|---|---|---|
+| **ESM-1b** | `esm1b_t33_650M_UR50S.pt` | 650M |
+| **ESM-MSA-1b** | `esm_msa1b_t12_100M_UR50S.pt` | 100M |
+
+将这些 `.pt` 文件放置在专用目录中，例如 `~/esm_models/`，并记录它们的完整路径。
+
+### 复制 ESM 回归权重
+
+仓库在 `data/regression/` 下包含两个**回归检查点**占位文件，必须将它们复制到与相应模型权重相同的目录中：
+
+```bash
+# 将回归权重复制到你的 ESM 模型目录
+cp data/regression/esm1b_t33_650M_UR50S-contact-regression.pt ~/esm_models/
+cp data/regression/esm_msa1b_t12_100M_UR50S-contact-regression.pt ~/esm_models/
+```
+
+这一点至关重要 — `esm` 库会从主模型权重旁边带有 `-contact-regression.pt` 后缀的同级文件中加载接触回归头。如果缺少这些文件，ESM 注意力提取将会失败。
+
+来源: [README.md](/README.md#L11-L22), [data/regression/](/data/regression/)
+
+## 步骤 5 — 下载训练好的 DRN-1D2D_Inter 模型
+
+预测流程会从 `model/` 目录加载一个由 7 个模型组成的**集成模型**（模型文件命名为 `1` 到 `7`）：
+
+```python
+weight_list = [f'model/{i}' for i in range(1,8)]
+```
+
+从 [Google Drive 链接](https://drive.google.com/file/d/1ICqJSNc01E2cGYhVj1IxzIkmnS-FMT2C/view?usp=sharing)下载训练好的模型，然后解压到项目根目录的 `model/` 文件夹中：
+
+```bash
+# 从 Google Drive 下载后
+unzip trained_models.zip -d model/
+# 验证: 你应该看到 model/1, model/2, ..., model/7
+ls model/
+```
+
+来源: [README.md](/README.md#L24-L25), [predict.py](/predict.py#L159-L160)
+
+## 步骤 6 — 配置 predict.py 中的路径
+
+打开 [predict.py](predict.py) 并更新第 24–31 行的**六个路径变量**，使其与你的系统相匹配：
+
+```python
+# 修改前（原作者的占位路径）
+CCMPred = '/home/yunda_si/self/software_p/CCMpred_pad/bin/ccmpred'
+reformat = '/home/Common_softwares/DeepMSA/bin/fasta2aln'
+alnstats = '/home/yunda_si/self/software_p/metapsicov-2.0.3/bin/alnstats'
+hhmake   = '/home/yunda_si/self/software_p/hh-suite/build/bin/hhmake'
+hhfilter = '/home/Common_softwares/hh-suite/build/bin/hhfilter'
+LoadHHM  = '/mnt/data/yunda_si/self/PythonProjects/PPI_contact/github/plm/LoadHHM.py'
+esm1b_location      = "/mnt/data/yunda_si/self/software_p/esm/model/esm1b_t33_650M_UR50S.pt"
+esm_msa1b_location  = "/mnt/data/yunda_si/self/software_p/esm/model/esm_msa1b_t12_100M_UR50S.pt"
+```
+
+将它们替换为你实际的绝对路径：
+
+```python
+# 修改后（你的系统路径）
+CCMPred = '/your/path/to/CCMpred/build/bin/ccmpred'
+reformat = '/your/path/to/fasta2aln'
+alnstats = '/your/path/to/metapsicov/bin/alnstats'
+hhmake   = '/your/path/to/hh-suite/build/bin/hhmake'
+hhfilter = '/your/path/to/hh-suite/build/bin/hhfilter'
+LoadHHM  = '/your/path/to/DRN-1D2D_Inter/plm/LoadHHM.py'
+esm1b_location      = "/your/path/to/esm_models/esm1b_t33_650M_UR50S.pt"
+esm_msa1b_location  = "/your/path/to/esm_models/esm_msa1b_t12_100M_UR50S.pt"
+```
+
+请注意，`LoadHHM` 指向的是**本仓库内**的 `plm/LoadHHM.py` 脚本 — 请将其更新为你克隆仓库的实际位置。
+
+来源: [predict.py](/predict.py#L22-L31)
+
+## 完整安装流程
+
+下图总结了完整的设置流程及其验证检查点：
+
+```mermaid
+flowchart TD
+    A["克隆仓库"] --> B["创建 Python 3.8 环境"]
+    B --> C["pip install torch==1.9<br/>biopython, fair-esm, numpy"]
+    C --> C1{"✓ Python 导入<br/>torch, esm, Bio 正常?"}
+    C1 -->|通过| D["编译/下载<br/>CCMpred, hh-suite,<br/>alnstats, fasta2aln"]
+    C1 -->|失败| C
+    D --> E["下载 ESM 模型权重<br/>+ 复制回归 .pt 文件"]
+    E --> F["下载训练好的模型<br/>→ model/ 目录"]
+    F --> G["在 predict.py 中更新 8 个路径变量"]
+    G --> G1{"✓ 运行示例预测<br/>1GL1 正常?"}
+    G1 -->|通过| H["安装完成 🎉"]
+    G1 -->|失败| G
+
+    style A fill:#e8f5e9,stroke:#2e7d32
+    style H fill:#c8e6c9,stroke:#2e7d32
+    style C1 fill:#fff3e0,stroke:#ef6c00
+    style G1 fill:#fff3e0,stroke:#ef6c00
+```
+
+## 验证 — 运行示例
+
+完成所有步骤后，使用内置示例验证你的安装：
+
+```bash
+python predict.py ./example/1GL1_A.fasta ./example/1GL1_A_uniref100.a3m \
+                   ./example/1GL1_I.fasta ./example/1GL1_I_uniref100.a3m \
+                   ./example/result cpu
+```
+
+如果一切配置正确，这将在 `./example/result/pred.txt` 生成一个接触概率图。如果有可用的 GPU，请使用 `cuda:0` 代替 `cpu`。请注意，示例 MSA 因 GitHub 文件大小限制而被下采样，因此在实际应用中使用完整深度的 MSA 性能会更好。
+
+来源: [README.md](/README.md#L28-L44), [predict.py](/predict.py#L37-L41)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'esm'` | 未安装 `fair-esm` | `pip install "fair-esm[all]"` |
+| 在 ESM `.pt` 文件上出现 `FileNotFoundError` | 模型权重路径错误或文件缺失 | 验证 `predict.py` 中的 `esm1b_location` / `esm_msa1b_location` 指向了存在的 `.pt` 文件 |
+| 工具调用时出现 `OSError` 或 `Permission denied` | 外部工具无执行权限 | 对该二进制文件执行 `chmod +x`，并验证 `predict.py` 中的路径 |
+| `RuntimeError: CUDA out of memory` | GPU VRAM 不足以运行 ESM-1b (650M) | 使用 `cpu` 设备，或使用 `hhfilter -diff` 降低 MSA 深度 |
+| 找不到回归头（`-contact-regression.pt`） | 回归权重未复制到模型目录 | 将 `data/regression/` 中的文件复制到主 `.pt` 权重所在目录 |
+| 找不到 `model/1` | 未下载训练好的集成模型 | 从 [Google Drive](https://drive.google.com/file/d/1ICqJSNc01E2cGYhVj1IxzIkmnS-FMT2C/view?usp=sharing) 下载并解压到 `model/` 目录 |
+
+## 后续步骤
+
+环境完全配置好后，你就可以运行预测了。逻辑上的下一步是了解流程如何编排特征提取和模型推理：
+
+- **[快速开始](2-quick-start)** — 使用自定义输入运行你的首次蛋白质间接触预测
+- **[架构概览](4-architecture-overview)** — 了解 1D 特征、2D 配对特征和 DRN 网络是如何协同工作的
+- **[特征工程流程](5-feature-engineering-pipeline)** — 深入剖析 `predict.py` 内部的 9 步特征计算链
+
+---
+
+# 深入探究
+
+- [深入探究/架构概述](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+DRN-1D2D_Inter 是一个用于**蛋白质间接触预测**的深度学习系统——给定两个相互作用蛋白质（链 A 和链 B）的氨基酸序列，它预测界面两侧哪些残基对存在空间接触。该架构通过**混合 1D-2D 卷积的膨胀残差网络**，融合了来自蛋白质语言模型、进化谱和协进化信号的异构特征，最终输出一张逐残基对的概率图。
+
+来源: [README.md](/README.md#L1-L3), [model.py](/model.py#L1-L10)
+
+## 系统架构
+
+该系统作为一个四阶段的流水线运行：**输入准备 → 特征工程 → 特征组装 → 网络推理**。每个阶段将数据从原始序列层面逐步转换为更具结构化的表示，最终生成 2D 接触概率图。
+
+```mermaid
+flowchart TB
+    subgraph Input["① 输入准备"]
+        A1["链 A FASTA"] 
+        A2["链 A MSA (.a3m)"]
+        B1["链 B FASTA"]
+        B2["链 B MSA (.a3m)"]
+    end
+
+    subgraph FeatureEng["② 特征工程"]
+        direction TB
+        subgraph Paired["配对特征组"]
+            P1["配对 MSA<br/>(基于分类学的配对)"]
+            P2["CCMpred<br/>(协进化)"]
+            P3["alnstats<br/>(统计势)"]
+            P4["ESM-1b 注意力<br/>(跨链)"]
+            P5["ESM-MSA-1b 注意力<br/>(跨链)"]
+        end
+        subgraph PerChain["逐链特征组"]
+            C1["PSSM / HHM<br/>(进化谱)"]
+            C2["ESM-1b 表示<br/>(逐残基嵌入)"]
+            C3["ESM-MSA-1b 表示<br/>(逐残基嵌入)"]
+        end
+    end
+
+    subgraph Assembly["③ 特征组装 (concat)"]
+        F1["1D→2D 扩展<br/>链 A 特征按行平铺"]
+        F2["1D→2D 扩展<br/>链 B 特征按列平铺"]
+        F3["2D 配对特征<br/>(直接放置)"]
+        F4["张量: 4944 × L_A × L_B"]
+    end
+
+    subgraph Network["④ 网络推理"]
+        N1["1×1 卷积投影<br/>4944 → 96 通道"]
+        N2["9× BasicBlock<br/>(混合 1D-2D 膨胀卷积)"]
+        N3["1×1 卷积输出<br/>96 → 1 通道"]
+        N4["Sigmoid → 接触图"]
+    end
+
+    Input --> FeatureEng
+    FeatureEng --> Assembly
+    P1 --> P2 & P3
+    Assembly --> Network
+    F1 & F2 & F3 --> F4
+    N1 --> N2 --> N3 --> N4
+```
+
+上图展示了端到端的数据流。阶段 ①–② 的详细信息见[特征工程流水线](5-feature-engineering-pipeline)；阶段 ④ 的内部机制在[混合 1D-2D 残差块](6-hybrid-1d-2d-residual-block)、[膨胀率策略](7-dilation-rate-strategy)和[网络前向传播](8-network-forward-pass)中介绍。
+
+来源: [predict.py](/predict.py#L35-L178), [model.py](/model.py#L154-L209)
+
+## 特征架构
+
+模型接收形状为 `(1, 4944, L_A, L_B)` 的 **4944 通道**输入张量，其中 `L_A` 和 `L_B` 分别为两条链的序列长度。该张量由三个特征流组装而成，这些特征流捕获了关于蛋白质间接触的互补信息。
+
+### 逐链 1D 特征 (→ 通过平铺转为 2D)
+
+每条链独立生成一个 **2068 维**的逐残基特征向量。这些 1D 特征通过平铺扩展为 2D：链 A 的特征沿列复制（每行相同），链 B 的特征沿行复制（每列相同）。这种扩展使 2D 卷积网络能够学习两条链的逐残基特征之间的相互作用。
+
+| 特征来源 | 维度 | 来源 | 捕获信息 |
+|---|---|---|---|
+| PSSM (HHM) | 20 | HHblits 谱 HMM → 得分矩阵 | 每个位置的进化保守性 |
+| ESM-1b 表示 | 1280 | ESM-1b 第 33 层输出 | 来自单序列的上下文残基语义 |
+| ESM-MSA-1b 表示 | 768 | ESM-MSA-1b 第 12 层输出 | 来自 MSA 的上下文残基语义 |
+| **逐链总计** | **2068** | | |
+
+两条链平铺后：2068 × 2 = **4136 通道**。
+
+### 配对 2D 特征 (直接)
+
+配对特征在**联合 MSA**（通过分类学配对两条链的 MSA 序列构建）上计算，并具有固有的 2D 结构——每个值对应于跨两条链的残基对 `(i, j)`。
+
+| 特征来源 | 通道数 | 来源 | 捕获信息 |
+|---|---|---|---|
+| CCMpred | 1 | 配对 MSA 上的伪似然协进化 | 直接协进化耦合 |
+| alnstats | 3 | 统计势 (3 个打分函数) | 成对统计偏好 |
+| ESM-1b 注意力 | 660 | 33 层 × 20 头，跨链切片 | 链间 Transformer 注意力 |
+| ESM-MSA-1b 注意力 | 144 | 12 层 × 12 头，跨链切片 | 链间 MSA 感知注意力 |
+| **配对总计** | **808** | | |
+
+### 输入总体构成
+
+| 流 | 通道数 | 方法 |
+|---|---|---|
+| 链 A 1D → 2D | 2068 | 通过 `repeat_interleave` 进行走平铺 |
+| 链 B 1D → 2D | 2068 | 通过 `repeat_interleave` 进行列平铺 |
+| 配对 2D | 808 | 直接放置 |
+| **总计** | **4944** | 沿通道轴拼接 |
+
+`concat` 函数执行此组装：它沿列维度重复链 A 的 1D 特征，沿行维度重复链 B 的 1D 特征，然后将两者与配对 2D 特征沿通道轴进行拼接。
+
+来源: [load_feature.py](/load_feature.py#L16-L27), [load_feature.py](/load_feature.py#L42-L102), [model.py](/model.py#L13-L25)
+
+## 网络架构: DRN-1D2D
+
+该网络是一个**膨胀残差网络**，由三个连续阶段组成：
+
+```mermaid
+flowchart LR
+    Input["输入<br/>4944×L_A×L_B"] --> First["1×1 投影<br/>4944→96<br/>+InstanceNorm +LeakyReLU"]
+    First --> Hidden["9× BasicBlock<br/>96→96 通道<br/>膨胀率 = 1"]
+    Hidden --> Output["1×1 输出<br/>96→1<br/>(无归一化，无激活)"]
+    Output --> Clamp["截断 [-15, 15]"]
+    Clamp --> Sig["Sigmoid"]
+    Sig --> Pred["接触图<br/>L_A×L_B"]
+```
+
+### 阶段 1: 输入投影
+
+1×1 卷积将 4944 通道输入降维至 **96 通道**，随后进行实例归一化和 LeakyReLU 激活。此投影充当一个可学习的特征选择层，将异构的输入通道压缩至统一的表示空间。
+
+### 阶段 2: 膨胀残差块
+
+九个 `BasicBlock` 模块在 96 通道下以膨胀率 1 运行。每个 `BasicBlock` 包含一个**混合 1D-2D 卷积**方案——一个 3×3 膨胀 2D 卷积加上 1×15 和 15×1 膨胀 1D 卷积——它们的输出被求和，并通过残差连接加回至输入。由于膨胀率 (1) 落在激活阈值 `[1, 20, 40]` 内，所有九个块均采用完整的混合卷积。
+
+### 阶段 3: 输出投影与激活
+
+1×1 卷积将 96 通道映射为 1 通道，随后截断至 `[-15, 15]`（以保障数值稳定性），并经 Sigmoid 激活生成区间 `[0, 1]` 内的逐对接触概率。
+
+<CgxTip>混合 1D-2D 设计是有意为之：1×15 和 15×1 卷积捕获了沿每条链序列维度的条形感受野，这对于蛋白质间接触具有结构意义，因为一条链上的残基会与另一条链的特定区域发生相互作用。3×3 卷积则捕获局部 2D 空间模式。</CgxTip>
+
+来源: [model.py](/model.py#L154-L209), [model.py](/model.py#L78-L151), [model.py](/model.py#L28-L55)
+
+## 预测策略: 对称平均
+
+预测流水线利用了**注意力特征的不对称性**，从同一特征集构建两个输入张量：
+
+| 输入张量 | 1D 特征 | 2D 配对特征 | 语义含义 |
+|---|---|---|---|
+| `rt_input` | A 行，B 列 | 从右至左注意力 | "A 关注 B" 方向 |
+| `sw_input` | B 行，A 列 | 交换的注意力 | "B 关注 A" 方向 |
+
+加载七个独立训练的模型检查点。每个检查点对 `rt_input` 和 `sw_input` 均进行预测，所有 14 个预测结果取平均（除以 14）。`sw_input` 预测结果的转置将其重新对齐至 `(L_A, L_B)` 坐标系。这种集成策略通过覆盖蛋白质间界面的两个方向视图，提升了鲁棒性。
+
+来源: [predict.py](/predict.py#L153-L177), [load_feature.py](/load_feature.py#L61-L102)
+
+## 模块清单
+
+代码库被组织为四个功能模块，每个模块具有明确的职责边界：
+
+```
+DRN-1D2D_Inter/
+├── model.py                  # 网络定义 (ResNet, BasicBlock, 卷积工厂)
+├── load_feature.py           # 特征加载与 1D→2D 组装 (concat)
+├── predict.py                # 端到端预测流水线
+├── train.py                  # 带 top-K 模型选择的训练循环
+├── plm/                      # 蛋白质语言模型特征提取器
+│   ├── LoadHHM.py            # HHM → PSSM/PSFM 解析器
+│   ├── esm1b_repr.py         # ESM-1b 逐残基表示
+│   ├── esm1b_attn.py         # ESM-1b 跨链注意力图
+│   ├── msa1b_repr.py         # ESM-MSA-1b 逐残基表示
+│   └── msa1b_attn.py         # ESM-MSA-1b 跨链注意力图
+├── paired/                   # 配对 MSA 构建
+│   ├── pair_msa.py           # 编排器: MSA 配对流水线
+│   ├── cluster_species.py    # 分类学分组与相似度排序
+│   ├── rw_a2m.py             # MSA/a2m 文件 I/O 与解析
+│   └── hhfilter_paired.py    # 批量 hhfilter 工具
+├── data/                     # 基准数据集与模型回归权重
+└── example/                  # 示例输入文件 (1GL1 异源二聚体)
+```
+
+| 模块 | 核心抽象 | 依赖 |
+|---|---|---|
+| `model.py` | `ResNet`, `BasicBlock` | PyTorch |
+| `load_feature.py` | `chain_feature`, `paired_feature`, `concat` | NumPy, PyTorch |
+| `plm/` | ESM-1b / MSA-1b 注意力与表示提取器 | Facebook ESM, BioPython |
+| `paired/` | 基于分类学的 MSA 配对 | 内部 (rw_a2m, cluster_species) |
+
+来源: [model.py](/model.py#L1-L218), [load_feature.py](/load_feature.py#L1-L131), [predict.py](/predict.py#L1-L20), [paired/pair_msa.py](/paired/pair_msa.py#L1-L10)
+
+## 建议阅读路径
+
+要建立对该系统的有效心智模型，请按照以下顺序阅读文档：
+
+1. **[特征工程流水线](5-feature-engineering-pipeline)** — 了解哪些数据流入网络以及每个特征为何重要
+2. **[混合 1D-2D 残差块](6-hybrid-1d-2d-residual-block)** — 核心架构创新；1D 和 2D 卷积如何结合
+3. **[膨胀率策略](7-dilation-rate-strategy)** — 感受野在网络深度上如何构建
+4. **[网络前向传播](8-network-forward-pass)** — 从输入张量到接触图的完整前向计算
+5. **[预测流水线](13-prediction-pipeline)** — 包括特征准备和集成平均在内的完整推理工作流
+6. **[训练与模型选择](14-training-and-model-selection)** — 网络如何优化及检查点如何选择
+
+---
+
+- [深入探究/特征工程流程](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/5-feature-engineering-pipeline)
+
+---
+slug:5-feature-engineering-pipeline
+blog_type:normal
+---
+
+
+特征工程流水线是 DRN-1D2D_Inter 的数据骨干，它将原始蛋白质序列和多重序列比对转换为结构化的 **4944 通道二维接触图张量**，以馈入膨胀残差网络。该流水线融合了三种不同的信息来源 —— **进化谱**（来自 HHblits 的 PSSM）、**单链蛋白质语言模型嵌入**（ESM-1b）和 **MSA 感知语言模型嵌入**（ESM-MSA-1b）—— 将其转化为逐残基（1D）和成对（2D）特征通道，随后将 1D 信号扩展至二维平面，生成最终的输入张量。
+
+## 特征类别与维度
+
+该流水线产生两类特征，并最终合并为单一的二维张量。**1D（逐残基）特征**独立捕获每条链的局部序列上下文，而 **2D（成对）特征**则从配对的 MSA 中编码链间共进化与基于注意力的信号。
+
+| 特征 | 来源模块 | 维度 | 范围 | 生成方式 |
+|---------|--------------|-----------|-------|------------|
+| PSSM | HHblits → `LoadHHM.py` | 20 | 单链 1D | 进化谱 |
+| ESM-1b 表示 | `esm1b_repr.py` | 1280 | 单链 1D | PLM 逐残基嵌入 |
+| MSA-1b 表示 | `msa1b_repr.py` | 768 | 单链 1D | MSA 感知 PLM 嵌入 |
+| CCmpred | 外部二进制文件 | 1 | 配对 2D | 共进化耦合 |
+| 比对统计量 | 外部 `alnstats` | 3 | 配对 2D | 协方差统计量 |
+| ESM-1b 注意力 | `esm1b_attn.py` | 660 (33×20) | 配对 2D | 链间注意力头 |
+| MSA-1b 注意力 | `msa1b_attn.py` | 144 (12×12) | 配对 2D | MSA 感知链间注意力 |
+
+**每条链的总 1D 特征维度**为 20 + 1280 + 768 = **2068**。**总 2D 配对特征维度**为 1 + 3 + 660 + 144 = **808**。最终输入张量的通道数为：2068 × 2（两条链）+ 808 = **4944**，这与网络中 `first_layer` 的输入规范相匹配。
+
+来源: [model.py](model.py#L160-L166), [load_feature.py](load_feature.py#L42-L58)
+
+## 流水线架构
+
+下图展示了从原始输入到最终模型可用张量的完整特征生成与组装流程：
+
+```mermaid
+flowchart TB
+    subgraph Inputs
+        fasA["Chain A FASTA"]
+        fasB["Chain B FASTA"]
+        a3mA["Chain A MSA (.a3m)"]
+        a3mB["Chain B MSA (.a3m)"]
+    end
+
+    subgraph "1D Feature Generation (per chain)"
+        hhmA["hhmake → A.hhm"]
+        hhmB["hhmake → B.hhm"]
+        pssmA["LoadHHM → PSSM (20-dim)"]
+        pssmB["LoadHHM → PSSM (20-dim)"]
+        esmA["ESM-1b repr → 1280-dim"]
+        esmB["ESM-1b repr → 1280-dim"]
+        msaA["MSA-1b repr → 768-dim"]
+        msaB["MSA-1b repr → 768-dim"]
+    end
+
+    subgraph "2D Feature Generation (paired)"
+        pair["pair_msa → paired.a3m"]
+        filt["hhfilter → filtered"]
+        ccmpred["CCmpred → 1-ch"]
+        alnstats["alnstats → 3-ch"]
+        esm1b_attn["ESM-1b attn → 660-ch"]
+        msa1b_attn["MSA-1b attn → 144-ch"]
+    end
+
+    subgraph "Feature Assembly (load_feature.py)"
+        chain_feat["chain_feature() → 1D tensors"]
+        paired_feat["paired_feature() → rt_2d, sw_2d"]
+        concat_rt["concat(A, B, rt_2d) → rt_input"]
+        concat_sw["concat(B, A, sw_2d) → sw_input"]
+    end
+
+    fasA --> hhmA --> pssmA
+    a3mA --> hhmA
+    fasB --> hhmB --> pssmB
+    a3mB --> hhmB
+    fasA --> esmA
+    fasB --> esmB
+    a3mA --> msaA
+    a3mB --> msaB
+
+    a3mA --> pair
+    a3mB --> pair
+    pair --> filt
+    filt --> ccmpred
+    filt --> alnstats
+    pair --> esm1b_attn
+    filt --> msa1b_attn
+
+    pssmA & esmA & msaA --> chain_feat
+    pssmB & esmB & msaB --> chain_feat
+    ccmpred & alnstats & esm1b_attn & msa1b_attn --> paired_feat
+
+    chain_feat --> concat_rt
+    chain_feat --> concat_sw
+    paired_feat --> concat_rt
+    paired_feat --> concat_sw
+```
+
+来源: [predict.py](predict.py#L44-L154), [load_feature.py](load_feature.py#L16-L102)
+
+## 1D 特征构建：`chain_feature()`
+
+`chain_feature()` 函数为每条链加载并拼接三种逐残基特征。对于给定的链，它从 HHM pickle 文件中读取 PSSM，从 `.npy` 文件中读取 ESM-1b 表示和 MSA-1b 表示，然后将它们水平堆叠为单一矩阵并转置，生成一个 **(2068 × L)** 张量，其中 L 为链长。
+
+```python
+# 单链 1D 组装（源码简化版）
+PSSM = pickle.load(open(pssm_file, 'rb'))['PSSM']       # (L, 20)
+esm1b_repr = np.load(esm1b_repr_file)                     # (L, 1280)
+msa1b_repr = np.load(msa1b_repr_file)                     # (L, 768)
+feature_1d = np.hstack((PSSM, esm1b_repr, msa1b_repr)).T # (2068, L)
+```
+
+该函数遍历链 `['A', 'B']` 并返回包含两个张量的列表 —— `[A_feature, B_feature]`，每个张量的形状为 `(2068, L_chain)`。`.T` 转置操作至关重要：它将 **通道维度置于首位**，以匹配下游 `concat()` 的扩展逻辑。
+
+**PSSM 生成**首先由 `hhmake` 将输入的 `.a3m` MSA 转换为 `.hhm` profile HMM 文件，随后 `LoadHHM.py` 解析 HMM 发射分数，利用 Gonnet 替换矩阵应用伪计数校正，重新归一化概率，最后计算位置特异性得分矩阵，公式为 `PSSM = log2(PSFM) + HMMNull`。结果存储为 pickle 字典，其 `'PSSM'` 键包含一个 `(L, 20)` 数组 —— 即每个残基对应每个标准氨基酸的一个得分。
+
+来源: [load_feature.py](load_feature.py#L42-L58), [plm/LoadHHM.py](plm/LoadHHM.py#L188-L190)
+
+## 2D 特征构建：`paired_feature()`
+
+`paired_feature()` 函数组装链间成对特征，并生成 **两个对称的二维张量** —— `rt_feature_2d`（右向）和 `sw_feature_2d`（交换）—— 它们捕获了 A→B 界面的互补方向视图。
+
+### 共进化特征
+
+**CCmpred** 根据配对的 MSA 比对计算原始共进化耦合，生成一个完整的 `(L_A+L_B) × (L_A+L_B)` 矩阵。该函数仅提取 **链间块** `[:L_A, L_A:]` —— 即捕获链 A 残基与链 B 残基之间耦合的子矩阵 —— 从而产生单一的 `(L_A × L_B)` 通道。
+
+**比对统计量**（`alnstats`）从三列文件中解析而得，文件中每行指定一个残基对的 `(i, j, stat1, stat2, stat3)`。该函数构建一个对称的 `(3 × (L_A+L_B) × (L_A+L_B))` 张量，随后切片出链间部分 `[:, :L_A, L_A:]`，生成形状为 `(L_A × L_B)` 的 **3 个通道**。
+
+### 蛋白质语言模型注意力特征
+
+ESM-1b 和 ESM-MSA-1b 注意力特征是信息最丰富的 2D 通道。它们各自从拼接配对序列的 **跨链注意力块** 中生成形状为 `(num_layers, num_heads, L_A, L_B)` 的注意力张量。这些张量通过展平层数和头数维度进行重塑：
+
+- **ESM-1b 注意力**：`(33, 20, L_A, L_B)` → 重塑为 `(660, L_A, L_B)` —— 33 层 × 20 头
+- **MSA-1b 注意力**：`(12, 12, L_A, L_B)` → 重塑为 `(144, L_A, L_B)` —— 12 层 × 12 头
+
+跨链提取的机制是：在 **拼接序列**（链 A 后接链 B）上运行语言模型，然后切片注意力矩阵，仅隔离出 **链 A 查询关注链 B 键** 的区域（右向注意力）以及反之亦然的区域（交换注意力）。这正是将单链语言模型转化为链间相互作用信号提取器的机制。
+
+### 双视图组装
+
+关键的设计决策是构建两个独立的 2D 特征张量：
+
+| 视图 | 2D 组件 | 形状 |
+|------|--------------|-------|
+| `rt_feature_2d` | `[ccmpred, alnstats, esm1b_rt_attn, msa1b_rt_attn]` | `(808, L_A, L_B)` |
+| `sw_feature_2d` | `[ccmpred.T, alnstats.T, esm1b_sw_attn, msa1b_sw_attn]` | `(808, L_B, L_A)` |
+
+**右向视图**（`rt`）使用具有原生方向共进化特征的 A→B 方向注意力。**交换视图**（`sw`）转置了共进化特征并使用 B→A 方向注意力，有效地镜像了整个特征图。这种双视图策略利用了 **注意力的不对称性**（A 关注 B ≠ B 关注 A），同时确保捕获了界面的两种方向，这对于异二聚体界面尤其重要，因为其相互作用的不对称性具有生物学意义。
+
+来源: [load_feature.py](load_feature.py#L61-L102), [plm/esm1b_attn.py](plm/esm1b_attn.py#L54-L61), [plm/msa1b_attn.py](plm/msa1b_attn.py#L57-L64)
+
+## 1D 到 2D 扩展：`concat()`
+
+`concat()` 函数是最终的组装步骤，它将 1D 逐残基特征与 2D 成对特征合并为单一的模型可用张量。它对每条链的 1D 特征在二维平面上执行 **广播扩展**：
+
+```mermaid
+flowchart LR
+    A1d["A_f1d (C × L_A)"] -->|"repeat_interleave on axis 2"| row["row_repeat (C × L_A × L_B)"]
+    B1d["B_f1d (C × L_B)"] -->|"repeat_interleave on axis 1"| col["col_repeat (C × L_A × L_B)"]
+    p2d["p2d (C' × L_A × L_B)"] --> cat
+    row --> cat["torch.cat"]
+    col --> cat
+    cat -->|"unsqueeze axis 0"| out["Output (1 × (2C+C') × L_A × L_B)"]
+```
+
+对于链 A 的 1D 特征 `(C, L_A)`，每个残基的特征向量沿新的列维度 **复制 L_B 次**，生成一个 `(C, L_A, L_B)` 的映射图，其中每个列位置承载相同的 A 残基信号。链 B 的 1D 特征则进行互补扩展 —— 沿行维度复制 `L_A` 次。这意味着生成的 2D 映射图中的每个单元格 `(i, j)` 包含 **链 A 的残基 i** 和 **链 B 的残基 j** 的拼接特征，以及该位置的成对特征。
+
+最终输出形状为 **(1, 4944, L_A, L_B)** —— 一个具有批次维度 1、4944 个通道，且空间维度与链间接触图相匹配的四维张量。4944 个通道可分解为：2068（扩展后的 A）+ 2068（扩展后的 B）+ 808（配对的 2D）。
+
+来源: [load_feature.py](load_feature.py#L16-L27), [model.py](model.py#L13-L25)
+
+## 预测中的端到端特征流
+
+`predict.py` 中的预测流水线编排了完整的特征工程序列。1D 和 2D 特征通过外部工具和语言模型推理独立生成，随后通过 `load_feature.py` 加载并组装：
+
+```python
+# 从磁盘加载预生成的特征
+featureA, featureB = load_feature.chain_feature(result_path)   # 每条链的 1D
+rt_p2d, sw_p2d = load_feature.paired_feature(result_path)      # 2D 配对视图
+
+# 组装两个对称的输入张量
+rt_input = load_feature.concat(featureA, featureB, rt_p2d)     # (1, 4944, L_A, L_B)
+sw_input = load_feature.concat(featureB, featureA, sw_p2d)     # (1, 4944, L_B, L_A)
+```
+
+注意第二次 `concat()` 调用中的 **参数顺序交换**：`concat(featureB, featureA, sw_p2d)` 将链 B 的特征置于行扩展位置，链 A 的特征置于列扩展位置，以匹配 `sw_p2d` 的转置几何结构。随后这两个输入被传入同一个模型，并通过转置校正（`preds2.T`）对它们的预测结果求平均，从而生成最终对称的接触概率图。
+
+<CgxTip>双视图预测（`rt_input` + `sw_input`）有效地在推理时将集成规模翻倍。由于加载了 7 个模型检查点，且每个检查点从两个视图生成预测（共 14 次前向传播），最终预测会对所有 14 个输出求平均，这显著改善了对非对称界面的校准效果。</CgxTip>
+
+来源: [predict.py](predict.py#L145-L177)
+
+## 特征生成依赖
+
+特征工程流水线依赖于多种外部工具和预训练模型检查点。下表总结了各项依赖及其在流水线中的作用：
+
+| 依赖 | 作用 | 输出格式 |
+|-----------|------|--------------|
+| `hhmake` (HH-suite) | 将 MSA 转换为 profile HMM | `.hhm` 文件 |
+| `hhfilter` (HH-suite) | 将 MSA 过滤至最多 256 条序列 | `.a3m` 文件 |
+| `CCMpred` | 计算共进化耦合 | `.ccmpred` 矩阵 |
+| `alnstats` (metapsicov) | 计算比对统计量 | `.singout` / `.pairout` |
+| ESM-1b 检查点 (650M 参数) | 单序列 PLM | `.repr.npy` / `.attn.npy` |
+| ESM-MSA-1b 检查点 (100M 参数) | MSA 感知 PLM | `.repr.npy` / `.attn.npy` |
+
+ESM 检查点作为接触回归参数文件存储在 `data/regression/` 目录下，而完整的模型权重需按照 ESM 库的约定单独下载。
+
+来源: [predict.py](predict.py#L24-L31), [data/regression](data/regression)
+
+## 特征维度验证
+
+追踪流水线中的确切通道数可确认网络 1×1 投影层的 4944 通道输入：
+
+| 组件 | 通道数 | 计算过程 |
+|-----------|----------|-------------|
+| 每条链的 PSSM | 20 | 20 种标准氨基酸 |
+| 每条链的 ESM-1b 表示 | 1280 | ESM-1b 嵌入维度 |
+| 每条链的 MSA-1b 表示 | 768 | ESM-MSA-1b 嵌入维度 |
+| **每条链的 1D 总数** | **2068** | 20 + 1280 + 768 |
+| CCmpred | 1 | 单一耦合通道 |
+| 比对统计量 | 3 | 三种协方差统计量 |
+| ESM-1b 注意力 | 660 | 33 层 × 20 头 |
+| MSA-1b 注意力 | 144 | 12 层 × 12 头 |
+| **2D 总数** | **808** | 1 + 3 + 660 + 144 |
+| **总计** | **4944** | 2068 × 2 + 808 |
+
+此 4944 通道张量由网络的 `first_layer`（一个带有 InstanceNorm 和 LeakyReLU 的 1×1 卷积）投影至 96 个通道，随后进入膨胀残差块。
+
+<CgxTip>2D 注意力通道（660 + 144 = 804）主导了 2D 特征预算，而 1D PLM 表示（1280 + 768 = 2048）则主导了 1D 特征预算。这一设计反映了经验发现：对于链间接触预测，语言模型嵌入比传统进化谱携带着更丰富的信号。</CgxTip>
+
+来源: [model.py](model.py#L160-L166), [load_feature.py](load_feature.py#L42-L102)
+
+## 下一步
+
+特征工程流水线生成 4944 通道输入张量，直接馈入膨胀残差网络。若要了解该张量如何通过具有受控感受野增长的混合 1D-2D 卷积进行逐步精炼，请继续阅读 [混合 1D-2D 残差块](6-hybrid-1d-2d-residual-block)。有关每个 PLM 特征计算方式的详情，请参见 [ESM-1b 注意力与表示](9-esm-1b-attention-and-representation) 和 [ESM-MSA-1b 注意力与表示](10-esm-msa-1b-attention-and-representation)。如需了解包含双视图预测的完整推理工作流，请参见 [预测流水线](13-prediction-pipeline)。
+
+---
+
+- [深入探究/预测流程](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/13-prediction-pipeline)
+
+---
+slug:13-prediction-pipeline
+blog_type:normal
+---
+
+
+预测流水线是 DRN-1D2D_Inter 的运算核心——这是一个确定性的端到端工作流，将原始蛋白质序列及其多序列比对（MSA）转换为蛋白质间接触概率矩阵。该流水线完全由 `predict.py` 编排，依次经历三个架构迥异的阶段：**特征准备**（9 个计算密集型子步骤）、**特征组装**（张量构建与空间广播）以及**集成推理**（7 模型双向平均）。每个阶段均在前一阶段的基础上构建，共同涵盖了从序列到结构的完整推理链。
+
+来源: [predict.py](predict.py#L1-L178)
+
+## 流水线调用与参数
+
+该流水线通过命令行调用，接受六个位置参数，直接从 `sys.argv` 解析，无需包装框架：
+
+```bash
+python predict.py sequenceA msaA sequenceB msaB result_path device
+```
+
+| 参数 | 类型 | 描述 |
+|---|---|---|
+| `sequenceA` | 文件路径 | 目标蛋白质链 A 的 FASTA 文件 |
+| `msaA` | 文件路径 | 链 A 的 A3M 格式 MSA（源自 UniRef90/UniRef100） |
+| `sequenceB` | 文件路径 | 目标蛋白质链 B 的 FASTA 文件 |
+| `msaB` | 文件路径 | 链 B 的 A3M 格式 MSA |
+| `result_path` | 目录 | 中间文件与最终预测结果的输出目录 |
+| `device` | 字符串 | PyTorch 设备——`cpu`、`cuda:0`、`cuda:1` 等 |
+
+调用时，若结果目录不存在则会自动创建，设备字符串会被解析为 `torch.device` 对象。所有中间产物——配对 MSA、注意力图、表征、PSSM 以及最终接触图——均写入该目录，使得流水线完全自包含，并可通过其输出实现完全复现。
+
+来源: [predict.py](predict.py#L37-L41)
+
+## 端到端数据流
+
+下图展示了贯穿三个阶段的完整数据流，其中每个编号步骤对应源码中的特征准备子步骤：
+
+```mermaid
+flowchart TD
+    subgraph Phase1["阶段 1: 特征准备"]
+        direction TB
+        S1["① 配对 MSA<br/>pair_msa.main()"] --> S2["② MSA 过滤与格式重整<br/>hhfilter + fasta2aln"]
+        S2 --> S3["③ 配对序列<br/>seqA + seqB 拼接"]
+        S3 --> S4["④ 共进化信号<br/>CCMpred + alnstats"]
+        S4 --> S5["⑤ ESM-1b 注意力<br/>esm1b_attn.main()"]
+        S5 --> S6["⑥ ESM-MSA-1b 注意力<br/>msa1b_attn.main()"]
+        S6 --> S7["⑦ 基于 HHmake 的 PSSM<br/>hhmake + LoadHHM"]
+        S7 --> S8["⑧ ESM-1b 表征<br/>esm1b_repr.main()"]
+        S8 --> S9["⑨ ESM-MSA-1b 表征<br/>msa1b_repr.main()"]
+    end
+
+    subgraph Phase2["阶段 2: 特征组装"]
+        direction TB
+        F1["链特征 A & B<br/>load_feature.chain_feature()"]
+        F2["配对 2D 特征<br/>load_feature.paired_feature()"]
+        F3["空间广播与拼接<br/>load_feature.concat()"]
+        F1 --> F3
+        F2 --> F3
+    end
+
+    subgraph Phase3["阶段 3: 集成推理"]
+        direction TB
+        M1["7 个模型检查点<br/>model/1 → model/7"]
+        M2["双向预测<br/>rt_input + sw_input"]
+        M3["聚合与归一化<br/>14 次预测取均值"]
+        M1 --> M2 --> M3
+    end
+
+    S9 --> F1
+    S9 --> F2
+    F3 --> M2
+    M3 --> OUT["pred.txt<br/>L_A × L_B 接触图"]
+
+    style Phase1 fill:#e8f4e8,stroke:#2d7d2d
+    style Phase2 fill:#e8e8f4,stroke:#2d2d7d
+    style Phase3 fill:#f4e8e8,stroke:#7d2d2d
+```
+
+来源: [predict.py](predict.py#L44-L177)
+
+## 阶段 1：特征准备
+
+特征准备是计算开销最大的阶段，依序执行 9 个子步骤以生成所有原始输入信号。这些步骤被组织为两个逻辑组：**配对特征**（步骤 1–6），用于捕获链间共进化与基于注意力的耦合；以及**单链 1D 特征**（步骤 7–9），用于编码各链独立的进化谱与学习表征。
+
+### 配对特征生成（步骤 1–6）
+
+**步骤 ① — 配对 MSA 构建。** 链 A 和链 B 的两个独立 MSA 通过 `pair_msa.main()` 基于共享分类学进行配对。该函数读取两个 A3M 文件，识别两个 MSA 间的共同物种，按 TaxID 对序列分组，依据与参考序列的相似度排序，并配对每个物种的前 *n* 条序列（总数上限为 100,000）。输出的 `paired.a3m` 包含以 `||` 分隔头部的拼接 A+B 序列，为所有下游配对特征奠定了进化耦合基础。
+
+来源: [predict.py](predict.py#L49-L56), [paired/pair_msa.py](paired/pair_msa.py#L35-L83)
+
+**步骤 ② — MSA 过滤与格式重整。** 三次 `hhfilter` 调用将配对 MSA 及各单链 MSA 缩减至最多 256 条多样化序列（`-diff 256`），以防语言模型步骤出现计算爆炸。配对 A3M 额外通过 `fasta2aln` 转换为 ALN 格式，以兼容 CCMpred 和 alnstats，后者要求空位对齐的输入而非 A3M 的小写插入约定。
+
+来源: [predict.py](predict.py#L61-L71)
+
+**步骤 ③ — 配对序列文件。** 通过将链 A 与链 B 的原始氨基酸序列拼接为单一记录（`>paired\nseqA+seqB`），构建一条合成 FASTA。该拼接序列作为 ESM-1b 注意力提取的输入，模型处理此联合序列后，通过索引切片恢复跨链注意力。
+
+来源: [predict.py](predict.py#L76-L83)
+
+**步骤 ④ — 共进化信号。** CCMpred 从配对比对中计算出原始接触预测矩阵，生成 `paired.ccmpred`——一个 L×L 矩阵，其中 L = lenA + lenB。其链间子矩阵（行 1:lenA，列 lenA+1:end）随后被提取为单通道 2D 特征。类似地，alnstats 从比对中计算出三种两两统计势（APC、偏分与组合得分），生成 3 通道 2D 特征。二者共同捕获了与神经注意力互补的传统共进化信号。
+
+来源: [predict.py](predict.py#L87-L92)
+
+**步骤 ⑤ — ESM-1b 跨链注意力。** ESM-1b 处理配对拼接序列并输出全注意力张量。流水线提取两个跨链子矩阵：**右注意力**（`rt`），即链 A 残基对链 B 残基的注意力（形状：33 层 × 20 头 × lenA × lenB）；以及**交换注意力**（`sw`），即链 B 对链 A 的注意力（相同形状，转置关系）。它们分别保存为 `esm1b_rt.attn.npy` 和 `esm1b_sw.attn.npy`。
+
+来源: [predict.py](predict.py#L97-L100), [plm/esm1b_attn.py](plm/esm1b_attn.py#L39-L61)
+
+**步骤 ⑥ — ESM-MSA-1b 跨链注意力。** ESM-MSA-1b 处理过滤后的配对 MSA（256 条序列），并以相同的 rt/sw 分解提取行注意力子矩阵。所得张量形状为 12 层 × 12 头 × lenA × lenB，保存为 `msa1b_rt.attn.npy` 和 `msa1b_sw.attn.npy`。与处理单序列的 ESM-1b 不同，MSA-1b 利用完整比对结构，捕获进化注意力模式。
+
+来源: [predict.py](predict.py#L104-L108), [plm/msa1b_attn.py](plm/msa1b_attn.py#L40-L64)
+
+### 单链 1D 特征生成（步骤 7–9）
+
+**步骤 ⑦ — 位置特异性得分矩阵（PSSM）。** 每条链的 A3M 经 `hhmake` 转换为 HMM 谱，再由 `LoadHHM.py` 解析以提取每个残基的 20 维 PSSM（每个标准氨基酸一个得分，按单字母码的字母序排列）。该 PSSM 通过 Gonnet 替换矩阵引入伪计数正则化，并经 Neff 加权平滑，生成鲁棒的进化谱。输出：`A_hhm.pkl` 与 `B_hhm.pkl`。
+
+来源: [predict.py](predict.py#L115-L123), [plm/LoadHHM.py](plm/LoadHHM.py#L99-L190)
+
+**步骤 ⑧ — ESM-1b 残基表征。** 每条链的 FASTA 独立送入 ESM-1b，提取第 33 层表征——为每个残基生成 1280 维嵌入向量。这些逐残基向量编码了模型对局部与全局序列上下文的理解。输出：`A_esm1b.repr.npy` 与 `B_esm1b.repr.npy`。
+
+来源: [predict.py](predict.py#L127-L131), [plm/esm1b_repr.py](plm/esm1b_repr.py#L39-L54)
+
+**步骤 ⑨ — ESM-MSA-1b 残基表征。** 每条链的过滤 MSA 送入 ESM-MSA-1b，为第一条（查询）序列提取第 12 层表征——为每个残基生成 768 维嵌入向量。这些嵌入整合了 MSA 级别的进化上下文。输出：`A_msa1b.repr.npy` 与 `B_msa1b.repr.npy`。
+
+来源: [predict.py](predict.py#L135-L140), [plm/msa1b_repr.py](plm/msa1b_repr.py#L41-L58)
+
+## 阶段 2：特征组装
+
+特征组装将异构的中间文件集合转换为可供网络消费的两个统一 4D 张量。此阶段由 `load_feature.py` 通过三次函数调用编排完成。
+
+### 链特征构建
+
+`load_feature.chain_feature()` 为每条链加载并水平堆叠三个单链 1D 特征数组：
+
+| 特征 | 每残基维度 | 来源文件 |
+|---|---|---|
+| PSSM | 20 | `{chain}_hhm.pkl` |
+| ESM-1b 表征 | 1280 | `{chain}_esm1b.repr.npy` |
+| ESM-MSA-1b 表征 | 768 | `{chain}_msa1b.repr.npy` |
+| **每链合计** | **2068** | — |
+
+三个数组经 `np.hstack()` 拼接并转置为 `(2068, L_chain)` 形状，随后转换为 PyTorch 张量。`featureA` 与 `featureB` 均独立生成。
+
+来源: [load_feature.py](load_feature.py#L42-L58)
+
+### 配对 2D 特征构建
+
+`load_feature.paired_feature()` 从六个源文件组装链间 2D 特征。多头注意力张量通过展平层与头维度进行重塑：ESM-1b 注意力从 `(33, 20, L_A, L_B)` 变为 `(660, L_A, L_B)`，ESM-MSA-1b 注意力从 `(12, 12, L_A, L_B)` 变为 `(144, L_A, L_B)`。CCMpred 矩阵与 alnstats 势被切片，仅提取链间子区域（行属链 A，列属链 B）。
+
+构建两组并行的 2D 特征栈：
+
+| 通道组 | rt 特征 (A→B) | sw 特征 (B→A) | 通道数 |
+|---|---|---|---|
+| CCMpred | `ccmpred[:lenA, lenA:]` | `ccmpred[:lenA, lenA:]` 的转置 | 1 |
+| alnstats | `alnstats[:, :lenA, lenA:]` | `alnstats[:, :lenA, lenA:]` 的轴交换 | 3 |
+| ESM-1b 注意力 | `rt_attn` 重塑 | `sw_attn` 重塑 | 660 |
+| ESM-MSA-1b 注意力 | `rt_attn` 重塑 | `sw_attn` 重塑 | 144 |
+| **每方向合计** | — | — | **808** |
+
+**右** 特征表示链 A 对链 B 的注意力，而 **交换** 特征表示反向。CCMpred 与 alnstats 分量在 sw 中进行的是轴交换而非注意力交换，这反映了其对称的统计特性。
+
+来源: [load_feature.py](load_feature.py#L61-L102)
+
+### 空间广播与拼接
+
+`load_feature.concat()` 执行关键的空间广播操作，将单链 1D 特征提升至 2D 链间接触空间。对于每一残基对 (i, j)，其中 i ∈ 链 A 且 j ∈ 链 B：
+
+1. **行复制**：`featureA`（2068 × L_A）沿 B 维度广播 →（2068 × L_A × L_B），使每列 j 携带链 A 在位置 i 的 1D 谱。
+2. **列复制**：`featureB`（2068 × L_B）沿 A 维度广播 →（2068 × L_A × L_B），使每行 i 携带链 B 在位置 j 的 1D 谱。
+3. **堆叠**：两个 1D 广播与 2D 配对特征沿通道轴拼接，并扩展批次维度。
+
+由此生成两个输入张量：
+
+| 张量 | 构成 | 形状 |
+|---|---|---|
+| `rt_input` | `concat(featureA, featureB, rt_p2d)` | `(1, 4944, L_A, L_B)` |
+| `sw_input` | `concat(featureB, featureA, sw_p2d)` | `(1, 4944, L_A, L_B)` |
+
+总通道数 **4944** = 2068（A 的 1D）+ 2068（B 的 1D）+ 808（配对 2D），与模型首个 1×1 投影层的 `in_channels=4944` 相吻合。`sw_input` 中交换了参数顺序（B 在前，A 在后），确保模型能看到反向注意力方向的对称视角。
+
+<CgxTip>4944 通道输入会在模型首层被 1×1 卷积立即投影至 96 通道。此设计意味着开销高昂的特征准备生成了丰富但冗余的表示，网络在训练中学习最优的压缩嵌入。调试输入形状失配时，请验证每链 PSSM (20) + ESM-1b 表征 (1280) + MSA-1b 表征 (768) = 2068，且所有注意力文件具有预期的 (层数, 头数, L_A, L_B) 形状。</CgxTip>
+
+来源: [load_feature.py](load_feature.py#L16-L27), [model.py](model.py#L160-L166)
+
+## 阶段 3：集成推理
+
+推理阶段实现了 **7 模型集成与双向平均**，产生 14 次独立预测后求和并归一化。该设计同时利用了模型多样性（不同训练检查点）与结构对称性（链 A 残基 i 与链 B 残基 j 的接触，无论从 A→B 还是 B→A 视角应保持一致）。
+
+### 集成配置
+
+```python
+weight_list = [f'model/{i}' for i in range(1,8)]  # 7 个检查点
+model = resnet18()                                   # 包含 9 个 BasicBlock 的 ResNet
+torch.set_grad_enabled(False)                        # 推理模式
+```
+
+模型实例化为 `resnet18()`（返回含 9 个 `BasicBlock` 层的 `ResNet`——详见[网络前向传播](8-network-forward-pass)），并全局禁用梯度计算。每个检查点按序加载至同一模型对象，预测结果累积至 `all_preds`。
+
+来源: [predict.py](predict.py#L159-L164)
+
+### 双向预测逻辑
+
+对于 7 个检查点，各执行两次前向传播：
+
+```python
+# 方向 1: A→B（右注意力特征）
+preds = model(rt_input)
+all_preds += preds.detach().cpu()
+
+# 方向 2: B→A（交换注意力特征，转置输出）
+preds2 = model(sw_input)
+all_preds += preds2.T.detach().cpu()
+```
+
+`rt_input` 张量包含链 A 对链 B 的右注意力特征，输出形状为 `(L_A, L_B)` 的预测。`sw_input` 张量反转了此视角——链 B 的 1D 特征位于行维度，交换注意力特征取代了右注意力特征。由于模型期望链 A 信息位于行维度，输出 `preds2` 需转置（`.T`）以映射回 `(L_A, L_B)` 接触空间。
+
+### 聚合与输出
+
+14 次预测（7 模型 × 2 方向）求和后除以 14，生成最终接触概率矩阵：
+
+```python
+all_preds = all_preds.numpy()
+np.savetxt(os.path.join(result_path, 'pred.txt'), all_preds / 14)
+```
+
+输出 `pred.txt` 为形状 `(L_A, L_B)` 的纯文本矩阵，其中每个元素 ∈ (0, 1) 表示对应残基对发生蛋白质间接触的预测概率。模型前向传播中的 Sigmoid 激活与截断（Sigmoid 前截断至 [-15, 15]）保证了数值稳定性。
+
+<CgxTip>除以 14（而非 7）意义重大——这意味着无论集成规模如何，每个方向对最终均值贡献均等。若修改集成规模，请确保除数匹配 `2 × len(weight_list)`。`preds2` 的转置同样关键：若无此操作，sw 方向输出的形状将为 `(L_B, L_A)`，在累积至形状为 `(L_A, L_B)` 的 `all_preds` 时将导致静默的维度失配。</CgxTip>
+
+来源: [predict.py](predict.py#L166-L177), [model.py](model.py#L195-L209)
+
+## 中间文件清单
+
+下表罗列了预测过程中生成的所有中间文件、其生产者及在下游步骤中的角色：
+
+| 文件 | 生产者 | 消费者 | 描述 |
+|---|---|---|---|
+| `paired.a3m` | 步骤 ① pair_msa | 步骤 ② hhfilter/reformat | 基于分类学配对的拼接 MSA |
+| `filtered_paired.a3m` | 步骤 ② hhfilter | 步骤 ⑥ msa1b_attn | 多样性过滤后的配对 MSA（≤256 条序列） |
+| `paired.aln` | 步骤 ② fasta2aln | 步骤 ④ CCMpred/alnstats | 供共进化工具使用的空位对齐格式 |
+| `paired.fasta` | 步骤 ③ 拼接 | 步骤 ⑤ esm1b_attn | 拼接的 A+B 参考序列 |
+| `paired.ccmpred` | 步骤 ④ CCMpred | load_feature | 原始接触预测矩阵 |
+| `paired.singout` / `paired.pairout` | 步骤 ④ alnstats | load_feature | 单点与两两统计势 |
+| `esm1b_rt.attn.npy` / `esm1b_sw.attn.npy` | 步骤 ⑤ esm1b_attn | load_feature | ESM-1b 跨链注意力（33×20 头） |
+| `msa1b_rt.attn.npy` / `msa1b_sw.attn.npy` | 步骤 ⑥ msa1b_attn | load_feature | ESM-MSA-1b 跨链注意力（12×12 头） |
+| `A.hhm` / `B.hhm` | 步骤 ⑦ hhmake | LoadHHM | 各链的 HMM 谱 |
+| `A_hhm.pkl` / `B_hhm.pkl` | 步骤 ⑦ LoadHHM | load_feature | 解析后的 PSSM/PSFM 字典 |
+| `A_esm1b.repr.npy` / `B_esm1b.repr.npy` | 步骤 ⑧ esm1b_repr | load_feature | ESM-1b 1280 维残基嵌入 |
+| `A_msa1b.repr.npy` / `B_msa1b.repr.npy` | 步骤 ⑨ msa1b_repr | load_feature | ESM-MSA-1b 768 维残基嵌入 |
+| `pred.txt` | 最终输出 | 用户 | L_A × L_B 接触概率矩阵 |
+
+来源: [predict.py](predict.py#L44-L177)
+
+## 调用示例
+
+使用提供的 1GL1 复合物（凝血酶–抑制剂相互作用）示例文件：
+
+```bash
+python predict.py \
+    ./example/1GL1_A.fasta \
+    ./example/1GL1_A_uniref100.a3m \
+    ./example/1GL1_I.fasta \
+    ./example/1GL1_I_uniref100.a3m \
+    ./example/result \
+    cpu
+```
+
+此命令处理链 A（245 个残基）和链 I（64 个残基），在 `./example/result/pred.txt` 中生成 245×64 的接触概率矩阵。注意，示例 MSA 为控制仓库大小已作降采样；使用完整 UniRef100 MSA 的生产运行将产生更优预测。
+
+来源: [README.md](README.md#L38-L44)
+
+## 流水线架构导览
+
+预测流水线位于本指南中另作阐述的多个子系统的交汇处。特征准备阶段在步骤 ① 中依赖[基于分类学的 MSA 配对](11-taxonomy-based-msa-pairing)与[MSA 解析与过滤](12-msa-parsing-and-filtering)模块，在步骤 ⑤⑥⑧⑨ 中依赖[ESM-1b 注意力与表征](9-esm-1b-attention-and-representation)及[ESM-MSA-1b 注意力与表征](10-esm-msa-1b-attention-and-representation)模块。推理阶段采用 `model.py` 中定义的[混合 1D-2D 残差块](6-hybrid-1d-2d-residual-block)架构。有关集成检查点生成细节，请参阅[训练与模型选择](14-training-and-model-selection)；用于评估预测质量的基准数据集，请参阅[输入数据与基准数据集](15-input-data-and-benchmark-datasets)。
+
+---
+
+- [深入探究/训练与模型选择](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/14-training-and-model-selection)
+
+---
+slug:14-training-and-model-selection
+blog_type:normal
+---
+
+
+DRN-1D2D_Inter 的训练流水线实现了一种多准则模型选择策略，该策略同时跟踪**八个 top-k 精度指标**和**最小验证损失**，从而生成九个独立选择的模型检查点。这一设计反映了蛋白质间接触预测的核心洞察：用于捕获*置信度最高的前 5 个（top-5）*接触的最佳模型，与针对*前 L/5（top-L/5）*覆盖率优化的模型是不同的，且下游对接应用可能更倾向于精度-召回率前沿上的不同工作点。
+
+来源: [train.py](/train.py#L1-L220), [README.md](/README.md#L46-L48)
+
+## 训练配置
+
+训练脚本通过确定性种子和显式的超参数选择来初始化所有组件。`random.seed(42)` 确保了可复现的数据打乱，而优化器和学习率调度器则配置了保守的正则化，以防止在结构多样的二聚体数据集上过拟合。
+
+| 参数 | 值 | 作用 |
+|---|---|---|
+| 优化器 | AdamW | 解耦权重衰减正则化 |
+| 学习率 | 0.001 | 初始步长 |
+| Betas | (0.9, 0.999) | 动量估计的指数衰减率 |
+| 权重衰减 | 0.1 | L2 正则化强度（高 — 强正则化） |
+| 调度器 | ReduceLROnPlateau | 验证损失停滞时自适应降低学习率 |
+| 容忍度 | 1 | 1 个 epoch 无改善后降低学习率 |
+| 因子 | 0.1 | 停滞时降低 10 倍 |
+| eps | 1e-6 | 最小学习率阈值 |
+| Epochs | 25 | 总训练周期 |
+| max_aa | 400 | 每条链的最大残基维度 |
+
+**0.1 的权重衰减**非常激进 — 比常见的默认值 (0.01) 高出一个数量级 — 这反映了高容量的 9 块残差网络以及从训练二聚体中记忆稀疏接触模式的风险。
+
+来源: [train.py](/train.py#L37-L78)
+
+## 数据划分与加载
+
+训练流水线从异源二聚体子集中构建了一个**保留验证集划分**。在进行 10 轮打乱以实现最大随机化后，前 500 个异源二聚体被保留用于验证，其余的则构成训练集。`PPI_Dataset` 类从磁盘加载预计算的特征张量（一维链特征和二维配对特征），`DataLoader` 以 `batch_size=None` 的方式运行，这意味着每个蛋白质二聚体作为单个样本进行处理 — 鉴于输入张量长度可变，这是必要的。
+
+```
+DataLoader 配置:
+├── shuffle       = True
+├── num_workers   = 6
+├── prefetch_factor = 3
+├── batch_size    = None   (每个样本的可变长度处理)
+└── persistent_workers = True  (避免工作进程重启开销)
+```
+
+`persistent_workers=True` 标志对性能至关重要：它使六个工作进程在 epoch 之间保持存活，避免了在 25 个训练周期中重新初始化特征加载流水线的高昂开销。
+
+来源: [train.py](/train.py#L38-L61)
+
+## 随机裁剪策略
+
+在训练期间，每条链残基数超过 `max_aa=400` 限制的蛋白质二聚体会经历**随机裁剪**。对于每次前向传播，从有效范围内均匀采样一个随机起始索引，并相应地裁剪一维特征和二维图谱（掩码、接触）：
+
+```python
+= 0 if la <= max_aa else np.random.randint(0, la - max_aa + 1)
+startb = 0 if lb <= max_aa else np.random.randint(0, lb - max_aa + 1)
+```
+
+这种随机裁剪具有双重目的：它既满足了网络固定空间容量的约束，又充当了**隐式数据增强** — 在不同的训练迭代中暴露接触图谱的不同子区域，教导模型从部分结构上下文中定位接触。在验证期间，同样应用随机裁剪（没有确定性的中心裁剪），这在验证指标中引入了微小的方差，该方差会在 500 个样本的验证集上平均消除。
+
+来源: [train.py](/train.py#L130-L138)
+
+## 损失函数与梯度流
+
+损失通过 `ppi_loss` 计算，该函数以 `alpha=None` 和 `reduction='sum'` 实例化。当 `alpha=None` 时，损失可能默认为接触预测任务的标准加权二元交叉熵公式，其中掩码张量将无效位置（填充区域、链内接触）排除在损失计算之外。`reduction='sum'` 对整个接触图谱的逐像素损失进行求和而非平均，产生更大的梯度幅度，与激进的权重衰减相互作用以维持稳定的优化动态。
+
+训练循环遵循**逐样本梯度更新**模式：在每个单独的二聚体之后累加并应用梯度（对于可变长度输入，有效批次大小 = 1）。`optimizer.zero_grad()` 在前向传播之前（第 119 行）和 `optimizer.step()` 之后（第 154 行）均被调用，以确保每个样本的梯度累加是干净的。
+
+来源: [train.py](/train.py#L70-L154)
+
+## 多准则模型选择
+
+模型选择框架是训练流水线在架构上最具特色的部分。它定义了**八个 top-k 精度指标**和**一个基于损失的准则**，每个都独立跟踪其表现最佳的检查点：
+
+| 指标 | 描述 | 物理解释 |
+|---|---|---|
+| L/5 | 前 L/5 预测 | 广泛覆盖 — 适用于初始对接姿态 |
+| L/10 | 前 L/10 预测 | 中等覆盖 — 平衡的精度/召回率 |
+| L/20 | 前 L/20 预测 | 集中 — 更高置信度的接触 |
+| 50 | 前 50 预测 | 固定数量 — 针对小蛋白 |
+| 20 | 前 20 预测 | 稀疏的高置信度区间 |
+| 10 | 前 10 预测 | 非常稀疏 — 仅最具置信度的接触 |
+| 5 | 前 5 预测 | 超稀疏 — 前 5 个残基对 |
+| 1 | 前 1 预测 | 单个最具置信度的接触 |
+| min_loss | 最小验证损失 | 全局最优损失曲面点 |
+
+每个准则跟踪一个 `highest` 精度值和对应的保存路径。在每个 epoch 结束时，评估所有八个 top-k 检查点：如果某个准则的当前验证精度超过其历史最佳，则删除之前的检查点并保存当前模型状态。最小损失检查点遵循相同的替换逻辑，但与 `running_loss` 而非精度进行比较。一个经序列化的 `dict_statics` 文件持久化保存了跨运行的完整训练历史。
+
+来源: [train.py](/train.py#L81-L98), [train.py](/train.py#L180-L199)
+
+```mermaid
+flowchart TD
+    A[Epoch 完成] --> B{针对每个 top-k 准则}
+    B --> C[比较 valid_acc 与 highest]
+    C -->|新的最高值| D[删除旧检查点]
+    D --> E[保存模型 state_dict]
+    C -->|无改善| F[跳过]
+    E --> G[更新 highest 值]
+    F --> B
+    G --> B
+    B -->|所有准则已检查| H{"valid_loss < min_loss?"}
+    H -->|是| I[保存最小损失检查点]
+    H -->|否| J[跳过]
+    I --> K[序列化 dict_statics]
+    J --> K
+```
+
+## 学习率调度动态
+
+`ReduceLROnPlateau` 调度器通过 **factor=0.1 的衰减**来响应验证损失的停滞，这意味着每当验证损失在 `patience=1` 个 epoch 内未改善时，学习率就会下降一个数量级。从 `lr=0.001` 开始，可能的轨迹为：
+
+| 阶段 | 学习率 | 处于此学习率的 Epochs |
+|---|---|---|
+| 初始 | 1e-3 | 直至首次停滞 |
+| 第一次衰减 | 1e-4 | 直至第二次停滞 |
+| 第二次衰减 | 1e-5 | 直至第三次停滞 |
+| 第三次衰减 | 1e-6 | 达到 eps 下限 |
+
+由于 `patience=1`，调度器的响应极其灵敏 — 在仅一个 epoch 损失无改善后即触发衰减。在 25 个 epoch 的预算下，这种激进的调度通常会产生 2-3 次衰减，从探索性优化 (1e-3) 转变为精细收敛 (1e-5 或 1e-6)。
+
+来源: [train.py](/train.py#L74-L75), [train.py](/train.py#L171-L172)
+
+## 推理集成策略
+
+模型选择策略直接促成了预测期间使用的**多模型集成**。正如[预测流水线](13-prediction-pipeline)中所揭示的，预测阶段加载**七个独立训练的模型权重**（`model/1` 到 `model/7`），并在原生和交换的链顺序上平均其输出：
+
+```python
+for weight_file in weight_list:         # 7 个模型
+    model.load_state_dict(torch.load(weight_file))
+    preds = model(rt_input)             # 原生顺序
+    all_preds += preds.detach().cpu()
+    preds2 = model(sw_input)            # 交换顺序
+    all_preds += preds2.T.detach().cpu()
+
+final_prediction = all_preds / 14       # 7 个模型 × 2 种顺序 = 14 次预测
+```
+
+**14 次预测平均**（7 个模型 × 2 个对称方向）作为一种测试时增强形式。来自交换输入的转置预测（`preds2.T`）在几何上等价于原生预测，对两者进行平均减少了膨胀卷积感受野中的方向偏差。这七个模型可能对应于独立训练运行中不同 top-k 选择的检查点，从而确保集成的多样性。
+
+<CgxTip>多准则检查点选择意味着你可以为不同的下游任务选择不同的已保存模型 — top-1 检查点用于超精确的约束生成，或 top-L/5 检查点用于粗粒度对接中的广泛界面覆盖。</CgxTip>
+
+<CgxTip>训练中的 `concat` 函数仅组合一维特征（外积展开），而 `model.py` 和 `load_feature.py` 中的版本还拼接了二维配对特征。这种差异表明训练脚本可能代表一种消融变体；请确保你的训练配置与预期的特征集相匹配。</CgxTip>
+
+来源: [predict.py](/predict.py#L158-L177), [train.py](/train.py#L23-L34), [model.py](/model.py#L13-L25)
+
+## 检查点与统计持久化
+
+所有模型构件均保存在 `./final_model/` 目录下，前缀为 `PSSM_`。命名约定编码了选择准则：
+
+| 文件 | 准则 |
+|---|---|
+| `PSSM_L_5.pth` | 最佳 top-L/5 精度 |
+| `PSSM_L_10.pth` | 最佳 top-L/10 精度 |
+| `PSSM_L_20.pth` | 最佳 top-L/20 精度 |
+| `PSSM_50.pth` | 最佳 top-50 精度 |
+| `PSSM_20.pth` | 最佳 top-20 精度 |
+| `PSSM_10.pth` | 最佳 top-10 精度 |
+| `PSSM_5.pth` | 最佳 top-5 精度 |
+| `PSSM_1.pth` | 最佳 top-1 精度 |
+| `PSSM__minloss.pth` | 最小验证损失 |
+
+`PSSM__dict_statics.pkl` 序列化文件记录了完整的训练轨迹：所有八个 top-k 指标的逐 epoch 训练/验证精度、验证损失历史以及运行最佳值。这无需重新训练即可对收敛行为和准则相关性进行事后分析。
+
+训练结束时，会打印一条汇总行，显示每个准则达到的最高精度，提供了各个工作点模型质量的一目了然的比较。
+
+来源: [train.py](/train.py#L88-L98), [train.py](/train.py#L196-L208)
+
+## 训练循环架构
+
+完整的逐 epoch 训练循环遵循严格的先训练后验证顺序，并带有依赖阶段的梯度计算：
+
+```mermaid
+flowchart TD
+    A[Epoch 开始] --> B[阶段: 训练]
+    B --> C["model.train()"]
+    C --> D[迭代 train_loader]
+    D --> E["若 len > 400 则随机裁剪"]
+    E --> F[拼接一维特征]
+    F --> G[带梯度的前向传播]
+    G --> H["计算 ppi_loss()"]
+    H --> I["反向传播 + optimizer.step()"]
+    I --> D
+    D -->|耗尽| J[记录训练精度]
+    J --> K[阶段: 验证]
+    K --> L["model.eval()"]
+    L --> M[迭代 valid_loader]
+    M --> N["若 len > 400 则随机裁剪"]
+    N --> O[无梯度的前向传播]
+    O --> P["计算 ppi_loss()"]
+    P --> M
+    M -->|耗尽| Q["在 valid_loss() 上执行 scheduler.step"]
+    R["模型选择: [8 个 top-k + 最小损失]"] --> S[序列化统计数据]
+    S --> T[记录 epoch 耗时]
+    Q --> R
+```
+
+`torch.set_grad_enabled(phase == 'train')` 上下文管理器确保验证运行具有充分的内存效率 — 在评估阶段不构建计算图。鉴于蛋白质语言模型表示会产生大型特征张量，这一点尤为重要。
+
+---
+
+- [深入探究/输入数据与基准数据集](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/15-input-data-and-benchmark-datasets)
+
+---
+slug:15-input-data-and-benchmark-datasets
+blog_type:normal
+---
+
+
+DRN-1D2D_Inter 从两个相互作用蛋白质的氨基酸序列中预测**蛋白质间接触**。该模型的输入极其精简——仅需一对 FASTA 序列及其对应的多序列比对（MSA）——然而，这种稀疏的输入驱动了一个丰富的特征工程流水线，生成一维（1D）逐残基表征和二维（2D）成对表征。本页记录了所需的输入格式、用于训练和评估的基准数据集，以及原始输入与网络所消费的派生特征产物之间的关系。
+
+## 所需输入文件
+
+对于每个预测目标（一对相互作用的蛋白质 A 和 B），该模型需要**四个文件**：每条链各一个 FASTA 文件和一个 A3M 文件。这些文件将作为命令行参数直接传递给 `predict.py`：
+
+```
+python predict.py sequenceA msaA sequenceB msaB result_path device
+```
+
+| 参数 | 描述 | 格式 | 示例 |
+|----------|-------------|--------|---------|
+| `sequenceA` | 链 A 的 FASTA 文件 | `.fasta` | `1GL1_A.fasta` |
+| `msaA` | 链 A 的 MSA | `.a3m` | `1GL1_A_uniref100.a3m` |
+| `sequenceB` | 链 B 的 FASTA 文件 | `.fasta` | `1GL1_I.fasta` |
+| `msaB` | 链 B 的 MSA | `.a3m` | `1GL1_I_uniref100.a3m` |
+| `result_path` | 输出目录 | — | `./example/result` |
+| `device` | 计算设备 | — | `cpu`, `cuda:0` |
+
+来源: [predict.py](/predict.py#L22-L28), [README.md](/README.md#L26-L37)
+
+### FASTA 格式
+
+每个 FASTA 文件包含一条以标准单字母编码表示的**单链氨基酸序列**。头部行以 `>` 开头，下一行为蛋白质序列。以 1GL1 示例目标（牛胰凝乳蛋白酶-PSTI 复合物）为例，链 A 是一条含 199 个残基的丝氨酸蛋白酶，链 I 是一条含 36 个残基的胰胰蛋白酶抑制剂：
+
+```
+>1GL1
+CGVPAIQPVLSGLSRIVNGEEAVPGSWPWQVSLQDKTGFHFCGGSLINENWVVTAAH...
+```
+
+```
+>1GL1
+EISCEPGKTFKDKCNTCRCGADGKSAACTLKACPNQ
+```
+
+链之间序列长度的不对称是预期内的，且能被自然处理——网络在 L_A × L_B 的接触图上运行，其中 L_A 和 L_B 可能存在显著差异。
+
+来源: [1GL1_A.fasta](/example/1GL1_A.fasta#L1-L2), [1GL1_I.fasta](/example/1GL1_I.fasta#L1-L2)
+
+### A3M（比对 MSA）格式
+
+`.a3m` 文件包含 A3M 格式的**多序列比对**——这是一种紧凑的 MSA 表示，其中空位表示为 `-`（相对于查询序列的插入序列用小写字母表示，可被移除）。每个条目以 `>` 为前缀的头部行开始，包含元数据（UniRef 聚类 ID、序列范围、分类信息），下一行则为比对序列。本项目 A3M 文件的关键结构特征：
+
+- **头部格式**：`>UniRef100_<ID>/<range> [subseq from] <description> n=<count> Tax=<species> TaxID=<id> RepID=<representative>`
+- **序列主体**：大写字母表示比对列，`-` 表示空位，小写字母表示插入
+- **数据库来源**：MSA 应从 **UniRef90 或 UniRef100** 数据库派生，如项目 README 中所述
+- **深度**：示例 A3M 文件包含数万条序列（链 A 有 131,782 行；链 I 有 143,537 行），但出于 GitHub 存储限制，这些已被**降采样**——实际应用中的完整 MSA 会更深
+
+MSA 深度直接影响进化耦合特征（CCMpred、PSSM）的质量以及 ESM-MSA-1b 表征的信息量，这使得全面的 MSA 构建成为至关重要的上游步骤。
+
+来源: [1GL1_A_uniref100.a3m](/example/1GL1_A_uniref100.a3m#L1-L20), [1GL1_I_uniref100.a3m](/example/1GL1_I_uniref100.a3m#L1-L20), [README.md](/README.md#L36-L37)
+
+## 基准数据集
+
+项目在 `data/` 目录下提供了五个基准数据集，每个数据集在“训练-验证-测试”流水线中各司其职。数据集按**二聚体类型**（同源二聚体 vs. 异源二聚体）和**来源**（经筛选的 PDB 复合物、Docking Benchmark、DeepHomo 测试集）进行组织。
+
+| 数据集 | 位置 | 大小 | 二聚体类型 | 角色 | 来源 |
+|---------|----------|------|------------|------|------------|
+| **trainset** | `data/trainset/` | 7,362 个二聚体 | 混合 | 训练 + 验证 | 筛选的 PDB 二聚体 |
+| **HomoPDB** | `data/HomoPDB/` | 400 个二聚体 | 同源二聚体 | 独立测试 | PDB 同源二聚体 |
+| **HeteroPDB** | `data/HeteroPDB/` | 200 个二聚体 | 异源二聚体 | 独立测试 | PDB 异源二聚体 |
+| **DB5.5** | `data/DB5.5/` | 59 个二聚体 | 异源二聚体 | 独立测试 | Docking Benchmark 5.5（非冗余） |
+| **DHTest** | `data/DHTest/` | 130 个二聚体 | 异源二聚体 | 独立测试 | DeepHomo 测试集（非冗余） |
+
+来源: [data/README.md](/data/README.md#L1-L10)
+
+### 数据集关系与冗余控制
+
+测试基准集经过精心构建，以避免与训练集发生信息泄露。**DB5.5** 和 **DHTest** 通过对训练集**移除冗余**显式派生——这确保了测试性能反映的是真正的泛化能力，而非对进化邻近项的死记硬背。以下 Mermaid 图展示了这些数据集如何划分评估格局：
+
+```mermaid
+flowchart TB
+    subgraph Training["Training Pipeline"]
+        TS["trainset<br/>(7,362 dimers)"]
+        TS --> TR["Train split<br/>(hetero 500+ remaining + others)"]
+        TS --> VL["Validation split<br/>(500 heterodimers)"]
+    end
+
+    subgraph Testing["Independent Test Benchmarks"]
+        HP["HomoPDB<br/>(400 homodimers)"]
+        HeP["HeteroPDB<br/>(200 heterodimers)"]
+        DB["DB5.5<br/>(59 heterodimers)"]
+        DH["DHTest<br/>(130 heterodimers)"]
+    end
+
+    TR --> MODEL["Trained Model<br/>(7 ensemble members)"]
+    VL --> MODEL
+    MODEL --> HP
+    MODEL --> HeP
+    MODEL --> DB
+    MODEL --> DH
+
+    DB -.->|"non-redundant<br/>vs trainset"| TS
+    DH -.->|"non-redundant<br/>vs trainset"| TS
+
+    style Training fill:#e8f4e8,stroke:#4caf50
+    style Testing fill:#e8e8f4,stroke:#5c6bc0
+    style MODEL fill:#fff3e0,stroke:#ff9800
+```
+
+### 训练/验证集划分策略
+
+训练脚本展示了一种具体的划分策略：从异源二聚体子集中，**前 500 个条目**（在使用 `random.seed(42)` 打乱后）被留出用于验证，而剩余部分加上额外的训练复合物则构成训练划分。这产生了一个能代表异源二聚体接触预测的验证集，同时保留了大部分数据用于参数优化。
+
+<CgxTip>基准目录（`data/trainset/`、`data/HomoPDB/` 等）在 GitHub 仓库中是占位目录——实际的预计算特征文件对版本控制而言过大。训练时，特征必须经过预计算并存储在 `train.py` 引用的路径中；预测时，`predict.py` 中的特征流水线会从四个输入文件即时计算它们。</CgxTip>
+
+来源: [train.py](/train.py#L38-L52), [data/README.md](/data/README.md#L1-L10)
+
+## 从原始输入到模型可消费特征
+
+四个原始输入文件（2× FASTA + 2× A3M）**并未直接**输入神经网络。相反，`predict.py` 编排了一个多阶段特征派生流水线，将其转换为 DRN 所消费的一维和二维特征张量。下表总结了从原始输入生成的每一个中间产物：
+
+| 阶段 | 工具/模块 | 输入 | 输出产物 | 特征类型 |
+|-------|-------------|----------|-----------------|--------------|
+| 1 | `pair_msa` | `fastaA`, `fastaB`, `msaA`, `msaB` | `paired.a3m` | 配对 MSA |
+| 2 | `hhfilter` | `paired.a3m` | `filtered_paired.a3m` | 筛选的配对 MSA（≤256 差异） |
+| 3 | `fasta2aln` | `paired.a3m` | `paired.aln` | 供 CCMpred 使用的 ALN 格式 |
+| 4 | `hhfilter` | `msaA`, `msaB` | `filteredA.a3m`, `filteredB.a3m` | 筛选的单链 MSA |
+| 5 | 序列拼接 | `fastaA`, `fastaB` | `paired.fasta` | 拼接的 A+B 序列 |
+| 6 | `CCMpred` | `paired.aln` | `paired.ccmpred` | 二维共进化（1 通道） |
+| 7 | `alnstats` | `paired.aln` | `paired.pairout` | 二维统计势（3 通道） |
+| 8 | `esm1b_attn` | `paired.fasta` | `esm1b_rt.attn`, `esm1b_sw.attn` | 二维 ESM-1b 注意力（2× 通道） |
+| 9 | `msa1b_attn` | `filtered_paired.a3m` | `msa1b_rt.attn`, `msa1b_sw.attn` | 二维 ESM-MSA-1b 注意力（2× 通道） |
+| 10 | `hhmake` | `msaA`, `msaB` | `A.hhm`, `B.hhm` → `A_hhm.pkl`, `B_hhm.pkl` | 每条链的一维 PSSM |
+| 11 | `esm1b_repr` | `fastaA`, `fastaB` | `A_esm1b.repr`, `B_esm1b.repr` | 每条链的一维 ESM-1b 嵌入 |
+| 12 | `msa1b_repr` | `filteredA.a3m`, `filteredB.a3m` | `A_msa1b.repr`, `B_msa1b.repr` | 每条链的一维 ESM-MSA-1b 嵌入 |
+
+来源: [predict.py](/predict.py#L30-L120)
+
+### 一维特征（逐残基）
+
+每条链的一维特征向量通过水平堆叠三个逐残基表征构建，如 `load_feature.chain_feature()` 中所实现：
+
+```
+feature_1d = hstack(PSSM, ESM-1b_repr, ESM-MSA-1b_repr)   # shape: (L, C_1d)
+```
+
+PSSM 从 `hhmake` 生成的 HMM 特征中提取，而两个 PLM 表征则来自 ESM-1b（单序列）和 ESM-MSA-1b（感知 MSA）。然后，这些一维特征通过重复交错（repeat-interleave）沿接触图维度**广播**，以形成最终输入张量的行重复和列重复分量。
+
+来源: [load_feature.py](/load_feature.py#L57-L73)
+
+### 二维特征（成对）
+
+二维特征图将**共进化信号**（CCMpred、alnstats）与**基于注意力的链间模式**（ESM-1b 注意力、ESM-MSA-1b 注意力）结合，如 `load_feature.paired_feature()` 中所组装：
+
+```
+rt_feature_2d = cat(ccmpred, alnstats, esm1b_rt_attn, msa1b_rt_attn)
+sw_feature_2d = cat(ccmpred.T, alnstats.T, esm1b_sw_attn, msa1b_sw_attn)
+```
+
+**rt**（right）和 **sw**（swap）变体表示 A×B 接触图的两个非对称视角。最终的模型输入通过拼接广播后的一维特征与二维特征构建：
+
+```
+Input = unsqueeze(cat(A_broadcast, B_broadcast, p2d), dim=0)   # shape: (1, C_total, L_A, L_B)
+```
+
+<CgxTip>`hhfilter -diff 256` 步骤对于在 ESM-MSA-1b 推理前控制 MSA 深度至关重要，因为其内存消耗与 MSA 深度呈二次方缩放关系。若没有此筛选，大型 MSA 在注意力计算阶段可能会耗尽 GPU 内存。</CgxTip>
+
+来源: [load_feature.py](/load_feature.py#L76-L131), [load_feature.py](/load_feature.py#L8-L18)
+
+## 回归权重文件
+
+`data/regression/` 目录包含两个 **ESM 接触回归权重文件**，它们必须与相应的 ESM 模型权重放置在一起：
+
+| 文件 | 关联 PLM | 用途 |
+|------|----------------|---------|
+| `esm1b_t33_650M_UR50S-contact-regression.pt` | ESM-1b（650M 参数） | 接触头回归权重 |
+| `esm_msa1b_t12_100M_UR50S-contact-regression.pt` | ESM-MSA-1b（100M 参数） | 接触头回归权重 |
+
+这些文件**并非完整的 PLM 权重**——它们是各模型接触预测头的补充回归参数。完整的模型权重必须从 ESM 仓库单独下载，并放置在 `predict.py` 中配置的路径下。
+
+来源: [README.md](/README.md#L13-L17), [predict.py](/predict.py#L22-L27)
+
+## 示例目标：1GL1
+
+`example/` 目录提供了一个使用 PDB 条目 **1GL1**（牛胰凝乳蛋白酶与胰分泌型胰蛋白酶抑制剂复合物）的完整示例。这是一个具有明确表征界面的经典异源二聚体，是理想的演示案例：
+
+| 文件 | 链 | 长度 | 描述 |
+|------|-------|--------|-------------|
+| `1GL1_A.fasta` | A（胰凝乳蛋白酶） | 199 个残基 | 丝氨酸蛋白酶链 |
+| `1GL1_I.fasta` | I（PSTI） | 36 个残基 | 胰蛋白酶抑制剂链 |
+| `1GL1_A_uniref100.a3m` | A | 65,890 条序列 | 来自 UniRef100 的 MSA（降采样） |
+| `1GL1_I_uniref100.a3m` | I | 71,768 条序列 | 来自 UniRef100 的 MSA（降采样） |
+
+由于 GitHub 文件大小限制，示例中的 MSA 已被**降采样**。正如项目 README 中所述：*"由于 github 文件大小限制，我们对示例目标的 MSA 进行了降采样。在实际应用中，DRN-1D2D_Inter 对所提供示例的真实性能应该更好。"* 在生产环境中，应使用通过 HHblits 或 Jackhmmer 针对 UniRef90/UniRef100 搜索获得的完整深度 MSA。
+
+来源: [README.md](/README.md#L40-L49), [1GL1_A.fasta](/example/1GL1_A.fasta#L1-L2), [1GL1_I.fasta](/example/1GL1_I.fasta#L1-L2)
+
+## 准备你自己的输入数据
+
+要为新目标预测蛋白质间接触，你必须准备四个输入文件。关键的上游步骤是 **MSA 构建**，它决定了进化特征的质量。推荐的工作流为：
+
+1. **获取序列**：为每个相互作用的链准备 FASTA 文件（每个文件单条序列，标准单字母氨基酸编码）
+2. **生成 MSA**：针对 **UniRef90 或 UniRef100** 运行 HHblits 或 Jackhmmer，为每条链独立生成 A3M 格式的比对
+3. **运行预测**：使用这四个文件执行 `predict.py`——特征流水线将自动处理所有下游派生
+
+MSA 数据库的选择至关重要：UniRef100 能产生更深的比对（序列更多），但计算成本更高；而 UniRef90 提供了一种减少冗余的折中方案。如项目文档所述，两者均被明确支持。
+
+来源: [README.md](/README.md#L36-L37)
+
+## 进一步导航
+
+要了解派生特征如何流经网络架构，请参阅[特征工程流水线](5-feature-engineering-pipeline)。有关基于 PLM 的特征提取器详情，请查阅[ESM-1b 注意力与表征](9-esm-1b-attention-and-representation)和[ESM-MSA-1b 注意力与表征](10-esm-msa-1b-attention-and-representation)。将特定链的 MSA 组合成链间比对的配对 MSA 构建过程，记录于[基于分类学的 MSA 配对](11-taxonomy-based-msa-pairing)。
+
+---
+
+## 膨胀残差网络
+
+- [深入探究/膨胀残差网络/混合 1D-2D 残差块](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/6-hybrid-1d-2d-residual-block)
+
+---
+slug:6-hybrid-1d-2d-residual-block
+blog_type:normal
+---
+
+
+**混合 1D-2D 残差块**（`BasicBlock`）是 DRN-1D2D_Inter 的核心架构创新。它通过**三个并行的卷积分支**处理 2D 接触图形状的张量——一个 2D 分支用于捕获局部空间模式，两个 1D 导向分支用于沿各自轴独立捕获长程依赖——然后通过残差连接融合它们的输出。这种维度混合设计是使网络能够同时学习细粒度成对相互作用和跨蛋白质残差对的扩展序列相关性的关键机制，这种二元性对于蛋白质间接触预测至关重要。
+
+来源：[model.py](model.py#L78-L151)
+
+## 动机：为什么混合 1D 和 2D？
+
+蛋白质间接触图是 2D 矩阵，其中每个条目 (i, j) 表示蛋白质 A 中的残基 i 接触蛋白质 B 中的残基 j 的概率。在这种表示中并存着两种不同的信号尺度：
+
+- **局部 2D 模式**：跨越 2D 图中较小邻域的接触簇和协同进化斑块——自然由标准 3×3 卷积捕获。
+- **长程 1D 相关性**：沿一条蛋白质链的残基通常表现出跨越多个位置的序列保守性或结构周期性（例如螺旋重复）——最好通过沿单轴应用的细长 1D 导向核来捕获。
+
+具有小感受野的纯 2D 卷积在没有深层堆叠的情况下无法高效触及长程相关性。相反，纯 1D 方法忽略了联合空间结构。混合块通过**与 3×3 膨胀卷积并行运行 1×15 和 15×1 膨胀卷积**来解决这一矛盾，使网络在单个残差单元内能同时访问这两种信号尺度。
+
+来源：[model.py](model.py#L93-L116)
+
+## 架构概览
+
+下图说明了当膨胀率激活所有三个分支时，`BasicBlock` 的内部数据流：
+
+```mermaid
+flowchart TB
+    subgraph BasicBlock
+        X["Input x<br/>(C, L_A, L_B)"]
+
+        X --> B1["conv_3x3<br/>3×3 Dilated Conv Block"]
+        X --> B2["conv_1xn<br/>1×15 Dilated Conv Block"]
+        X --> B3["conv_nx1<br/>15×1 Dilated Conv Block"]
+
+        B1 --> I1["identity₁"]
+        B2 --> I2["identity₂"]
+        B3 --> I3["identity₃"]
+
+        I1 --> FUSE["Fusion<br/>identity₁ + identity₂ + identity₃"]
+        I2 --> FUSE
+        I3 --> FUSE
+
+        FUSE --> ADD["x + identity<br/>(Residual Add)"]
+        X --> ADD
+        ADD --> ACT["LeakyReLU"]
+        ACT --> OUT["Output<br/>(C, L_A, L_B)"]
+    end
+```
+
+当膨胀率落在阈值集合 `{1, 20, 40}` 之外时，仅 3×3 分支处于激活状态，该块退化为标准的 2D 残差块。
+
+来源：[model.py](model.py#L127-L151)
+
+## 卷积子块：`make_conv_layer`
+
+每个分支不是单个卷积，而是由 `make_conv_layer` 构建的**双层子块**。该工厂函数构建以下顺序链：
+
+| 步骤 | 层 | 配置 |
+|------|-------|--------------|
+| 1 | `Conv2d` | `in_channels → out_channels`，指定的核/填充/膨胀，**bias=False** |
+| 2 | `InstanceNorm2d` | `momentum=0.1`，`affine=True`，`track_running_stats=False` *(可选)* |
+| 3 | `LeakyReLU` | `negative_slope=0.01` *(可选)* |
+| 4 | `Conv2d` | `out_channels → out_channels`，相同的核/填充/膨胀，**bias=False** |
+| 5 | `InstanceNorm2d` | 与步骤 2 配置相同 *(可选)* |
+
+关键设计选择：使用**实例归一化（Instance Normalization）**而非批归一化（Batch Normalization）——这适用于蛋白质结构预测中尺寸可变的接触图，因为此时批次统计量并不可靠。`affine=True` 标志允许学习缩放/偏移参数，而 `track_running_stats=False` 确保归一化仅使用当前实例的统计量。两个卷积共享相同的核大小、填充和膨胀率，这意味着感受野在两层之间是复合的。
+
+来源：[model.py](model.py#L28-L55)
+
+## 三个并行分支
+
+### 分支 1：2D 局部路径（`conv_3x3`）
+
+无论膨胀率如何，始终实例化。使用具有均匀膨胀 `(d, d)` 和填充 `(1, 1)` 的 **3×3 核**以维持空间维度。该分支捕获每个残基对直接邻域内的局部 2D 协同进化和接触模式。
+
+```python
+self.conv_3x3 = make_conv_layer(
+    in_channels=in_channels, out_channels=out_channels,
+    kernel_size=(3,3), padding_size=(1,1),
+    dilated_rate=(dilated_rate, dilated_rate))
+```
+
+### 分支 2：逐行 1D 路径（`conv_1xn`）
+
+有条件创建——仅在 `dilated_rate ∈ {1, 20, 40}` 时创建。使用具有膨胀 `(1, d)` 和填充 `(0, 7×d)` 的 **1×15 核**。行维度的核大小为 1 且膨胀率为 1，意味着不跨行聚合信息。列维度使用细长的 15 宽核且膨胀率为 `d`，沿 B 链轴扫描，以捕获链 A 中每个固定位置的长程序列模式。
+
+```python
+self.conv_1xn = make_conv_layer(
+    in_channels=in_channels, out_channels=out_channels,
+    kernel_size=(1,15), padding_size=(0, 7*dilated_rate),
+    dilated_rate=(1, dilated_rate))
+```
+
+### 分支 3：逐列 1D 路径（`conv_nx1`）
+
+有条件创建——仅在 `dilated_rate ∈ {1, 20, 40}` 时创建。使用具有膨胀 `(d, 1)` 和填充 `(7×d, 0)` 的 **15×1 核**。这是分支 2 的转置：它沿 A 链轴扫描，同时保持每个 B 链位置独立，从而捕获链 A 中的长程序列相关性。
+
+```python
+self.conv_nx1 = make_conv_layer(
+    in_channels=in_channels, out_channels=out_channels,
+    kernel_size=(15,1), padding_size=(7*dilated_rate, 0),
+    dilated_rate=(dilated_rate, 1))
+```
+
+下表总结了每个分支在不同膨胀率下的感受野特征：
+
+| 膨胀率 | 3×3 有效感受野 | 1×15 有效感受野（每个子层） | 15×1 有效感受野（每个子层） |
+|:---:|:---:|:---:|:---:|
+| 1 | 3×3 | 1×15 | 15×1 |
+| 20 | 41×41 | 1×281 | 281×1 |
+| 40 | 81×81 | 1×561 | 561×1 |
+
+由于每个 `make_conv_layer` 包含**两**个卷积层，子块后的实际感受野甚至更大。例如，在膨胀率为 20 时，沿行膨胀率为 1、沿列膨胀率为 20 的两个堆叠 1×15 卷积，可产生约 **1×547** 个位置的有效列覆盖。
+
+来源：[model.py](model.py#L93-L116)
+
+## 膨胀激活的分支门控
+
+一个关键的架构细节是**阈值门控分支激活**。`BasicBlock` 定义了：
+
+```python
+self.threshold = [1, 20, 40]
+```
+
+只有当块的 `dilated_rate` 匹配这三个值之一时，1D 导向分支（`conv_1xn`、`conv_nx1`）才会被实例化。对于任何其他膨胀率，该块作为仅包含 `conv_3x3` 的纯 2D 残差块运行。此设计同时实现了两个目标：
+
+1. **选择性的参数效率**：并非每个膨胀级别都需要 1D 分支。中间膨胀率（例如 2、4、8）仅依赖 2D 路径，在长程 1D 建模不太关键的地方减少了参数量。
+2. **策略性的长程覆盖**：阈值 {1, 20, 40} 被选择以覆盖短程 (d=1)、中程 (d=20) 和长程 (d=40) 序列相关性，确保 1D 路径能够跨越典型蛋白质链的全长（100–400 个残基）。
+
+<CgxTip>阈值列表 `[1, 20, 40]` 充当架构超参数，控制维度混合在膨胀时间表中*何处*发生。修改此列表会直接改变哪些膨胀阶段接收 1D 分支——增加更多值会增加模型容量，但同时也会增加参数量和内存使用。</CgxTip>
+
+来源：[model.py](model.py#L89-L101)
+
+## 融合策略：求和与拼接
+
+`BasicBlock` 支持由 `self.concatenate` 标志控制的两种融合模式：
+
+| 模式 | `concatenate` | 操作 | 1×1 投影 | 参数开销 |
+|------|:---:|-----------|:---:|----------------|
+| **逐元素求和** | `False` | `identity₁ + identity₂ + identity₃` | 不需要 | 零开销 |
+| **拼接** | `True` | 沿通道维度 `cat(identity₁, identity₂, identity₃)` | `1×1 Conv: 3C → C` | 额外 3C² 个参数 |
+
+在当前配置中，**`concatenate = False`**，因此三个分支的输出被相加。此选择优先考虑参数效率和训练稳定性——逐元素相加不需要额外参数，并自然地鼓励每个分支学习互补的残差校正。拼接路径作为架构选项保留在代码中：启用时，它应用 `make_1x1_layer` 将拼接的 3×C 通道投影回 C 通道，然后再与输入相加。
+
+```python
+# 求和模式（默认）
+identity = identity1 + identity2 + identity3
+
+# 拼接模式（备选）
+identity = torch.cat((identity1, identity2, identity3), 1)
+identity = self.conv_1x1(identity)
+```
+
+来源：[model.py](model.py#L118-L141)
+
+## 残差连接与激活
+
+前向传播通过标准的加性跳跃连接及随后的激活来完成残差块：
+
+```python
+out = x + identity        # 残差相加
+out = self.leakyrelu(out) # LeakyReLU (negative_slope=0.01)
+```
+
+使用**恒等快捷连接（identity shortcut）**（无投影），因为所有分支都通过适当的填充保留空间维度，且输入/输出通道数相等（在当前网络配置中 `in_channels == out_channels`）。带有小负斜率 (0.01) 的 **LeakyReLU** 防止了神经元死亡，同时对负激活保持接近零的梯度——这是一个保守的选择，可稳定深度堆叠残差网络的训练。
+
+来源：[model.py](model.py#L127-L151)
+
+## 从 1D 特征到 2D 输入：`concat` 函数
+
+混合块在 2D 张量上运行，但特征管线产生的是**1D 单链特征**（PSSM、ESM-1b 表示、ESM-MSA-1b 表示）以及**2D 成对特征**（CCMpred、alnstats、PLM attentions）。`concat` 函数通过**轴对齐广播**弥合了这一维度差距：
+
+```mermaid
+flowchart LR
+    subgraph concat
+        A["A_f1d<br/>(C, L_A)"] -->|"unsqueeze + repeat<br/>along axis 2"| AR["row_repeat<br/>(C, L_A, L_B)"]
+        B["B_f1d<br/>(C, L_B)"] -->|"unsqueeze + repeat<br/>along axis 1"| BC["col_repeat<br/>(C, L_A, L_B)"]
+        P["p2d<br/>(C', L_A, L_B)"]
+
+        AR --> CAT["torch.cat<br/>along channel dim"]
+        BC --> CAT
+        P --> CAT
+        CAT --> UNSQ["unsqueeze(axis=0)<br/>→ (1, 2C+C', L_A, L_B)"]
+    end
+```
+
+对于形状为 `(C, L_A)` 的链 A 的 1D 特征 `A_f1d`，它被 unsqueeze 至 `(C, L_A, 1)` 并沿轴 2 重复 `L_B` 次，产生 `(C, L_A, L_B)`——每一列将链 A 的特征复制到链 B 的所有位置。相同逻辑对称地应用于链 B。这三个张量（行广播的 A、列广播的 B、成对的 2D）沿通道维度拼接，并 unsqueeze 以添加批次维度。这构造了 `ResNet.first_layer` 向下投影至 96 个通道的 **4944 通道输入**。
+
+<CgxTip>广播模式编码了强烈的归纳偏置：2D 图中的每个位置 (i, j) 都接收 {链 A 在位置 i 的特征，链 B 在位置 j 的特征，(i, j) 处的成对特征} 的并集。这确保了 1D 导向的卷积分支即使输入是 2D 张量，也能提取单链的序列模式。</CgxTip>
+
+来源：[model.py](model.py#L13-L25)，[load_feature.py](load_feature.py#L16-L27)
+
+## 完整网络中的块实例化
+
+`ResNet` 类通过以下层堆栈组装完整的预测网络：
+
+| 层 | 操作 | 通道 |
+|-------|-----------|----------|
+| `first_layer` | 1×1 Conv + InstanceNorm + LeakyReLU | 4944 → 96 |
+| `hidden_layer` | `BasicBlock` 单元序列 | 96 → 96 |
+| `output_layer` | 1×1 Conv（无归一化，无激活） | 96 → 1 |
+| 最终 | Clamp(−15, 15) + Sigmoid | 1 → [0, 1] |
+
+`resnet18()` 工厂创建了一个具有 **9 个 BasicBlock 单元**的 `ResNet`，所有单元共享相同的膨胀率（通过 `_make_layer` 外部设置）。对所有 `Conv2d` 模块应用了 `a=0.01` 且 `mode='fan_in'` 的 Kaiming 正态初始化，与 LeakyReLU 负斜率匹配，以在初始化时实现正确的信号传播。
+
+来源：[model.py](model.py#L154-L218)
+
+## 设计原理总结
+
+| 设计选择 | 原理 |
+|---------------|-----------|
+| 1×15 和 15×1 核 | 细长的感受野沿每条蛋白质链捕获序列相关性，而不发生跨轴混合 |
+| 1D 分支仅在其轴向上膨胀 | 保持正交轴上的逐位置独立性——真正的 1D 扫描 |
+| 阈值门控激活 | 选择性混合平衡了各膨胀级别的容量与参数效率 |
+| 逐元素求和融合 | 零开销的分支组合；鼓励互补的残差学习 |
+| 实例归一化 | 适用于尺寸可变的接触图；避免对批次统计量的依赖 |
+| 每个分支的双卷积子块 | 在每个分支内复合感受野，同时维持梯度流 |
+| 恒等快捷连接 | 无投影的干净残差学习；因通道保持不变而可行 |
+
+---
+
+**下一步**：了解膨胀率如何在整个网络中进行策略性调度，请参阅[膨胀率策略](7-dilation-rate-strategy)，或查看所有块如何端到端组合，请参阅[网络前向传播](8-network-forward-pass)。
+
+---
+
+- [深入探究/膨胀残差网络/膨胀率策略](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/7-dilation-rate-strategy)
+
+---
+slug:7-dilation-rate-strategy
+blog_type:normal
+---
+
+
+膨胀率策略是一种架构机制，用于控制每个 `BasicBlock` 内混合 1D-2D 卷积路径上的**感受野缩放**。DRN-1D2D_Inter 设计并未对所有卷积核应用统一的单一膨胀率，而是采用了**轴非对称膨胀**——即水平轴和垂直轴接收独立的膨胀因子——并结合**阈值门控激活**，仅在特定膨胀率下有条件地启用 1D-2D 混合路径。这种双重机制使网络能够在截然不同的空间尺度上捕获蛋白质间接触模式，同时维持维度混合结构，从而将局部序列特征与成对相互作用图区分开来。
+
+来源: [model.py](/model.py#L78-L116)
+
+## 阈值门控混合激活
+
+`BasicBlock` 定义了一个阈值列表 `self.threshold = [1, 20, 40]`，它充当混合 1D-2D 卷积路径的守门人。当该模块的 `dilated_rate` 属于此阈值集合时，`conv_1xn` 和 `conv_nx1` 分支将被实例化并参与前向传播；否则，该模块退化为带有残差连接的纯 3×3 膨胀卷积。这种条件分支在 `__init__` 期间通过 `if dilated_rate in self.threshold` 检查来实现，这意味着架构是**在构建时静态确定的**——在推理期间不会发生动态路由。
+
+来源: [model.py](/model.py#L89-L101), [model.py](/model.py#L127-L151)
+
+这三个阈值对应于蛋白质间接触预测的三种不同操作模式：
+
+| 阈值 | 有效水平感受野 (1×N) | 有效垂直感受野 (N×1) | 接触尺度 | 生物学解释 |
+|-----------|-------------------------------|-----------------------------|---------------|--------------------------|
+| **1** | 15 个残基 | 15 个残基 | 局部 | 相邻残基-残基接触 |
+| **20** | 281 个残基 | 281 个残基 | 中程 | 结构域-结构域界面模式 |
+| **40** | 561 个残基 | 561 个残基 | 长程 | 全长链间拓扑 |
+
+感受野数值源自标准膨胀卷积公式：**RF = 1 + (k − 1) × d**，其中 1D 卷积核的 k = 15，d 为膨胀率。这种几何级数缩放意味着每个后续阈值大约使空间覆盖范围翻倍，使网络能够在单一架构框架内，推理从局部邻域模式直至全局链-链几何形状的接触。
+
+来源: [model.py](/model.py#L101-L116)
+
+## 轴非对称膨胀模式
+
+DRN 膨胀策略的决定性特征在于，每个 `BasicBlock` 内的三个卷积路径接收**结构上截然不同的膨胀配置**，尽管它们共享相同的标量 `dilated_rate` 参数。这种非对称性并非实现上的伪影——它是一种刻意的设计，将 2D 接触图的两个轴映射到语义不同的生物学维度上。
+
+```mermaid
+graph TD
+    DR["dilated_rate = d"] --> C33["conv_3x3<br/>dilation: (d, d)<br/>Symmetric"]
+    DR --> C1N["conv_1xn<br/>dilation: (1, d)<br/>Horizontal-only"]
+    DR --> CN1["conv_nx1<br/>dilation: (d, 1)<br/>Vertical-only"]
+    
+    C33 --> DESC1["Captures isotropic local<br/>interaction patterns"]
+    C1N --> DESC2["Scans along chain B<br/>at rate d (inter-chain)"]
+    CN1 --> DESC3["Scans along chain A<br/>at rate d (intra-chain)"]
+    
+    style C33 fill:#e8f4e8,stroke:#2d7d2d
+    style C1N fill:#e8e8f4,stroke:#2d2d7d
+    style CN1 fill:#f4e8e8,stroke:#7d2d2d
+```
+
+具体的膨胀分配如下：
+
+- **`conv_3x3`** 接收 `(dilated_rate, dilated_rate)`——**对称膨胀**，同等地应用于两个空间轴。此路径捕获接触图中的各向同性局部模式，其中相互作用邻域大致呈方形。当膨胀率为 1 时，这是标准的 3×3 卷积；在更高的膨胀率下，它从越来越稀疏但空间上均衡的区域中进行采样。
+
+- **`conv_1xn`** 接收 `(1, dilated_rate)`——**仅水平膨胀**。垂直轴（链 A 残基）以单位间距进行采样，而水平轴（链 B 残基）以速率 `d` 进行采样。此路径专用于检测链 B 中跨度为 `d` 个残基的接触，同时在链 A 上保持细粒度分辨率——有效地沿链间方向扫描周期性相互作用模式。
+
+- **`conv_nx1`** 接收 `(dilated_rate, 1)`——**仅垂直膨胀**。作为 `conv_1xn` 的镜像配置，此路径沿链 A 膨胀，同时沿链 B 保持单位间距。它捕获链 A 中相距 `d` 个位置的残基与链 B 中连续区域相互作用的接触。
+
+来源: [model.py](/model.py#L93-L116)
+
+## 膨胀下的填充一致性
+
+一个关键的实现细节是计算填充值，以在膨胀下保持空间维度。对于非对称的 1D 卷积核，填充必须与膨胀率呈线性缩放，以维持输出尺寸的一致性：
+
+- 核为 `(1, 15)` 且膨胀率为 `d` 的 **`conv_1xn`**：padding = `(0, 7d)`。`7 × dilated_rate` 的水平填充确保了有效宽度为 `1 + 14d` 的膨胀 1×15 卷积核，能够生成与输入具有相同水平维度的输出图。垂直填充为 0，因为卷积核高度为 1（没有需填充的空间跨度）。
+
+- 核为 `(15, 1)` 且膨胀率为 `d` 的 **`conv_nx1`**：padding = `(7d, 0)`。相同的逻辑适用于垂直方向。
+
+- 核为 `(3, 3)` 且膨胀率为 `d` 的 **`conv_3x3`**：padding = `(1, 1)`。值得注意的是，3×3 路径无论膨胀率如何，都使用**固定填充 1**。这在数学上仅在 `d = 1` 时才是正确的（此时有效卷积核大小为 3，填充 1 可保持维度不变）。对于 `d > 1`，有效卷积核大小变为 `1 + 2d`，需要填充 `d` 才能保持维度。这意味着较高膨胀率下的 3×3 路径会产生**空间缩小的输出**——这种行为可能是作为隐式下采样形式的刻意设计，也可能是受限于当前默认配置使用 `dilated_rate = 1` 而被掩盖的实现约束。
+
+<CgxTip>当扩展网络以使用超过 1 的膨胀率时，必须将 3×3 的填充从 `(1, 1)` 更新为 `(dilated_rate, dilated_rate)`，以保持空间维度的一致性。若无此修正，3×3 的输出将缩小，导致在残差相加 `out = out + identity` 期间出现张量尺寸不匹配。</CgxTip>
+
+来源: [model.py](/model.py#L93-L116), [model.py](/model.py#L28-L55)
+
+## 当前配置与可扩展性
+
+默认的网络实例化为 `resnet18() → ResNet(9)`，它构建了 9 个 `BasicBlock` 实例，所有实例均处于**膨胀率 1**。由于 1 ∈ [1, 20, 40]，每个模块都会激活包含所有三个卷积路径的完整混合 1D-2D 架构。因此，网络完全在**局部模式**下运行，其 1D 感受野为 15 个残基，3×3 各向同性感受野为 3 个残基。
+
+```mermaid
+graph LR
+    subgraph "ResNet(9) — All blocks at rate=1"
+        B0["Block 0<br/>d=1 ✓"] --> B1["Block 1<br/>d=1 ✓"] --> B2["Block 2<br/>d=1 ✓"]
+        B2 --> B3["Block 3<br/>d=1 ✓"] --> B4["Block 4<br/>d=1 ✓"] --> B5["Block 5<br/>d=1 ✓"]
+        B5 --> B6["Block 6<br/>d=1 ✓"] --> B7["Block 7<br/>d=1 ✓"] --> B8["Block 8<br/>d=1 ✓"]
+    end
+    
+    style B0 fill:#d4e6f1,stroke:#2874a6
+    style B1 fill:#d4e6f1,stroke:#2874a6
+    style B2 fill:#d4e6f1,stroke:#2874a6
+    style B3 fill:#d4e6f1,stroke:#2874a6
+    style B4 fill:#d4e6f1,stroke:#2874a6
+    style B5 fill:#d4e6f1,stroke:#2874a6
+    style B6 fill:#d4e6f1,stroke:#2874a6
+    style B7 fill:#d4e6f1,stroke:#2874a6
+    style B8 fill:#d4e6f1,stroke:#2874a6
+```
+
+`_make_layer` 方法目前为层内的所有模块分配了单一的 `dilated_rate`。为了构建**多尺度膨胀层次结构**（类似于计算机视觉中的 DRN 架构），该架构支持扩展至渐进式膨胀调度，例如 `[1, 1, 1, 1, 1, 1, 1, 20, 40]`——其中最后的模块切换至中程和长程感受野。在此调度下：
+
+- 膨胀率为 1 的 **模块 0–6**：具有 15 残基 1D 感受野的细粒度接触特征
+- 膨胀率为 20 的 **模块 7**：具有 281 残基 1D 感受野的中程结构域界面模式  
+- 膨胀率为 40 的 **模块 8**：具有 561 残基 1D 感受野的全局链-链拓扑
+
+这种渐进式方案遵循**“由粗到精”的残差学习**原则，其中早期模块建立局部相互作用模体，后期模块精炼全局接触拓扑，而残差连接确保每个尺度的信息无退化地传播。
+
+<CgxTip>`BasicBlock` 中的 `concatenate` 标志（当前为 `False`）为三个卷积路径提供了一种替代融合策略。当为 `True` 时，`conv_3x3`、`conv_1xn` 和 `conv_nx1` 的输出将沿通道维度拼接，并通过 1×1 卷积（`conv_1x1`）进行投影，而非直接求和。在以异构膨胀率运行时，这种保通道拼接可能更好地保留特定尺度的特征。</CgxTip>
+
+来源: [model.py](/model.py#L154-L193), [model.py](/model.py#L214-L215), [model.py](/model.py#L118-L125), [model.py](/model.py#L137-L141)
+
+## 前向传播中的膨胀策略
+
+在 `BasicBlock.forward` 方法内部，膨胀策略表现为条件执行路径。当 `self.dilated_rate in self.threshold` 时，计算所有三个分支并融合其输出（通过逐元素求和，或通过由 `self.concatenate` 控制的 1×1 投影进行通道拼接）。随后，融合后的结果与输入残差相加。当膨胀率不在阈值范围内时，仅有 `conv_3x3` 贡献，生成不带维度混合增强的标准膨胀残差模块。
+
+这意味着**膨胀率起到了双重作用**：它同时控制 (1) 所有卷积路径上卷积核元素的空间间距，以及 (2) 模块的架构宽度——即其作为 3 分支混合模块运行，还是单分支标准残差单元运行。这种耦合是刻意的：在非阈值膨胀率下（例如 2、5 或 10 等中间值），架构故意回退到更简单的纯 3×3 路径，将这些尺度视为不值得为完整的混合结构付出计算成本。
+
+来源: [model.py](/model.py#L127-L151)
+
+## 后续步骤
+
+膨胀率策略在 `BasicBlock` 内部运作，是更广泛的网络前向传播的一部分。要了解这些模块如何从输入特征端到端地组合成接触概率图，请参阅 [网络前向传播](8-network-forward-pass)。有关膨胀策略所门控的混合 1D-2D 卷积路径的结构细节，请参阅 [混合 1D-2D 残差块](6-hybrid-1d-2d-residual-block)。
+
+---
+
+- [深入探究/膨胀残差网络/网络前向传播](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/8-network-forward-pass)
+
+---
+slug:8-network-forward-pass
+blog_type:normal
+---
+
+
+网络前向传播通过三阶段膨胀残差架构，将 4,944 通道的特征张量转换为蛋白质间接触概率图：**通道投影**（4,944→96）、**残差块处理**（9 个混合 1D-2D 块）以及 **logit 读取**（96→1）并后接 Sigmoid 激活。在推理时，该前向传播会在 **14 种模型-方向组合**（7 个检查点 × 2 种链排列顺序）上执行并取平均，利用了蛋白质间交互特征固有的不对称性。
+
+## 端到端数据流
+
+下图描绘了从预组装特征张量到最终平均接触预测的完整计算路径：
+
+```mermaid
+flowchart TD
+    subgraph Input["特征张量组装"]
+        A1d["A_f1d (2068×L_A)"] --> C["concat()"]
+        B1d["B_f1d (2068×L_B)"] --> C
+        P2d["p2d (808×L_A×L_B)"] --> C
+    end
+
+    C -->|"广播 + 拼接"| InputTensor["输入 (1×4944×L_A×L_B)"]
+
+    subgraph ResNet["ResNet 前向传播"]
+        InputTensor --> FL["first_layer: 1×1 卷积<br/>4944→96 + IN + LeakyReLU"]
+        FL --> HL["hidden_layer: 9× BasicBlock<br/>(96→96, dilation=1)"]
+        HL --> OL["output_layer: 1×1 卷积<br/>96→1 (无归一化, 无激活)"]
+    end
+
+    OL --> SQ["降维挤压 → (L_A×L_B)"]
+    SQ --> CL["截断 [-15, 15]"]
+    CL --> SIG["Sigmoid → (L_A×L_B)"]
+    SIG --> PredMap["接触概率图"]
+
+    subgraph Ensemble["集成 (仅 predict.py)"]
+        PredMap -->|"rt 方向"| ACC["累加"]
+        PredMap2["sw 方向 (转置)"] --> ACC
+        ACC -->|"÷ 14"| Final["最终预测"]
+    end
+```
+
+来源: [model.py](/model.py#L154-L209), [predict.py](/predict.py#L153-L177)
+
+## 输入张量构建
+
+在进入网络之前，单链 1D 特征和链间 2D 特征通过 `concat()` 函数融合为一个 4D 张量。该操作将每条链的 1D 特征向量在对侧链的每个位置上进行**广播**，然后沿通道维度拼接所有信号。
+
+`concat(A_f1d, B_f1d, p2d)` 函数的运作方式如下：对于形状为 `(C, L_A)` 的链 A 1D 特征，它将每个位置的特征向量沿新轴重复 `L_B` 次，生成 `(C, L_A, L_B)` 的行广播张量。链 B 的特征也进行对称处理，生成 `(C, L_B, L_A)` 张量后转置为 `(C, L_A, L_B)`。这两个广播张量与配对特征 `p2d` 沿通道轴拼接，并扩展批量维度：
+
+$$\text{Input} = \text{unsqueeze}\big(\text{cat}\big(\text{repeat}(A_{\text{1d}}, L_B, \text{axis}{=}2),\;\text{repeat}(B_{\text{1d}}, L_A, \text{axis}{=}1),\;p_{\text{2d}}\big), \text{axis}{=}0\big)\big)$$
+
+4,944 维输入的通道构成如下：
+
+| 特征组 | 来源 | 通道数 | 维度 |
+|---|---|---|---|
+| A 广播 (行) | PSSM + ESM-1b repr + MSA-1b repr | 20 + 1280 + 768 | **2,068** |
+| B 广播 (列) | PSSM + ESM-1b repr + MSA-1b repr | 20 + 1280 + 768 | **2,068** |
+| 配对特征 (2D) | CCMpred + alnstats + ESM-1b attn + MSA-1b attn | 1 + 3 + 660 + 144 | **808** |
+| **总计** | | | **4,944** |
+
+注意力通道数由展平的 (层数 × 头数) 结构计算得出：ESM-1b 贡献 33 层 × 20 头 = 660 个通道，ESM-MSA-1b 贡献 12 层 × 12 头 = 144 个通道。在预测时，会构建**两个方向的输入**：`rt_input = concat(A, B, rt_p2d)` 用于右方向注意力，`sw_input = concat(B, A, sw_p2d)` 用于交换方向注意力及转置的共进化信号。
+
+来源: [model.py](/model.py#L13-L25), [load_feature.py](/load_feature.py#L16-L27), [predict.py](/predict.py#L153-L154)
+
+## 三阶段前向架构
+
+`ResNet.forward()` 方法实现了一个严格顺序的三阶段流水线。每个阶段具有独特的架构作用：
+
+### 阶段 1 — 通道投影 (`first_layer`)
+
+1×1 卷积将 4,944 个输入通道降维至网络内部宽度 96 个通道，后接实例归一化和 LeakyReLU。此阶段充当**可学习的特征压缩器**，将异质输入信号（进化、语言和共进化信号）投影到统一的 96 维表示空间。1×1 卷积核确保这纯粹是逐位置操作，不涉及空间混合。
+
+### 阶段 2 — 残差处理 (`hidden_layer`)
+
+九个 `BasicBlock` 实例以膨胀率 1 处理 96 通道张量。每个块应用混合 1D-2D 膨胀卷积及残差跳跃连接（详见下一节）。通过同值填充约定，空间维度 (L_A × L_B) 在全过程中保持不变，因此输出形状仍为 `(1, 96, L_A, L_B)`。
+
+### 阶段 3 — Logit 读取 (`output_layer`)
+
+1×1 卷积将 96 个通道映射为每个位置的单个标量 logit，**不应用归一化和激活函数**。这是一种线性投影，在最终非线性后处理之前产生原始回归信号。
+
+来源: [model.py](/model.py#L154-L209), [model.py](/model.py#L160-L179)
+
+## BasicBlock 前向计算
+
+`BasicBlock` 是网络的计算核心。其前向传播实现了一个**多分支膨胀残差单元**，结合了三种具有不同感受野几何特征的卷积路径：
+
+```mermaid
+flowchart LR
+    X["x (输入张量)"] --> C3["conv_3×3<br/>3×3 膨胀卷积"]
+    X --> C1N["conv_1×N<br/>1×15 膨胀卷积"]
+    X --> CN1["conv_N×1<br/>15×1 膨胀卷积"]
+
+    C3 --> I1["identity₁"]
+    C1N --> I2["identity₂"]
+    CN1 --> I3["identity₃"]
+
+    I1 --> SUM["逐元素求和<br/>identity₁ + identity₂ + identity₃"]
+    I2 --> SUM
+    I3 --> SUM
+
+    SUM --> RES["x + identity<br/>(残差连接)"]
+    X --> RES
+    RES --> ACT["LeakyReLU(0.01)"]
+    ACT --> OUT["输出"]
+```
+
+每个分支由 `make_conv_layer()` 构建，该方法生成一个**双卷积**子网络，其内部序列如下：
+
+```
+Conv2d → [InstanceNorm2d] → [LeakyReLU] → Conv2d → [InstanceNorm2d]
+```
+
+方括号中的可选组件由 `instance_norm` 和 `non_linearity` 标志控制。在默认配置下（`Bool_in=True`、`Bool_nl=True`），所有组件均处于激活状态，产生带有逐卷积归一化的完整双卷积模式。值得注意的是，**未应用 Dropout** —— 被注释掉的 `Dropout2d(p=0.3)` 在最终架构中被禁用。
+
+### 分支激活逻辑
+
+1×N 和 N×1 分支基于块的膨胀率是否落在阈值集合 `{1, 20, 40}` 内进行**条件实例化**。对于 `resnet18()` 配置（9 个块，膨胀率全为 1），所有块均激活三个分支。当膨胀率超出此阈值时，仅执行 3×3 分支，使该块退化为标准的单分支膨胀残差单元。
+
+### 分支组合模式
+
+该块支持由 `self.concatenate` 标志（默认为 `False`）控制的两种组合策略：
+
+| 模式 | 标志 | 操作 | 通道流 |
+|---|---|---|---|
+| **相加** (默认) | `concatenate=False` | `identity₁ + identity₂ + identity₃` | 每个分支: in_ch → out_ch |
+| **拼接** | `concatenate=True` | `Conv1×1(cat(identity₁, identity₂, identity₃))` | 分支: 各 in_ch → out_ch; 拼接: 3×out_ch → out_ch 经 1×1 卷积 |
+
+在相加模式下，三个分支的输出直接进行逐元素求和 —— 这是一种参数高效的方案，避免了额外的 1×1 投影。在拼接模式下，分支的通道输出被堆叠，并通过 1×1 卷积（由 `make_1x1_layer` 构建）投影回 `out_channels`。
+
+来源: [model.py](/model.py#L78-L151), [model.py](/model.py#L28-L76)
+
+## 输出后处理
+
+在 `output_layer` 生成形状为 `(1, 1, L_A, L_B)` 的单通道 logit 图后，前向传播应用确定性的后处理链：
+
+| 步骤 | 操作 | 输入形状 | 输出形状 | 目的 |
+|---|---|---|---|---|
+| 1 | `torch.squeeze()` | (1, 1, L_A, L_B) | (L_A, L_B) | 移除批量和通道维度 |
+| 2 | `torch.clamp(min=-15, max=15)` | (L_A, L_B) | (L_A, L_B) | 防止 Sigmoid 饱和 |
+| 3 | `nn.Sigmoid()` | (L_A, L_B) | (L_A, L_B) | 映射至概率区间 [0, 1] |
+
+<CgxTip>Sigmoid 前截断至 [-15, 15] 是关键的数值稳定性措施。若不如此，超过约 ±15 的 logit 将产生接近零的梯度（Sigmoid 饱和），导致训练停滞。此操作将有效概率范围限定在约 [3.1×10⁻⁷, 1 − 3.1×10⁻⁷]，足以进行二元接触分类，同时维持健康的梯度流。</CgxTip>
+
+权重初始化采用 **Kaiming 正态**初始化，参数为 `a=0.01`（LeakyReLU 负斜率）和 `mode='fan_in'`，统一应用于网络中所有 `Conv2d` 模块。此初始化专为 LeakyReLU 激活校准，以在前向传播中维持层间方差。
+
+来源: [model.py](/model.py#L195-L209), [model.py](/model.py#L181-L183)
+
+## 集成推理策略
+
+在预测时，前向传播被嵌入到一个利用蛋白质间特征方向性结构的**不对称集成**中。`predict.py` 流水线构建两种不同的输入：
+
+- **`rt_input`**：`concat(A_f1d, B_f1d, rt_p2d)` —— 链 A 特征沿行广播，链 B 沿列广播，附右方向注意力图
+- **`sw_input`**：`concat(B_f1d, A_f1d, sw_p2d)` —— 链 B 特征沿行广播，链 A 沿列广播，附交换方向注意力图（及转置的共进化信号）
+
+7 个训练好的模型检查点分别应用于**这两种**方向输入，每个位置产生 14 个原始预测。交换方向的预测在累加前被**转置**，以重新对齐至 rt 方向的坐标系：
+
+```python
+for weight_file in weight_list:         # 7 个检查点
+    model.load_state_dict(torch.load(weight_file, map_location=device))
+    preds  = model(rt_input)             # (L_A, L_B)
+    preds2 = model(sw_input)             # (L_B, L_A) → 转置 → (L_A, L_B)
+    all_preds += preds + preds2.T
+final = all_preds / 14
+```
+
+这种双向平均在无需额外检查点的情况下将有效集成规模翻倍，并捕获了蛋白质间注意力固有的不对称性：拼接序列 A+B 的 ESM-1b 注意力不同于 B+A，二者均携带互补的结构信号。
+
+来源: [predict.py](/predict.py#L158-L177), [load_feature.py](/load_feature.py#L61-L102)
+
+## 模型配置摘要
+
+`resnet18()` 工厂函数通过单一配置参数实例化完整架构：
+
+| 参数 | 值 | 作用 |
+|---|---|---|
+| `blocks_num` | 9 | hidden_layer 中包含 9 个 BasicBlock |
+| `in_channel` | 96 | 所有块的内部通道宽度 |
+| 首层输入/输出 | 4944 → 96 | 从异质输入进行特征压缩 |
+| 输出层输入/输出 | 96 → 1 | 每个空间位置的标量 logit |
+| 膨胀率 | 1 | 所有块使用均匀膨胀（按阈值激活分支） |
+| 分支数 | 每块 3 个 | 3×3 + 1×15 + 15×1 (dilation=1 ∈ 阈值 {1,20,40}) |
+| 组合方式 | 相加 | `identity₁ + identity₂ + identity₃` |
+| 激活函数 | LeakyReLU(0.01) | 在每对卷积后及残差相加后应用 |
+| 归一化 | InstanceNorm2d | Momentum=0.1, affine=True, track_running_stats=False |
+| 卷积偏置 | False | 所有 Conv2d 层无偏置项运作 |
+
+配置了 `track_running_stats=False` 的 InstanceNorm2d 意味着归一化统计量在训练和推理时均**按实例**计算，而非使用运行平均值。这非常契合蛋白质结构预测中遇到的可变尺寸接触图，其中每个输入具有独特的空间维度。
+
+来源: [model.py](/model.py#L154-L183), [model.py](/model.py#L214-L215)
+
+如需深入理解混合 1D-2D 分支设计与膨胀率调度，请参阅 [混合 1D-2D 残差块](6-hybrid-1d-2d-residual-block) 和 [膨胀率策略](7-dilation-rate-strategy)。关于前向传播之前的特征准备，请参阅 [特征工程流水线](5-feature-engineering-pipeline)。
+
+---
+
+## 蛋白质语言模型
+
+- [深入探究/蛋白质语言模型/ESM-1b 注意力与表示](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/9-esm-1b-attention-and-representation)
+
+---
+slug:9-esm-1b-attention-and-representation
+blog_type:normal
+---
+
+
+ESM-1b 蛋白质语言模型在 DRN-1D2D_Inter 中作为**主要特征提取器**，为蛋白质间接触预测流程提供两种互补的信号类型：**逐残基表示**，用于编码单链的进化和结构上下文；以及**跨链注意力图**，用于在两条链作为拼接序列输入时捕获残基对耦合信号。这两个模块——`esm1b_repr.py` 和 `esm1b_attn.py`——在根本不同的输入模式上运行，并产生不同维度的特征，但两者均源自同一个 650M 参数的 ESM-1b Transformer（33 层，20 个注意力头，1280 维嵌入），从而确保了 1D 和 2D 特征通道之间的表示一致性。
+
+## 模型加载与推理上下文
+
+两个模块共享相同的初始化模式：通过 `esm.pretrained.load_model_and_alphabet_local()` 从本地文件加载预训练的 ESM-1b 检查点，将其置于评估模式，并移动至目标计算设备。**字母表的批量转换器**负责分词——将氨基酸字符映射为整数标记，并自动进行 BOS/EOS 填充。推理始终在 `torch.no_grad()` 上下文中进行以禁用梯度计算，并通过 `repr_layers=[33]` 参数显式请求第 33 层（即 Transformer 的最后一层）的表示。选择最后一层是为了在所有 33 个 Transformer 层通过多头自注意力和前馈变换迭代精炼标记表示后，捕获最抽象且与任务相关的嵌入。
+
+```python
+repr_layers = [33]
+model, alphabet = pretrained.load_model_and_alphabet_local(esm1b_location)
+model = model.eval().to(device)
+batch_converter = alphabet.get_batch_converter()
+```
+
+来源: [esm1b_repr.py](plm/esm1b_repr.py#L40-L43), [esm1b_attn.py](plm/esm1b_attn.py#L45-L48)
+
+## 序列 I/O 工具
+
+两个模块共享三个用于读取和清洗序列数据的工具函数。`read_sequence()` 函数从 FASTA 文件中提取第一条记录，返回一个 `(description, sequence)` 元组。`remove_insertions()` 函数去除比对序列中的小写字符、点号和星号——这些代表 MSA 格式中的插入状态，必须在将序列输入 ESM 分词器之前移除。`read_msa()` 函数将其推广到多序列比对，通过 `itertools.islice` 读取最多 `nseq` 条记录，并自动移除插入标记。
+
+| 函数 | 输入 | 输出 | 用途 |
+|----------|-------|--------|---------|
+| `read_sequence` | FASTA 文件路径 | `(description, sequence)` | 单序列提取 |
+| `remove_insertions` | 比对序列字符串 | 清洗后的序列字符串 | 去除 MSA 插入标记 |
+| `read_msa` | MSA 文件路径, `nseq` | `List[(description, sequence)]` | 批量 MSA 读取 |
+
+来源: [esm1b_attn.py](plm/esm1b_attn.py#L23-L35), [esm1b_repr.py](plm/esm1b_repr.py#L24-L36)
+
+## 逐残基表示提取
+
+`esm1b_repr.main()` 函数为单个蛋白质链中的每个残基提取一个 **1D 特征向量**。给定一条链的 FASTA 文件，它读取序列，通过 ESM-1b 批量转换器对其进行分词，并运行前向传播以获得第 33 层的表示张量。关键的后处理步骤是 **BOS/EOS 标记移除**：ESM-1b 在位置 0 前置一个序列起始标记，并在末尾追加一个序列结束标记，因此表示切片 `out['representations'][33][0, 1:(len_seq+1), :]` 会丢弃这些哨兵嵌入，从而生成干净的逐残基矩阵。
+
+```mermaid
+flowchart LR
+    A["FASTA file<br/>(single chain)"] --> B["read_sequence()"]
+    B --> C["Batch converter<br/>(tokenize + pad)"]
+    C --> D["ESM-1b forward<br/>repr_layers=[33]"]
+    D --> E["Representations<br/>shape: (1, L+2, 1280)"]
+    E --> F["Slice [1:L+1]<br/>(remove BOS/EOS)"]
+    F --> G["Output .npy<br/>shape: (L, 1280)"]
+```
+
+输出形状为 **(L, 1280)**，其中 L 为序列长度，1280 为 ESM-1b 的嵌入维度。该表示被保存为 NumPy `.npy` 文件，随后在 `load_feature.chain_feature()` 的 1D 特征组装步骤中，与 PSSM 和 ESM-MSA-1b 表示进行拼接，形成维度为 20 (PSSM) + 1280 (ESM-1b) + 768 (ESM-MSA-1b) = **2068 通道**的单链 1D 特征。
+
+<CgxTip>`repr_layers=[33]` 参数被传递给模型的前向方法，但输出字典由整数键 `33` 索引——而非列表位置。如果你修改了 `repr_layers`，则必须相应地更新字典键（例如，`out['representations'][your_layer]`）。</CgxTip>
+
+来源: [esm1b_repr.py](plm/esm1b_repr.py#L39-L54), [load_feature.py](load_feature.py#L42-L58)
+
+## 跨链注意力提取
+
+`esm1b_attn.main()` 函数在架构上更具意义——它通过利用 ESM-1b 对拼接链对的自注意力来提取**蛋白质间注意力信号**。给定一个包含 `seqA + seqB`（两条链无分隔符拼接）的配对 FASTA 文件，模型计算所有残基对之间的完全自注意力。核心见解在于，**链 A 位置与链 B 位置之间的注意力权重构成了一种跨链耦合信号**，尽管该模型仅在单链序列上受过训练——这些注意力模式仍可作为可迁移的结构先验涌现出来。
+
+注意力张量 `out['attentions']` 的形状为 `(1, 33, 20, L_total+2, L_total+2)`，其中 33 为层数，20 为注意力头数，`L_total = lenA + lenB`。提取两个跨链子张量：
+
+| 注意力类型 | 切片表达式 | 形状 | 语义含义 |
+|---------------|-----------------|-------|------------------|
+| **rt_attn** (right) | `[:, :, 1:(lenA+1), 1+lenA:(len_seq+1)]` | (33, 20, lenA, lenB) | A→B：链 A 残基如何关注链 B |
+| **sw_attn** (swap) | `[:, :, 1+lenA:(len_seq+1), 1:(lenA+1)]` | (33, 20, lenB, lenA) | B→A：链 B 残基如何关注链 A |
+
+```mermaid
+flowchart TD
+    subgraph PairedSequence
+        direction LR
+        BOS["BOS<br/>pos 0"] --- A1["A₁<br/>pos 1"] --- A2["A₂<br/>pos 2"] --- AN["...Aₙ<br/>pos lenA"] --- B1["B₁<br/>pos lenA+1"] --- B2["B₂<br/>pos lenA+2"] --- BM["...Bₘ<br/>pos lenA+lenB"] --- EOS["EOS"]
+    end
+
+    subgraph AttentionMatrix
+        direction LR
+        FULL["Full Attention<br/>(lenA+lenB+2) × (lenA+lenB+2)"]
+        RT["rt_attn<br/>A rows × B cols<br/>(lenA × lenB)"]
+        SW["sw_attn<br/>B rows × A cols<br/>(lenB × lenA)"]
+    end
+
+    FULL --> RT
+    FULL --> SW
+```
+
+BOS/EOS 偏移逻辑与表示模块相同：位置 0 为 BOS 标记，位置 1 到 `lenA` 为链 A 残基，位置 `1+lenA` 到 `len_seq` 为链 B 残基，位置 `len_seq+1` 为 EOS。`.squeeze()` 调用会在转换为 NumPy 之前移除批量维度。
+
+来源: [esm1b_attn.py](plm/esm1b_attn.py#L39-L61), [predict.py](predict.py#L76-L100)
+
+## 用于 2D 通道组装的注意力特征重塑
+
+由 `esm1b_attn.main()` 保存的原始注意力张量形状为 **(33, 20, lenA, lenB)**——包含三个“元”维度（层数、头数）和两个空间维度。然而，下游的 DRN-1D2D 网络将每个 (层, 头) 组合视为一个独立的 2D 特征通道。在 `load_feature.paired_feature()` 中，重塑操作 `np.reshape(rtattn_esm1b, (l*h, la, lb))` 将层和头维度展平为单一的通道轴，从而生成 **660 个通道**（33 层 × 20 个头），每个通道的形状为 `(lenA, lenB)`。
+
+这种重塑至关重要，因为它允许膨胀残差网络通过其 1×1 输入投影层学习**层头特定模式**，该投影层将所有 2D 通道（包括 CCmpred、alnstats、ESM-1b 注意力和 ESM-MSA-1b 注意力）混合为一个 96 通道的内部表示。不同层中不同的注意力头捕获性质不同的结构信号——早期层关注局部序列模式，而后期层捕获长程接触——网络通过学习哪些组合对蛋白质间接触具有预测性。
+
+来源: [load_feature.py](load_feature.py#L61-L102), [model.py](model.py#L154-L166)
+
+## 流程集成与特征组装
+
+这两个 ESM-1b 模块在 `predict.py` 定义的预测流程中的特定阶段被调用。注意力模块在两条链的**配对拼接**上运行（步骤 5），而表示模块**独立**地在每条链上运行（步骤 8）。这种不对称性是有意为之的：表示是表征单个残基环境的链局部特征，而注意力是需要联合上下文的链对特征。
+
+| 流程步骤 | 模块 | 输入 | 输出文件 | 下游角色 |
+|--------------|--------|-------|-------------|-----------------|
+| 5 | `esm1b_attn.main` | paired.fasta, chain A FASTA | `esm1b_rt.attn.npy`, `esm1b_sw.attn.npy` | 2D 跨链特征 (660 通道) |
+| 8 | `esm1b_repr.main` | chain A FASTA | `A_esm1b.repr.npy` | 1D 逐残基特征 (1280 通道) |
+| 8 | `esm1b_repr.main` | chain B FASTA | `B_esm1b.repr.npy` | 1D 逐残基特征 (1280 通道) |
+
+**rt**（right）方向的完整 2D 特征通道组成为：1 (CCmpred) + 3 (alnstats) + 660 (ESM-1b attn) + 144 (ESM-MSA-1b attn) = **808 通道**。加上在 2D 网格上广播的 1D 特征（2068 + 2068 = 4136 通道），DRN-1D2D 网络的总输入为 **4944 通道**——与模型第一个 1×1 卷积层中的 `in_channels=4944` 相匹配。
+
+<CgxTip>`sw_attn` 特征使用转置的 CCmpred 和 alnstats（`swapaxes(-2,-1)`），而非 `rt_attn` 使用的同向版本。这反映了问题的方向对称性：rt 特征对 A→B 接触进行建模，而 sw 特征对 B→A 接触进行建模，网络集成对两个方向的预测进行平均以增强鲁棒性。</CgxTip>
+
+来源: [predict.py](predict.py#L96-L131), [load_feature.py](load_feature.py#L61-L102), [model.py](model.py#L159-L161)
+
+## ESM-1b 与 ESM-MSA-1b：互补角色
+
+尽管本页侧重于 ESM-1b，但理解它如何与 [ESM-MSA-1b Attention and Representation](10-esm-msa-1b-attention-and-representation) 中记载的 MSA 感知模型互补也很重要。ESM-1b 在**单序列**（或其拼接）上运行，并捕获在 UniRef50 上预训练期间学习到的隐式进化信号。相比之下，ESM-MSA-1b 接收**显式 MSA 输入**，并能跨同源序列进行关注。这两个模型提供非冗余的信息：ESM-1b 提供 1280 维表示和 660 个注意力通道，而 ESM-MSA-1b 提供 768 维表示和 144 个注意力通道。它们共同构成了 [Feature Engineering Pipeline](5-feature-engineering-pipeline) 中描述的特征工程流程的蛋白质语言模型主干。
+
+| 属性 | ESM-1b | ESM-MSA-1b |
+|----------|--------|------------|
+| 参数量 | 650M | 100M |
+| 层数 | 33 | 12 |
+| 注意力头数 | 20 | 12 |
+| 嵌入维度 | 1280 | 768 |
+| 输入类型 | 单序列 / 拼接 | 多序列比对 |
+| 注意力通道数 (L×H) | 660 | 144 |
+| 表示维度 | 1280 | 768 |
+
+---
+
+- [深入探究/蛋白质语言模型/ESM-MSA-1b 注意力与表示](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/10-esm-msa-1b-attention-and-representation)
+
+---
+slug:10-esm-msa-1b-attention-and-representation
+blog_type:normal
+---
+
+
+ESM-MSA-1b 模块从 **ESM-MSA-1b** 蛋白质语言模型（esm_msa1b_t12_100M_UR50S，12 个 Transformer 层，1 亿参数）中提取两种互补的特征类型：用于 2D 成对特征的**跨链注意力图**，以及用于 1D 序列特征的**逐残基表示**。与处理单个拼接序列的 ESM-1b 不同，ESM-MSA-1b 在**多序列比对（MSA）**上运行，利用同源序列间的进化耦合来生成更丰富的、具有共进化感知的嵌入。这一区别正是架构基石，使得 DRN-1D2D_Inter 能够并行捕获单序列语义信号（通过 ESM-1b）和进化上下文信号（通过 ESM-MSA-1b）。
+
+来源：[msa1b_attn.py](plm/msa1b_attn.py#L1-L89)，[msa1b_repr.py](plm/msa1b_repr.py#L1-L85)
+
+## 模型与输入特性
+
+ESM-MSA-1b 模型（`esm_msa1b_t12_100M_UR50S.pt`）是一个 MSA Transformer，它处理完整的多序列比对而非单一序列。其架构参数和输入约定与单序列 ESM-1b 存在根本差异：
+
+| 属性 | ESM-MSA-1b | ESM-1b |
+|---|---|---|
+| **模型标识符** | `esm_msa1b_t12_100M_UR50S` | `esm1b_t33_650M_UR50S` |
+| **参数量** | 1 亿 | 6.5 亿 |
+| **Transformer 层数** | 12 | 33 |
+| **输入类型** | MSA（`.a3m`，最多 256 条序列） | 单个拼接序列（`.fasta`） |
+| **注意力输出键** | `row_attentions` | `attentions` |
+| **使用的表示层** | 12（最终层） | 33（最终层） |
+| **预训练检查点** | `esm_msa1b_t12_100M_UR50S.pt` | `esm1b_t33_650M_UR50S.pt` |
+
+MSA 输入会通过 `hhfilter -diff 256` 预先筛选至最多 **256 条序列**，以确保注意力计算保持可行，同时保留足够的进化多样性。在分词之前，小写插入字符和空位标记（`.` 和 `*`）会通过基于 `string.ascii_lowercase` 构建的转换表被剔除。
+
+来源：[msa1b_attn.py](plm/msa1b_attn.py#L20-L23)，[msa1b_attn.py](plm/msa1b_attn.py#L44-L49)，[predict.py](predict.py#L31)，[predict.py](predict.py#L62-L71)
+
+## MSA 预处理流水线
+
+在调用 ESM-MSA-1b 之前，必须对原始 MSA 进行清洗和过滤。预处理链按顺序应用三种变换：
+
+```mermaid
+flowchart LR
+    A["Raw MSA (.a3m)<br/>Thousands of sequences"] --> B["remove_insertions()<br/>Strip lowercase + .* chars"]
+    B --> C["hhfilter -diff 256<br/>Diversity-based filtering"]
+    C --> D["Filtered MSA<br/>≤ 256 sequences"]
+    D --> E["MSA Batch Converter<br/>Tokenization + padding"]
+    E --> F["msa_tokens tensor<br/>Shape: [1, N_seq, L_aligned+2]"]
+```
+
+`read_msa` 函数负责编排前两步：它使用 `itertools.islice` 遍历 FASTA 记录以将序列数量限制在 `nseq` 条，并对每个序列字符串应用 `remove_insertions`。这种基于转换表的剔除方法是确定性的，并通过 `str.maketrans` 实现了向量化，避免了在大型比对上使用正则表达式的开销。随后，来自 ESM 字母表的批量转换器负责处理分词、填充和特殊词元插入（BOS/EOS），以生成最终的 `msa_tokens` 张量。
+
+来源：[msa1b_attn.py](plm/msa1b_attn.py#L25-L37)，[msa1b_repr.py](plm/msa1b_repr.py#L25-L37)
+
+## 跨链注意力提取
+
+注意力模块（`msa1b_attn.py`）从 MSA Transformer 的行注意力输出中提取**蛋白质间注意力模式**。其核心思想是，当处理配对的 MSA（包含拼接的链 A 和链 B 序列）时，自注意力矩阵自然会在其非对角块中编码跨链依赖关系。
+
+```mermaid
+flowchart TD
+    subgraph Input
+        MSA["Filtered paired MSA<br/>(≤ 256 sequences)"]
+        FA["Chain A FASTA<br/>(determines lenA)"]
+    end
+    subgraph Model
+        LOAD["Load model + alphabet<br/>pretrained.load_model_and_alphabet_local()"]
+        TOK["Batch convert MSA → tokens"]
+        FWD["Forward pass<br/>repr_layers=[12], return_contacts=True"]
+    end
+    subgraph Slicing
+        RT["rt_attn: A→B block<br/>[:,:, 1:lenA+1, 1+lenA:]"]
+        SW["sw_attn: B→A block<br/>[:,:, 1+lenA:, 1:lenA+1]"]
+    end
+    MSA --> TOK
+    FA --> RT
+    FA --> SW
+    LOAD --> TOK
+    TOK --> FWD
+    FWD --> RT
+    FWD --> SW
+```
+
+注意力提取对 `out['row_attentions']` 执行精确的 4D 张量切片：
+
+- **`rt_attn`（右注意力）**：切片 `[:,:, 1:lenA+1, 1+lenA:]` —— 对应链 A 残基的行关注对应链 B 残基的列。这捕获了链 A 中每个位置对链 B 中各位置的关注程度。
+- **`sw_attn`（交换注意力）**：切片 `[:,:, 1+lenA:, 1:lenA+1]` —— 对应链 B 残基的行关注对应链 A 残基的列。这是方向上的互补。
+
+`+1` 的偏移量用于处理位于位置 0 的 BOS（序列起始）词元。`.squeeze()` 调用移除了批次维度，产生形状为 `(num_layers, num_heads, L_A, L_B)` 的张量，随后该张量被分离至 CPU 并保存为 NumPy 数组。
+
+<CgxTip>将方向分离为 `rt_attn` 和 `sw_attn` 对下游 DRN 模型至关重要：这两个注意力方向分别输入到独立的 2D 特征通道（`rt_feature_2d` 和 `sw_feature_2d`）中，使网络能够学习不对称的链间耦合模式 —— 链 A 残基关注链 B 与链 B 残基关注链 A 并非相同的信号。</CgxTip>
+
+来源：[msa1b_attn.py](plm/msa1b_attn.py#L40-L64)，[predict.py](predict.py#L104-L108)
+
+## 逐残基表示提取
+
+表示模块（`msa1b_repr.py`）从 MSA 的第一条（参考）序列中提取 **1D 序列特征** —— 每个残基一个嵌入向量。提取逻辑如下：
+
+```python
+representations = out['representations'][12].cpu().numpy()[0, 0, 1:, :]
+```
+
+该表达式中的每个索引都有特定用途：
+
+| 索引 | 含义 |
+|---|---|
+| `[12]` | 选择第 12 层（即最终 Transformer 层）的输出 |
+| `[0]` | 批次维度（单个样本） |
+| `[0]` | **MSA 中的第一条序列** —— 参考/查询序列 |
+| `[1:]` | 跳过位置 0 处的 BOS 词元 |
+| `[:]` | 保留所有嵌入维度（768 维） |
+
+仅提取第一行 MSA 表示的做法是刻意为之：参考序列对应于正在分析的实际蛋白质，而剩余的 MSA 行则作为进化上下文，通过 Transformer 的轴向注意力机制影响表示。结果数组的形状为 `(L_residue, 768)`，并保存为 `.npy` 文件。
+
+<CgxTip>注意 ESM-1b 与 ESM-MSA-1b 之间表示索引的差异：ESM-1b 使用带有显式长度边界结束索引的 `[0, 1:(len_seq+1), :]`，而 ESM-MSA-1b 使用带有额外 MSA 行索引的 `[0, 0, 1:, :]`。这反映了 MSA Transformer 的 3D 输出张量 `(batch, N_seq, L, dim)` 与单序列模型的 2D 输出张量 `(batch, L, dim)` 之间的不同。</CgxTip>
+
+来源：[msa1b_repr.py](plm/msa1b_repr.py#L41-L58)，[esm1b_repr.py](plm/esm1b_repr.py#L39-L54)
+
+## 特征集成至 DRN 流水线
+
+MSA-1b 的注意力和表示均由特征加载模块消费，以构建膨胀残差网络的最终输入张量。1D 和 2D 特征的集成路径有所不同：
+
+### 1D 特征通道（逐链）
+
+对于每条链（A 和 B），MSA-1b 表示与 PSSM 及 ESM-1b 表示进行**水平堆叠**，以构成统一的逐残基特征向量：
+
+```
+feature_1d = np.hstack((PSSM, esm1b_repr, msa1b_repr))   # 形状: (L, 20+1280+768) = (L, 2068)
+feature_1d = feature_1d.T                                   # 形状: (2068, L)，遵循通道优先约定
+```
+
+MSA-1b 表示为 1D 特征贡献了 **768 个通道**，补充了 PSSM 的 20 个通道（位置特异性打分矩阵）和 ESM-1b 的 1280 个通道。这种三源设计确保 DRN 既能接收进化谱信息（PSSM），又能接收单序列语义嵌入（ESM-1b），以及共进化上下文嵌入（ESM-MSA-1b）。
+
+### 2D 特征通道（配对）
+
+对于配对（链间）特征，MSA-1b 注意力在层和头上**展平**，然后与其他 2D 信号拼接：
+
+```
+rtattn_msa1b: (layers, heads, L_A, L_B) → reshape → (layers×heads, L_A, L_B)
+```
+
+`rt_feature_2d` 和 `sw_feature_2d` 均通过拼接以下内容构成：
+
+| 通道来源 | 维度 | 方向 |
+|---|---|---|
+| CCMpred | 1 × L_A × L_B | 正向 / 转置 |
+| AlnStats | 3 × L_A × L_B | 正向 / 转置 |
+| ESM-1b 注意力 | 33×20 × L_A × L_B | rt / sw |
+| **ESM-MSA-1b 注意力** | **12×20 × L_A × L_B** | **rt / sw** |
+
+ESM-MSA-1b 注意力为每个方向的 2D 特征贡献了 **240 个通道**（12 层 × 20 头），而 ESM-1b 注意力贡献了 660 个通道（33 层 × 20 头）。随后，这些特征通过 `concat` 函数与广播的 1D 特征相结合，构成 ResNet 最终的 4944 通道输入张量。
+
+来源：[load_feature.py](load_feature.py#L42-L58)，[load_feature.py](load_feature.py#L61-L102)，[model.py](model.py#L160)
+
+## 预测流水线中的调用
+
+在预测流水线（`predict.py`）中，ESM-MSA-1b 会被使用不同 MSA 输入调用两次，这反映了它的双重作用：
+
+1. **注意力提取**（第 6 步）：使用**过滤后的配对 MSA**（`filtered_paired.a3m`） —— 即两条链基于分类学配对的比对 —— 来计算跨链注意力。配对 MSA 捕获了两个相互作用蛋白质间的共进化信号。
+
+2. **表示提取**（第 9 步）：对每条链独立使用**过滤后的单链 MSA**（`filteredA.a3m` 和 `filteredB.a3m`）。每条链的表示是根据其自身的进化上下文计算的，而非配对上下文。
+
+这种分离输入策略在架构上具有重要意义：跨链注意力需要联合 MSA 来检测蛋白质间耦合，而逐链表示则受益于更深的单链 MSA，这些 MSA 每条链包含更多的同源物，而不会因配对约束而产生稀释。
+
+来源：[predict.py](predict.py#L104-L141)
+
+## 对比：ESM-MSA-1b 与 ESM-1b 特征角色
+
+这两个蛋白质语言模型在特征工程流水线中扮演着互补的角色：
+
+```mermaid
+graph TB
+    subgraph "ESM-1b (Single Sequence)"
+        E1A["ESM-1b Attn<br/>Input: paired.fasta<br/>Key: attententions"]
+        E1R["ESM-1b Repr<br/>Input: chain.fasta<br/>Layers: 33, Dim: 1280"]
+    end
+    subgraph "ESM-MSA-1b (MSA Transformer)"
+        EMA["MSA-1b Attn<br/>Input: filtered_paired.a3m<br/>Key: row_attentions"]
+        EMR["MSA-1b Repr<br/>Input: filtered_chain.a3m<br/>Layers: 12, Dim: 768"]
+    end
+    subgraph "Downstream Integration"
+        F1["1D Features<br/>PSSM + ESM1b_repr + MSA1b_repr"]
+        F2["2D Features<br/>CCMpred + AlnStats + ESM1b_attn + MSA1b_attn"]
+    end
+    E1R --> F1
+    EMR --> F1
+    E1A --> F2
+    EMA --> F2
+```
+
+| 方面 | ESM-MSA-1b | ESM-1b |
+|---|---|---|
+| **进化信号** | 显式（MSA 输入，跨序列的轴向注意力） | 隐式（从 UniRef50 预训练中学习） |
+| **表征容量** | 768 维（较小，但由 MSA 信息驱动） | 1280 维（较大，单序列） |
+| **注意力粒度** | 行注意力（基于 MSA 平均的注意力模式） | 标准注意力（单序列自注意力） |
+| **对 MSA 深度的敏感度** | 高 —— 更深的 MSA → 更丰富的共进化信号 | 无 —— 输入始终为单序列 |
+| **计算开销** | 较高（同时处理 256 条序列） | 较低（单序列前向传播） |
+
+这两个模型并不冗余 —— 它们捕获的是正交信息。ESM-1b 擅长从序列语义中捕获局部结构倾向，而 ESM-MSA-1b 捕获的则是仅在联合处理多个同源物时才可见的全局共进化约束。它们在 1D 和 2D 特征通道中的拼接，确保了 DRN 能接收到最全频谱的已学习蛋白质信号。
+
+来源：[msa1b_attn.py](plm/msa1b_attn.py#L40-L64)，[esm1b_attn.py](plm/esm1b_attn.py#L39-L61)，[msa1b_repr.py](plm/msa1b_repr.py#L41-L58)，[esm1b_repr.py](plm/esm1b_repr.py#L39-L54)
+
+## 下一步
+
+在理解了 ESM-MSA-1b 如何从 MSA 输入中提取进化信息特征后，自然地进展是探索 **MSA 输入本身是如何构建的** —— 特别是决定每条链中哪些同源物被比对在一起的基于分类学的配对策略。参见[基于分类学的 MSA 配对](11-taxonomy-based-msa-pairing)了解配对算法，或继续前往[预测流水线](13-prediction-pipeline)查看所有特征如何汇聚为最终的接触预测。
+
+---
+
+## 配对 MSA 构建
+
+- [深入探究/配对 MSA 构建/基于分类学的 MSA 配对](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/11-taxonomy-based-msa-pairing)
+
+---
+slug:11-taxonomy-based-msa-pairing
+blog_type:normal
+---
+
+
+蛋白质间接触预测需要两条相互作用链之间的**耦合进化信息**。基于分类学的MSA配对模块通过识别在两条链之间共享共同进化起源的同源序列，构建出**配对多序列比对**。其核心思想很直接：来自**同一生物体**的序列更有可能在相同的选择压力下共同进化，这使得分类学ID成为将两个独立MSA中的行连接成单一联合比对的天然配对键。
+
+来源: [pair_msa.py](paired/pair_msa.py#L1-L101), [cluster_species.py](paired/cluster_species.py#L1-L111)
+
+## 架构概述
+
+配对流程由 `pair_msa.main()` 统一调度，它协调三个顺序阶段中的四个模块。每个阶段逐步转换数据——从原始a3m文件，到基于分类学索引的分组，再到最终拼接的配对比对。
+
+```mermaid
+flowchart TD
+    subgraph Phase1["Phase 1: MSA Reading & Parsing"]
+        A1["fastaA / fastaB"] -->|read_refseq| R1["Reference sequences<br/>(refA, refB)"]
+        A2["msaA.a3m"] -->|read_a2m + parse_msa| P1["Parsed MSA-A<br/>[metadata, seq]"]
+        A3["msaB.a3m"] -->|read_a2m + parse_msa| P2["Parsed MSA-B<br/>[metadata, seq]"]
+    end
+
+    subgraph Phase2["Phase 2: Taxonomy Intersection & Grouping"]
+        P1 -->|common_Tax| CS["Common TaxIDs<br/>(TaxID_A ∩ TaxID_B)"]
+        P2 -->|common_Tax| CS
+        P1 -->|Tax_groupmsa| TG["TaxID_dict<br/>{TaxID: [msaA_rows, msaB_rows]}"]
+        P2 -->|Tax_groupmsa| TG
+        CS --> TG
+        R1 -->|sorted_sim| TG
+        R1 -->|sorted_sim| TG
+    end
+
+    subgraph Phase3["Phase 3: Pairing & Output"]
+        TG -->|final_pair| PAIRED["Paired sequences<br/>[header_A||header_B, seq_A+seq_B]"]
+        R1 -->|concat ref| OUT["paired.a3m"]
+        PAIRED --> OUT
+    end
+
+    style Phase1 fill:#e8f4f8,stroke:#2196F3
+    style Phase2 fill:#fff3e0,stroke:#FF9800
+    style Phase3 fill:#e8f5e9,stroke:#4CAF50
+```
+
+来源: [pair_msa.py](paired/pair_msa.py#L29-L101)
+
+## 作为分类学来源的a3m头信息
+
+配对逻辑严重依赖于由HHblits/UniRef搜索生成的**结构化头信息格式**。每个a3m头信息都编码了分类学元数据，`parse_msa` 会将其提取为一个包含6个元素的元数据元组：
+
+| 字段 | 头信息模式 | 示例 | 元组中的索引 |
+|-------|---------------|---------|----------------|
+| **UqID** | `>` 之后的第一个标记 | `UniRef100_UPI00187CB339/1-199` | `[0]` |
+| **Molecule** | `n=` 之前的部分 | `LOW QUALITY PROTEIN: uncharacterized protein LOC119010001` | `[1]` |
+| **Members** | `n=<int>` | `1` | `[2]` |
+| **Tax** | `Tax=<species>` | `Acanthopagrus latus` | `[3]` |
+| **TaxID** | `TaxID=<int>` | `8177` | **`[4]`** ← 配对键 |
+| **RepID** | `RepID=<str>` | `UPI00187CB339` | `[5]` |
+
+索引 `[4]` 处的 **TaxID** 是配对的唯一标准。头信息无法解析（缺少 `n=`、`TaxID=` 或 `Tax=` 字段）的序列会通过 `try/except` 块被静默跳过。此外，任何包含非标准氨基酸（在 `ARNDCQEGHILKMFPFPSTWYV-` 之外）的序列都会被丢弃。
+
+来源: [rw_a2m.py](paired/rw_a2m.py#L60-L102)
+
+## 阶段 1：MSA读取与初始过滤
+
+在分类学分析开始之前，会进行两项操作。首先，`read_a2m()` 加载原始比对，并应用**覆盖率过滤器**——空格比例超过 `1 - cov` 的任何序列都将被排除。这可以防止空缺过多的序列污染配对后的MSA。其次，第一行（即查询序列本身）通过 `msa_data.pop(0)` 被移除，随后 `parse_msa()` 从剩余的头信息中提取结构化元数据。
+
+覆盖率阈值 `cov` 从 `pair_msa.main()` 传入，在生产流程中被设定为 **0.5**——这意味着相对于查询序列长度，空格超过50%的序列将被丢弃。
+
+```
+# predict.py 中的生产调用
+pair_msa.main(file_dict, cov=0.5, topn=100000)
+```
+
+来源: [pair_msa.py](paired/pair_msa.py#L31-L50), [rw_a2m.py](paired/rw_a2m.py#L13-L42), [predict.py](predict.py#L44-L49)
+
+## 阶段 2：分类学交集与相似度排序
+
+此阶段由三个顺序操作组成，用于构建和优化基于分类学索引的分组。
+
+### 公共分类学识别
+
+`common_Tax()` 计算MSA-A和MSA-B中存在的TaxID的**集合交集**。TaxID `-1`（无法解析的头信息的哨兵值）在交集之前会从两个集合中被显式丢弃。只有在**两条**链中都有同源序列的生物体才会被保留——这是确保每个配对行都具有有意义共进化信号的基本约束。
+
+来源: [cluster_species.py](paired/cluster_species.py#L31-L47)
+
+### 基于分类学索引的分组
+
+`Tax_groupmsa()` 将每个解析后的MSA重组为一个以公共TaxID为键的字典，其中每个值是一个双元素列表 `[msaA_rows, msaB_rows]`，仅包含属于该生物体的序列。这是一个对两个MSA进行的 **O(N)** 划分操作。
+
+来源: [cluster_species.py](paired/cluster_species.py#L14-L29)
+
+### 组内相似度排序
+
+`sorted_sim()` 根据序列与参考序列的同一性，对**每个TaxID组内**的序列进行排序。对于包含多个序列的每个组，该函数会执行以下操作：
+
+1. 将参考序列追加到组列表中（作为最后一个元素）
+2. 通过 `encode_a2m()` 将所有序列编码为数字矩阵
+3. 使用 `cal_similarity()` 计算每个序列与参考序列的同一性
+4. 按同一性以**降序**排列索引（相似度最高的排在最前面）
+5. 相应地重新排序该组的序列列表
+
+这种排序确保了当序列随后按位置进行拉链式配对时，**最相似的同源序列会优先配对**——这是一种优先处理高置信度进化耦合的启发式方法。
+
+来源: [cluster_species.py](paired/cluster_species.py#L73-L111), [rw_a2m.py](paired/rw_a2m.py#L45-L58)
+
+## 阶段 3：最终配对与拼接
+
+`final_pair()` 执行实际的序列耦合。对于每个TaxID组，它从每一侧提取**前N条**（top-N）序列（由 `topn` 参数截断），并按位置将它们配对：msaA的第1条序列与msaB的第1条序列配对，第2条与第2条配对，依此类推。每个配对行包含：
+
+- **头信息**：`header_A + "||" + header_B`（使用双竖线分隔符连接配对的头信息）
+- **序列**：`seq_A + seq_B`（简单拼接，不插入空格）
+
+参考序列对会最先写入（使用 `&` 分隔符），并作为配对比对的查询行。总输出上限为 **100,000** 条配对序列。
+
+| 组件 | 格式 | 示例 |
+|-----------|--------|---------|
+| 参考头信息 | `headerA & headerB` | `>1GL1_A & 1GL1_I` |
+| 配对头信息 | `headerA \|\| headerB` | `>UniRef100_XYZ \|\| UniRef100_ABC` |
+| 参考序列 | `seqA + seqB` | `MKT...LVA + KEY...CNA` |
+| 配对序列 | `seqA + seqB` | `MKT...LVA + KEY...CNA` |
+
+来源: [pair_msa.py](paired/pair_msa.py#L14-L27), [pair_msa.py](paired/pair_msa.py#L72-L100)
+
+## 未配对序列统计
+
+`unpairedseq()` 是一个诊断函数，用于计算**可以**配对的序列数量。对于两侧至少存在一条序列（即 `faA_num + faB_num > 2`）的每个TaxID组，它会将 `min(faA_num, faB_num)` 添加到计数中。这揭示了最终输出前配对比对的有效深度——由于蛋白质间接触预测的准确性严重依赖于配对MSA的深度，这是一个关键的质量指标。
+
+来源: [cluster_species.py](paired/cluster_species.py#L50-L65)
+
+## 流程集成
+
+配对MSA的构建是完整预测流程的**第一步**。在 `pair_msa.main()` 生成 `paired.a3m` 之后，下游流程会立即应用 `hhfilter -diff 256` 以增加配对比对的多样性，然后使用它来计算CCMpred共进化图、alnstats特征以及ESM-MSA-1b注意力特征。分类学配对的质量直接决定了所有这些下游特征中的信号强度。
+
+```mermaid
+flowchart LR
+    PAIR["pair_msa.main()"] --> A3M["paired.a3m"]
+    A3M --> HF["hhfilter<br/>-diff 256"]
+    HF --> FPA3M["filtered_paired.a3m"]
+    FPA3M --> CCM["CCMpred"]
+    FPA3M --> ALN["alnstats"]
+    FPA3M --> MSA1B["ESM-MSA-1b<br/>attention"]
+
+    style PAIR fill:#e8f5e9,stroke:#4CAF50
+    style A3M fill:#fff3e0,stroke:#FF9800
+```
+
+来源: [predict.py](predict.py#L44-L72)
+
+## 模块参考
+
+| 模块 | 核心函数 | 职责 |
+|--------|--------------|----------------|
+| [`pair_msa.py`](paired/pair_msa.py) | `main()`, `final_pair()` | 调度流程；拼接配对行 |
+| [`cluster_species.py`](paired/cluster_species.py) | `common_Tax()`, `Tax_groupmsa()`, `sorted_sim()`, `unpairedseq()`, `cal_similarity()` | 分类学交集、分组、相似度排序 |
+| [`rw_a2m.py`](paired/rw_a2m.py) | `read_a2m()`, `parse_msa()`, `encode_a2m()`, `read_refseq()` | a3m I/O、头信息解析、数字编码 |
+| [`hhfilter_paired.py`](paired/hhfilter_paired.py) | (脚本) | 使用hhfilter进行事后批量过滤 |
+
+<CgxTip>配对是每个TaxID组内的**位置拉链**操作——如果一侧的序列多于另一侧，多余的序列将被静默丢弃。这意味着每个生物体的有效配对深度等于 `min(len(msaA_rows), len(msaB_rows))`，因此保持两侧MSA的平衡对于最大化配对深度至关重要。</CgxTip>
+
+<CgxTip>头信息解析失败（即 `TaxID = -1`）的序列会被完全排除在配对之外。当使用自定义MSA时，请确保所有头信息都遵循带有 `n=`、`Tax=`、`TaxID=` 和 `RepID=` 字段的UniRef格式，否则配对产率将显著下降。</CgxTip>
+
+## 下一步
+
+配对MSA随后会被过滤和解析以进行特征提取。有关 `hhfilter` 和格式转换如何将配对比对转化为DRN-1D2D网络所消费的特征的详情，请参阅[MSA解析与过滤](12-msa-parsing-and-filtering)。
+
+---
+
+- [深入探究/配对 MSA 构建/MSA 解析与过滤](https://zread.ai/ChengfeiYan/DRN-1D2D_Inter/12-msa-parsing-and-filtering)
+
+---
+slug:12-msa-parsing-and-filtering
+blog_type:normal
+---
+
+
+MSA 解析与过滤子系统将原始的 UniRef 多序列比对（A3M 格式）转换为具有分类学配对且冗余度降低的配对 MSA，以适用于蛋白质间接触预测。这是一个**六阶段渐进式过滤流水线**——每个阶段应用不同的过滤标准，所有六个阶段的组合决定了输入到下游特征提取器（ESM-MSA-1b、CCMpred、alnstats）的配对 MSA 的最终质量与多样性。该流水线涵盖四个模块：`rw_a2m`（I/O 与解析）、`cluster_species`（分类学分组与相似度排序）、`pair_msa`（流程编排）和 `hhfilter_paired`（配对后多样性过滤）。
+
+来源: [rw_a2m.py](paired/rw_a2m.py#L1-L102), [cluster_species.py](paired/cluster_species.py#L1-L111), [pair_msa.py](paired/pair_msa.py#L1-L101), [hhfilter_paired.py](paired/hhfilter_paired.py#L1-L24)
+
+## 流水线架构
+
+完整的流水线从原始 A3M 文件出发，经过逐步收窄的过滤器，最终生成配对的 A3M 文件。每个阶段会移除不符合特定标准的序列，各阶段的排列顺序确保计算成本较低的过滤器（覆盖率、字符验证）在成本较高的过滤器（分类学交集、相似度排序、HHfilter）之前执行。
+
+```mermaid
+flowchart TD
+    subgraph Stage1["Stage 1: Coverage Filter"]
+        A3M_A["A3M file A"] --> read_a2m_A["read_a2m()<br/>gap_cov = 1 - min_cov"]
+        A3M_B["A3M file B"] --> read_a2m_B["read_a2m()<br/>gap_cov = 1 - min_cov"]
+    end
+
+    subgraph Stage2["Stage 2: Header Parse & Validation"]
+        read_a2m_A --> pop_ref_A["pop(0): remove ref seq"]
+        pop_ref_A --> parse_A["parse_msa()<br/>extract TaxID, validate amino acids"]
+        read_a2m_B --> pop_ref_B["pop(0): remove ref seq"]
+        pop_ref_B --> parse_B["parse_msa()<br/>extract TaxID, validate amino acids"]
+    end
+
+    subgraph Stage3["Stage 3: Taxonomy Intersection"]
+        parse_A --> common_Tax["common_Tax()<br/>TaxID_A ∩ TaxID_B"]
+        parse_B --> common_Tax
+        common_Tax --> Tax_group["Tax_groupmsa()<br/>group by common TaxID"]
+    end
+
+    subgraph Stage4["Stage 4: Similarity Sorting"]
+        Tax_group --> sorted_sim["sorted_sim()<br/>sort by identity to ref<br/>within each TaxID group"]
+    end
+
+    subgraph Stage5["Stage 5: Top-N Selection & Concatenation"]
+        sorted_sim --> final_pair["final_pair()<br/>topn per TaxID<br/>concat A+B sequences<br/>cap at 100,000"]
+        final_pair --> paired_a3m["paired.a3m"]
+    end
+
+    subgraph Stage6["Stage 6: HHfilter Diversity"]
+        paired_a3m --> hhfilter["hhfilter -diff 256<br/>-maxseq 10000000"]
+        hhfilter --> filtered["filtered_paired.a3m"]
+    end
+
+    style Stage1 fill:#e8f4fd,stroke:#2196F3
+    style Stage2 fill:#e8f4fd,stroke:#2196F3
+    style Stage3 fill:#fff3e0,stroke:#FF9800
+    style Stage4 fill:#fff3e0,stroke:#FF9800
+    style Stage5 fill:#e8f5e9,stroke:#4CAF50
+    style Stage6 fill:#fce4ec,stroke:#E91E63
+```
+
+来源: [pair_msa.py](paired/pair_msa.py#L27-L101), [predict.py](predict.py#L68-L69)
+
+## 阶段 1 — 读取时的覆盖率过滤
+
+入口函数 `read_a2m(a2m_file, lenseq, min_cov)` 对 A3M 文件执行**单次流式读取**，并在读取过程中内联执行覆盖率过滤。它使用 8 KB 缓冲区以二进制模式读取文件以提升 I/O 效率，跨可能的多行 FASTA 条目累积序列字符，直到遇到下一个头部行（`>`）。
+
+**过滤逻辑**：对于每条完整的序列，将其空位数量与 `lenseq * gap_cov` 进行比较，其中 `gap_cov = 1 - min_cov`。空位数量**严格小于**此阈值的序列将被保留。这意味着 `min_cov=0.5`（`pair_msa.main` 中使用的默认值）会拒绝空位超过参考序列长度 50% 的序列——这是从 UniRef100 比对中移除片段化命中结果的关键过滤器。`lenseq` 参数是参考序列长度，通过 `len(refA[-1][-1])` 和 `len(refB[-1][-1])` 从外部传入。
+
+该函数使用 `maxlen=2` 的 `collections.deque` 来跟踪头部：每当追加新的头部时，最旧的头部会被自动驱逐。这种基于双端队列的滑动窗口能正确地将每条序列与其前一个头部配对，同时处理第一个条目的边界情况（其头部为空字符串，并通过切片 `msa_data[1:]` 被丢弃）。
+
+| 参数 | 类型 | 描述 |
+|-----------|------|-------------|
+| `a2m_file` | `str` | 输入 A3M 比对文件的路径 |
+| `lenseq` | `int` | 参考序列长度（空位阈值的分母） |
+| `min_cov` | `float` | 最小覆盖率比例（默认为 `0`） |
+| **返回值** | `list[tuple[str, str]]` | 通过覆盖率过滤的 `(header, sequence)` 对列表 |
+
+来源: [rw_a2m.py](paired/rw_a2m.py#L11-L36)
+
+## 阶段 2 — 头部解析与氨基酸验证
+
+读取完成后，参考序列（第一个条目）通过 `msaA_data.pop(0)` 被移除，剩余序列被传递给 `parse_msa(msa_data)`。该函数执行两轮验证：
+
+**头部字段提取**根据 UniRef A3M 约定解析每个头部行。本项目数据中的代表性头部如下：
+
+```
+>UniRef100_UPI00187CB339/1-199 [subseq from] LOW QUALITY PROTEIN: ... n=1 Tax=Acanthopagrus latus TaxID=8177 RepID=UPI00187CB339
+```
+
+解析器通过定位头部字符串中的哨兵标记（`n=`、`TaxID=`）来提取五个结构化字段。提取顺序为：
+
+1. **UqID** — UniRef 簇标识符，从 `>` 前缀后的首个空格处拆分获取
+2. **Molecule** — 簇 ID 与 `n=` 之间的蛋白质描述
+3. **Members** — 簇成员计数，从 `n=` 字段解析
+4. **Tax** — 物种名称，通过 `Tax=` 的 `split('=')[1]` 提取
+5. **TaxID** — NCBI 分类学 ID，从 `TaxID=` 的 `split('=')[1]` 解析为 `int`
+6. **RepID** — 代表序列 ID，为最后一个标记
+
+任何不符合此确切结构的头部（缺少 `n=` 或 `TaxID=` 标记，或字段格式错误）都会触发异常，该异常会被裸 `except: continue` 捕获，从而静默丢弃该条目。这是有意为之——许多 HHblits/HHsearch 的输出条目缺乏分类学注释，因此无法用于配对。
+
+**氨基酸验证**检查是否 `set(sequence) ⊆ standard_amino`，其中 `standard_amino = set('ARNDCQEGHILKMFPSTWYV-')`。包含小写字符（A3M 格式中的插入）或非标准残基（X、B、Z、O、U）的序列将被拒绝。这一点至关重要，因为 `encode_a2m`（稍后在相似度排序中使用）仅将 20 种标准残基加空位映射为整数 0-20，未知字符将被静默映射为 0（空位），从而破坏一致性计算。
+
+每个存活条目的输出结构为嵌套元组：`([UqID, Molecule, Members, Tax, TaxID, RepID], [header, sequence])`。索引 0 处的内部列表提供结构化元数据；索引 1 处的内部列表保留原始数据以供输出。
+
+来源: [rw_a2m.py](paired/rw_a2m.py#L59-L101), [pair_msa.py](paired/pair_msa.py#L41-L50)
+
+## 阶段 3 — 分类学交集过滤
+
+当两条链的 MSA 均被解析为结构化记录后，流水线会识别两条链比对中共同的物种——这是协同进化配对的先决条件。
+
+**`common_Tax(parsed_msaA, parsed_msaB)`** 从每个 MSA 中提取 TaxID 集合（访问 `fasta[0][4]`），丢弃哨兵值 `TaxID=-1`（用于缺少分类学的条目），并返回**集合交集** `TaxID_msaA ∩ TaxID_msaB`。只有属于**两条**链比对中均存在的物种的序列才能存活此阶段——仅存在于一条链的物种的序列将被永久排除。
+
+随后，**`Tax_groupmsa(common_species, parsed_msaA, parsed_msaB)`** 将存活的序列划分到一个以 TaxID 为键的字典中，每个值是一个包含两个元素的列表 `[chain_A_sequences, chain_B_sequences]`。TaxID 不在交集中的序列将被排除。生成的 `TaxID_dict` 是驱动所有后续配对操作的核心数据结构——每个 TaxID 键代表一个候选配对组。
+
+<CgxTip>当 `int(TaxID.split('=')[1])` 在格式错误的头部上执行失败时，`parse_msa` 会静默引入 `TaxID=-1` 哨兵值——但这些条目早已被头部解析的 `try/except` 拒绝。`common_Tax` 中的 `discard(-1)` 是为 TaxID 解析成功但结果为 -1 的边缘情况提供的安全网。</CgxTip>
+
+来源: [cluster_species.py](paired/cluster_species.py#L28-L63)
+
+## 阶段 4 — 组内相似度排序
+
+在选择配对序列之前，`sorted_sim(TaxID_dict, seqA, seqB)` 会根据每个分类学组内序列与参考序列（查询蛋白）的**一致性**对其进行排序。这确保了当后续 `topn` 选择截断列表时，与参考序列最相似（通常也最具信息量）的序列能被优先保留。
+
+对于每个 TaxID 组及每条链（A 和 B 独立处理）：
+
+1. 将参考序列**追加**到该组序列列表的末尾
+2. `encode_a2m()` 使用 21 字符映射 `{'-':0, 'A':1, 'C':2, ..., 'Y':20}` 将序列列表转换为 `uint8` NumPy 数组
+3. `cal_similarity()` 通过 `np.sum(np_fasta[i] == np_fasta[-1])` 计算每条序列 `i` 相对于索引 `-1` 处参考序列的一致性——这是一个**精确匹配计数**，而非归一化百分比
+4. 通过 `argsort()[::-1]` 将一致性分数按**降序**排序，并相应地重排序列列表
+
+参考序列因具有最高的一致性（等于其自身长度），自然会排在最前面。这种排序策略使配对 MSA 偏向于查询序列的近缘同源物，这对于蛋白质间接触预测是理想的，因为其目标是捕获相互作用特异性的协同进化信号，而非远缘同源物的信号。
+
+| 步骤 | 操作 | 复杂度 |
+|------|-----------|------------|
+| 编码 | 将残基映射为 `uint8` 数组 | O(N × L) |
+| 相似度 | 将每行与参考行进行比较 | O(N × L) |
+| 排序 | 对一致性分数执行 `argsort()` | O(N log N) |
+| **每个 TaxID 组** | **总计** | **O(N × L + N log N)** |
+
+来源: [cluster_species.py](paired/cluster_species.py#L12-L16), [cluster_species.py](paired/cluster_species.py#L74-L111), [rw_a2m.py](paired/rw_a2m.py#L39-L55)
+
+## 阶段 5 — Top-N 选择与序列拼接
+
+**`final_pair(TaxID_dict, topn)`** 通过遍历每个 TaxID 组并为每条链选择最多 `topn` 条序列，然后将它们拉链式配对，从而构建配对比对：
+
+```python
+faA_list = faA_list[:topn]
+faB_list = faB_list[:topn]
+for faA, faB in zip(faA_list, faB_list):
+    header = faA[-1][0].strip() + '||' + faB[-1][0].strip()
+    seq = faA[-1][1].strip() + faB[-1][1].strip()
+    paired.append([header, seq])
+```
+
+配对策略是**组内贪心拉链配对**：序列已按与参考序列的一致性排序（阶段 4），因此 `zip` 会将每个物种内与参考序列最相似的链 A 序列与最相似的链 B 序列配对，然后是次相似的配对，依此类推。一个 TaxID 组贡献的配对数为 `min(len(faA_list), len(faB_list))`——如果某条链的序列较少，另一条链的多余序列将被丢弃。
+
+配对头部使用 `||` 作为两个原始头部之间的分隔符，配对序列是链 A 和链 B 序列的**直接拼接**（包括其空位字符）。这种拼接产生了一个联合比对，其中链 A 的位置 `i` 和链 B 的位置 `j` 位于不同的列，使下游协同进化分析（CCMpred、alnstats）能够检测链间耦合。
+
+最终输出**上限为 100,000 条序列**（`return paired[:100000]`），为下游特征提取的内存和计算提供了硬性上限。参考配对在 `main()` 中单独前置，使用 `&` 作为头部分隔符，在配对序列之前写入输出 `paired.a3m` 文件。
+
+<CgxTip>`pair_msa.main(file_dict, cov, topn)` 中的 `topn` 参数直接传递给 `final_pair`，但其作用范围是**每个 TaxID 组**，而非全局。当 `topn=100000`（`predict.py` 中的默认值）时，该各组上限实际上是无限制的——`final_pair` 返回值中的 100,000 全局上限才是真正的硬性约束。</CgxTip>
+
+来源: [pair_msa.py](paired/pair_msa.py#L14-L26), [pair_msa.py](paired/pair_msa.py#L83-L101), [predict.py](predict.py#L68)
+
+## 阶段 6 — 配对后 HHfilter 多样性降低
+
+基于分类学的配对生成 `paired.a3m` 后，使用 HHsuite 的 `hhfilter` 工具应用最终的**多样性过滤器**：
+
+```bash
+hhfilter -i paired.a3m -o filtered_paired.a3m -diff 256 -maxseq 10000000
+```
+
+`-diff 256` 参数是关键控制项：它最多保留 256 条彼此存在差异的序列，从而有效地选择出具有受控冗余度的代表性子集。`-maxseq 10000000` 为输入处理设定了宽松的上限以避免截断。这种多样性降低对两个下游消费者至关重要：
+
+1. **ESM-MSA-1b 注意力提取** — MSA Transformer 的内存消耗与序列数量呈二次方关系；256 条多样化序列在保留系统发育广度的同时，在计算上是易处理的
+2. **协同进化特征提取**（CCMpred、alnstats） — 冗余序列不增加统计信号，但会增加计算量
+
+相同的 `-diff 256` 过滤器也独立应用于每条链的非配对 A3M 文件（`filteredA.a3m`、`filteredB.a3m`），用于单链 MSA-1b 表示提取。`hhfilter_paired.py` 模块提供了一个批处理脚本，可在整个数据集目录中应用此过滤器。
+
+来源: [hhfilter_paired.py](paired/hhfilter_paired.py#L14-L24), [predict.py](predict.py#L71-L78)
+
+## 端到端数据流总结
+
+下表追踪了一对序列从原始输入经过所有六个过滤阶段到最终输出的全过程：
+
+| 阶段 | 函数 | 过滤标准 | 数据结构变化 |
+|-------|----------|------------------|-----------------------|
+| 1 | `read_a2m` | 空位比例 < (1 − min_cov) | 原始文件 → `[(header, seq)]` |
+| 2 | `parse_msa` | 有效头部 + 标准氨基酸 | `(header, seq)` → `([metadata], [header, seq])` |
+| 3 | `common_Tax` + `Tax_groupmsa` | TaxID ∈ (TaxIDs_A ∩ TaxIDs_B) | 扁平列表 → `{TaxID: [listA, listB]}` |
+| 4 | `sorted_sim` | 与参考序列的一致性（降序） | 组内未排序列表 → 已排序 |
+| 5 | `final_pair` | 每组 Top-N，全局上限 100K | 分类学字典 → `[(paired_header, paired_seq)]` |
+| 6 | `hhfilter` | `-diff 256` 多样性 | 100K 配对 → ~256 条多样化配对 |
+
+这六个阶段的组合实现了蛋白质间接触预测的标准配对 MSA 构建方法：覆盖率过滤移除片段，头部解析确保分类学可注释性，分类学交集保证协同进化的合理性，相似度排序优先处理信息量大的同源物，Top-N 截断限制计算量，HHfilter 确保统计和神经特征提取器的多样性。
+
+来源: [pair_msa.py](paired/pair_msa.py#L27-L101), [predict.py](predict.py#L60-L78)
+
+## A3M 头部格式契约
+
+`parse_msa` 函数对 A3M 头部格式编码了严格的契约。任何偏差都会导致该条目被静默丢弃。所需格式为：
+
+```
+>UqID [optional tokens] n=Members Tax=OrganismName TaxID=Integer RepID=String
+```
+
+关键解析依赖：
+- **`n=`** 必须在头部字符串中出现在 `TaxID=` 之前
+- **`Tax=`** 从 `n=` 的值与 `TaxID=` 之间的片段提取，然后在 `=` 处拆分以获取物种名称
+- **`TaxID=`** 后必须跟随一个有效整数
+- **`RepID`** 是 `TaxID=` 值之后的最后一个以空格分隔的标记
+
+在实践中，此格式由针对 UniRef100 或 UniRef90 数据库的 HHblits/HHsearch 生成，这些数据库使用 UniProt 分类学交叉引用中的分类学信息注释命中结果。示例文件 `1GL1_A_uniref100.a3m` 和 `1GL1_I_uniref100.a3m` 展示了此格式，包含如 `Tax=Acanthopagrus latus TaxID=8177` 的条目。
+
+来源: [rw_a2m.py](paired/rw_a2m.py#L67-L96), [example/1GL1_A_uniref100.a3m](example/1GL1_A_uniref100.a3m#L1-L2)
+
+## 与预测流水线的集成
+
+MSA 解析与过滤流水线作为 `predict.py` 的**第一步**被调用，先于任何特征提取或模型推理。调用序列为：
+
+```python
+pair_msa.main(file_dict, 0.5, 100000)  # 阶段 1–5
+os.system(f'{hhfilter} -i {paired_a3m} -o {filter_paired_a3m} -diff 256')  # 阶段 6
+```
+
+`file_dict` 参数汇总了所有的输入/输出路径：`fastaA`、`fastaB`（参考序列），`msaA`、`msaB`（原始 A3M 比对），以及 `outpath`（输出目录）。覆盖率阈值 `0.5` 和 Top-N `100000` 在预测脚本中被硬编码。生成的 `filtered_paired.a3m` 直接输入 ESM-MSA-1b 注意力计算，而非配对的过滤 A3M（`filteredA.a3m`、`filteredB.a3m`）则用于单链 MSA-1b 表示提取。
+
+要了解配对 MSA 如何接入更广泛的特征工程系统，请参阅[特征工程流水线](5-feature-engineering-pipeline)。要了解驱动阶段 3–5 的基于分类学的配对策略，请参阅[基于分类学的 MSA 配对](11-taxonomy-based-msa-pairing)。
+
+---

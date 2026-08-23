@@ -1,0 +1,33 @@
+# ChengfeiYan/DRN-1D2D_Inter
+
+Source: https://zread.ai/ChengfeiYan/DRN-1D2D_Inter
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速上手](2-quick-start.md)
+- [入门/安装与依赖](3-installation-and-dependencies.md)
+
+## 深入探究
+
+- [深入探究/架构概述](4-architecture-overview.md)
+- [深入探究/特征工程流程](5-feature-engineering-pipeline.md)
+- [深入探究/预测流程](13-prediction-pipeline.md)
+- [深入探究/训练与模型选择](14-training-and-model-selection.md)
+- [深入探究/输入数据与基准数据集](15-input-data-and-benchmark-datasets.md)
+### 膨胀残差网络
+
+- [深入探究/膨胀残差网络/混合 1D-2D 残差块](6-hybrid-1d-2d-residual-block.md)
+- [深入探究/膨胀残差网络/膨胀率策略](7-dilation-rate-strategy.md)
+- [深入探究/膨胀残差网络/网络前向传播](8-network-forward-pass.md)
+
+### 蛋白质语言模型
+
+- [深入探究/蛋白质语言模型/ESM-1b 注意力与表示](9-esm-1b-attention-and-representation.md)
+- [深入探究/蛋白质语言模型/ESM-MSA-1b 注意力与表示](10-esm-msa-1b-attention-and-representation.md)
+
+### 配对 MSA 构建
+
+- [深入探究/配对 MSA 构建/基于分类学的 MSA 配对](11-taxonomy-based-msa-pairing.md)
+- [深入探究/配对 MSA 构建/MSA 解析与过滤](12-msa-parsing-and-filtering.md)
+
