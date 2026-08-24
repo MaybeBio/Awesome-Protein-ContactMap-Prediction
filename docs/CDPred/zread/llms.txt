@@ -1,0 +1,32 @@
+# BioinfoMachineLearning/CDPred
+
+Source: https://zread.ai/BioinfoMachineLearning/CDPred
+
+## 入门指南
+
+- [入门指南/概述](1-overview.md)
+- [入门指南/快速入门](2-quick-start.md)
+- [入门指南/输入数据准备](3-input-data-preparation.md)
+
+## 深入解析
+
+- [深入解析/架构概述](4-architecture-overview.md)
+- [深入解析/输出文件与格式](12-output-files-and-formats.md)
+- [深入解析/预测评估指标](13-prediction-evaluation-metrics.md)
+- [深入解析/模型配置与集成](14-model-configuration-and-ensemble.md)
+### 预测流水线
+
+- [深入解析/预测流水线/特征生成](5-feature-generation.md)
+- [深入解析/预测流水线/神经网络模型设计](6-neural-network-model-design.md)
+- [深入解析/预测流水线/预测工作流](7-prediction-workflow.md)
+
+### 自定义归一化层
+
+- [深入解析/自定义归一化层/实例归一化](8-instance-normalization.md)
+- [深入解析/自定义归一化层/行与列归一化](9-row-and-column-normalization.md)
+
+### 外部工具
+
+- [深入解析/外部工具/用于生成 MSA 的 ZComplexMSA](10-zcomplexmsa-for-msa-generation.md)
+- [深入解析/外部工具/用于结构对接的 GDFold](11-gdfold-for-structure-docking.md)
+

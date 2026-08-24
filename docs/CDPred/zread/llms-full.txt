@@ -1,0 +1,3322 @@
+# BioinfoMachineLearning/CDPred
+
+Source: https://zread.ai/BioinfoMachineLearning/CDPred
+
+# 入门指南
+
+- [入门指南/概述](https://zread.ai/BioinfoMachineLearning/CDPred/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**CDPred** 是一款深度学习工具，用于预测两条相互作用蛋白质链之间的**链间残基-残基距离**——这是理解蛋白质如何组装成复合物所需的关键空间信息。CDPred 发表于 *Nature Communications* (2022)，它利用基于二维注意力的深度神经网络，将序列共进化信号和结构先验转化为精确的链间距离图和接触图，同时支持**同源二聚体**（两条相同链）和**异源二聚体**（两条不同链）的预测。
+
+![CDPred Header](https://github.com/BioinfoMachineLearning/CDPred/raw/main/image/CDPred1.gif)
+
+来源: [README.md](/README.md#L1-L6)
+
+## CDPred 的功能
+
+蛋白质复合物驱动着几乎所有的生物过程——从信号转导到免疫识别。确定两条链如何进行空间相互作用是理解复合物功能的前提，然而通过实验确定链间距离依然成本高昂且通量较低。CDPred 通过计算预测两条相互作用链中每对残基之间的**欧几里得重原子距离**来解决这一问题，生成连续的距离图和二值接触图（残基对距离在 8Å 以内）。
+
+该工具接受两个核心输入：(1) 每条链的**预测单体三级结构**（PDB 格式），以及 (2) 捕获链间共进化信号的**多序列比对**（MSA，`.a3m` 格式）。基于这些输入，CDPred 提取四个特征通道，将其输入到由三个训练好的神经网络组成的集成模型中，并输出链间距离预测及相关的接触概率。
+
+来源: [README.md](/README.md#L4-L6), [lib/Model_predict.py](/lib/Model_predict.py#L121-L131)
+
+## 预测模式
+
+CDPred 在两种不同的预测模式下运行，每种模式由在相应二聚体类型上训练的独立模型集成作为支撑：
+
+| 模式 | 标志 | 输入结构 | 模型目录 | 适用场景 |
+|------|------|-----------------|-----------------|----------|
+| **同源二聚体** | `-m homodimer` | 1 个 PDB 文件（单链） | `model/homo/` | 两条相同链的相互作用 |
+| **异源二聚体** | `-m heterodimer` | 2 个 PDB 文件（双链） | `model/hetero/` | 两条不同链的相互作用 |
+
+对于**同源二聚体**，由于两条链完全相同，因此单链的结构和 MSA 即可满足需求。对于**异源二聚体**，则需要提供两条链的单体结构，并且它们的链内距离图会在特征提取前组合成一个块对角复合矩阵。
+
+来源: [README.md](/README.md#L69-L77), [lib/Model_predict.py](/lib/Model_predict.py#L146-L206)
+
+## 架构概览
+
+CDPred 的预测流水线遵循三阶段架构——**特征生成 → 神经网络集成 → 输出后处理**——如下所示：
+
+```mermaid
+flowchart TD
+    subgraph Input["📥 Input Data"]
+        PDB["Monomer PDB Structure(s)"]
+        MSA["MSA File (.a3m)"]
+    end
+
+    subgraph Features["🔧 Feature Generation"]
+        PSSM["PSSM\n(Position-Specific Scoring Matrix)\nvia PSI-BLAST + UniRef90"]
+        CCMpred["CCMpred\n(Co-evolutionary Score Matrix)\n441 channels"]
+        ESM["ESM Row Attention\n(MSA Transformer Attention Maps)\n144 channels"]
+        IntraDist["Intra-distance Map\n(Cβ–Cβ distances from PDB)\n1 channel"]
+    end
+
+    subgraph Model["🧠 Neural Network Ensemble"]
+        M1["Model 1 (.h5)"]
+        M2["Model 2 (.h5)"]
+        M3["Model 3 (.h5)"]
+        Avg["Ensemble Average"]
+    end
+
+    subgraph Output["📤 Prediction Output"]
+        DistMap["Inter-chain Distance Map\n(.dist, _dist.rr)"]
+        ConMap["Inter-chain Contact Map\n(.htxt, _con.rr)"]
+    end
+
+    PDB --> IntraDist
+    MSA --> PSSM
+    MSA --> CCMpred
+    MSA --> ESM
+
+    PSSM --> Stack["Feature Stack\n186 channels"]
+    CCMpred --> Stack
+    ESM --> Stack
+    IntraDist --> Stack
+
+    Stack --> M1 --> Avg
+    Stack --> M2 --> Avg
+    Stack --> M3 --> Avg
+
+    Avg --> DistMap
+    Avg --> ConMap
+```
+
+四个特征通道被拼接成一个**186 通道的二维特征张量**（144 通道的 ESM 与 441 通道的 CCMpred 经过降维，根据模型输入配置，有效堆叠通道数总计为 186），随后由集成模型中的三个神经网络分别进行批量预测。最终预测结果是所有三个模型的**逐元素平均值**，此举降低了方差并提升了鲁棒性。
+
+来源: [lib/Model_predict.py](/lib/Model_predict.py#L208-L218), [model/homo/feature.txt](/model/homo/feature.txt#L1-L4), [lib/generate_feature.py](/lib/generate_feature.py#L75-L111)
+
+## 特征工程摘要
+
+每个特征通道捕获关于链间关系的不同信号：
+
+| 特征 | 来源 | 描述 | 每对残基的形状 |
+|---------|--------|-------------|----------------------|
+| **`rowatt`** | ESM MSA Transformer (esm_msa1_t12_100M_UR50S) | 来自预训练 MSA Transformer 的行注意力图，捕获比对序列间的共进化注意力模式 | L × L × 144 |
+| **`ccmpred`** | CCMpred (伪似然最大化) | 来自 MSA 直接耦合分析的共进化耦合分数 | L × L × 441 |
+| **`pssm`** | 对 UniRef90 运行 PSI-BLAST | 编码进化保守性谱的位置特异性打分矩阵 | L × L × 44 |
+| **`intradist_cb`** | 从 PDB 提取 Cβ 距离 | 链内 Cβ–Cβ（或回退至 Cα）距离图，提供来自单体预测的结构先验 | L × L × 1 |
+
+对于超过 1024 个残基的序列（MSA Transformer 的最大长度限制），CDPred 采用了**滑动窗口裁剪策略**，将 MSA 划分为长度为 1000 个残基的重叠窗口，分别独立处理，最后将生成的注意力图拼接回去。
+
+来源: [lib/generate_feature.py](/lib/generate_feature.py#L136-L200), [model/homo/feature.txt](/model/homo/feature.txt#L1-L4), [lib/generate_feature.py](/lib/generate_feature.py#L159-L173)
+
+## 模型集成设计
+
+CDPred 为每种预测模式均采用了**3 模型集成**。这三个模型共享相同的架构（在 `.json` 配置文件中定义），但学习到的权重不同（存储为 `.h5` 文件）。此设计通过取平均值提升了预测的稳定性：
+
+- **同源二聚体集成**：`HomoPred1.h5`、`HomoPred2.h5`、`HomoPred3.h5`——架构定义在 [`model-train-HomoPred_Net.json`](/model/homo/model-train-HomoPred_Net.json) 中
+- **异源二聚体集成**：`HeteroPred1.h5`、`HeteroPred2.h5`、`HeteroPred3.h5`——架构定义在 [`model-train-HeteroPred_Net.json`](/model/hetero/model-train-HeteroPred_Net.json) 中
+
+网络架构结合了**自定义归一化层**——`InstanceNormalization`、`RowNormalization` 和 `ColumNormalization`——它们对加载预训练模型至关重要。这些层沿二维特征图的不同轴进行归一化，提供空间自适应归一化，对于蛋白质距离图这类可变长度的二维输入，其表现优于标准的批归一化。
+
+<CgxTip>加载 CDPred 模型时，必须通过 Keras 的 `CustomObjectScope` 注册这三个自定义归一化层——否则模型反序列化将失败。此步骤已在 `Model_predict.py` 中自动处理。</CgxTip>
+
+来源: [lib/Model_predict.py](/lib/Model_predict.py#L96-L119), [lib/Model_predict.py](/lib/Model_predict.py#L25-L83), [lib/Model_construct.py](/lib/Model_construct.py#L107-L165)
+
+## 项目结构
+
+```
+CDPred/
+├── lib/                          # 核心库（预测、训练、评估）
+│   ├── Model_predict.py          # 主预测入口
+│   ├── Model_construct.py        # 神经网络架构定义
+│   ├── Model_training.py         # 模型训练逻辑
+│   ├── generate_feature.py       # 特征生成（ESM, CCMpred, PSSM）
+│   ├── distmap_evaluate.py       # 预测评估指标
+│   ├── pdb_process.py            # PDB 文件处理工具
+│   ├── data.py                   # ESM Alphabet 与批量转换器
+│   ├── constants.py              # 全局常量（UniRef90 路径）
+│   └── util.py                   # 距离图工具及 PDB 解析
+├── model/                        # 预训练模型权重与配置
+│   ├── homo/                     # 同源二聚体模型（3 个权重文件 + JSON + 特征）
+│   └── hetero/                   # 异源二聚体模型（3 个权重文件 + JSON + 特征）
+├── example/                      # 示例输入与预期输出
+│   ├── *.a3m                     # 示例 MSA 文件
+│   ├── expection_output/         # 预生成的预测输出
+│   ├── ground_truth/             # 真实距离/接触图
+│   └── training_datalists/       # 训练/测试/验证集划分
+├── external_tool/                # 外部工具集成
+│   ├── ZComplexMSA/              # 自定义 MSA 生成流水线
+│   ├── GDFold/                   # 梯度下降结构对接
+│   └── run_CDFold*.sh            # CDFold 执行脚本
+└── requirments.txt               # Python 依赖
+```
+
+来源: [README.md](/README.md#L1-L16), [lib/Model_predict.py](/lib/Model_predict.py#L1-L20)
+
+## 核心依赖
+
+CDPred 依赖特定的深度学习技术栈（Python 3.6.x、TensorFlow 1.9.0、Keras 2.1.6），并结合了现代蛋白质语言模型工具：
+
+| 包 | 版本 | 作用 |
+|---------|---------|------|
+| `tensorflow` | 1.9.0 | Keras 神经网络后端 |
+| `Keras` | 2.1.6 | 神经网络模型定义与推理 |
+| `fair-esm` | 0.3.1 | Facebook 的进化尺度建模（MSA Transformer） |
+| `torch` | 1.8.0 | ESM 推理的 PyTorch 后端 |
+| `biopython` | 1.79 | PDB 文件解析与序列处理 |
+| `numpy` | 1.16.2 | 数值数组操作 |
+| `scikit-learn` | 0.24.2 | 评估指标 (precision_score) |
+| `h5py` | 2.10.0 | HDF5 模型权重文件 I/O |
+
+<CgxTip>CDPred 同时使用了两种不同的深度学习框架：**TensorFlow/Keras** 用于预测网络，**PyTorch** 用于 ESM 特征生成。请确保在同一虚拟环境中正确安装了两者。</CgxTip>
+
+来源: [requirments.txt](/requirments.txt#L1-L15), [README.md](/README.md#L24-L30)
+
+## 外部工具生态
+
+CDPred 集成了两个外部工具，将其能力扩展至核心预测之外：
+
+- **[ZComplexMSA](https://github.com/BioinfoMachineLearning/CDPred/tree/main/external_tool/ZComplexMSA)**——专为蛋白质复合物设计的自定义 MSA 生成流水线。它既可处理同源二聚体 MSA 生成（使用 HHsuite 对比 BFD），也可处理异源二聚体 MSA 生成（使用 HHsuite 对比 UniRef90 并结合 UniProt 到 PDB 的映射），生成 CDPred 所需的 `.a3m` 输入文件。
+
+- **[GDFold](https://github.com/BioinfoMachineLearning/CDPred/tree/main/external_tool/GDFold)**——基于梯度下降的蛋白质结构对接工具，能够利用 CDPred 预测的链间距离图，通过优化组成链的相对朝向和位置来组装完整的四级结构。
+
+来源: [external_tool/ZComplexMSA/README.md](/external_tool/ZComplexMSA/README.md#L1-L57), [README.md](/README.md#L75-L76)
+
+## 接下来阅读什么
+
+既然你已在宏观层面了解了 CDPred 是什么及其工作原理，请按照以下逻辑顺序深入阅读：
+
+1. **[快速开始](2-quick-start)**——在 10 分钟内安装 CDPred 并运行你的首次预测
+2. **[输入数据准备](3-input-data-preparation)**——了解所需的 PDB 和 MSA 格式，以及如何准备它们
+3. **[架构概览](4-architecture-overview)**——深入探讨神经网络设计、自定义归一化层及数据流
+4. **[特征生成](5-feature-generation)**——了解四个特征通道分别是如何计算的
+5. **[输出文件与格式](12-output-files-and-formats)**——解读预测结果及距离/接触图格式
+6. **[预测评估指标](13-prediction-evaluation-metrics)**——使用 Top-L 精度指标对照真实值评估预测质量
+
+---
+
+- [入门指南/快速入门](https://zread.ai/BioinfoMachineLearning/CDPred/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+不到一小时即可让 CDPred 运行起来——从克隆仓库到生成你的第一个链间距离预测。本页将引导你完成**环境搭建**、**数据库配置**，并使用内置示例数据进行**首次预测**。最终，你将成功复现同源二聚体目标的预生成输出，并了解如何调整命令以适配你自己的蛋白质复合物。
+
+![CDPred Header](<BioinfoMachineLearning/CDPred_github_url>/blob/main/image/CDPred1.gif?raw=true)
+
+## 前置条件一览
+
+在安装 CDPred 之前，请确认你的系统满足以下要求：
+
+| 要求 | 规格 | 说明 |
+|---|---|---|
+| **操作系统** | Linux (Ubuntu 16.04 或 CentOS 7.9.2009) | 未在 macOS/Windows 上测试 |
+| **Python** | 3.6.x | 必需 — 较新版本与 TensorFlow 1.9 不兼容 |
+| **磁盘空间** | ~30 GB | 主要被 UniRef90 数据库占用 |
+| **内存** | ≥ 8 GB | 特征生成 (ESM, CCMpred, PSSM) 非常消耗内存 |
+
+来源: [README.md](/README.md#L17-L30)
+
+## 第 1 步：克隆仓库
+
+将 CDPred 克隆到一个**短路径**下——过长的路径可能会导致某些内部工具出现问题：
+
+```bash
+git clone https://github.com/BioinfoMachineLearning/CDPred.git
+cd CDPred
+```
+
+你刚刚克隆的顶层项目结构组织如下：
+
+```
+CDPred/
+├── lib/                    # 核心 Python 脚本 (预测、特征生成、评估)
+├── model/                  # 预训练的神经网络权重与配置
+│   ├── homo/               # 同源二聚体集成模型 (3 个模型)
+│   └── hetero/             # 异源二聚体集成模型 (3 个模型)
+├── example/                # 演示输入 + 预期输出 + 真实值
+├── external_tool/          # ZComplexMSA (MSA 生成) + GDFold (结构对接)
+├── requirments.txt         # Python 依赖
+└── LICENSE
+```
+
+来源: [README.md](/README.md#L33-L39)
+
+## 第 2 步：创建并激活 Python 环境
+
+CDPred 依赖于 **TensorFlow 1.9.0** 和 **Keras 2.1.6**，它们需要 Python 3.6。请设置一个独立的虚拟环境：
+
+```bash
+mkdir env
+python3.6 -m venv env/CDPred_virenv
+source env/CDPred_virenv/bin/activate
+pip install --upgrade pip
+pip install -r requirments.txt
+```
+
+安装的主要依赖如下：
+
+| 包 | 版本 | 在 CDPred 中的作用 |
+|---|---|---|
+| `tensorflow` | 1.9.0 | 神经网络推理的后端 |
+| `Keras` | 2.1.6 | 高级模型加载与预测 API |
+| `fair-esm` | 0.3.1 | Evolutionary Scale Modeling — 生成行注意力特征 |
+| `numpy` | 1.16.2 | 整个流程中的数值数组操作 |
+| `biopython` | 1.79 | PDB 文件解析与序列提取 |
+| `torch` | 1.8.0 | ESM 计算注意力图所需 |
+
+来源: [README.md](/README.md#L42-L51), [requirments.txt](/requirments.txt#L1-L15)
+
+## 第 3 步：下载并配置 UniRef90 数据库
+
+PSSM 特征生成需要 **UniRef90_01_2020** 序列数据库（压缩包约 30 GB）。从 Zenodo 下载：
+
+```bash
+aria2c -x 10 https://zenodo.org/record/7650566/files/uniref90_01_2020.tar.xz?download=1
+xz -d -T 4 uniref90_01_2020.tar.xz
+tar -xvf uniref90_01_2020.tar
+```
+
+然后更新 `lib/constants.py` 中的数据库路径，使其指向解压后的 `uniref90` 目录。例如，如果你下载到了 `/data/CDPred_db/`：
+
+```python
+# lib/constants.py
+unirefdb = '/data/CDPred_db/uniref90_01_2020/uniref90'
+```
+
+<CgxTip>如果在特征生成期间遇到共享库错误（尤其是使用 PSI-BLAST 生成 PSSM 时），请在运行 CDPred 之前将相应的库路径添加到你的 `LD_LIBRARY_PATH` 环境变量中。</CgxTip>
+
+来源: [README.md](/README.md#L53-L64), [lib/constants.py](/lib/constants.py#L1-L4)
+
+## 第 4 步：运行你的首次预测
+
+环境激活且数据库配置完成后，你就可以开始预测了。CDPred 的入口点是 `lib/Model_predict.py`。以下流程图展示了完整的预测生命周期：
+
+```mermaid
+flowchart TD
+    A["准备输入<br/>(PDB + A3M)"] --> B["运行 Model_predict.py"]
+    B --> C["特征生成<br/>ESM → CCMpred → PSSM"]
+    C --> D["神经网络推理<br/>(3 模型集成)"]
+    D --> E["输出距离与接触图"]
+    E --> F{需要结构?}
+    F -->|是| G["GDFold 对接<br/>(run_CDFold.sh)"]
+    F -->|否| H["完成 ✓"]
+    G --> H
+```
+
+### 同源二聚体示例
+
+对于**同源二聚体**（两条相同链），你需要 **1 个**单体 PDB 文件和 **1 个** A3M 比对文件：
+
+```bash
+python lib/Model_predict.py \
+  -n T1084A_T1084B \
+  -p ./example/T1084A_T1084B.pdb \
+  -a ./example/T1084A_T1084B.a3m \
+  -m homodimer \
+  -o ./output/T1084A_T1084B/
+```
+
+### 异源二聚体示例
+
+对于**异源二聚体**（两条不同链），你需要 **2 个**单体 PDB 文件（链 A 和链 B）以及 **1 个**配对的 A3M 比对文件：
+
+```bash
+python lib/Model_predict.py \
+  -n H1017A_H1017B \
+  -p ./example/H1017A.pdb ./example/H1017B.pdb \
+  -a ./example/H1017A_H1017B.a3m \
+  -m heterodimer \
+  -o ./output/H1017A_H1017B/
+```
+
+完整的参数参考如下：
+
+| 标志 | 是否必需 | 描述 |
+|---|---|---|
+| `-n` | 是 | 蛋白质复合物名称 (例如 `T1084A_T1084B`) |
+| `-p` | 是 | 一个 PDB 文件 (同源二聚体) 或两个 PDB 文件 (异源二聚体)，以空格分隔 |
+| `-a` | 是 | `.a3m` 格式的 MSA 文件 |
+| `-m` | 否 | 模型类型：`homodimer` (默认) 或 `heterodimer` |
+| `-o` | 是 | 输出目录 (若不存在则会自动创建) |
+
+在 CPU 上每次预测大约需要 **5 分钟**。该脚本默认在 CPU 上运行 (`CUDA_VISIBLE_DEVICES="-1"`)。
+
+来源: [README.md](/README.md#L69-L94), [lib/Model_predict.py](/lib/Model_predict.py#L121-L131)
+
+## 第 5 步：验证输出
+
+成功运行后，你的输出目录中将包含两个子目录：
+
+```
+output/T1084A_T1084B/
+├── feature/                # 预测期间生成的中间特征
+│   ├── T1084A_T1084B_pssm.txt    # PSI-BLAST 生成的 PSSM
+│   ├── T1084A_T1084B.npy         # ESM 行注意力图
+│   ├── T1084A_T1084B.mat         # CCMpred 共进化得分
+│   ├── T1084A_T1084B.fasta       # FASTA 序列
+│   ├── T1084A_T1084B.dist        # 链内 Cβ 距离图
+│   ├── T1084A_T1084B.aln         # ALN 格式的 MSA
+│   └── T1084A_T1084B.a3m         # A3M 格式的 MSA
+└── predmap/                # 最终预测结果
+    ├── T1084A_T1084B_dist.rr     # 残基-残基距离 (格式: i, j, dist)
+    ├── T1084A_T1084B_con.rr      # 残基-残基接触概率
+    ├── T1084A_T1084B.htxt        # 链间接触图 (矩阵)
+    └── T1084A_T1084B.dist        # 链间距离图 (矩阵)
+```
+
+将你的输出与 `./example/expection_output/` 中的**预生成参考输出**进行对比，以确认正确性。需要重点检查的是 `predmap/` 下的 `*.htxt` 和 `*.dist` 图文件。
+
+来源: [README.md](/README.md#L98-L135)
+
+## 第 6 步：评估预测质量
+
+CDPred 内置了评估脚本，可基于真实接触图计算**精度指标** (Top-5, Top-10, Top-L/10, Top-L/5, Top-L/2, Top-L)：
+
+```bash
+# 同源二聚体评估
+python ./lib/distmap_evaluate.py \
+  -p ./example/expection_output/T1084A_T1084B/predmap/T1084A_T1084B.htxt \
+  -t ./example/ground_truth/T1084A_T1084B.htxt \
+  -f1 ./example/ground_truth/T1084A.fasta \
+  -f2 ./example/ground_truth/T1084B.fasta
+```
+
+预期输出：
+
+```
+NAME            LEN_A LEN_B TOP5       TOP10      TOPL/10    TOPL/5     TOPL/2     TOPL      
+T1084A_T1084B   71    71    100.0000   100.0000   100.0000   100.0000   94.2857    91.5493 
+```
+
+来源: [README.md](/README.md#L137-L165)
+
+## 单命令端到端流程
+
+如果你还想要**对接的 3D 结构**（而不仅仅是距离图），请使用 shell 封装脚本 `external_tool/run_CDFold.sh`。该脚本将编排整个流程：MSA 生成 → CDPred 预测 → GDFold 结构对接：
+
+```bash
+bash ./external_tool/run_CDFold.sh \
+  -n T1084A_T1084B \
+  -p ./example/T1084A_T1084B.pdb \
+  -m homodimer \
+  -o ./output/T1084A_T1084B/
+```
+
+这要求 [ZComplexMSA](10-zcomplexmsa-for-msa-generation) 和 [GDFold](11-gdfold-for-structure-docking) 均已安装在 `external_tool/` 下。最终对接的模型将输出在 `./output/T1084A_T1084B/models/top_5_models/`。
+
+来源: [external_tool/run_CDFold.sh](/external_tool/run_CDFold.sh#L1-L152)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'keras'` | 虚拟环境未激活 | 运行 `source env/CDPred_virenv/bin/activate` |
+| PSSM 生成期间出现 `FileNotFoundError` 找不到 UniRef90 | `lib/constants.py` 中的路径错误 | 验证 `unirefdb` 路径是否指向实际的 `uniref90` 二进制文件 |
+| PSI-BLAST 期间出现 `libssl.so` 或共享库错误 | 缺少系统库 | 将库路径添加到 `LD_LIBRARY_PATH` |
+| 特征形状不匹配错误 | Python/NumPy 版本不兼容 | 确保为 Python 3.6.x 且 `numpy==1.16.2` |
+| ESM 行注意力计算期间出现 OOM | 长序列导致内存不足 | 使用内存 ≥ 16 GB 的机器 |
+
+## 后续进阶
+
+现在你已经拥有了一个可用的 CDPred 安装环境，并在示例数据上完成了验证。以下是推荐的阅读路径，以帮助你进一步深入理解：
+
+1. **[输入数据准备](3-input-data-preparation)** — 了解如何准备你自己的 PDB 和 A3M 文件，或使用 ZComplexMSA 从头生成复合物 MSA
+2. **[架构概览](4-architecture-overview)** — 理解端到端的流程设计，从特征生成到集成预测
+3. **[特征生成](5-feature-generation)** — 深入了解四个特征通道（ESM 注意力、CCMpred、PSSM、链内距离）及其数学基础
+4. **[输出文件与格式](12-output-files-and-formats)** — 用于下游集成的每个输出文件的详细规范
+5. **[预测评估指标](13-prediction-evaluation-metrics)** — Top-L 精度与接触阈值是如何计算的
+
+---
+
+- [入门指南/输入数据准备](https://zread.ai/BioinfoMachineLearning/CDPred/3-input-data-preparation)
+
+---
+slug:3-input-data-preparation
+blog_type:normal
+---
+
+
+CDPred 需要三个核心输入项来预测蛋白质二聚体的链间残基-残基距离：**复合物名称**、一个或多个**预测的单体 PDB 结构文件**，以及一个**`.a3m` 格式的多序列比对 (MSA) 文件**。这些输入的类型和数量在**同源二聚体**和**异源二聚体**预测模式下有所不同，并且每一项都必须符合特定的格式约束。本页将详细介绍每个输入项、其格式规范，以及从原始序列到可用于预测的数据的准备流程。
+
+来源: [README.md](/README.md#L1-L172)
+
+## 输入项概述
+
+CDPred 的预测脚本 `lib/Model_predict.py` 接受五个命令行参数，其中三个直接提供输入数据：
+
+| 参数 | 标志 | 描述 | 是否必选 |
+|-----------|------|-------------|----------|
+| **Name** | `-n` | 蛋白质复合物标识符（自定义名称或 PDB 风格的 ID） | 是 |
+| **PDB File(s)** | `-p` | 带有 `.pdb` 后缀的预测单体三级结构文件 | 是 |
+| **MSA File** | `-a` | `.a3m` 格式的多序列比对文件 | 是 |
+| **Model Option** | `-m` | `homodimer` 或 `heterodimer` — 决定预测模式 | 是 |
+| **Output Path** | `-o` | 自定义输出目录（若不存在则自动创建） | 是 |
+
+关键区别在于，**同源二聚体**预测仅需**一个** PDB 文件（因为两条链完全相同），而**异源二聚体**预测需要**两个** PDB 文件——每个不同的链各一个。这一差异贯穿整个输入准备流程。
+
+来源: [README.md](/README.md#L67-L78)
+
+## 输入数据流
+
+下图展示了完整的输入准备流程，即从原始序列到 CDPred 特征生成阶段所消费的数据：
+
+```mermaid
+flowchart TD
+    A["Chain A Sequence<br/>(FASTA)"] --> C["ZComplexMSA<br/>MSA Generation"]
+    B["Chain B Sequence<br/>(FASTA, heterodimer only)"] --> C
+    C --> D["Complex MSA<br/>(.a3m file)"]
+    A --> E["Structure Prediction Tool<br/>(e.g. AlphaFold, trRosetta)"]
+    B --> E
+    E --> F["Monomer PDB<br/>(Chain A)"]
+    E --> G["Monomer PDB<br/>(Chain B, heterodimer only)"]
+    D --> H["CDPred<br/>Model_predict.py"]
+    F --> H
+    G --> H
+    H --> I["Feature Generation<br/>& Prediction"]
+```
+
+该流程分为两条并行的准备轨道：**MSA 生成**（上方路径）和**单体结构预测**（下方路径）。在调用 CDPred 之前，两者必须全部完成。MSA 文件捕获相互作用链之间的共进化信号，而 PDB 文件则提供链内距离的空间上下文。
+
+来源: [README.md](/README.md#L79-L94), [README.md](/README.md#L52-L64)
+
+## 蛋白质复合物命名约定
+
+`-n` 参数定义复合物标识符，并作为所有输出项的命名空间。CDPred 遵循 **`ChainA_ChainB`** 命名约定，其中每个链标识符通常映像 PDB 命名法：
+
+- **同源二聚体示例**：`T1084A_T1084B` — 两条链均源自同一单体 (T1084)，A 和 B 表示两个副本
+- **异源二聚体示例**：`H1017A_H1017B` — 源自不同序列的两条不同链 (H1017A 和 H1017B)
+
+此命名约定不仅是为了美观——它决定了输出文件名（`<name>_dist.rr`、`<name>_con.rr`、`<name>.htxt` 等），并且必须与 `.a3m` 文件中的头部行相匹配以保持一致性。
+
+来源: [README.md](/README.md#L73-L74), [example/T1084A_T1084B.a3m](/example/T1084A_T1084B.a3m#L1-L2), [example/H1017A_H1017B.a3m](/example/H1017A_H1017B.a3m#L1-L2)
+
+## PDB 结构文件
+
+### 格式要求
+
+CDPred 接受标准 **PDB 格式**（`.pdb` 后缀）的预测单体三级结构文件。这些文件必须包含允许提取碳阿尔法 (Cα) 位置的原子坐标记录，链内距离图便是据此计算得出的。PDB 文件表示的是**预测的**（不一定是实验测定的）单体结构——任何能输出有效 PDB 格式的结构预测工具均可接受。
+
+### 同源二聚体：单个 PDB 文件
+
+对于同源二聚体预测，**一个** PDB 文件便足够了，因为两条链共享相同的结构。命令使用单个 `-p` 参数：
+
+```bash
+python lib/Model_predict.py -n T1084A_T1084B \
+    -p ./example/T1084A_T1084B.pdb \
+    -a ./example/T1084A_T1084B.a3m \
+    -m homodimer \
+    -o ./output/T1084A_T1084B/
+```
+
+来源: [README.md](/README.md#L82-L87)
+
+### 异源二聚体：两个 PDB 文件
+
+对于异源二聚体预测，**两条**链的结构都是必需的，并且必须作为 **两个以空格分隔的参数** 提供给 `-p`。这两个 PDB 文件必须分别对应链 A 和链 B，且其残基序列必须与 `.a3m` 文件中编码的序列**保持一致**：
+
+```bash
+python lib/Model_predict.py -n H1017A_H1017B \
+    -p ./example/H1017A.pdb ./example/H1017B.pdb \
+    -a ./example/H1017A_H1017B.a3m \
+    -m heterodimer \
+    -o ./output/H1017A_H1017B/
+```
+
+<CgxTip>异源二聚体模式下 `-p` 参数中 PDB 文件的顺序必须与复合物名称和 MSA 头部所隐含的链顺序相匹配。交换链 A 和链 B 的结构将导致错误的链间距离预测。</CgxTip>
+
+来源: [README.md](/README.md#L89-L94)
+
+### 获取单体 PDB 结构
+
+CDPred 本身并不预测单体结构——你必须从外部结构预测工具获取这些结构。常见选择包括：
+
+| 工具 | 输出格式 | 适用性 |
+|------|---------------|-------------|
+| **AlphaFold2** | PDB | 高精度，推荐 |
+| **trRosetta** | PDB | 良好精度，速度更快 |
+| **RoseTTAFold** | PDB | 良好精度 |
+| **I-TASSER** | PDB | 成熟的方法 |
+
+预测后，请验证每个 PDB 文件是否包含相应 FASTA 序列中出现的所有残基的完整 Cα 坐标。
+
+来源: [README.md](/README.md#L74-L75)
+
+## A3M 格式的 MSA 文件
+
+### 格式规范
+
+`.a3m` 格式是 HH-suite 及相关工具使用的一种**紧凑 MSA 表示**。它遵循类似 FASTA 的结构，具有两个关键特征：
+
+1. **头部行**：以 `>` 开头，后跟复合物名称（例如，`>T1084A_T1084B`）
+2. **序列行**：氨基酸序列，其中**小写字母表示插入**（相对于查询序列），**破折号 (`-`)** 表示缺失/空位。与 `.aln` 格式不同，`.a3m` **保留插入残基**而不是移除它们。
+
+头部之后的第一个序列是**查询序列**（拼接或配对的链序列），随后的条目是通过数据库搜索发现的同源序列。
+
+### 同源二聚体 MSA 示例
+
+同源二聚体示例 `T1084A_T1084B.a3m` 的开头如下：
+
+```
+>T1084A_T1084B
+AHKGAEHHHKAAEHHEQAAKHHHAAAEHHEKGEHEQAAHHADTAYAHHKHAEEHAAQAAKHDAEHHAPKPH
+> 
+DHAGVEHHHKAAEHHEQAAKHHREAAKHHESGDHEKAAHHAHSAHGHASHAEEHHAEASRHHAEHHG----
+```
+
+查询序列长 71 个残基，MSA 包含数千条提供共进化信号的同源序列。序列末端的空位 (`-`) 表示同源序列的部分覆盖。
+
+来源: [example/T1084A_T1084B.a3m](/example/T1084A_T1084B.a3m#L1-L7)
+
+### 异源二聚体 MSA 示例
+
+异源二聚体示例 `H1017A_H1017B.a3m` 的开头如下：
+
+```
+>H1017A_H1017B
+LLLNDKQYNELCEAAEGRNLGAVFSYSEPEEPPPLNFSFEERKKIFLWVLTRLLKEGRIKLAKHGKFLEGSVDEQVERFRQAFPKTEEEMEDGIWFFDESCPGGAVWVLEQEVQQQRFDELSKIYDKSHPVGELTVDGQTIRQSSVSNRYGXTKVFESQNLTDKQIHNYAQQLAGDTPLKEVRPGIYTAKLENGTSITLRSLSSSQEQRWTIDIKGNKQLSDIAYKYKDVEIKFK
+>UniRef90_UPI0018AF6D8D_UniRef90_A0A6F8TFA5
+--------------------------------KDFNFNFNQRKEFFLLLLRMLLETGKIRLGKHGEFLQGSVDELISRYDAAFPKTEGEWET---------------------------EIAELFTKTNSRNTLTIAGLDIKKGYNPVNSQTTVILDSQKLTSNNIKEYAQQLAGTVPLKAVGNGIYVATLGNGQQIRLRSVSSSASQRWTIDIQGNPGIN--------------
+```
+
+异源二聚体查询序列拼接了两条链 (110 + 125 = 235 个残基)，带有 UniRef90 前缀的头部表明了每条同源序列的源数据库。许多同源序列在早期位置的大量空位反映了许多数据库匹配仅覆盖第二条链区域。
+
+来源: [example/H1017A_H1017B.a3m](/example/H1017A_H1017B.a3m#L1-L10)
+
+## 使用 ZComplexMSA 生成 MSA
+
+CDPred 提供了 **ZComplexMSA**，这是一个专为蛋白质复合物共进化分析优化的自定义 MSA 生成流程。该工具替代了通用的 MSA 生成器，并生成专门为链间距离预测调优的 `.a3m` 文件。
+
+### 前置条件
+
+ZComplexMSA 需要自带带有 HH-suite 和 HMMER 的 conda 环境：
+
+```bash
+conda create -p ./env/ -c conda-forge -c bioconda hhsuite python==3.8
+conda activate ./env/
+conda install -y -c bioconda hmmer==3.3.2 hhsuite==3.3.0
+pip install -r requirments.txt
+```
+
+### 数据库设置
+
+MSA 生成流程所需的序列数据库因二聚体类型而异：
+
+| 二聚体类型 | 所需数据库 | 来源 |
+|------------|-------------------|--------|
+| **同源二聚体** | Big Fantastic Database (BFD) | [bfd.mmseqs.com](https://bfd.mmseqs.com/) |
+| **异源二聚体** | UniRef90 + UniProt2PDB 映射 | [FTP:UniRef90](https://ftp.uniprot.org/pub/databases/uniprot/uniref/uniref90/uniref90.fasta.gz) + 捆绑的 `uniprot2pdb.tar.xz` |
+
+下载后，在 `./bin/db_option` 中配置数据库路径：
+
+```
+bfd_database = /Your_Download_Path/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt
+uniref90_fasta = /Your_Download_Path/uniref90/uniref90.fasta
+uniprot2pdb_dir = /Your_Download_Path/uniprot2pdb
+uniprot2pdb_mapping_file = /Your_Download_Path/uniprot2pdb/uniprot2pdb.map
+dimers_list = /Your_Download_Path/uniprot2pdb/dimers_cm.list
+```
+
+来源: [external_tool/ZComplexMSA/README.md](/external_tool/ZComplexMSA/README.md#L1-L35)
+
+### 为同源二聚体生成 MSA
+
+对于同源二聚体目标，提供单体链的**单个 FASTA 文件**：
+
+```bash
+python run_zcomplexmsa.py \
+    --option_file ./bin/db_option \
+    --fasta1 ./test/homo/2FDOA.fasta \
+    --outdir ./test/homo \
+    --option homodimer
+```
+
+`--fasta1` 参数提供单体序列，`--option homodimer` 选择同源二聚体 MSA 构建策略。
+
+来源: [external_tool/ZComplexMSA/README.md](/external_tool/ZComplexMSA/README.md#L49-L57)
+
+### 为异源二聚体生成 MSA
+
+对于异源二聚体目标，提供**两个 FASTA 文件**——每条链一个：
+
+```bash
+python run_zcomplexmsa.py \
+    --option_file ./bin/db_option \
+    --fasta1 ./test/hetero/1AWCA.fasta \
+    --fasta2 ./test/hetero/1AWCB.fasta \
+    --outdir ./test/hetero \
+    --option heterodimer
+```
+
+`--fasta2` 参数**专属于异源二聚体模式**，用于提供第二条链的序列。UniProt2PDB 映射数据库使 ZComplexMSA 能够识别涉及两条链同源物的已知异源二聚体复合物，从而用链间共进化信号丰富 MSA。
+
+来源: [external_tool/ZComplexMSA/README.md](/external_tool/ZComplexMSA/README.md#L37-L46)
+
+## FASTA 序列文件
+
+FASTA 文件是 MSA 生成（通过 ZComplexMSA）和评估（通过 `distmap_evaluate.py`）的起点。每个文件以标准 FASTA 格式包含单条链序列：
+
+```
+>T1084A
+AHKGAEHHHKAAEHHEQAAKHHHAAAEHHEKGEHEQAAHHADTAYAHHKHAEEHAAQAAKHDAEHHAPKPH
+```
+
+```
+>H1017A
+LLLNDKQYNELCEAAEGRNLGAVFSYSEPEEPPPLNFSFEERKKIFLWVLTRLLKEGRIKLAKHGKFLEGSVDEQVERFRQAFPKTEEEMEDGIWFFDESCPGGAVWVLE
+```
+
+头部行 (`>`) 包含链标识符，序列行仅包含**大写单字母氨基酸代码**。对于异源二聚体的准备，你需要**两个独立的 FASTA 文件**——每条链一个。
+
+来源: [example/ground_truth/T1084A.fasta](/example/ground_truth/T1084A.fasta#L1-L2), [example/ground_truth/H1017A.fasta](/example/ground_truth/H1017A.fasta#L1-L2)
+
+## PSSM 生成依赖 (UniRef90)
+
+CDPred 的特征生成阶段从输入的 MSA 中计算**位置特异性评分矩阵 (PSSM)**，这需要 **UniRef90_01_2020** 数据库。这是一个与 MSA 生成数据库独立的下载项：
+
+```bash
+aria2c -x 10 https://zenodo.org/record/7650566/files/uniref90_01_2020.tar.xz?download=1
+xz -d -T 4 uniref90_01_2020.tar.xz
+tar -xvf uniref90_01_2020.tar
+```
+
+解压后，修改 `./lib/constants.py` 中的 UniRef90 路径：
+
+```python
+UNIREF90_PATH = "/Download_Path/uniref90_01_2020/uniref90"
+```
+
+根据网速不同，此下载大约需要 40–70 分钟。**如果在特征生成期间遇到共享库错误，请将相应的库添加到你的系统路径中。**
+
+<CgxTip>用于 PSSM 生成的 UniRef90 数据库 (`uniref90_01_2020`) 不同于 ZComplexMSA 用于 MSA 生成的 UniRef90 FASTA。两者均为必需，但在流程中用途不同。</CgxTip>
+
+来源: [README.md](/README.md#L52-L64)
+
+## 训练数据列表格式
+
+对于扩展或重新训练 CDPred 模型的用户，`example/training_datalists/` 目录提供了数据集划分文件。这些列表文件定义了训练、验证和测试划分，不同二聚体类型的格式不同：
+
+### 同源二聚体列表格式
+
+每行包含四个以空格分隔的字段：
+
+```
+<complex_name> <chain_A_length> <chain_B_length> <contact_count>
+```
+
+示例：`5FGLA_5FGLB 200 200 223.0` — 同源二聚体 5FGL 具有各 200 个残基的链和 223 个链间接触。
+
+### 异源二聚体列表格式
+
+每行包含三个以空格分隔的字段：
+
+```
+<complex_name> <chain_A_length> <chain_B_length>
+```
+
+示例：`5k39A_5k39B 167 153` — 异源二聚体 5k39 的链 A 有 167 个残基，链 B 有 153 个残基。请注意，某些异源二聚体条目包含 `_1` 或 `_2` 后缀（例如，`1hbuB_1hbuD_1`），以区分同一 PDB 条目内的多个界面区域。
+
+来源: [example/training_datalists/homodimer/train.lst](/example/training_datalists/homodimer/train.lst#L1-L5), [example/training_datalists/heterodimer/train.lst](/example/training_datalists/heterodimer/train.lst#L1-L10)
+
+## 逐步准备流程
+
+以下流程图提供了完整的输入准备过程：
+
+```mermaid
+flowchart TD
+    Start(["Start: Have protein sequences"]) --> Check{"Homodimer or<br/>Heterodimer?"}
+    
+    Check -->|Homodimer| Homo1["Prepare 1 FASTA file<br/>for the monomer chain"]
+    Check -->|Heterodimer| Het1["Prepare 2 FASTA files<br/>one per chain"]
+    
+    Homo1 --> Homo2["Run ZComplexMSA<br/>with --option homodimer"]
+    Homo2 --> Homo3["Obtain 1 predicted<br/>monomer PDB structure"]
+    Homo3 --> Ready["Input data ready"]
+    
+    Het1 --> Het2["Run ZComplexMSA<br/>with --option heterodimer"]
+    Het2 --> Het3["Obtain 2 predicted<br/>monomer PDB structures"]
+    Het3 --> Ready
+    
+    Ready --> Validate["Validate inputs:<br/>• a3m header matches complex name<br/>• PDB residue count matches FASTA<br/>• No missing Cα atoms in PDB"]
+    Validate --> Run["Run Model_predict.py()"]
+```
+
+### 准备清单
+
+| 步骤 | 任务 | 同源二聚体 | 异源二聚体 |
+|------|------|-----------|-------------|
+| 1 | 准备 FASTA 序列文件 | 1 个文件 | 2 个文件 |
+| 2 | 通过 ZComplexMSA 生成复合物 MSA | `--option homodimer` | `--option heterodimer` |
+| 3 | 从外部预测单体结构 | 1 个 PDB 文件 | 2 个 PDB 文件 |
+| 4 | 下载并配置 UniRef90 用于 PSSM | 必需 | 必需 |
+| 5 | 使用 `-m` 标志运行 CDPred | `homodimer` | `heterodimer` |
+
+来源: [README.md](/README.md#L67-L94), [external_tool/ZComplexMSA/README.md](/external_tool/ZComplexMSA/README.md#L37-L57)
+
+## 输入验证准则
+
+在运行 CDPred 之前，请验证输入项之间的以下一致性约束：
+
+1. **名称一致性**：`-n` 的值应与 `.a3m` 文件中的头部相匹配（不含 `>` 前缀）
+2. **序列长度一致性**：每个 PDB 文件中的残基数必须与 `.a3m` 查询序列中相应区域的残基数相匹配
+3. **链顺序一致性**：对于异源二聚体，`-p` 中 PDB 文件的顺序必须对应复合物名称和 MSA 中的链顺序
+4. **Cα 原子完整性**：每个 PDB 文件必须包含每个残基的 Cα 原子坐标——缺失原子将导致特征提取失败
+5. **A3M 格式有效性**：文件至少须包含头部行和查询序列；额外的同源序列可提高预测质量
+
+未能满足这些约束通常表现为特征生成期间的维度不匹配或隐性预测错误。
+
+来源: [README.md](/README.md#L67-L94)
+
+## 使用自定义 MSA
+
+CDPred 的 `-a` 参数接受**任何有效的 `.a3m` 文件**，不仅限于由 ZComplexMSA 生成的文件。如果你拥有来自 HHblits、JackHMMER 或其他工具的现有 MSA，只要它符合 `.a3m` 格式（小写插入，破折号作为空位字符），就可以直接使用。然而，对于**链间**距离预测，捕获两条链之间**配对共进化信号**的 MSA 所产生的结果明显优于朴素拼接的单链 MSA——这正是 ZComplexMSA 存在的原因。
+
+来源: [README.md](/README.md#L75-L76)
+
+---
+
+**下一步**：输入数据准备完成后，请前往 [特征生成](5-feature-generation) 了解 CDPred 如何将这些输入转换为神经网络特征，或跳转至 [预测流程](7-prediction-workflow) 获取端到端执行指南。有关 ZComplexMSA 工具本身的详细信息，请参阅 [使用 ZComplexMSA 生成 MSA](10-zcomplexmsa-for-msa-generation)。
+
+---
+
+# 深入解析
+
+- [深入解析/架构概述](https://zread.ai/BioinfoMachineLearning/CDPred/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+CDPred（复杂距离预测器）是一个**基于二维注意力的深度神经网络**系统，用于预测蛋白质二聚体的链间残基-残基距离。其架构遵循三阶段流水线——**特征生成**、**神经网络集成预测**和**后处理**——并为同源二聚体和异源二聚体复合物提供双路径。本页映射了整个系统的结构拓扑，从入口点经过数据流直至输出产物。
+
+来源：[README.md](/README.md#L1-L172), [lib/Model_predict.py](/lib/Model_predict.py#L1-L240)
+
+## 系统架构图
+
+端到端预测流水线由 `Model_predict.py` 编排，它负责协调特征计算、模型加载、集成推理和结果序列化。下图展示了从原始输入到最终预测的完整数据流：
+
+```mermaid
+flowchart TB
+    subgraph Inputs
+        PDB["PDB File(s)<br/>单体结构"]
+        A3M["A3M File<br/>多序列比对"]
+        MODE["Model Option<br/>homodimer | heterodimer"]
+    end
+
+    subgraph Feature_Generation["特征生成层"]
+        PDB_PROC["pdb_process.py<br/>PDB 归一化 &<br/>序列提取"]
+        INTRA_DIST["链内 Cβ 距离图<br/>(L × L × 1)"]
+        CCM["CCMpred<br/>共进化得分<br/>(L × L × 1)"]
+        ESM_ATT["ESM MSA Transformer<br/>行注意力图<br/>(L × L × 144)"]
+        PSSM_FEAT["PSI-BLAST PSSM<br/>位置特异性得分<br/>(L × L × 40)"]
+    end
+
+    subgraph Feature_Aggregation["特征聚合"]
+        CONCAT["通道拼接<br/>(L × L × 186)"]
+    end
+
+    subgraph Model_Ensemble["神经网络集成"]
+        direction LR
+        M1["模型 1<br/>.h5 权重"]
+        M2["模型 2<br/>.h5 权重"]
+        M3["模型 3<br/>.h5 权重"]
+    end
+
+    subgraph Prediction["集成与后处理"]
+        AVG["3 个预测的平均值"]
+        EXTRACT["链间提取<br/>(同源二聚体: 完整图)<br/>(异源二聚体: 非对角块)"]
+    end
+
+    subgraph Outputs
+        DIST_RR["*_dist.rr<br/>距离预测"]
+        CON_RR["*_con.rr<br/>接触预测"]
+        HTXT["*.htxt<br/>接触图"]
+        DIST_MAP["*.dist<br/>距离图"]
+    end
+
+    PDB --> PDB_PROC
+    PDB_PROC --> INTRA_DIST
+    A3M --> CCM
+    A3M --> ESM_ATT
+    A3M --> PSSM_FEAT
+    INTRA_DIST --> CONCAT
+    CCM --> CONCAT
+    ESM_ATT --> CONCAT
+    PSSM_FEAT --> CONCAT
+    CONCAT --> M1 & M2 & M3
+    M1 & M2 & M3 --> AVG
+    AVG --> EXTRACT
+    EXTRACT --> DIST_RR & CON_RR & HTXT & DIST_MAP
+    MODE -.->|选择模型路径| Model_Ensemble
+```
+
+来源：[lib/Model_predict.py](/lib/Model_predict.py#L146-L240), [lib/generate_feature.py](/lib/generate_feature.py#L228-L313)
+
+## 核心模块拓扑
+
+CDPred 的源代码组织在 `lib/` 目录中，每个模块承担不同的架构角色。下表将每个模块映射到其职责及其在调用图中的位置：
+
+| 模块 | 角色 | 关键函数 | 调用方 |
+|---|---|---|---|
+| `Model_predict.py` | **编排器 / 入口点** | CLI 解析，特征→预测→保存流水线 | 用户 (CLI) |
+| `generate_feature.py` | **特征计算引擎** | `compute_ccmpred()`, `computerowatt()`, `computepssm()`, `get2d_feature_by_list()` | `Model_predict.py` |
+| `Model_construct.py` | **网络架构定义** | 自定义层，残差块，squeeze-excite，损失函数 | 训练脚本 |
+| `pdb_process.py` | **结构预处理** | `process_pdbfile()`, `get_sequence_from_pdb()` | `Model_predict.py` |
+| `util.py` | **后处理与 I/O 工具** | `npy2distmap()`, `gen_rr_file()`, `get_cb_dist_from_pdbfile()` | `Model_predict.py`, `pdb_process.py` |
+| `data.py` | **ESM 字母表配置** | 用于 MSA Transformer 标记化的 `Alphabet` 类 | `generate_feature.py` |
+| `constants.py` | **全局配置** | `unirefdb` 路径常量 | `generate_feature.py` |
+| `distmap_evaluate.py` | **评估指标** | Top-L 精度评分 | 用户 (CLI, 预测后) |
+
+来源：[lib/Model_predict.py](/lib/Model_predict.py#L1-L240), [lib/generate_feature.py](/lib/generate_feature.py#L1-L376), [lib/pdb_process.py](/lib/pdb_process.py#L1-L176), [lib/util.py](/lib/util.py#L1-L234), [lib/constants.py](/lib/constants.py#L1-L4)
+
+## 特征生成架构
+
+特征生成层是计算最密集的阶段，生成四个二维特征通道，这些通道被拼接成一个形状为 **(L, L, 186)** 的单一张量，其中 L 是二聚体的总序列长度。每个特征通道捕获不同的生物信号：
+
+| 特征 | 标签 | 维度 | 来源工具 | 生物信号 |
+|---|---|---|---|---|
+| **行注意力** | `# rowatt` | (L, L, 144) | ESM MSA Transformer (`esm_msa1_t12_100M_UR50S`) | 跨 MSA 行的共进化注意力模式 |
+| **CCMpred** | `# ccmpred` | (L, L, 1) | CCMpred (伪似然最大化) | 残基对的直接耦合分析 |
+| **PSSM** | `# pssm` | (L, L, 40) | 基于 UniRef90 的 PSI-BLAST | 位置特异性进化谱 (20 原始 + 20 转置) |
+| **链内距离** | `# intradist_cb` | (L, L, 1) | 通过 Cβ–Cβ 距离从输入 PDB 计算得出 | 单体结构约束 |
+
+特征选择由每个模型目录中的 `feature.txt` 文件控制。同源二聚体和异源二聚体模型均使用相同的四特征配置，共计 **186 个通道** (144 + 1 + 40 + 1)。`generate_feature.py` 中的 `get2d_feature_by_list()` 函数读取此清单，并沿最后一个轴通过顺序通道拼接来组装特征张量。
+
+<CgxTip>对于长度超过 1024 个残基的序列，ESM 行注意力特征通过滑动窗口裁剪策略计算：将 MSA 分割为残基数 ≤1000 的重叠窗口，每个窗口独立处理，并将生成的注意力图在平均重叠区域后重新拼接在一起。</CgxTip>
+
+来源：[lib/generate_feature.py](/lib/generate_feature.py#L176-L219), [lib/generate_feature.py](/lib/generate_feature.py#L228-L313), [lib/generate_feature.py](/lib/generate_feature.py#L315-L342), [model/homo/feature.txt](/model/homo/feature.txt#L1-L4), [model/hetero/feature.txt](/model/hetero/feature.txt#L1-L4)
+
+## 双路径模型设计：同源二聚体 vs. 异源二聚体
+
+CDPred 维护**两个并行的模型集成**——一个用于同源二聚体（相同链），另一个用于异源二聚体（不同链）。架构分裂体现在三个层面：
+
+**模型产物。** 每条路径在 `model/` 下都有各自的目录，包含三个独立训练的 Keras 模型（`.h5` 权重文件）、一个共享的 JSON 架构定义以及一个特征清单：
+
+```
+model/
+├── homo/                          # 同源二聚体集成
+│   ├── HomoPred1.h5               # 模型 1 权重
+│   ├── HomoPred2.h5               # 模型 2 权重
+│   ├── HomoPred3.h5               # 模型 3 权重
+│   ├── model-train-HomoPred_Net.json   # 架构定义
+│   └── feature.txt                # 特征通道清单
+└── hetero/                        # 异源二聚体集成
+    ├── HeteroPred1.h5
+    ├── HeteroPred2.h5
+    ├── HeteroPred3.h5
+    ├── model-train-HeteroPred_Net.json
+    └── feature.txt
+```
+
+**输入处理差异。** 两条路径在特征生成前的输入处理方式上存在显著分歧。对于同源二聚体，单个 PDB 文件即可满足要求（因为两条链相同），且 FASTA 序列仅包含一条链。对于异源二聚体，则需要两个 PDB 文件，且 FASTA 拼接了两条链的序列。链内距离图也不同：同源二聚体使用单个 L×L 矩阵，而异源二聚体将两个独立的 L_A×L_A 和 L_B×L_B 矩阵嵌入到交叉块为零的组合 (L_A+L_B)×(L_A+L_B) 矩阵中。
+
+**输出提取差异。** 集成预测后，必须切分完整的 (L, L) 预测图以分离出链间预测。对于同源二聚体，整个接触/距离图都是链间的（因为两条链相同）。对于异源二聚体，仅非对角块——行 [0:L_A] 和列 [L_A:L_A+L_B]——包含链间信息；此块将被提取并保存。
+
+来源：[lib/Model_predict.py](/lib/Model_predict.py#L146-L228), [model/homo/feature.txt](/model/homo/feature.txt#L1-L4)
+
+## 神经网络架构
+
+预测网络是一个基于 Keras/TensorFlow 1.9 构建的**二维全卷积架构**，旨在处理可变长度的 (L, L, 186) 输入张量。架构定义以 JSON 格式序列化，并在推理时通过 `model_from_json()` 加载，权重则从相应的 `.h5` 文件中加载。
+
+**自定义归一化层。** 网络采用三个非标准归一化层——**InstanceNormalization**、**RowNormalization** 和 **ColumNormalization**——每一层均在二维特征图的不同空间轴上计算矩。它们在模型加载期间通过 `CustomObjectScope` 注册为自定义对象，以确保正确的反序列化：
+
+| 层 | 矩轴 | 语义 |
+|---|---|---|
+| `InstanceNormalization` | [1, 2] (H, W) | 独立归一化每个特征图（逐样本、逐通道） |
+| `RowNormalization` | [1] (仅 H) | 沿行维度归一化——保留列结构 |
+| `ColumNormalization` | [2] (仅 W) | 沿列维度归一化——保留行结构 |
+
+这些归一化策略对于基于二维注意力的设计至关重要，因为链间距离图展现出强烈的**逐行和逐列结构相关性**，而批归一化会抑制这种相关性。`Model_construct.py` 中的构建块 `_in_relu`、`_in_elu_conv2D` 和 `_conv_in_relu2D` 将 InstanceNormalization 与激活函数和卷积组合成可复用单元。
+
+**集成推理。** 在预测时，特征张量独立地馈送通过所有三个模型，其原始输出逐元素求平均。每个模型输出距离区间（链间距离为 13 个区间）上的多类概率分布，从中推导出接触概率（区间 0-12 的总和）和期望距离（加权和）。
+
+<CgxTip>模型的 JSON 架构指定了 `batch_input_shape: [null, null, null, 186]`——所有空间维度均无界限，从而无需调整大小或填充即可对任意长度的蛋白质进行预测。</CgxTip>
+
+来源：[lib/Model_predict.py](/lib/Model_predict.py#L25-L84), [lib/Model_predict.py](/lib/Model_predict.py#L96-L119), [lib/Model_predict.py](/lib/Model_predict.py#L214-L220), [lib/Model_construct.py](/lib/Model_construct.py#L26-L74), [lib/Model_construct.py](/lib/Model_construct.py#L107-L165), [model/homo/model-train-HomoPred_Net.json](/model/homo/model-train-HomoPred_Net.json#L1-L1)
+
+## 外部工具集成
+
+CDPred 集成了两个扩展其核心预测流水线能力的扩展工具：
+
+**ZComplexMSA** (`external_tool/ZComplexMSA/`) 生成复合物感知的多序列比对——关键的上游输入。虽然用户可以提供自己的 `.a3m` 文件，但 ZComplexMSA 通过在 UniProt 到 PDB 的映射数据库中搜索复合物级别的同源物，生成专门为链间距离预测优化的共进化信号。
+
+**GDFold** (`external_tool/GDFold/`) 执行基于梯度下降的结构对接，使用 CDPred 预测的链间距离图作为约束，从各个单体模型组装完整的四级结构。Shell 脚本 `run_CDFold.sh` 和 `run_CDFold_multimer.sh` 分别为单个二聚体和多聚体编排 CDPred→GDFold 工作流。
+
+```mermaid
+flowchart LR
+    subgraph Upstream
+        ZComplexMSA["ZComplexMSA<br/>MSA 生成"]
+    end
+
+    subgraph Core
+        CDPred["CDPred 核心<br/>特征生成 → 集成 → 距离图"]
+    end
+
+    subgraph Downstream
+        GDFold["GDFold<br/>结构对接"]
+    end
+
+    ZComplexMSA -->|".a3m 文件"| CDPred
+    CDPred -->|"*.dist, *.htxt"| GDFold
+    CDPred -->|"*.rr, *.htxt"| Evaluation["评估<br/>distmap_evaluate.py"]
+```
+
+来源：[external_tool/ZComplexMSA/README.md](/external_tool/ZComplexMSA/README.md#L1-L1), [external_tool/run_CDFold.sh](/external_tool/run_CDFold.sh#L1-L1), [external_tool/run_CDFold_multimer.sh](/external_tool/run_CDFold_multimer.sh#L1-L1)
+
+## 项目目录映射
+
+完整的项目结构围绕预测流水线生命周期——输入、处理、模型产物和输出——进行组织：
+
+```
+CDPred/
+├── lib/                            # ── 核心源代码 ──
+│   ├── Model_predict.py            # 入口点：预测编排器
+│   ├── Model_construct.py          # 网络架构与自定义层
+│   ├── generate_feature.py         # 特征计算 (ESM, CCMpred, PSSM)
+│   ├── pdb_process.py              # PDB 文件归一化
+│   ├── util.py                     # 距离/接触后处理
+│   ├── data.py                     # ESM 字母表配置
+│   ├── constants.py                # 全局路径 (UniRef90 DB)
+│   ├── distmap(1).py               # 预测评估指标
+│   └── pssm/                       # 临时 PSSM 缓存
+├── model/                          # ── 训练好的模型产物 ──
+│   ├── homo/                       #   同源二聚体集成 (3 个模型)
+│   └── hetero/                     #   异源二聚体集成 (3 个模型)
+├── external_tool/                  # ── 外部集成 ──
+│   ├── ZComplexMSA/                #   复合物感知 MSA 生成器
+│   ├── GDFold/                     #   梯度下降结构对接
+│   ├── run_CDFold.sh               #   单二聚体对接脚本
+│   └── run_CDFold_multimer.sh      #   多聚体对接脚本
+├── example/                        # ── 示例数据与输出 ──
+│   ├── *.a3m                       #   输入 MSA 文件
+│   ├── expection_output/           #   预生成的预测输出
+│   ├── ground_truth/               #   用于评估的天然距离图
+│   └── training_datalists/         #   训练/测试/验证划分
+├── image/                          # README 头图
+└── requirments.txt                 # Python 3.6 依赖
+```
+
+来源：[README.md](/README.md#L1-L172), [requirments.txt](/requirments.txt#L1-L15)
+
+## 关键设计决策
+
+| 决策 | 理由 |
+|---|---|
+| **仅 CPU 推理** (`CUDA_VISIBLE_DEVICES="-1"`) | 确保可复现性；ESM 注意力在 CPU 上计算；TF 推理在 CPU 上执行 |
+| **可变长度输入** (`batch_input_shape: [null, null, null, 186]`) | 推理时无需填充或裁剪；模型可跨蛋白质大小泛化 |
+| **3 模型集成** | 降低预测方差；平均输出比任何单一模型更稳健 |
+| **距离区间分类** (13 个区间) | 将距离预测构建为离散区间上的分类问题；`npy2distmap()` 通过加权和将其转换回连续值 |
+| **自定义实例/行/列归一化** | 保留二维距离图的空间结构，而批归一化会破坏该结构；行/列归一化捕获链间接触中的方向偏差 |
+| **特征缓存** (计算前检查) | 高开销特征（ESM 注意力、CCMpred、PSSM）被保存到磁盘，并在后续对同一目标的运行中复用 |
+
+来源：[lib/Model_predict.py](/lib/Model_predict.py#L129-L131), [lib/Model_predict.py](/lib/Model_predict.py#L190-L197), [lib/Model_predict.py](/lib/Model_predict.py#L214-L218), [lib/util.py](/lib/util.py#L65-L82), [model/homo/model-train-HomoPred_Net.json](/model/homo/model-train-HomoPred_Net.json#L1-L1)
+
+## 接下来去哪
+
+架构概述已映射了完整的系统拓扑。为了加深你的理解，请按以下顺序深入：
+
+1. **[特征生成](5-feature-generation)** — 每个特征通道计算的详细分解、ESM MSA Transformer 集成以及滑动窗口裁剪策略
+2. **[神经网络模型设计](6-neural-network-model-design)** — 二维卷积网络、残差块和 squeeze-excite 机制的逐层架构
+3. **[预测工作流](7-prediction-workflow)** — 结合具体示例的端到端预测流水线逐步演练
+4. **[实例归一化](8-instance-normalization)** / **[行和列归一化](9-row-and-column-normalization)** — 自定义归一化层的数学推导与实现细节
+5. **[模型配置与集成](14-model-configuration-and-ensemble)** — 模型权重、架构 JSON 和特征清单的加载与组合方式
+
+---
+
+- [深入解析/输出文件与格式](https://zread.ai/BioinfoMachineLearning/CDPred/12-output-files-and-formats)
+
+---
+slug:12-output-files-and-formats
+blog_type:normal
+---
+
+
+CDPred 会为每个复合体生成一组结构化的输出文件，这些文件被组织在两个主目录中：**`feature/`**（被神经网络使用的中间特征产物）和 **`predmap/`**（最终预测结果）。理解这些格式对于下游分析、与真实值进行基准测试，以及将预测结果输入到 GDFold 等对接工具中至关重要。
+
+## 输出目录结构
+
+对于每个输入复合体（例如 `H1017A_H1017B`），CDPred 会创建一个专属的子目录，其中包含中间和最终输出：
+
+```
+<complex_name>/
+├── feature/                    # 中间特征文件
+│   ├── <complex>.a3m           # 过滤后的 MSA（A3M 格式）
+│   ├── <complex>.aln           # 原始 MSA 比对
+│   ├── <complex>.fasta         # 拼接的复合体序列
+│   ├── <complex>.mat           # 共进化矩阵
+│   ├── <complex>.dist          # 距离矩阵（特征阶段）
+│   ├── <complex>.npy           # NumPy 特征数组
+│   ├── <complex>_pssm.txt      # PSSM 特征谱（组合）
+│   └── pssm/                   # PSI-BLAST PSSM 产物
+│       ├── <complex>.fasta
+│       ├── <complex>.psiblast.output
+│       └── <complex>.pssm
+└── predmap/                    # 最终预测输出
+    ├── <complex>.htxt          # 链间接触概率图
+    ├── <complex>.dist          # 预测的链间距离图
+    ├── <complex>_con.rr        # 接触预测（RR 格式）
+    └── <complex>_dist.rr       # 距离预测（RR 格式）
+```
+
+来源: [expection_output](/example/expection_output)
+
+## 特征目录文件
+
+`feature/` 目录存储在 [特征生成](5-feature-generation) 流水线期间生成的中间计算产物。这些文件会被神经网络集成模型使用，但也可以独立检查用于调试或分析。
+
+### FASTA 序列文件 (`.fasta`)
+
+一个标准的 FASTA 文件，包含二聚体复合体的**拼接氨基酸序列**。对于像 H1017A_H1017B 这样的异二聚体，链 A 的残基直接后接链 B 的残基，形成单个序列条目：
+
+```
+>H1017A_H1017B
+LLLNDKQYNELCEAAEGRNLGAVFSYSEPEEPPPLNFSFEERKKIFLWVLTRLLKEGRIKLAKH...
+```
+
+首行使用复合体名称（`ChainA_ChainB`）作为序列标识符。序列长度等于两条链长度之和，这定义了所有后续矩阵输出的维度（N × N，其中 N = len(chain_A) + len(chain_B)）。
+
+来源: [H1017A_H1017B.fasta](/example/expection_output/H1017A_H1017B/feature/H1017A_H1017B.fasta#L1-L3)
+
+### A3M 比对文件 (`.a3m`)
+
+一个 **A3M 格式的多序列比对**——一种紧凑的 MSA 表示，其中相对于查询序列的插入已被移除（小写残基被删除）。第一行是查询序列，随后是与它比对的同源序列。此文件由 [ZComplexMSA](10-zcomplexmsa-for-msa-generation) 生成，并作为共进化分析的输入。
+
+来源: [H1017A_H1017B.a3m](/example/expection_output/H1017A_H1017B/feature/H1017A_H1017B.a3m)
+
+### 原始比对文件 (`.aln`)
+
+一个**逐行的 MSA**，其中每一行代表多序列比对中的一个比对序列，无头信息。所有序列共享相同的长度（包括间隙字符 `-`）。这种格式更容易通过编程方式解析，用于计算序列权重或有效序列计数（Meff）等统计信息。
+
+来源: [H1017A_H1017B.aln](/example/expection_output/H1017A_H1017B/feature/H1017A_H1017B.aln#L1-L61)
+
+### 共进化矩阵 (`.mat`)
+
+一个**对称的 N × N 共进化得分矩阵**，以制表符分隔的科学计数法浮点数存储。每个条目 `mat[i][j]` 表示残基 i 和 j 之间的共进化耦合强度，源自通过互信息或直接耦合分析等方法从 MSA 中推导的结果。对角线为零（`0.00000000000000000000e+00`）。
+
+| 属性 | 值 |
+|---|---|
+| 格式 | 制表符分隔的科学计数法浮点数 |
+| 维度 | N × N（N = 两条链中的残基总数） |
+| 对称性 | `mat[i][j] == mat[j][i]` |
+| 对角线 | `0.0` |
+
+来源: [H1017A_H1017B.mat](/example/expection_output/H1017A_H1017B/feature/H1017A_H1017B.mat#L1-L10)
+
+### 特征阶段距离矩阵 (`.dist`)
+
+在特征生成阶段的**预测残基间距离矩阵**，以空格分隔的浮点数存储。这与 `predmap/` 中的最终预测距离图不同——它代表从共进化数据导出的早期估计或输入特征。值以**埃（Å）**为单位，矩阵维度为 N × N。
+
+来源: [H1017A_H1017B.dist](/example/expection_output/H1017A_H1017B/feature/H1017A_H1017B.dist)
+
+### NumPy 特征数组 (`.npy`)
+
+一个**序列化的 NumPy 二进制数组**，包含所有残基对的完整特征向量堆叠。这是直接输入到 [神经网络模型](6-neural-network-model-design) 中进行预测的数据。该数组将所有计算出的特征（共进化、PSSM、基于序列的、基于距离的）整合到一个适合批量推理的单一张量中。
+
+来源: [H1017A_H1017B.npy](/example/expection_output/H1017A_H1017B/feature/H1017A_H1017B.npy)
+
+### 组合 PSSM 特征谱 (`_pssm.txt`)
+
+一个**位置特异性得分矩阵**，采用归一化文本格式，以 `# PSSM` 头行作为前缀。随后的每一行包含每个残基位置的 42 个空格分隔的浮点值，代表 20 种标准氨基酸及附加特征的归一化进化谱（概率）。值的范围通常从接近零（不可能的残基）到接近一（高度保守的残基）。
+
+来源: [H1017A_H1017B_pssm.txt](/example/expection_output/H1017A_H1017B/feature/H1017A_H1017B_pssm.txt#L1-L10)
+
+### PSI-BLAST PSSM 产物 (`pssm/`)
+
+一个子目录，包含用于构建组合 PSSM 的**原始 PSI-BLAST 输出**：
+
+| 文件 | 描述 |
+|---|---|
+| `<complex>.fasta` | PSI-BLAST 搜索的输入 FASTA |
+| `<complex>.psiblast.output` | 原始 PSI-BLAST 标准输出（迭代日志，E 值） |
+| `<complex>.pssm` | NCBI 格式的原始 PSSM（位置特异性得分） |
+
+来源: [pssm/](/example/expection_output/H1017A_H1017B/feature/pssm)
+
+## 预测输出文件 (predmap/)
+
+`predmap/` 目录包含**最终预测结果**——这是用户用于生物学解释、下游对接和评估的主要输出。这些文件由 [神经网络模型](6-neural-network-model-design) 集成生成。
+
+### 链间接触概率图 (`.htxt`)
+
+**CDPred 的核心输出**：一个 N × N 的**链间接触概率**矩阵，以空格分隔的浮点数存储（保留 4 位小数）。每个条目 `P[i][j]` 表示残基 i（来自一条链）与残基 j（来自另一条链）接触的预测概率。这是由 CDPred 神经网络直接预测的矩阵。
+
+主要特征：
+
+- **值范围从 0.0 到约 0.42**，值越高表示预测的链间接触越强
+- **链内块接近零**：i 和 j 同属一条链的条目表现为接近 0.0000 的值，因为 CDPred 专注于链间相互作用
+- **链间块包含信号**：非对角块（链 A 残基 × 链 B 残基）包含有意义的预测
+- **非对称性**：完整矩阵同时包含 `P[i_A][j_B]` 和 `P[i_B][j_A]` 区域，它们不一定是对称的
+
+`example/ground_truth/` 中的真实 `.htxt` 文件遵循相同格式，但包含**实际的链间距离**（以埃为单位）而非概率，以便通过 [预测评估指标](13-prediction-evaluation-metrics) 进行评估。
+
+来源: [H1017A_H1017B.htxt](/example/expection_output/H1017A_H1017B/predmap/H1017A_H1017B.htxt), [ground_truth H1017A_H1017B.htxt](/example/ground_truth/H1017A_H1017B.htxt)
+
+### 预测距离图 (`.dist`)
+
+一个 N × N 的**预测残基间距离**矩阵，以埃为单位，存储为空格分隔的浮点数（保留 4 位小数）。这是接触概率图在距离空间的对应物。对于链间区域，值通常在约 12.7 到约 22.0 Å 之间，较小的距离对应于预测在二聚体界面两侧距离接近的残基。
+
+矩阵结构镜像 `.htxt` 格式：链内区域包含链内距离，而链间块携带对接关键的链间距离预测。
+
+来源: [H1017A_H1017B.dist](/example/expection_output/H1017A_H1017B/predmap/H1017A_H1017B.dist)
+
+### RR 格式的接触预测 (`_con.rr`)
+
+一个**标准 RR（残基-残基）格式**文件，按置信度降序列出预测的链间接触。此格式广泛用于 CASP 竞赛，并兼容许多结构预测工具。每行包含 5 个空格分隔的字段：
+
+```
+i  j  segID  minDist  probability
+```
+
+| 字段 | 描述 | 示例 |
+|---|---|---|
+| `i` | 第一个残基的残基索引（从 1 开始） | `109` |
+| `j` | 第二个残基的残基索引（从 1 开始） | `92` |
+| `segID` | 片段标识符（始终为 `0`） | `0` |
+| `minDist` | 最小接触距离阈值（始终为 `8.0` Å） | `8.0` |
+| `probability` | 预测的接触概率 | `0.575` |
+
+接触被定义为 8.0 Å 内的残基对，文件按概率降序排列。顶部的高置信度接触（例如 `109 92 0 8.0 0.575`）代表最可靠的链间接触预测——这些作为 [GDFold 结构对接](11-gdfold-for-structure-docking) 的约束条件尤为有价值。
+
+来源: [H1017A_H1017B_con.rr](/example/expection_output/H1017A_H1017B/predmap/H1017A_H1017B_con.rr#L1-L200)
+
+### RR 格式的距离预测 (`_dist.rr`)
+
+一个**RR 格式文件，列出预测的链间距离**，按距离升序排列。每行包含 3 个空格分隔的字段：
+
+```
+i  j  predicted_distance
+```
+
+| 字段 | 描述 | 示例 |
+|---|---|---|
+| `i` | 第一个残基的残基索引（从 1 开始） | `17` |
+| `j` | 第二个残基的残基索引（从 1 开始） | `121` |
+| `predicted_distance` | 预测的 Cβ–Cβ 距离（以埃为单位） | `7.744` |
+
+文件按距离递增排序，意味着**预测最近的链间残基对排在最前面**。最短的预测距离（例如残基 17 和 121 之间的 `7.744` Å）标识了预测的接触界面。此格式通过保留实际距离大小而非仅仅是二元的接触/非接触分类，为 `_con.rr` 提供了补充信息。
+
+<CgxTip>当将预测结果输入 GDFold 进行结构对接时，请使用 `_con.rr` 文件作为接触约束。排名最高的接触（最高概率）可作为最可靠的链间约束。`.htxt` 概率矩阵也可以在用户定义的截断值（例如 P > 0.3）处进行阈值处理，以生成自定义接触列表。</CgxTip>
+
+来源: [H1017A_H1017B_dist.rr](/example/expection_output/H1017A_H1017B/predmap/H1017A_H1017B_dist.rr#L1-L200)
+
+## 真实值文件
+
+`example/ground_truth/` 目录提供**用于评估的参考数据**。真实值文件遵循与预测输出相同的格式，但包含实验确定的值：
+
+| 文件 | 格式 | 内容 |
+|---|---|---|
+| `H1017A.fasta` | FASTA | 链 A 单体序列 |
+| `H1017B.fasta` | FASTA | 链 B 单体序列 |
+| `H1017A_H1017B.htxt` | 空格分隔矩阵 | 真实链间距离矩阵 (Å) |
+
+真实值 `.htxt` 包含**实际的 Cβ–Cβ 距离**（以埃为单位，而非概率），以便如 [预测评估指标](13-prediction-evaluation-metrics) 中所述进行定量评估。单体 FASTA 文件定义了拆分拼接复合体序列所需的链边界。
+
+来源: [ground_truth/](/example/ground_truth/H1017A_H1017B.htxt), [H1017A.fasta](/example/ground_truth/H1017A.fasta)
+
+## 输出格式比较
+
+| 文件 | 目录 | 域 | 值类型 | 范围 | 主要用途 |
+|---|---|---|---|---|---|
+| `.htxt` | predmap/ | 链间接触 | 概率 | [0, ~0.5] | 核心预测；评估 |
+| `.dist` | predmap/ | 所有残基对 | 距离 (Å) | [~7, ~42] | 距离空间预测 |
+| `_con.rr` | predmap/ | 链间接触 | 概率 | [0, 1] | GDFold 约束；CASP 提交 |
+| `_dist.rr` | predmap/ | 链间距离 | 距离 (Å) | [~7, ~22] | 基于距离的分析 |
+| `.mat` | feature/ | 所有残基对 | 共进化得分 | [0, ~0.05] | 特征检查；调试 |
+| `_pssm.txt` | feature/ | 逐残基特征谱 | 归一化概率 | [0, 1] | 特征检查；调试 |
+| `.npy` | feature/ | 所有残基对 | 多特征向量 | 变化 | 神经网络输入 |
+
+来源: [expection_output](/example/expection_output), [ground_truth](/example/ground_truth)
+
+## 下一步
+
+理解输出格式后，请参阅 [预测评估指标](13-prediction-evaluation-metrics) 了解如何定量比较 `.htxt` 预测与真实值，并参阅 [GDFold 结构对接](11-gdfold-for-structure-docking) 了解 `_con.rr` 接触预测如何驱动 3D 结构组装。
+
+---
+
+- [深入解析/预测评估指标](https://zread.ai/BioinfoMachineLearning/CDPred/13-prediction-evaluation-metrics)
+
+---
+slug:13-prediction-evaluation-metrics
+blog_type:normal
+---
+
+
+CDPred 通过一个 **precision-at-top-k** 框架评估链间距离和接触预测，该框架将预测的残基对概率与真实接触进行排名对比。评估流程将连续的距离预测转换为二值化接触标签，选择得分最高的残基对，并计算这些选择与真实链间接触匹配的比例。本页将剖析每一个指标、底层计算逻辑，以及将训练目标与评估结果联系起来的设计原理。
+
+## 接触定义与真实值构建
+
+当两个相互作用链上的一对残基 *(i, j)* 之间的最小重原子欧几里得距离严格小于 **8 Å** 时，该残基对被定义为**处于接触状态**。该阈值在评估脚本中是硬编码的，并反映在 `.rr` 接触输出格式中（列 `0 8.0`）。在评估期间，真实的 `.htxt` 距离矩阵会根据此规则进行二值化：
+
+```
+true_complex[true_complex < 8]  = 1   (接触)
+true_complex[true_complex >= 8] = 0   (非接触)
+```
+
+真实矩阵的链间区域通过切片 `true_dist[:lenA, lenA:]` 提取，其中 `lenA` 是较短链的长度（用作 `tar_length`）。这个形状为 *(lenA × lenB)* 的矩形子矩阵，准确捕获了 CDPred 旨在预测的跨链残基对。
+
+来源：[distmap_evaluate.py](lib/distmap_evaluate.py#L62-L72)
+
+## Precision-at-Top-kL 指标
+
+CDPred 报告了**六种精确率指标**，它们共享相同的计算结构，但在考虑的预测对数量上有所不同。通用公式为：
+
+**Precision@Top-xL** = |{预测为 top-xL 且为真实接触的残基对}| / xL
+
+变量 *L* 等于 `min(lenA, lenB)`——即较短链的长度——它根据蛋白质大小对评估的残基对数量进行归一化。辅助函数 `ceil_topxL_to_one()` 将排序后的预测向量转换为二值选择向量：它先将所有条目置零，然后将预测概率最高的 *xL* 个条目置为 1。接着，Scikit-learn 的 `precision_score` 计算这些选择中真实接触的比例。
+
+| 指标 | 评估的残基对数量 | 解释 |
+|--------|--------------------------|----------------|
+| **Top-5** | 5 | 仅评估最高置信度的预测 |
+| **Top-10** | 10 | 略宽的置信度区间 |
+| **Top-L/10** | L/10 | 稀疏的长程链间接触 |
+| **Top-L/5** | L/5 | 链间界面的中等覆盖度 |
+| **Top-L/2** | L/2 | 广泛的界面覆盖度 |
+| **Top-L** | L | 全界面尺度的评估 |
+
+从 Top-5 到 Top-L 的演进测试了模型的**精确率-召回率权衡**：Top-5 奖励将概率质量集中在最确定接触上的模型，而 Top-L 奖励在更大规模预测集上保持准确率的模型。
+
+来源：[distmap_evaluate.py](lib/distmap_evaluate.py#L20-L32), [distmap_evaluate.py](lib/distmap_evaluate.py#L77-L90)
+
+## `EvaluateComplex` 函数内部机制
+
+核心评估函数作用于两个展平的向量：`true_complex_vec`（二值化真实值）和 `pred_complex_vec`（连续的预测接触概率）。该函数遍历六个 *x* 值——`5, 10, L/10, L/5, L/2, L`——对于每个 *x*：
+
+1. 调用 `ceil_topxL_to_one(pred_complex_vec, x)` 生成一个标记前 *x* 个预测的二值向量
+2. 将真实值向量和选择向量传递给 `sklearn.metrics.precision_score`
+3. 乘以 100 得到百分比
+4. 格式化为 4 位小数
+
+这种设计确保了**只有预测的排名顺序起作用**，而非它们的绝对概率值。一个概率校准良好的模型和一个概率单调但未校准的模型，如果它们以相同的顺序对残基对进行排名，将获得相同的精确率分数。
+
+```mermaid
+flowchart TD
+    A[预测的 .htxt 接触图] --> B[展平为 1D 向量]
+    C[真实的 .htxt 距离图] --> D[提取链间区域]
+    D --> E[二值化: 距离 < 8Å → 1, 否则 → 0]
+    E --> F[展平为 1D 向量]
+    B --> G{对于 x in 5, 10, L/10, L/5, L/2, L}
+    F --> G
+    G --> H[从预测向量中选择 top-xL 条目]
+    H --> I[对照真实二值向量计算精确率]
+    I --> J[输出保留 4 位小数的百分比]
+```
+
+来源：[distmap_evaluate.py](lib/distmap_evaluate.py#L20-L32)
+
+## 从多类距离输出到接触概率
+
+CDPred 的神经网络为每个残基对输出一个**多类距离分布**——而非单一标量。在预测期间，模型生成一个包含 13 个以上距离区间的输出张量。接触概率通过**对前 13 个区间的概率求和**得出，这对应于低于约 8 Å 的距离：
+
+```python
+hv_con = Y_hat_hdist_npy[:, :, 0:13].sum(axis=-1).squeeze()
+```
+
+此求和利用了每个区间代表一个距离间隔的事实，区间 0–12 共同覆盖了定义接触的范围（0–8 Å）。生成的 `hv_con` 矩阵存储每对残基的接触概率，并保存为 `.htxt` 文件，作为评估脚本的输入。实值距离图通过 `npy2distmap()` 单独恢复，该函数使用区间中心值作为权重计算所有区间的加权和。
+
+来源：[Model_predict.py](lib/Model_predict.py#L215-L220), [util.py](lib/util.py#L62-L80)
+
+## 距离离散化方案
+
+在训练期间，连续的重原子距离使用 **选项 'G'** 方案离散化为区间：42 个区间跨越 0–22 Å，**间隔为 0.5 Å**（区间 0 = 0–2 Å，区间 1–40 = 2.0–22.0 Å，步长 0.5 Å，区间 41 = 距离 ≥ 22 Å 或空隙）。该方案决定了训练期间多类分类损失和推理期间 `npy2distmap()` 重建中使用的区间边界：
+
+| 区间索引 | 距离范围 (Å) | 区间中心 (Å) |
+|-----------|---------------------|-----------------|
+| 0 | 0.0 – 2.0 | 1.0 |
+| 1 | 2.0 – 2.5 | 2.25 |
+| 2 | 2.5 – 3.0 | 2.75 |
+| ... | ... | ... |
+| 40 | 21.5 – 22.0 | 21.75 |
+| 41 | ≥ 22.0 或空隙 | 22.0 |
+
+8 Å 的接触阈值落在区间 12（7.5–8.0 Å）和区间 13（8.0–8.5 Å）的边界上，这就是为什么**对区间 0–12 求和**能近似表示距离 < 8 Å 的概率。
+
+来源：[Model_training.py](lib/Model_training.py#L67-L85), [util.py](lib/util.py#L62-L80)
+
+## 训练损失：加权均方误差
+
+模型的训练目标不同于评估指标——这是距离预测中的常见模式。CDPred 使用**距离依赖的加权均方误差**（`_weighted_mean_squared_error`），该误差应用了两种加权机制：
+
+- **近程残基对**（真实距离 ≤ 10 Å）：常量权重 `weight`（通常 > 1）放大了损失贡献，迫使模型优先保证短距离预测的准确性
+- **远程残基对**（真实距离 > 10 Å）：衰减权重 `1 / (1 + (ŷ / ȳ)²)` 减少了大距离的损失贡献，其中 `ȳ` 是真实平均距离
+
+这种双机制设计反映了**链间接触是短程现象**的生物学现实——在 4–8 Å 处的精确预测远比在 18–20 Å 处有价值。加权 MSE 训练模型专注于评估指标最终测量的距离范围（接触 < 8 Å），尽管损失和评估指标在数学上是不同的。
+
+来源：[Model_construct.py](lib/Model_construct.py#L106-L122)
+
+## Top 预测的平均概率
+
+除了精确率，CDPred 还提供了 `get_top_avg_prob()`，它计算排名前 L/k 的残基对的**平均预测接触概率**。此辅助指标衡量模型的**置信度校准**——即高排名预测是否具有接近 1.0 的概率。它支持三种选择模式：
+
+| 模式 | 选择的残基对 | 用例 |
+|------|---------------|----------|
+| `topL5` | L/5 个最高概率残基对 | 稀疏界面置信度 |
+| `topL2` | L/2 个最高概率残基对 | 广泛界面置信度 |
+| `topL`` | L 个最高概率残基对 | 全界面置信度 |
+
+一个校准良好的模型应在 Top-L/5（少量高置信度预测）显示出接近 1.0 的平均概率，并随着向 Top-L 推进而逐渐衰减。
+
+来源：[distmap_evaluate.py](lib/distmap_evaluate.py#L34-L46)
+
+## 运行评估
+
+评估脚本 `distmap_evaluate.py` 需要四个输入：预测的接触图（`.htxt`）、真实的距离图（`.htxt`）以及两条链的 FASTA 文件。该脚本从 FASTA 文件中提取链长，以 8 Å 对真实值进行二值化，并在格式化表格中报告所有六个精确率指标：
+
+```
+python ./lib/distmap_evaluate.py \
+  -p ./output/T1084A_T1084B/predmap/T1084A_T1084B.htxt \
+  -t ./example/ground_truth/T1084A_T1084B.htxt \
+  -f1 ./example/ground_truth/T1084A.fasta \
+  -f2 ./example/ground_truth/T1084B.fasta
+```
+
+示例输出：
+
+```
+NAME            LEN_A LEN_B TOP5       TOP10      TOPL/10    TOPL/5     TOPL/2     TOPL      
+T1084A_T1084B   71    71    100.0000   100.0000   100.0000   100.0000   94.2857    91.5493
+```
+
+同源二聚体示例在 Top-5 到 Top-L/5 范围内达到了完美的精确率（所有排名靠前的残基对都是真实接触），在 Top-L/2 和 Top-L 处随着置信度较低的残基对被纳入考虑，精确率出现平缓下降。异源二聚体示例的整体得分较低，反映了预测不对称链间界面的更大难度。
+
+来源：[distmap_evaluate.py](lib/distmap_evaluate.py#L48-L90), [README.md](README.md#L108-L135)
+
+## 指标关系与解释
+
+```mermaid
+graph LR
+    subgraph Training
+        A[加权 MSE 损失] -->|优化| B[距离区间概率]
+    end
+    subgraph Inference
+        B -->|对区间 0-12 求和| C[接触概率图 .htxt]
+        B -->|加权区间中心| D[实值距离图 .dist]
+    end
+    subgraph Evaluation
+        C -->|排名 + 阈值| E[Precision@Top-xL]
+        C -->|选择 + 平均| F[Avg prob@Top-L/k]
+    end
+    D -.->|被 GDFold 使用| G[结构对接]
+```
+
+上图展示了完整的生命周期：训练期间的**加权 MSE 损失**产生校准的距离区间概率；在推理时，这些概率被转换为接触概率图（用于评估）和实值距离图（用于下游对接）。精确率指标仅对排序后的接触概率进行操作，使其具有**保序性**——对概率值进行任何单调变换都会产生相同的评估结果。
+
+<CgxTip>8 Å 接触阈值与 'G' 离散化方案中的区间边界对齐（区间 0–12 跨度 0–8 Å）。如果修改此阈值，还必须调整 `Model_predict.py` 中 `hv_con = Y_hat_hdist_npy[:,:,0:13].sum(axis=-1)` 行求和的区间数量，以保持预测输出和评估标准之间的一致性。</CgxTip>
+
+<CgxTip>在评估异源二聚体时，`tar_length` 被设置为 `min(lenA, lenB)`，这意味着 Top-L 指标会缩放到较短链的长度。对于高度不对称的复合物（例如，lenA=50, lenB=200），Top-L 在 10,000 个可能的残基对中仅评估 50 对——这是一个非常稀疏的样本。在这种情况下，考虑使用 Top-L/2 或 Top-L/5 以获得更有意义的覆盖度。</CgxTip>
+
+来源：[distmap_evaluate.py](lib/distmap_evaluate.py#L62-L76), [Model_predict.py](lib/Model_predict.py#L215-L220), [Model_construct.py](lib/Model_construct.py#L106-L122)
+
+## 下一步
+
+了解了评估指标之后，可以进一步探索如何配置由三个模型组成的集成并取平均以生成最终预测，详见[模型配置与集成](14-model-configuration-and-ensemble)，或者回顾预测输出的格式化方式，详见[输出文件与格式](12-output-files-and-formats)。
+
+---
+
+- [深入解析/模型配置与集成](https://zread.ai/BioinfoMachineLearning/CDPred/14-model-configuration-and-ensemble)
+
+---
+slug:14-model-configuration-and-ensemble
+blog_type:normal
+---
+
+
+CDPred的预测精度取决于两个紧密耦合的设计决策：**向网络输入什么特征**以及**如何聚合多个独立训练的模型**。模型配置系统统管这两者——通过每种模型类型的`feature.txt`清单选择输入特征通道集，并通过同一目录下多个`.h5`权重文件的存在情况决定集成模型的构成。在预测时，所有共享相同架构定义（`.json`）但仅在习得权重上有所差异的模型，通过算术平均集成对最终的距离图做出同等贡献，该策略在不引入额外可训练参数的前提下，降低了单个模型过拟合带来的方差。
+
+## 模型目录布局
+
+每种预测类型——**同源二聚体**和**异源二聚体**——都在`model/`下维护各自独立的模型目录，包含三类产物：
+
+| 文件类型 | 同源二聚体路径 | 异源二聚体路径 | 用途 |
+|-----------|---------------|-----------------|---------|
+| 架构（`.json`） | `model/homo/model-train-HomoPred_Net.json` | `model/hetero/model-train-HeteroPred_Net.json` | 通过`model.to_json()`序列化的Keras模型计算图 |
+| 权重（`.h5`） | `model/homo/HomoPred1.h5` … `HomoPred3.h5` | `model/hetero/HeteroPred1.h5` … `HeteroPred3.h5` | 独立的训练检查点；每个定义了一个集成成员 |
+| 特征清单（`.txt`） | `model/homo/feature.txt` | `model/hetero/feature.txt` | 声明要将哪些特征通道组装到输入张量中 |
+
+架构JSON定义了一个**单一共享计算图**——三个`.h5`文件并非三种不同的架构，而是基于不同随机种子或数据洗牌训练出的**同一**网络拓扑的三个实例。这正是使简单平均有效的根本假设：所有集成成员在相同的概率空间中产生输出。
+
+来源: [Model_predict.py](lib/Model_predict.py#L93-L114)
+
+## 特征清单配置
+
+`feature.txt`文件充当了一个**声明式特征选择器**。以`#`为前缀的行指定了一个被接受的特征通道；未列出的特征在预测时会被从输入张量中排除。目前，两种模型类型声明了完全一致的特征集：
+
+```
+# rowatt
+# ccmpred
+# pssm
+# intradist_cb
+```
+
+每个声明的特征都映射到组装输入张量中特定的2D通道堆叠，贡献如下通道数：
+
+| 特征标志 | 来源 | 描述 | 通道维度 |
+|-------------|--------|-------------|-------------------|
+| `# rowatt` | ESM-1b注意力图 | 蛋白质语言模型的逐行注意力 | 128 |
+| `# ccmpred` | CCMpred | 共进化耦合分数（plm矩阵） | 1 (L×L) |
+| `# pssm` | 基于UniRef90的PSI-BLAST | 位置特异性评分矩阵，重塑为2D | 20 (每个位置的20个AA分数被广播) |
+| `# intradist_cb` | 单体PDB结构 | 来自预测单体结构的链内Cβ距离图 | 1 (L×L) |
+
+这些通道沿最后一个轴拼接，生成具有**186个总特征通道**的最终输入张量，与架构JSON中定义的`batch_input_shape: [null, null, null, 186]`相匹配。前三个维度为`None`（可变长度），使CDPred能够处理任意序列长度的蛋白质，而无需填充或裁剪。
+
+来源: [feature.txt](model/homo/feature.txt#L1-L4), [feature.txt](model/hetero/feature.txt#L1-L4), [model-train-HomoPred_Net.json](model/homo/model-train-HomoPred_Net.json#L1-L1)
+
+## 集成加载与自定义层解析
+
+函数`get_model_info()`编排了完整的模型加载流水线。它按顺序分三个阶段执行：
+
+```mermaid
+flowchart TD
+    A["get_model_info(model_path)"] --> B["发现 .json 架构文件"]
+    B --> C["发现所有 .h5 权重文件"]
+    C --> D["读取 feature.txt → accept_list"]
+    D --> E["对每个 .h5 文件:<br/>1. 从JSON重构计算图<br/>2. 注册自定义层<br/>3. 将权重加载至计算图"]
+    E --> F["返回: List&#91;Keras Model&#93;, List&#91;Feature Flags&#93;"]
+    
+    style A fill:#2d3748,stroke:#4a5568,color:#fff
+    style F fill:#2d3748,stroke:#4a5568,color:#fff
+```
+
+**自定义层注册**至关重要。序列化的JSON架构引用了三个自定义`Layer`子类——`InstanceNormalization`、`RowNormalization`和`ColumNormalization`——它们没有内置的Keras反序列化支持。若不通过`CustomObjectScope`进行显式注册，Keras的`model_from_json()`将抛出`ValueError`。该作用域还将`tf`（TensorFlow）作为自定义对象注入，因为架构中的某些Lambda层直接引用了它：
+
+```python
+with CustomObjectScope({
+    'InstanceNormalization': InstanceNormalization,
+    'RowNormalization': RowNormalization,
+    'ColumNormalization': ColumNormalization,
+    'tf': tf
+}):
+    json_string = open(model_out).read()
+    temp_model = model_from_json(json_string)
+    temp_model.load_weights(model_weight)
+```
+
+每个成功加载的`(architecture, weights)`对都会被追加到`CDPred`列表中，该列表即成为集成模型。特征标志的`accept_list`仅读取一次并在所有集成成员间共享——因为它们共享相同的架构，所以需要相同的输入特征组合。
+
+<CgxTip>当向架构中添加新的自定义归一化层时，你**必须**在`get_model_info()`内部的`CustomObjectScope`字典中注册它。遗漏此项将导致模型加载时出现无声的反序列化失败，产生令人费解的Keras `ValueError`，而非预测错误。</CgxTip>
+
+来源: [Model_predict.py](lib/Model_predict.py#L93-L114)
+
+## 预测时的集成聚合
+
+集成预测循环是对所有已加载模型的**等权算术平均**。其核心逻辑仅跨四行代码，却体现了一个关键的设计选择：
+
+```python
+Y_hat_hdist_npy = 0
+for temp in CDPred:
+    CDPred_prediction = temp.predict([selected_list_2D], batch_size=1)
+    Y_hat_hdist_npy += CDPred_prediction[1].squeeze()
+Y_hat_hdist_npy /= len(CDPred)
+```
+
+此循环中蕴含了若干架构细节：
+
+- **索引`[1]`**：模型具有**两个输出头**——`interdist`（索引0）和`interhdist`（索引1）。集成仅选择**第二个头**（`interhdist`），用于预测多类链间距离分布。第一个头（`interdist`）预测实值距离，但在推理时会被丢弃——它仅作为辅助训练信号。
+- **`.squeeze()`**：移除批处理维度，将形状从`(1, L, L, 42)`转换为`(L, L, 42)`。
+- **除以`len(CDPred)`**：每种模型类型有三个`.h5`文件，此操作将累加和除以3，得出算术平均值。
+
+平均后，42类距离分布将进行后处理：
+
+| 步骤 | 操作 | 输出形状 | 描述 |
+|------|-----------|-------------|-------------|
+| 1 | `[:,:,0:13].sum(axis=-1)` | `(L, L)` | 接触概率：前13个距离区间的总和（对应于 < 8Å 的重原子距离） |
+| 2 | `npy2distmap()` | `(L, L)` | 期望实值距离：使用softmax概率对区间中心进行加权求和 |
+| 3 | 区域提取 | `(L_A, L_B)` | 对于异源二聚体：提取链间象限`[:lenA, lenA:]`；对于同源二聚体：使用完整图 |
+
+来源: [Model_predict.py](lib/Model_predict.py#L214-L227)
+
+## 运行时的模型类型选择
+
+`-m`命令行标志直接映射到模型目录，在同源二聚体和异源二聚体预测流水线之间建立了**完全隔离**：
+
+```python
+if model_option == 'homodimer':
+    model_path = f'{GLOABL_Path}/model/homo/'
+elif model_option == 'heterodimer':
+    model_path = f'{GLOABL_Path}/model/hetero/'
+```
+
+这意味着每种模型类型都携带其**自身**的架构JSON、**自身**的三个权重文件集以及**自身**的特征清单。尽管目前两种类型声明了相同的特征并共享相同的输入维度（186个通道），但这种隔离边界允许它们发生分化——例如，未来的异源二聚体模型可以纳入额外的链间特征，而不影响同源二聚体的配置。
+
+完整的模型配置生命周期总结如下：
+
+```mermaid
+flowchart LR
+    subgraph CLI["运行时选择"]
+        M["-m homodimer<br/>-m heterodimer"]
+    end
+    subgraph Config["模型目录"]
+        M -->|映射至| D["model/homo/<br/>model/hetero/"]
+        D --> JSON["*.json<br/>(架构)"]
+        D --> H5["*.h5 ×3<br/>(集成权重)"]
+        D --> FT["feature.txt<br/>(特征选择器)"]
+    end
+    subgraph Load["加载阶段"]
+        JSON & H5 --> CS["CustomObjectScope<br/>+ model_from_json<br/>+ load_weights"]
+        FT --> FL["accept_list<br/>['#rowatt','#ccmpred',<br/>'#pssm','#intradist_cb']"]
+    end
+    subgraph Predict["集成预测"]
+        CS --> E["Σ model.predict(x)[1]<br/>÷ 3"]
+        FL --> X["组装 186通道<br/>输入张量"]
+        X --> E
+        E --> C["接触图<br/>(区间 0-12 之和)"]
+        E --> R["距离图<br/>(期望值)"]
+    end
+```
+
+来源: [Model_predict.py](lib/Model_predict.py#L127-L131), [Model_predict.py](lib/Model_predict.py#L208-L218)
+
+## 距离离散化方案
+
+42类距离分箱方案（`option='G'`）是`interhdist`输出头的基础，并决定了softmax预测如何映射到物理距离：
+
+| 区间索引 | 距离范围 | 区间宽度 |
+|-----------|---------------|-----------|
+| 0 – 3 | 0.0 – 2.0 Å | 0.5 Å |
+| 4 – 41 | 2.0 – 22.0 Å | 0.5 Å |
+| 41 | > 22.0 Å | 兜底类（间隙/无限大） |
+
+转换公式为`bin = ceil(distance / 0.5 - 4)`，截断至`[0, 41]`。对应于缺失链内距离（输入结构中的间隙）的值被分配至第41区间。接触概率的计算对第0至12区间求和，这对应于低于约8 Å的重原子距离——蛋白质结构预测中的标准接触定义。
+
+来源: [Model_training.py](lib/Model_training.py#L59-L76)
+
+## 网络架构参数
+
+主模型构造器`HomoPredRes_with_paras_2D`暴露了四个定义网络容量的可配置超参数：
+
+| 参数 | 作用 | 预训练模型中的默认值 |
+|-----------|------|------------------------------|
+| `kernel_size` | 初始卷积滤波器的尺寸 | 通过`filtsize` CLI参数设置 |
+| `feature_2D_num` | 输入特征通道数 | 186（由`feature.txt`决定） |
+| `filters` | 瓶颈块中的卷积滤波器数量 | 通过`nb_filters` CLI参数设置 |
+| `nb_layers` | 膨胀残差块的重复次数 | 通过`nb_layers` CLI参数设置 |
+| `predict_method` | 输出头配置 | `realdist_hdist_nointra`（双头：interdist + interhdist） |
+
+该架构遵循**膨胀残差瓶颈**模式，采用多尺度卷积（3×3, 7×1, 1×7）、行列实例归一化（`_rcin_relu_K`）以及`[1, 2, 4, 8, 1] × 4`的膨胀调度。初始投影中的Maxout激活层（带有`output_dim=64`的`MaxoutAct`）在残差块之前提供了一种已学习的分段线性非线性。
+
+<CgxTip>三个`.h5`集成成员是使用不同的`index`值（第13个CLI参数）运行`train_homopred_tune_net.py`生成的。每个索引会触发具有唯一随机种子的独立训练运行，从而生成有效集成所需的权重多样性。`predict_method`标志控制输出头结构——只有`realdist_hdist_nointra`和`realdist_hdist_whole`会生成预测流水线所期望的双头架构。</CgxTip>
+
+来源: [Model_construct.py](lib/Model_construct.py#L348-L396), [train_homopred_tune_net.py](lib/train_homopred_tune_net.py#L27-L39), [train_homopred_tune_net.py](lib/train_homopred_tune_net.py#L97-L99)
+
+## 扩展集成
+
+要添加第四个集成成员（例如`HomoPred4.h5`），请将新的`.h5`权重文件放入相应的模型目录中。函数`get_model_info()`会通过`getFileName(model_path, '.h5')`自动发现**所有**`.h5`文件，并且除以`len(CDPred)`的操作会自动适应——无需修改代码。唯一的约束是，新权重必须与目录中`.json`文件定义的**相同架构**相对应；架构不匹配将在`load_weights()`时引发Keras层形状错误。
+
+要修改特征集，请编辑`feature.txt`并确保`generate_feature.py`中存在相应的特征生成逻辑。总通道数将发生变化，这要求同时提供重新训练的架构JSON（带有更新后的`batch_input_shape`）和重新训练的权重文件。
+
+要深入理解使此架构独一无二的自定义归一化层，请参阅[实例归一化](8-instance-normalization)和[行列归一化](9-row-and-column-normalization)。有关调用此集成的完整预测工作流，请参阅[预测工作流](7-prediction-workflow)。
+
+---
+
+## 预测流水线
+
+- [深入解析/预测流水线/特征生成](https://zread.ai/BioinfoMachineLearning/CDPred/5-feature-generation)
+
+---
+slug:5-feature-generation
+blog_type:normal
+---
+
+
+特征生成是 CDPred 预测流程的基础阶段，它将原始生物学输入（单体结构和多序列比对）转换为丰富的**二维成对特征**张量，编码了共进化信号、结构先验和基于注意力机制的表征。该阶段决定了输入神经网络的数据质量和维度，使其成为整个工作流程中计算最密集且架构最关键的组件。
+
+## 特征架构概述
+
+CDPred 构建形状为 **(L, L, C)** 的 3D 特征张量，其中 **L** 是二聚体的合并序列长度，**C** 是由所选特征集决定的总通道数。每个通道捕获关于残基-残基关系的独特生物学或统计学信号。特征组装遵循**通道拼接**策略：独立生成各个 2D 特征图，然后通过 `np.concatenate` 沿最后一个轴进行堆叠。
+
+```mermaid
+flowchart TD
+    A["输入: .a3m MSA + .pdb 结构"] --> B["特征生成流水线"]
+    
+    B --> C["CCMpred<br/>(L, L, 1) .mat"]
+    B --> D["ESM MSA Transformer<br/>(L, L, 144) .npy"]
+    B --> E["PSI-BLAST PSSM<br/>(L, L, 40) _pssm.txt"]
+    B --> F["链内 Cβ 距离<br/>(L, L, 1) .dist"]
+    
+    C --> G["get2d_feature_by_list()<br/>通道拼接"]
+    D --> G
+    E --> G
+    F --> G
+    
+    G --> H["组合特征张量<br/>(L, L, C)"]
+    H --> I["神经网络输入<br/>(1, L, L, C)"]
+    
+    style A fill:#e1f5fe,stroke:#0288d1
+    style G fill:#fff3e0,stroke:#f57c00
+    style H fill:#e8f5e9,stroke:#388e3b
+    style I fill:#f3e5f5,stroke:#7b1fa2
+```
+
+通道维度 **C** 随模型类型而变化——**同源二聚体**和**异源二聚体**模型各自通过 [`model/homo/feature.txt`](model/homo/feature.txt) 和 [`model/hetero/feature.txt`](model/hetero/feature.txt) 处的配置文件指定其特征子集。`cal_feature_num()` 函数将特征名称映射到其通道贡献，以验证维度一致性。
+
+来源: [generate_feature.py](lib/generate_feature.py#L1-L50), [Model_predict.py](lib/Model_predict.py#L127-L170)
+
+## 特征类型与通道维度
+
+下表列举了所有可用的特征类型、其来源及对最终张量的维度贡献：
+
+| 特征键 | 通道数 | 来源工具 | 输出文件 | 生物学信号 |
+|---|---|---|---|---|
+| `# plm` | 441 | CCMpred (PLM 模式) | `.plm` (二进制) | 伪似然共进化耦合（21×21 残基对） |
+| `# ccmpred` | 1 | CCMpred | `.mat` | 标量共进化得分矩阵 |
+| `# rowatt` | 144 | ESM MSA Transformer | `.npy` | 12 层 12 头注意力的行注意力图 |
+| `# rowatt_diff` | 144 | ESM MSA Transformer | `.npy` | 差分行注意力（链间注意力差异） |
+| `# rowatt_inter` | 144 | ESM MSA Transformer | `.npy` | 链间行注意力图 |
+| `# pssm` | 40 | PSI-BLAST (通过 `genpssm.pl`) | `_pssm.txt` | 位置特异性得分矩阵，外积展开 |
+| `# intradist_cb` | 1 | PDB 结构解析 | `.dist` | 链内 Cβ 原子距离图 |
+| `# intradist_hv` | 1 | PDB 结构解析 | `.dist` | 链内重原子距离图 |
+| `# interdist` | 1 | PDB 结构解析 | `.dist` | 链间距离先验 |
+
+<CgxTip>`# plm` 特征（441 个通道）是消耗最大的通道贡献者，编码了来自伪似然模型的所有 21×21 成对耦合参数。在生产预测中，CDPred 改用 `# ccmpred`（1 个通道）——相同共进化信号的标量摘要——这极大地减少了内存消耗，同时保留了预测能力。</CgxTip>
+
+来源: [generate_feature.py](lib/generate_feature.py#L308-L330)
+
+## CCMpred：共进化得分矩阵
+
+**CCMpred** 特征捕获了残基对之间的直接耦合，这种耦合源于维持蛋白质复合物界面的进化压力。CDPred 对过滤后的比对文件（`.aln` 格式）调用编译好的 `ccmpred` 二进制文件（位于包根目录的 `bin/ccmpred` 处），以生成标量共进化得分矩阵。
+
+生成函数 `compute_ccmpred()` 将 CCMpred 二进制文件作为子进程执行，生成保存至 `{save_ccmpred_path}/{name}.mat` 的原始得分矩阵。该 `.mat` 文件随后通过 `np.loadtxt()` 加载，并使用 `np.newaxis` 扩展为 (L, L, 1) 的形状，以进行通道拼接。传递给 CCMpred 的比对文件是由 `.a3m` 输入剥离 FASTA 头部并移除小写插入字符派生而来：`grep -v '^>' {a3m} | sed 's/[a-z]//g' > {aln}`。
+
+备选的 `computeplm()` 函数生成完整的伪似然模型（PLM）输出——441 个通道，对应于 21×21 残基类型耦合参数——通过读取二进制 `.plm` 文件并使用 `plm_rawdata.reshape(441, L, L).transpose(1, 2, 0)` 进行重塑。然而，这主要用于训练阶段，而非推理阶段。
+
+```mermaid
+flowchart LR
+    A[".a3m MSA 文件"] --> B["剥离头部 &<br/>移除插入字符"]
+    B --> C[".aln 比对文件"]
+    C --> D["bin/ccmpred 二进制文件"]
+    D --> E[".mat 得分矩阵<br/>形状: (L, L)"]
+    E --> F["np.loadtxt() →<br/>np.newaxis → (L, L, 1)"]
+    
+    style D fill:#fce4ec,stroke:#c62828
+    style F fill:#e8f5e9,stroke:#388e3b
+```
+
+来源: [generate_feature.py](lib/generate_feature.py#L47-L68), [Model_predict.py](lib/Model_predict.py#L155-L157)
+
+## ESM MSA Transformer：行注意力图
+
+**行注意力**特征是 CDPred 最独特且最强大的信号——从 ESM-1b MSA Transformer (`esm_msa1_t12_100M_UR50S`) 中提取的 144 个通道的注意力图。此预训练模型处理完整的 MSA，并返回其 12 个 Transformer 层和 12 个注意力头上的逐行注意力模式（12 × 12 = 144 个通道）。
+
+`computerowatt()` 中的核心计算过程如下：读取 `.a3m` 文件最多至 `depth` 条序列（独立运行时默认为 64，预测期间为 128），通过 `msa_batch_converter` 转换为批次 token，并设置 `return_contacts=True` 传入 MSA Transformer。从模型输出中提取 `row_attentions` 键，移至 CPU，并通过转置将形状从 (144, L, L) 重塑为 (L, L, 144)。
+
+### 处理超过 1024 个残基的序列
+
+ESM MSA Transformer 的最大序列长度为 **1024 个 token**。对于更长的序列，`computerowatt_over1024()` 实现了**滑动窗口裁剪策略**：
+
+1. 序列被 `get_crop_index()` 划分为重叠窗口，该函数计算 4 个长度为 1000 且步距均匀的裁剪段。
+2. 每个裁剪段生成一个仅包含该窗口内残基的临时 `.a3m` 文件。
+3. 独立计算每个裁剪段的行注意力。
+4. 相邻裁剪段的重叠区域进行**平均**：`fea[i, j, :] = (fea[i, j, :] + fea_crop[count, :]) / 2`。
+5. 第五个“差异”裁剪段填补未被第一和第三窗口重叠覆盖的任何残基。
+
+<CgxTip>当从 `Model_predict.py` 调用特征生成时，MSA 深度设置为 **128** 条序列（而非默认的 64）。这种更深的采样提高了链间接触信号注意力质量。如果可用，ESM 模型会加载到 `cuda:0`，否则回退到 `cpu`——由于注意力传播是性能瓶颈，此处的 GPU 加速提供了最大的单一提速效果。</CgxTip>
+
+来源: [generate_feature.py](lib/generate_feature.py#L108-L145), [generate_feature.py](lib/generate_feature.py#L153-L200), [Model_predict.py](lib/Model_predict.py#L158-L159)
+
+## PSSM：位置特异性得分矩阵
+
+**PSSM** 特征编码了针对 UniRef90 数据库运行 PSI-BLAST 所得的位置特异性进化偏好。CDPred 委托给一个 Perl 脚本 (`bin/genpssm.pl`)，该脚本运行 PSI-BLAST 并提取生成的 PSSM。数据库路径在 [`constants.py`](lib/constants.py) 中配置为 `unirefdb` 变量——用户必须更新此路径以指向其本地的 UniRef90 下载位置。
+
+原始 PSSM 的形状为 (L, 20)——每个残基的每个氨基酸对应一个得分。CDPred 通过**外积展开**将其扩展为形状为 (L, L, 40) 的**二维成对特征**：按行的 (L, 1, 20) PSSM 被广播为 (L, L, 20)，其转置从列角度产生 (L, L, 20)，拼接后得到 (L, L, 40)。这种对称展开在每个残基对位置同时捕获了逐行和逐列的进化上下文。
+
+```mermaid
+flowchart LR
+    A["FASTA 序列"] --> B["bin/genpssm.pl<br/>+ UniRef90 DB"]
+    B --> C["_pssm.txt<br/>形状: (L, 20)"]
+    C --> D["转置 → (20, L)"]
+    D --> E["重塑 → (L, 1, 20)"]
+    E --> F["重复 → (L, L, 20)"]
+    F --> G["与转置拼接 → (L, L, 40)"]
+    
+    style B fill:#fce4ec,stroke:#c62828
+    style G fill:#e8f5e9,stroke:#388e3b
+```
+
+来源: [generate_feature.py](lib/generate_feature.py#L70-L85), [constants.py](lib/constants.py#L1-L4), [Model_predict.py](lib/Model_predict.py#L160-L161)
+
+## 来自 PDB 结构的链内距离图
+
+**链内距离**特征提供了结构先验——了解每条单体链内的距离可以约束链间距离的搜索空间。CDPred 使用 [`pdb_process`](lib/pdb_process.py) 模块中的 `get_cb_dist_from_pdbfile()` 函数，从预测的单体 PDB 结构中提取 Cβ 原子距离。
+
+距离图的处理方式因二聚体类型而异：
+
+| 二聚体类型 | 距离图构建 |
+|---|---|
+| **同源二聚体** | 直接使用单链的 (L_chain, L_chain) 图；通过 `np.savetxt(fmt='%.3f')` 保存 |
+| **异源二聚体** | 将两条链的图嵌入块对角 (L_A + L_B, L_A + L_B) 矩阵：对角线为链内块，链间块为零 |
+
+这种块对角结构至关重要——它明确标记了哪些残基对属于同一条链（填充距离），哪些属于不同链（零），为神经网络提供了关于链边界的清晰信号。
+
+来源: [Model_predict.py](lib/Model_predict.py#L127-L153), [Model_predict.py](lib/Model_predict.py#L163-L170)
+
+## 特征组装：get2d_feature_by_list
+
+`get2d_feature_by_list()` 函数是核心协调器，它读取模型的特征配置并组装最终张量。它**按固定顺序**处理特征，而不考虑配置文件的排序：`plm → ccmpred → pssm → rowatt → intradist_cb`。每个特征要么即时计算，要么从预生成的文件中加载，然后沿通道轴拼接到不断增长的张量中。
+
+该函数对每种特征类型支持两种模式：
+- **预计算模式**：如果提供了文件路径（例如 `rowatt_file`、`ccmpred_file`、`pssm_file`），则直接从磁盘加载特征。
+- **即时计算模式**：如果没有提供文件路径，则从原始输入（MSA、FASTA、比对）计算特征。
+
+这种双模式设计使得预测流程在重新运行时可以跳过已生成的特征——在调用其生成函数之前会检查每个特征文件是否存在，从而节省大量计算时间。
+
+来源: [generate_feature.py](lib/generate_feature.py#L220-L295), [Model_predict.py](lib/Model_predict.py#L172-L176)
+
+## 预测流程特征流向
+
+[`Model_predict.py`](lib/Model_predict.py) 中完整的特征生成序列遵循以下精确顺序：
+
+1. **PDB 处理**：处理每个输入 PDB 文件，提取序列，计算链内 Cβ 距离图。
+2. **目录设置**：在输出路径下创建 `feature/` 子目录。
+3. **MSA 准备**：将输入的 `.a3m` 文件复制到特征目录；通过剥离头部和插入字符派生出 `.aln` 比对文件。
+4. **FASTA 生成**：写入 FASTA 文件——同源二聚体包含单链序列，异源二聚体包含拼接的链序列。
+5. **CCMpred 生成**：如果 `.mat` 不存在，则调用 `compute_ccmpred()`。
+6. **行注意力生成**：如果 `.npy` 不存在，则调用深度为 128 的 `computerowatt_over1024()`。
+7. **PSSM 生成**：如果 `_pssm.txt` 不存在，则针对 UniRef90 调用 `computepssm()`。
+8. **距离图生成**：链内距离图保存为 `.dist`。
+9. **特征组装**：`get2d_feature_by_list()` 将所有特征拼接成最终的 (L, L, C) 张量。
+10. **批次扩展**：添加前导维度：`selected_list_2D[np.newaxis, :, :, :]` → 形状 (1, L, L, C)，作为 Keras 模型输入。
+
+```mermaid
+flowchart TD
+    subgraph 输入
+        I1[".pdb 文件"]
+        I2[".a3m MSA 文件"]
+    end
+    
+    subgraph "特征生成 (feature/ 目录)"
+        F1["处理 PDB →<br/>序列 + Cβ 距离"]
+        F2["从 .a3m 派生 .aln"]
+        F3["写入 .fasta"]
+        F4["compute_ccmpred() → .mat"]
+        F5["computerowatt_over1024() → .npy"]
+        F6["computepssm() → _pssm.txt"]
+        F7["保存 .dist"]
+        F8["get2d_feature_by_list() →<br/>(L, L, C) 张量"]
+    end
+    
+    subgraph "模型输入"
+        M1["添加批次维度 →<br/>(1, L, L, C)"]
+    end
+    
+    I1 --> F1
+    I2 --> F2
+    F2 --> F3
+    F3 --> F4
+    F2 --> F4
+    F2 --> F5
+    I2 --> F5
+    F3 --> F6
+    F1 --> F7
+    F4 --> F8
+    F5 --> F8
+    F6 --> F8
+    F7 --> F8
+    F8 --> M1
+    
+    style F8 fill:#fff3e0,stroke:#f57c00
+    style M1 fill:#e8f5e9,stroke:#388e3b
+```
+
+来源: [Model_predict.py](lib/Model_predict.py#L100-L176)
+
+## 输出特征文件
+
+特征生成完成后，`feature/` 目录包含以下产物：
+
+| 文件 | 格式 | 描述 |
+|---|---|---|
+| `{name}.a3m` | FASTA MSA | 输入多序列比对的副本 |
+| `{name}.aln` | 纯文本 | 过滤后的比对（无头部，无插入字符） |
+| `{name}.fasta` | FASTA | 派生的序列文件（单链或拼接序列） |
+| `{name}.mat` | 文本矩阵 | CCMpred 共进化得分矩阵 |
+| `{name}.npy` | NumPy 二进制 | ESM 行注意力图，形状 (L, L, 144) |
+| `{name}_pssm.txt` | 文本矩阵 | PSI-BLAST PSSM，形状 (L, 20) |
+| `{name}.dist` | 文本矩阵 | 链内 Cβ 距离图 |
+| `pssm/` | 目录 | 中间 PSI-BLAST 产物（`.pssm`、`.psiblast.output`） |
+
+`.npy` 文件使用 NumPy 的原生二进制格式来高效存储 144 通道注意力张量，而其他特征则使用人类可读的文本格式以便检查和调试。
+
+来源: [Model_predict.py](lib/Model_predict.py#L135-L161), [README.md](README.md#L72-L91)
+
+## 特征配置与通道计数
+
+`cal_feature_num()` 函数提供了从特征名称到通道数的确定性映射，使神经网络能够在加载时验证其输入维度。此映射为：
+
+| 特征 | 通道数 | 计算 |
+|---|---|---|
+| `# plm` | 441 | 21 × 21 残基耦合参数 |
+| `# rowatt` | 144 | 12 层 × 12 个注意力头 |
+| `# rowatt_diff` | 144 | 相同架构，差异信号 |
+| `# rowatt_inter` | 144 | 相同架构，链间信号 |
+| `# pssm` | 40 | 20 (行) + 20 (列) 外积 |
+| `# ccmpred` | 1 | 标量得分 |
+| `# intradist_cb` | 1 | Cβ 距离 |
+| `# intradist_hv` | 1 | 重原子距离 |
+| `# interdist` | 1 | 链间距离先验 |
+
+总通道数 **C** 是所有选定特征的通道贡献之和。模型架构的输入层必须与此精确维度匹配——特征配置与模型定义之间的不匹配将导致运行时错误。
+
+有关模型如何使用这些特征的详细信息，请参阅[神经网络模型设计](6-neural-network-model-design)。有关包含特征生成后步骤的完整预测工作流，请参阅[预测工作流](7-prediction-workflow)。
+
+---
+
+- [深入解析/预测流水线/神经网络模型设计](https://zread.ai/BioinfoMachineLearning/CDPred/6-neural-network-model-design)
+
+---
+slug:6-neural-network-model-design
+blog_type:normal
+---
+
+
+CDPred的神经网络是一个**二维膨胀残差网络**，专为蛋白质二聚体的链间残基-残基距离预测而构建。该架构接收形状为`(batch, L, L, 186)`的4D特征张量——其中**L**为拼接后的链长，**186**为特征通道维度——并为每个残基对输出一个基于离散距离区间的**42类softmax分布**。该设计在瓶颈残差块内融合了三种自定义归一化策略（实例、行、列），应用多尺度膨胀卷积进行长距离空间推理，并引入分离注意力门控以实现选择性特征重校准。本页将从输入到输出头，剖析每一个结构组件。
+
+来源: [Model_construct.py](lib/Model_construct.py#L1-L397), [Model_predict.py](lib/Model_predict.py#L1-L240)
+
+## 输入规格与特征通道
+
+模型接受一个单一的4D输入张量，其空间维度为动态形状，通道深度固定为**186**。该通道维度是在[特征生成](5-feature-generation)流程中生成的四个2D特征图的拼接：
+
+| 特征键 | 来源 | 描述 |
+|---|---|---|
+| `# rowatt` | ESM-1b 行注意力 | 来自 ESM Transformer 的注意力图，捕获共进化信号 |
+| `# ccmpred` | CCMpred | 基于伪似然最大化的共进化得分矩阵 |
+| `# pssm` | PSI-BLAST | 位置特异性得分矩阵（20个氨基酸列展平为2D） |
+| `# intradist_cb` | 单体 PDB | 从预测的单体结构中提取的Cβ链内距离图 |
+
+这四个特征组在模型特定的`feature.txt`文件中声明，并由`get2d_feature_by_list()`组装成统一的`(L, L, 186)`输入。在 Keras 模型 JSON 中，输入形状声明为`[null, null, null, 186]`，这意味着两个空间维度都是可变的——该网络是全卷积网络，能够处理任意长度的蛋白质链。
+
+来源: [feature.txt](model/homo/feature.txt#L1-L4), [feature.txt](model/hetero/feature.txt#L1-L4), [Model_construct.py](lib/Model_construct.py#L286-L290)
+
+## 架构概述
+
+下图展示了从特征输入，经过膨胀残差主干网络，到距离输出头的端到端数据流：
+
+```mermaid
+flowchart TB
+    subgraph Input["输入阶段"]
+        I["输入张量<br/>(L, L, 186)"]
+        IN["实例归一化"]
+        C1["Conv2D 1×1<br/>filters=128"]
+        MA["MaxoutAct<br/>→ 64 通道"]
+    end
+
+    subgraph Backbone["膨胀残差主干网络 × 20 个块"]
+        direction TB
+        B1["SA_bottleneck_rc<br/>dilation=1"]
+        B2["SA_bottleneck_rc<br/>dilation=2"]
+        B3["SA_bottleneck_rc<br/>dilation=4"]
+        B4["SA_bottleneck_rc<br/>dilation=8"]
+        B5["SA_bottleneck_rc<br/>dilation=1"]
+        DR["Dropout 0.2"]
+        B1 --> B2 --> B3 --> B4 --> B5 --> DR
+    end
+
+    subgraph Output["输出阶段"]
+        RCIN["_rcin_relu_K<br/>归一化"]
+        C3["Conv2D 3×3"]
+        IN2["实例归一化"]
+        D1["Dense 42<br/>softmax"]
+    end
+
+    I --> IN --> C1 --> MA
+    MA --> B1
+    DR --> RCIN --> C3 --> IN2 --> D1
+    D1 --> O["距离分布<br/>(L, L, 42)"]
+```
+
+膨胀模式`[1, 2, 4, 8, 1]`重复**4次**，总共产生**20个瓶颈块**，每个块后接一个`Dropout(0.2)`层。这种膨胀调度逐步扩展了有效感受野——从膨胀率为1时的局部3×3邻域，扩展到膨胀率为8时的17×17感受野——同时通过共享卷积核权重保持了参数效率。
+
+来源: [Model_construct.py](lib/Model_construct.py#L286-L340)
+
+## 前端：实例归一化 → Conv1×1 → MaxoutAct
+
+输入阶段在进入残差主干网络之前应用了三种变换。首先，`InstanceNormalization`独立地稳定了每个样本在空间维度上的特征分布。接下来，一个具有128个滤波器的**1×1 Conv2D**执行逐点通道混合——将186个输入通道投影到128通道的表示中。最后，`MaxoutAct`应用**maxout激活**，在引入非线性的同时将通道维度进一步降低至**64**：
+
+`MaxoutAct`函数迭代`output_dim`次，每次在`filters`个并行卷积中取 Conv2D + ELU 激活的通道最大值，生成一个单通道特征图。这充当了一个可学习的分段线性激活，比单独使用 ReLU 更具表达力，并在网络入口处实现了从128到64通道的激进但保信息的降维。
+
+来源: [Model_construct.py](lib/Model_construct.py#L93-L101), [Model_construct.py](lib/Model_construct.py#L286-L295)
+
+## 核心构建块：SA_bottleneck_rc
+
+`SA_bottleneck_rc`函数定义了整个主干网络中使用的基础残差单元。它遵循**瓶颈**设计模式，通过多尺度卷积和跳跃连接实现了扩展的中间表示：
+
+```mermaid
+flowchart TB
+    INPUT["输入 x"] --> IS_FIRST{"第一层的<br/>第一个块？"}
+    
+    IS_FIRST -->|是| C11_A["Conv2D 1×1<br/>+ L2 正则化"]
+    IS_FIRST -->|否| N1["_rcin_relu_K<br/>(ELU)"] --> C11_B["Conv2D 1×1"]
+    
+    C11_A --> MID
+    C11_B --> MID["瓶颈中间阶段"]
+    
+    MID --> N2["_rcin_relu_K<br/>(ELU)"]
+    N2 --> C33["Conv2D 3×3"]
+    
+    C33 --> PARALLEL["并行分支"]
+    C33 --> C71["Conv2D 7×1"]
+    C33 --> C17["Conv2D 1×7"]
+    
+    PARALLEL --> CONCAT["拼接<br/>[3×3, 7×1, 1×7]"]
+    C71 --> CONCAT
+    C17 --> CONCAT
+    
+    CONCAT --> N3["_rcin_relu_K<br/>(ELU)"]
+    N3 --> C11_C["Conv2D 1×1"]
+    
+    C11_C --> USE_SA{"使用 SE/SA？"}
+    USE_SA -->|是| SA["SA_layer"]
+    USE_SA -->|否| RESIDUAL["残差"]
+    SA --> RESIDUAL
+    
+    INPUT --> SHORTCUT["快捷连接<br/>（通道不匹配时使用 1×1 卷积）"]
+    SHORTCUT --> ADD["相加"]
+    RESIDUAL --> ADD
+    ADD --> ELU["ELU 激活"]
+    ELU --> OUTPUT["输出"]
+```
+
+此块中的关键设计选择包括：
+
+**多尺度卷积融合。** 3×3卷积的输出被分支到两个额外的非对称卷积中——一个**7×1**和一个**1×7**卷积核——然后将这三者拼接起来。这种受 Inception 风格架构启发的模式，同时捕获了各向同性的局部模式（3×3）以及沿行（7×1）和列（1×7）的各向异性条带模式。对于链间信号通常表现为行或列走廊的距离图而言，这些非对称卷积核提供了与数据几何结构相匹配的归纳偏置。
+
+**通过`_rcin_relu_K`实现的三重归一化。** 该函数并非使用单一的归一化层，而是并行应用了**三种归一化**——实例归一化、行归一化和列归一化——并在激活前拼接它们的输出。这使每个归一化点的通道数增加了两倍，但确保了网络能够关注在三种不同粒度上归一化的特征：逐样本（实例）、逐行和逐列。有关详细的数学定义，请参阅[实例归一化](8-instance-normalization)和[行列归一化](9-row-and-column-normalization)。
+
+**全程使用 ELU 激活。** 与使用 ReLU 的`dilated_bottleneck_rc`变体不同，`SA_bottleneck_rc`专门使用**ELU**激活，包括残差相加后的最终 ELU。ELU 的负饱和特性避免了 ReLU 的“神经元死亡”问题，并提供更平滑的梯度，这对于距离图的密集预测场景尤为有益，因为该场景中许多输出值接近于零。
+
+来源: [Model_construct.py](lib/Model_construct.py#L258-L284)
+
+## 膨胀调度与感受野分析
+
+重复4次的膨胀序列`[1, 2, 4, 8, 1]`构成了主干网络的空间信息骨架。每个膨胀率都会扩展标准3×3卷积的有效卷积核大小：
+
+| 膨胀率 | 有效卷积核大小 | 有效感受野 |
+|---|---|---|
+| 1 | 3×3 | 局部邻域 |
+| 2 | 5×5 | 短距离 |
+| 4 | 9×9 | 中距离 |
+| 8 | 17×17 | 长距离 |
+
+在每个周期内，将膨胀率1放置在膨胀率8之后，能够在每次长距离扫描后**重新锚定**感受野至局部细节，从而防止膨胀卷积在其采样网格中留下间隙的“网格伪影”。通过这种调度在20个块中的应用，网络实现了覆盖整个L×L距离图的**全局感受野**，同时通过循环出现的膨胀率1块保持了细粒度的局部敏感性。
+
+来源: [Model_construct.py](lib/Model_construct.py#L244-L255), [Model_construct.py](lib/Model_construct.py#L296-L300)
+
+## 注意力机制
+
+CDPred 实现了两种互补的注意力机制，可通过`use_SE`标志在瓶颈块中选择性应用。
+
+### 通道压缩与激励 (SE)
+
+`squeeze_excite_block`实现了标准的 SE 设计：**全局平均池化**将每个通道压缩为一个标量，随后是两个 Dense 层（缩减比为16）用于学习通道间的相互依赖关系，输出由 sigmoid 门控的缩放因子，以乘法方式逐通道重校准输入特征图。这使得网络能够抑制无关通道并放大信息通道——当四种异构特征类型（rowatt、ccmpred、pssm、intradist）占据相同的通道空间时，这一点至关重要。
+
+来源: [Model_construct.py](lib/Model_construct.py#L207-L224)
+
+### 分离注意力层 (SA_layer)
+
+`SA_layer`提供了一种更复杂的混合注意力方案。它沿通道轴将输入张量**分割**为两半：
+
+- **前半部分** → `squeeze_excite_block`（通道注意力）
+- **后半部分** → `spatial_attention`（空间注意力）
+
+`spatial_attention`函数跨通道计算平均池化和最大池化的空间图，将它们拼接后，应用一个**具有 sigmoid 激活的7×7 Conv2D**来生成空间加权掩码。两个注意力输出随后被重新拼接在一起。这种分离设计确保了**一半的通道受益于逐通道重校准，而另一半受益于逐位置重校准**，而无需承担将两者同时应用于所有通道的参数成本。
+
+来源: [Model_construct.py](lib/Model_construct.py#L240-L252), [Model_construct.py](lib/Model_construct.py#L226-L239)
+
+## 输出头与距离离散化
+
+在残差主干网络之后，网络应用了最终的`_rcin_relu_K`归一化、一个**3×3 Conv2D**和一个实例归一化，然后分支到特定任务的输出头。输出架构取决于`predict_method`参数：
+
+| `predict_method` | 输出头 | 用例 |
+|---|---|---|
+| `realdist_hdist` | `intradist` + `interdist` + `interhdist`（各 Dense 42, softmax） | 完整预测：链内 + 链间真实距离 + 链间重原子距离 |
+| `realdist_hdist_nointra` | `interdist` + `interhdist`（各 Dense 42, softmax） | 仅链间：真实距离 + 重原子距离 |
+| `realdist_hdist_whole` | `interdist` + `interhdist`（各 Dense 42, softmax） | 全矩阵链间预测 |
+| 默认 (如 `realdist_nointra`) | `intradist`（Dense 42, softmax） | 单一距离图 |
+
+每个输出头根据**'G'分箱方案**，在离散距离区间上产生一个**42类softmax分布**：区间间隔为0.5Å，覆盖2Å–22Å的范围（区间0–40），加上一个用于距离>22Å或未定义位置的间隔/区间41。这种分箱方式通过设置`option='G'`在`real_value2mul_class`中实现。
+
+在推理期间（如[预测工作流](7-prediction-workflow)所示），预测的概率分布通过`npy2distmap()`转换回实值距离图，链间接触则通过累加区间0–12（对应距离<8Å）的概率来提取。
+
+来源: [Model_construct.py](lib/Model_construct.py#L310-L340), [Model_training.py](lib/Model_training.py#L86-L106), [Model_predict.py](lib/Model_predict.py#L208-L218)
+
+## 加权均方误差损失
+
+自定义损失函数`_weighted_mean_squared_error`实现了一个**距离感知加权方案**，以解决距离图中严重的类别不平衡问题：
+
+- **近距离**（真实距离 ≤ 10Å）：由标量`weight`参数加权（高权重，通常>1.0），确保网络优先进行准确的短距离预测，因为这些预测决定了接触关系
+- **远距离**（真实距离 > 10Å）：由`1 / (1 + (ŷ/ȳ)²)`加权，这是一个相对于平均距离的逆平方衰减——它平滑地降低了远距离残基对的预测权重，同时防止了中等距离残基的梯度消失
+
+这种双重加权策略至关重要，因为二聚体中绝大多数残基对相距甚远（>20Å），如果没有差异化加权，网络将退化成对所有残基对都预测为“远”。
+
+来源: [Model_construct.py](lib/Model_construct.py#L78-L92)
+
+## 模型集成策略
+
+CDPred 采用**3模型集成**进行最终预测。三个独立训练的模型（例如，`HomoPred1.h5`、`HomoPred2.h5`、`HomoPred3.h5`）共享相同的 JSON 架构定义，但由于随机初始化或训练调度不同，其学习到的权重也有所差异。在推理期间，会加载所有三个模型，并将它们的**重原子距离预测（interhdist 输出，索引 [1]）**取平均：
+
+```
+Y_hat = (pred_model1 + pred_model2 + pred_model3) / 3
+```
+
+这种对 softmax 输出的简单算术平均提供了一种模型不确定性缩减的形式——单个模型可能会过拟合到不同的伪影，但它们的平均值往往更具鲁棒性。集成在`get_model_info()`中组装，该函数加载架构 JSON，通过`CustomObjectScope`注册自定义层（`InstanceNormalization`、`RowNormalization`、`ColumNormalization`），并加载每个`.h5`权重文件。
+
+来源: [Model_predict.py](lib/Model_predict.py#L87-L104), [Model_predict.py](lib/Model_predict.py#L204-L210)
+
+## HomoPred 与 HeteroPred 架构
+
+同源二聚体和异源二聚体模型共享**完全相同的网络架构**——相同的 JSON 定义（具有`batch_input_shape: [null, null, null, 186]`）和相同的层拓扑结构。两者的区别完全在于其**训练后的权重**以及预测的**后处理**：
+
+| 方面 | 同源二聚体 | 异源二聚体 |
+|---|---|---|
+| 输入长度 L | 单链长度（对称） | 两条链长之和 |
+| 特征组装 | 一个单体距离图 | 块对角形式的两个单体距离图 |
+| 输出提取 | 完整的 L×L 链间区域 | 仅跨链象限：`[:lenA, lenA:]` |
+| 权重文件 | `HomoPred{1,2,3}.h5` | `HeteroPred{1,2,3}.h5` |
+
+对于异源二聚体，特征张量将两条链编码在一个单一的 L×L 矩阵中（其中 L = lenA + lenB），链内距离特征形成块对角模式。网络在整个矩阵上进行预测，但仅保留非对角线的跨链象限作为链间预测。
+
+来源: [Model_predict.py](lib/Model_predict.py#L173-L199), [Model_predict.py](lib/Model_predict.py#L218-L226)
+
+<CgxTip>当使用新特征通道扩展模型时，请同时更新`feature.txt`和模型 JSON 中的`batch_input_shape`通道维度——特征数量（186）在架构定义中是硬编码的，必须与拼接后的特征维度完全匹配。</CgxTip>
+
+<CgxTip>`_rcin_relu_K`归一化在每次应用时都会使通道数增加两倍（实例 + 行 + 列输出拼接）。对于大尺寸蛋白质，这种快速的通道扩展是内存消耗的主要驱动因素——在调整滤波器数量或瓶颈重复次数时，请谨慎考虑通道预算。</CgxTip>
+
+## 架构设计原理
+
+CDPred 网络做出了几项独特的架构选择，使其有别于用于接触/距离预测的标准2D CNN：
+
+**为什么选择实例 + 行 + 列归一化而不是批量归一化？** 蛋白质长度差异巨大（训练集中为30–450个残基），并且在单个批次中，距离图具有截然不同的空间统计特征。批量归一化在批次维度上计算统计量，混合了不同大小图的统计信息。实例归一化、行归一化和列归一化分别在单个样本内的不同空间粒度上计算统计量，提供了长度无关的归一化。将三者拼接起来，赋予了后续层按通道选择最合适归一化尺度的自由。
+
+**为什么使用非对称的 7×1 / 1×7 卷积？** 二聚体的链间距离图表现出强烈的方向结构——行对应于链A上的残基，列对应于链B上的残基（反之亦然）。非对称卷积核能够用少量参数检测跨越整行或整列的模式，这对于检测在 ESM 注意力图中表现为行或列注意力模式的协同突变信号尤为有效。
+
+**为什么使用膨胀而不是池化进行空间扩展？** 基于池化的下采样破坏了残基对之间精确的空间对应关系，这对于距离预测是灾难性的，因为每个位置都有其独立的目标。膨胀卷积在不降低空间分辨率的情况下扩展了感受野，保留了输入和输出位置之间的一一映射。
+
+---
+
+- [深入解析/预测流水线/预测工作流](https://zread.ai/BioinfoMachineLearning/CDPred/7-prediction-workflow)
+
+---
+slug:7-prediction-workflow
+blog_type:normal
+---
+
+
+预测工作流是 CDPred 的运行核心 —— 这是一个编排式的流水线，负责将原始生物学输入（单体 PDB 结构和 MSA 比对）转换为链间残基-残基距离和接触预测。本页将追溯从命令调用、模型推理到输出持久化的完整执行路径，揭示控制数据流、特征组装、集成聚合和结果提取的架构决策。
+
+## 流水线概述
+
+CDPred 的预测工作流通过单一入口点 `Model_predict.py` 执行，该入口点编排了四个顺序阶段：**模型加载**、**结构处理**、**特征生成**和**集成推理与输出序列化**。该流水线本质上是一个批次大小为 1 的推理图 —— 每个目标独立处理，并在送入神经网络集成之前，构建好一个蛋白质复合物的完整特征张量。
+
+```mermaid
+flowchart TD
+    A["CLI Invocation<br/><code>Model_predict.py -n -p -a -m -o</code>"] --> B["Phase 1: Model Loading<br/>Load 3 models + feature list"]
+    B --> C["Phase 2: Structure Processing<br/>Parse PDB → sequence + intra-distance"]
+    C --> D["Phase 3: Feature Generation<br/>rowatt + ccmpred + pssm + intradist_cb"]
+    D --> E["Phase 4: Ensemble Inference<br/>3-model average prediction"]
+    E --> F["Inter-chain Extraction<br/>Slice contact + distance maps"]
+    F --> G["Output Serialization<br/>.htxt, .dist, _dist.rr, _con.rr"]
+
+    style A fill:#e8f5e9,stroke:#2e7d32
+    style B fill:#e3f2fd,stroke:#1565c0
+    style C fill:#e3f2fd,stroke:#1565c0
+    style D fill:#fff3e0,stroke:#ef6c00
+    style E fill:#fce4ec,stroke:#c62828
+    style F fill:#fce4ec,stroke:#c62828
+    style G fill:#f3e5f5,stroke:#6a1b9a
+```
+
+<CgxTip>特征生成是瓶颈 —— 通过 PSI-BLAST 针对 UniRef90 计算 PSSM 是最慢的步骤，而 ESM-MSA-1b 行注意力和 CCMpred 相对较快。通过存在性检查，已存在的特征文件会被自动跳过。</CgxTip>
+
+来源: [Model_predict.py](lib/Model_predict.py#L1-L240), [generate_feature.py](lib/generate_feature.py#L1-L376)
+
+## 阶段 1 — 模型加载与配置
+
+预测工作流首先根据 `-m` 标志解析模型目录。对于 `homodimer`，模型从 `model/homo/` 加载；对于 `heterodimer`，则从 `model/hetero/` 加载。`get_model_info` 函数在该目录内执行三个关键操作：
+
+1. **架构反序列化**：读取包含 Keras 模型图定义的单个 `.json` 文件（例如 `model-train-HomoPred_Net.json`）。
+2. **权重加载**：将所有三个 `.h5` 权重文件（例如 `HomoPred1.h5`、`HomoPred2.h5`、`HomoPred3.h5`）加载到共享相同架构的独立模型实例中。
+3. **特征列表解析**：读取 `feature.txt` 以确定模型在推理时期望的特征通道。
+
+同源和异源二聚体模型均使用相同的特征规范：`# rowatt`、`# ccmpred`、`# pssm`、`# intradist_cb` —— 共计 **186 个输入通道**（144 + 1 + 40 + 1）。自定义归一化层（`InstanceNormalization`、`RowNormalization`、`ColumNormalization`）必须在 `CustomObjectScope` 上下文中注册，以便 Keras 正确反序列化模型图。
+
+| 模型变体 | 目录 | 权重文件 | 架构 JSON | 输入通道 |
+|---|---|---|---|---|
+| 同源二聚体 | `model/homo/` | `HomoPred{1,2,3}.h5` | `model-train-HomoPred_Net.json` | 186 |
+| 异源二聚体 | `model/hetero/` | `HeteroPred{1,2,3}.h5` | `model-train-HeteroPred_Net.json` | 186 |
+
+来源: [Model_predict.py](lib/Model_predict.py#L82-L110), [feature.txt](model/homo/feature.txt#L1-L4)
+
+## 阶段 2 — PDB 结构处理与链内距离提取
+
+模型加载后，流水线遍历每个输入 PDB 文件以提取两项结构信息：**氨基酸序列**和**链内 Cβ 距离图**。`process_pdbfile` 函数对每个 PDB 进行规范化，包括移除 `TER` 记录、将所有原子重新分配至 A 链、从 1 开始对残基重新编号，以及从 1 开始对原子序列号重新编号 —— 从而确保无论输入 PDB 的格式约定如何，都能获得统一的结构表示。
+
+`get_sequence_from_pdb` 函数使用 Biopython 的 `SeqIO` 解析器提取残基序列，该序列具有双重目的：验证单体假设（每个 PDB 恰好包含一条链），以及为下游 PSSM 生成构建 FASTA 文件。`get_cb_dist_from_pdbfile` 函数使用 Cβ 原子计算 L×L 的链内距离图（当 Cβ 不可用时退回到 Cα，例如甘氨酸），从而生成 `intradist_cb` 特征通道。
+
+对于**同源二聚体**，一个 PDB 文件即可 —— 单个链内距离图被直接保存。对于**异源二聚体**，需要两个 PDB 文件，其链内距离图被嵌入到一个 (L_A + L_B) × (L_A + L_B) 的分块对角矩阵中，其中对角线外的链间块保持为零，这反映了链内距离仅在各链内部定义。
+
+```mermaid
+flowchart LR
+    subgraph Homodimer
+        H_PDB["1 PDB file"] --> H_SEQ["sequence (L)"]
+        H_PDB --> H_DIST["intra-dist (L×L)"]
+    end
+    subgraph Heterodimer
+        HT_PDB1["PDB chain A"] --> HT_SEQ1["sequence (L_A)"]
+        HT_PDB1 --> HT_DIST1["intra-dist A (L_A×L_A)"]
+        HT_PDB2["PDB chain B"] --> HT_SEQ2["sequence (L_B)"]
+        HT_PDB2 --> HT_DIST2["intra-dist B (L_B×L_B)"]
+        HT_DIST1 --> HT_BLOCK["Block-diagonal matrix<br/>(L_A+L_B)×(L_A+L_B)"]
+        HT_DIST2 --> HT_BLOCK
+    end
+```
+
+来源: [Model_predict.py](lib/Model_predict.py#L130-L160), [pdb_process.py](lib/pdb_process.py#L114-L145), [util.py](lib/util.py#L108-L145)
+
+## 阶段 3 — 特征生成
+
+特征生成负责组装形状为 (L, L, 186) 的 4 通道特征张量，作为神经网络的输入。每个特征独立计算，并通过 `get2d_feature_by_list` 沿最后一维拼接。流水线包含存在性检查 —— 如果特征文件已存在于输出 `feature/` 目录中，则会完全跳过其（可能代价高昂的）计算。
+
+### 特征通道分解
+
+| 特征 | 键 | 形状 | 来源 | 生成方法 |
+|---|---|---|---|---|
+| **行注意力** | `# rowatt` | (L, L, 144) | ESM-MSA-1b transformer | `computerowatt_over1024` — 12 层 MSA Transformer 行注意力 |
+| **CCMpred** | `# ccmpred` | (L, L, 1) | CCMpred (PLM) | `compute_ccmpred` — 伪似然最大化耦合 |
+| **PSSM** | `# pssm` | (L, L, 40) | 基于 UniRef90 的 PSI-BLAST | `computepssm` — 位置特异性得分矩阵，广播至 2D |
+| **链内距离** | `# intradist_cb` | (L, L, 1) | 输入 PDB 结构 | 在阶段 2 中提取的 Cβ–Cβ 距离 |
+
+**行注意力（144 通道）**：ESM-MSA-1b 模型（`esm_msa1_t12_100M_UR50S`）处理深度为 128 条序列的 MSA。对于超过 1024 个残基的序列（MSA Transformer 的最大限制），裁剪策略将序列划分为长度为 1000 的重叠窗口，计算每个窗口的注意力图，并通过平均重叠区域将它们拼接回去。12 个注意力头跨越 12 层产生了 144 通道的图。
+
+**CCMpred（1 通道）**：CCMpred 二进制文件从 MSA 比对文件计算协同进化耦合分数。输出 `.mat` 文件包含单个 L×L 接触分数矩阵。
+
+**PSSM（40 通道）**：使用 Perl 包装脚本（`genpssm.pl`）针对 UniRef90 数据库运行 PSI-BLAST。生成的 20 位置得分矩阵被广播为 2D 表示：对于每个位置 i，PSSM 行在所有位置 j 上复制，位置 j 同理，然后拼接以产生每对 (i, j) 共 40 个通道。
+
+**链内距离（1 通道）**：直接复用阶段 2 中 PDB 处理期间计算的 Cβ 距离图。
+
+<CgxTip>当序列长度超过 1024 时，`computerowatt_over1024` 函数采用滑动窗口裁剪策略，包含 4 个长度为 1000 残基的重叠窗口。重叠区域取平均值，确保拼接的行注意力图不存在位置偏差。</CgxTip>
+
+来源: [generate_feature.py](lib/generate_feature.py#L67-L199), [generate_feature.py](lib/generate_feature.py#L215-L310), [Model_predict.py](lib/Model_predict.py#L162-L192)
+
+## 阶段 4 — 集成推理与链间提取
+
+利用组装好的形状为 (1, L, L, 186) 的特征张量（前置批次维度），流水线执行 **3 模型集成平均**：
+
+```python
+Y_hat_hdist_npy = 0
+for temp in CDPred:
+    CDPred_prediction = temp.predict([selected_list_2D], batch_size=1)
+    Y_hat_hdist_npy += CDPred_prediction[1].squeeze()
+Y_hat_hdist_npy /= len(CDPred)
+```
+
+每个模型产生一个多输出预测。索引 `[1]` 选取距离图输出（第二个模型输出）。三个预测结果累加后除以 3，实现了简单的算术平均集成。这种集成策略在不要求任何加权方案的情况下，减少了单个模型预测的方差。
+
+### 接触与距离图推导
+
+原始集成输出 `Y_hat_hdist_npy` 的形状为 (L, L, N_classes)，其中 N_classes 表示距离分箱。由此计算两个导出图：
+
+- **接触概率图**：`hv_con = Y_hat_hdist_npy[:,:,0:13].sum(axis=-1)` —— 前 13 个距离分箱概率之和（对应距离 < 8Å）得出每对残基的链间接触概率。
+- **实值距离图**：`hv_real_dist = npy2distmap(Y_hat_hdist_npy)` —— 跨所有距离分箱的加权和，其中每个分箱的概率乘以其距离阈值中心，然后进行对称平均。
+
+### 链间区域提取
+
+对于**同源二聚体**，完整的 L×L 预测图直接就是链间图（因为模型被训练用于预测对称二聚体的链间距离）。对于**异源二聚体**，通过切片组合预测图来提取链间区域：
+
+```python
+hcon_inter = hv_con[:lenA, lenA:]
+hdist_inter = hv_real_dist[:lenA, lenA:]
+```
+
+这提取了 (L_A + L_B) × (L_A + L_B) 图的右上角块，对应于链 A（行）和链 B（列）之间的链间残基对。
+
+来源: [Model_predict.py](lib/Model_predict.py#L194-L224), [util.py](lib/util.py#L56-L80)
+
+## 输出序列化
+
+最后阶段将四个输出文件写入用户指定输出路径的 `predmap/` 子目录中：
+
+| 文件 | 格式 | 内容 |
+|---|---|---|
+| `{name}.dist` | 空格分隔矩阵 | 链间距离图 (L_A × L_B)，实值埃（Å）距离 |
+| `{name}.htxt` | 空格分隔矩阵 | 链间接触概率图 (L_A × L_B)，值在 [0, 1] 内 |
+| `{name}_dist.rr` | 基于行的 `i j dist` | 按距离排序（升序）的 Top-1000 预测残基对 |
+| `{name}_con.rr` | 基于行的 `i j 0 8.0 prob` | 按概率排序（降序）的 Top-1000 预测接触 |
+
+`.rr` 文件由 `gen_rr_file` 生成，该函数按相关指标对所有残基对排序，取前 1000 个，并以标准化格式写入。距离 `.rr` 文件使用从 1 开始的残基索引，格式为 `i j dist`，而接触 `.rr` 文件包含距离边界 `0 8.0` 及接触概率。
+
+来源: [Model_predict.py](lib/Model_predict.py#L226-L240), [util.py](lib/util.py#L82-L106)
+
+## 完整工作流序列
+
+下表总结了预测工作流中的每个步骤及其数据转换和中间产物：
+
+| 步骤 | 操作 | 输入 | 输出 | 产物位置 |
+|---|---|---|---|---|
+| 1 | 解析 CLI 参数 | 命令行标志 | 验证后的路径与选项 | — |
+| 2 | 加载模型集成 | `.json` + `.h5` + `feature.txt` | 3 个 Keras 模型实例 + 特征列表 | `model/{homo,hetero}/` |
+| 3 | 处理 PDB 文件 | `.pdb` 文件 | 规范化 PDB、序列、链内距离图 | `{out_path}/feature/` |
+| 4 | 复制并转换 MSA | `.a3m` 文件 | `.a3m` 副本 + `.aln`（无插入） | `{out_path}/feature/` |
+| 5 | 生成 FASTA | 来自 PDB 的序列 | `.fasta` 文件 | `{out_path}/feature/` |
+| 6 | 计算 CCMpred | `.aln` 文件 | `.mat` 协同进化分数 | `{out_path}/feature/` |
+| 7 | 计算行注意力 | `.a3m` 文件 | `.npy` 注意力图 (144 ch) | `{out_path}/feature/` |
+| 8 | 计算 PSSM | `.fasta` + UniRef90 | `_pssm.txt` 得分矩阵 | `{out_path}/feature/` |
+| 9 | 组装特征张量 | 所有特征 | (1, L, L, 186) ndarray | 仅内存 |
+| 10 | 集成推理 | 特征张量 | 原始多分箱预测 | 仅内存 |
+| 11 | 提取接触 + 距离 | 原始预测 | 链间图 | 仅内存 |
+| 12 | 写入输出文件 | 链间图 | `.dist`, `.htxt`, `_dist.rr`, `_con.rr` | `{out_path}/predmap/` |
+
+## 接下来去哪
+
+- 有关每个特征的数学基础和实现的详细信息，请参见 [特征生成](5-feature-generation)。
+- 有关使用 186 通道张量的神经网络架构，请参见 [神经网络模型设计](6-neural-network-model-design)。
+- 有关模型反序列化所需的自定义归一化层，请参见 [实例归一化](8-instance-normalization) 和 [行与列归一化](9-row-and-column-normalization)。
+- 有关解读输出文件及其格式的信息，请参见 [输出文件与格式](12-output-files-and-formats)。
+- 有关针对真值评估预测的信息，请参见 [预测评估指标](13-prediction-evaluation-metrics)。
+
+---
+
+## 自定义归一化层
+
+- [深入解析/自定义归一化层/实例归一化](https://zread.ai/BioinfoMachineLearning/CDPred/8-instance-normalization)
+
+---
+slug:8-instance-normalization
+blog_type:normal
+---
+
+
+**实例归一化**（Instance Normalization）是 CDPred 神经网络架构核心的自定义归一化层。标准的批归一化会在整个批次和空间维度上计算统计量，与此不同，CDPred 的 `InstanceNormalization` **逐样本、逐通道**地独立归一化每个特征图——这一设计选择对于处理变长蛋白质距离图至关重要，因为批次级统计量会将结构上无关联的蛋白质混淆在一起。
+
+## 数学基础
+
+对于形状为 `(B, H, W, C)` 的输入张量——其中 *B* 为批次大小，*H* 和 *W* 为空间维度（距离图中的残基对位置），*C* 为通道维度——实例归一化针对每个样本 *b* 和通道 *c* 计算如下：
+
+$$\mu_{b,c} = \frac{1}{HW} \sum_{h=1}^{H} \sum_{w=1}^{W} x_{b,h,w,c}$$
+
+$$\sigma_{b,c}^{2} = \frac{1}{HW} \sum_{h=1}^{H} \sum_{w=1}^{W} (x_{b,h,w,c} - \mu_{b,c})^{2}$$
+
+$$\hat{x}_{b,h,w,c} = \gamma_c \cdot \frac{x_{b,h,w,c} - \mu_{b,c}}{\sqrt{\sigma_{b,c}^{2} + \epsilon}} + \beta_c$$
+
+可学习参数 **γ**（缩放）和 **β**（平移）在空间位置上共享，但在各通道间独立，从而在归一化后恢复网络的表征能力。这是与缺乏仿射参数的简单归一化方案的关键区别。
+
+来源: [Model_construct.py](lib/Model_construct.py#L84-L99), [Model_predict.py](lib/Model_predict.py#L28-L43)
+
+## 实现架构
+
+`InstanceNormalization` 类继承自 Keras 的 `Layer` 基类，由遵循 Keras 层契约的三个生命周期方法组成：
+
+```mermaid
+flowchart TD
+    A["__init__(axis=-1, epsilon=1e-5)"] --> B["build(input_shape)"]
+    B --> C{"input_shape[axis]<br/>is None?"}
+    C -- "Yes" --> D["Raise ValueError"]
+    C -- "No" --> E["Register learnable weights"]
+    E --> F["γ: random_normal(μ=1.0, σ=0.02)<br/>β: zeros"]
+    F --> G["call(inputs)"]
+    G --> H["tf.nn.moments(inputs, axes=[1,2])"]
+    H --> I["K.batch_normalization(<br/>inputs, mean, var, β, γ, ε)"]
+    I --> J["Normalized output<br/>shape: (B, H, W, C)"]
+```
+
+**`__init__`** 方法存储归一化轴（默认为 `axis=-1`，即通道维度）和数值稳定性常量 `epsilon=1e-5`。**`build`** 方法构建两个可训练的权重张量——`gamma` 和 `beta`——它们的形状均为 `(dim,)`，其中 `dim` 是从 `input_shape[self.axis]` 获取的通道数。`gamma` 的初始化器为 `random_normal(mean=1.0, stddev=0.02)`，将初始值置于 1 附近，使该层在初始时近似于恒等变换；`beta` 初始化为零。**`call`** 方法使用 `tf.nn.moments` 在空间轴 `[1, 2]`（即 H 和 W 维度）上计算实例级的矩，然后委托给 `K.batch_normalization` 进行仿射变换。
+
+<CgxTip>在 `call` 方法中，归一化轴**被硬编码为 `[1, 2]`**——这是针对 NHWC 格式 4D 张量的纯空间归一化。`self.axis` 参数仅控制**用于权重形状的通道轴**，而不控制矩计算的轴。这意味着 `axis` 参数不会改变被归一化的维度，而仅决定参数分配时通道维度所在的位置。</CgxTip>
+
+来源: [Model_construct.py](lib/Model_construct.py#L84-L99)
+
+## 为何选择实例归一化而非批归一化
+
+CDPred 处理表示链间残基-残基关系的 2D 特征图，其中每个输入样本是具有潜在不同维度（L×L，其中 L 为蛋白质长度）的距离图。这与批归一化产生了根本性冲突：
+
+| 属性 | 批归一化 | 实例归一化 |
+|---|---|---|
+| **矩轴** | `[0, 1, 2]`（批次、H、W） | `[1, 2]`（仅 H、W） |
+| **统计粒度** | 跨整个批次的每个通道一个 μ/σ | 逐样本逐通道各一个 μ/σ |
+| **批次大小敏感性** | 需要足够大的批次以获得稳定的统计量 | 与批次大小无关 |
+| **变长输入** | 不兼容——不同样本的 H、W 不同会破坏批次矩 | 兼容——逐样本计算矩 |
+| **训练/推理差异** | 推理时使用运行平均值 | 训练和测试时计算方式相同 |
+| **蛋白质结构域对齐** | 统计量会混淆不相关的蛋白质结构 | 每个蛋白质的特征图独立归一化 |
+
+变长输入问题是决定性的：由于每个蛋白质具有独特的残基数 L，模型配置中指定的输入形状 `(None, None, None, 186)` 意味着批次级矩是未定义的。实例归一化将每个样本视为其独立的统计宇宙，从而完全避开了这一问题。
+
+来源: [model-train-HomoPred_Net.json](model/homo/model-train-HetNet.json#L1-L1), [Model_construct.py](lib/Model_construct.py#L84-L99)
+
+## 网络中的集成点
+
+实例归一化通过多个可组合的辅助函数渗透在 CDPred 架构中，并在主模型构建器中直接实例化。下图映射了所有的集成位置：
+
+```mermaid
+flowchart LR
+    subgraph "Direct Instantiation"
+        A1["HomoPredRes_with_paras_2D<br/>Post-input normalization"]
+        A2["HomoPredRes_with_paras_2D<br/>Pre-output normalization"]
+    end
+    subgraph "Helper Function Wrappers"
+        B1["_in_relu → IN + ReLU"]
+        B2["_in_elu → IN + ELU"]
+        B3["_in_sigmoid → IN + Sigmoid"]
+        B4["_conv_in_relu2D → Conv + IN + ReLU"]
+        B5["_conv_in_sigmoid2D → Conv + IN + Sigmoid"]
+        B6["_in_elu_conv2D → IN + ELU + Conv"]
+        B7["_in_relu_K → IN + ReLU<br/>(named variant)"]
+    end
+    subgraph "Composite Normalization"
+        C1["_rcin_relu_K → concat(IN, RowNorm, ColNorm) + activation"]
+    end
+    A1 --> D["instance_normalization_1"]
+    A2 --> E["instance_normalization_N"]
+    B7 --> C1
+    C1 --> F["dilated_bottleneck_rc<br/>SA_bottleneck_rc"]
+```
+
+### 输入后归一化
+
+应用于原始 186 通道特征输入的最先变换是实例归一化——**在任何卷积之前**。它将占据截然不同数值范围的各种异构输入特征（共进化分数、PSSM、行注意力、链内距离）归一化到统一的尺度：
+
+```python
+HomoPred_2D_conv = InstanceNormalization(axis=-1)(HomoPred_2D_conv)  # Line ~325
+HomoPred_2D_conv = Conv2D(128, 1, padding='same')(HomoPred_2D_conv)
+```
+
+### 输出前归一化
+
+在最终的 `Dense` 预测层（为 `intradist`、`interdist` 和 `interhdist` 输出 42 类距离分布）之前，在最后一个卷积之后应用实例归一化，以稳定进入分类器的特征表示：
+
+```python
+HomoPred_2D_conv = Conv2D(filters=filters, kernel_size=(3,3), ...)(HomoPred_2D_conv)
+HomoPred_2D_conv = InstanceNormalization(axis=-1)(HomoPred_2D_conv)  # Line ~345
+intradist = Dense(42, activation='softmax', name='intradist')(HomoPred_2D_conv)
+```
+
+### 残差瓶颈块内部
+
+最普遍的使用发生在 `_rcin_relu_K` 中，该函数拼接**三种**归一化输出——实例、行和列——生成具有 3× 通道宽度的三重归一化表示。这种复合归一化为 `dilated_bottleneck_rc` 和 `SA_bottleneck_rc` 残差块内的每个内部变换提供输入：
+
+```python
+def _rcin_relu_K(x, bn_name=None, relu_name=None, activation='relu'):
+    norm1 = InstanceNormalization(axis=-1)(x)
+    norm2 = RowNormalization(axis=-1)(x)
+    norm3 = ColumNormalization(axis=-1)(x)
+    norm  = concatenate([norm1, norm2, norm3])
+    return Activation(activation)(norm)
+```
+
+此设计确保每个残差块都能接收多视角的归一化：实例归一化捕获逐样本的全局统计量，行归一化捕获逐行（残基-i）模式，列归一化捕获逐列（残基-j）模式。三者共同为网络提供了具备空间感知的归一化特征，且符合链间距离图的非对称特性。
+
+来源: [Model_construct.py](lib/Model_construct.py#L30-L55), [Model_construct.py](lib/Model_construct.py#L232-L237), [Model_construct.py](lib/Model_construct.py#L305-L380)
+
+## 模型反序列化与自定义对象注册
+
+由于 `InstanceNormalization` 是未包含在标准 Keras 中的自定义层，因此在加载序列化模型时必须显式注册。CDPred 在预测流程中通过 Keras 的 `CustomObjectScope` 上下文管理器来处理此问题：
+
+```python
+with CustomObjectScope({'InstanceNormalization': InstanceNormalization,
+                        'RowNormalization': RowNormalization,
+                        'ColumNormalization': ColumNormalization,
+                        'tf': tf}):
+    json_string = open(model_out).read()
+    temp_model = model_from_json(json_string)
+    temp_model.load_weights(model_weight)
+```
+
+该层在 `Model_construct.py`（用于训练）和 `Model_predict.py`（用于推理）中均被**重新声明**——这种有意为之的重复解耦了训练和预测的依赖关系，使得预测运行时无需导入完整的模型构建模块。序列化模型的 JSON（如 `model-train-HomoPred_Net.json`）通过类名 `"InstanceNormalization"` 引用该层，`CustomObjectScope` 在反序列化时将其映射到具体的类。
+
+<CgxTip>`tf` 模块也被注册在 `CustomObjectScope` 中，因为序列化模型中的 lambda 层引用了 TensorFlow 操作。如果你修改了 `InstanceNormalization` 类（例如更改矩计算轴），则必须重新训练并重新序列化模型——JSON 架构文件仅通过名称而非实现来嵌入该层。</CgxTip>
+
+来源: [Model_predict.py](lib/Model_predict.py#L28-L43), [Model_predict.py](lib/Model_predict.py#L80-L89)
+
+## 与 CDPred 其他归一化层的比较
+
+CDPred 实现了三个自定义归一化层，它们构成了一个归一化族，各自在 4D 输入张量 `(B, H, W, C)` 的不同空间轴上计算矩：
+
+| 层 | 矩轴 | 语义 | 可学习参数 |
+|---|---|---|---|
+| **InstanceNormalization** | `[1, 2]` | 逐样本逐通道跨两个空间维度（整个特征图）进行归一化 | γ, β ∈ ℝ^C |
+| **RowNormalization** | `[1]` | 逐样本逐通道逐列跨 H 维度（残基-i 轴）进行归一化 | γ, β ∈ ℝ^C |
+| **ColumNormalization** | `[2]` | 逐样本逐通道逐行跨 W 维度（残基-j 轴）进行归一化 | γ, β ∈ ℝ^C |
+
+三者共享相同的 `__init__` 和 `build` 方法——**唯一的区分代码**是传递给 `tf.nn.moments` 的 `axes` 参数。行归一化生成的统计量在各列间不同（每列获得各自的均值/方差），而列归一化生成的统计量在各行间不同。实例归一化通过同时在两个空间轴上计算矩，在每个通道的每个样本中产生单一的全局均值和方差——这是三者中最为强烈的归一化方式。
+
+有关行归一化和列归一化如何利用距离图空间结构的深入探讨，请参阅 [行与列归一化](9-row-and-column-normalization)。
+
+来源: [Model_construct.py](lib/Model_construct.py#L84-L130), [Model_predict.py](lib/Model_predict.py#L28-L75)
+
+## 蛋白质距离预测语境下的设计原理
+
+CDPred 的输入特征张量编码了链间残基对信息，其中每个空间位置 `(i, j)` 表示来自两个相互作用蛋白质链的一对特定残基。186 个输入通道结合了性质迥异的信号：来自 CCMpred 的共进化耦合分数、来自 PSSM 的位置特异性得分矩阵、来自 ESM 的注意力图以及链内 Cβ 距离特征。这些通道的原始数值范围跨越了多个数量级。
+
+在此语境下，实例归一化具有双重目的。**首先**，它执行逐样本的特征白化——将每个通道的激活分布归一化为零均值和单位方差（在仿射变换之前），从而防止天然幅度较大的通道在反向传播期间主导梯度信号。**其次**，通过独立计算每个蛋白质的统计量，它尊重了基本的生物学现实，即不同的蛋白质复合物具有不同的统计特征——一个包含 30 个残基的小型同源二聚体与一个包含 500 个残基的大型异源二聚体在共进化信号分布上存在根本差异，将它们的统计量混合在一起（如批归一化所做的那样）会模糊这些有意义的差异。
+
+为 gamma 选择 `random_normal(1.0, 0.02)` 初始化——而非 `ones`——在各通道的初始缩放因子中引入了轻微的不对称性，这有助于在早期训练阶段打破对称性，此时所有通道从归一化输入中接收到相似的梯度信号。
+
+来源: [Model_construct.py](lib/Model_construct.py#L84-L99), [model-train-HomoPred_Net.json](model/homo/model-train-HomoPred_Net.json#L1-L1)
+
+## 后续步骤
+
+- 了解实例归一化如何在瓶颈块中与行归一化和列归一化组合：[行与列归一化](9-row-and-column-normalization)
+- 查看归一化后的特征如何流经完整的预测流程：[预测工作流](7-prediction-workflow)
+- 探索嵌入实例归一化的完整神经网络架构：[神经网络模型设计](6-neural-network-model-design)
+
+---
+
+- [深入解析/自定义归一化层/行与列归一化](https://zread.ai/BioinfoMachineLearning/CDPred/9-row-and-column-normalization)
+
+---
+slug:9-row-and-column-normalization
+blog_type:normal
+---
+
+
+行归一化与列归一化是 CDPred 中的自定义 Keras 层，它们对 2D 特征图的空间维度执行方向感知归一化。实例归一化会同时在两个空间轴上聚合统计量，而这些层不同于实例归一化，它们沿着**单一空间轴**计算归一化统计量，从而保留了具有方向性的结构信号。这对于链间距离预测至关重要，因为在接触/距离图的行和列中，残基-残基关系承载着不同的生物学语义。
+
+## 数学基础
+
+对于 NHWC 格式中形状为 `(B, H, W, C)` 的输入张量 **x**，这三种归一化变体仅在计算矩的轴上有所不同：
+
+| 归一化 | 矩轴 | 统计范围 | μ, σ² 的输出形状 |
+|---|---|---|---|
+| InstanceNormalization | `[1, 2]` | 逐实例、逐通道、双空间维度 | `(B, 1, 1, C)` |
+| RowNormalization | `[1]` | 逐实例、逐通道、逐列 | `(B, 1, W, C)` |
+| ColumNormalization | `[2]` | 逐实例、逐通道、逐行 | `(B, H, 1, C)` |
+
+这三种归一化的输出均遵循带有可学习参数的标准批归一化公式：
+
+```
+ŷ = γ · (x - μ) / √(σ² + ε) + β
+```
+
+其中 **γ** (gamma) 和 **β** (beta) 是形状为 `(C,)` 的逐通道可学习权重，分别从 `random_normal(1.0, 0.02)` 和 `zeros` 初始化，**ε** = 1e-5 是用于保证数值稳定性的常数。
+
+<CgxTip>RowNormalization 沿轴 1（行/高度维度）计算统计量，为每个列位置生成唯一的 μ 和 σ²——实际上是在“每列内跨行”进行归一化。ColumNormalization 则执行相反的操作，在“每行内跨列”进行归一化。正是这种方向不对称性，在 2D 残基-残基图中捕获了具有结构意义的信号。</CgxTip>
+
+来源: [Model_construct.py](lib/Model_construct.py#L107-L141), [Model_predict.py](lib/Model_predict.py#L67-L101)
+
+## 实现架构
+
+`RowNormalization` 和 `ColumNormalization` 均作为自定义 Keras `Layer` 子类实现，具有相同的结构骨架——仅在 `call` 方法中传递给 `tf.nn.moments` 的 `axes` 参数有所不同：
+
+```mermaid
+classDiagram
+    class Layer {
+        <<Keras>>
+        +build(input_shape)
+        +call(inputs)
+    }
+    class RowNormalization {
+        +axis: int = -1
+        +epsilon: float = 1e-5
+        +gamma: Weight
+        +beta: Weight
+        +build(input_shape)
+        +call(inputs) → moments on axes=[1]
+    }
+    class ColumNormalization {
+        +axis: int = -1
+        +epsilon: float = 1e-5
+        +gamma: Weight
+        +beta: Weight
+        +build(input_shape)
+        +call(inputs) → moments on axes=[2]
+    }
+    class InstanceNormalization {
+        +axis: int = -1
+        +epsilon: float = 1e-5
+        +gamma: Weight
+        +beta: Weight
+        +build(input_shape)
+        +call(inputs) → moments on axes=[1,2]
+    }
+    Layer <|-- RowNormalization
+    Layer <|-- ColumNormalization
+    Layer <|-- InstanceNormalization
+```
+
+`build` 方法构建两个可训练权重：**gamma** (`random_normal(1.0, 0.02)`) 和 **beta** (`zeros`)，它们的形状均为 `(dim,)`，其中 `dim = input_shape[self.axis]`。`call` 方法在通过 `tf.nn.moments` 计算矩后委托给 `K.batch_normalization`，确保归一化操作完全可微且兼容 GPU。
+
+来源: [Model_construct.py](lib/Model_construct.py#L107-L141)
+
+## RCIN 组合模式
+
+行归一化与列归一化的真正威力体现在 **`_rcin_relu_K`** 组合函数中，该函数在激活前将三种归一化流融合为单一表示：
+
+```python
+def _rcin_relu_K(x, bn_name=None, relu_name=None, activation='relu'):
+    norm1 = InstanceNormalization(axis=-1, name=bn_name)(x)
+    norm2 = RowNormalization(axis=-1, name=bn_name)(x)
+    norm3 = ColumNormalization(axis=-1, name=bn_name)(x)
+    norm  = concatenate([norm1, norm2, norm3])
+    return Activation(activation, name=relu_name)(norm)
+```
+
+这种拼接使通道维度扩充至三倍：具有 C 个通道的输入在激活前会产生具有 **3C 个通道**的输出。这三个流分别捕获：
+
+- **InstanceNormalization 流**：全局空间统计量——每个通道的整体特征幅度
+- **RowNormalization 流**：列特定统计量——沿列维度变化的信号（即相对于一个残基在链 B 中位置的模式）
+- **ColumNormalization 流**：行特定统计量——沿行维度变化的信号（即相对于一个残基在链 A 中位置的模式）
+
+```mermaid
+flowchart LR
+    X["Input Tensor<br/>B×H×W×C"] --> IN["InstanceNorm<br/>axes=[1,2]"]
+    X --> RN["RowNorm<br/>axes=[1]"]
+    X --> CN["ColumnNorm<br/>axes=[2]"]
+    IN --> CAT["Concatenate<br/>B×H×W×3C"]
+    RN --> CAT
+    CN --> CAT
+    CAT --> ACT["Activation<br/>relu/elu"]
+    ACT --> OUT["Output<br/>B×H×W×3C"]
+```
+
+<CgxTip>`_rcin_relu_K` 的通道三倍化效应意味着下游卷积层必须适应 3 倍的输入通道数。这由瓶颈块中的滤波器数量隐式处理，这些瓶颈块直接接收拼接后的 3C 通道张量。</CgxTip>
+
+来源: [Model_construct.py](lib/Model_construct.py#L259-L263)
+
+## 在残差瓶颈块中的集成
+
+`_rcin_relu_K` 函数被嵌入到构成 CDPred 预测网络核心的两种瓶颈架构中：
+
+### `dilated_bottleneck_rc` — 标准膨胀残差块
+
+```mermaid
+flowchart TB
+    IN[Input] --> RC1[_rcin_relu_K]
+    RC1 --> C1x1[Conv2D 1×1]
+    C1x1 --> RC2[_rcin_relu_K]
+    RC2 --> C3x3[Conv2D 3×3]
+    C3x3 --> C7x1[Conv2D 7×1]
+    C3x3 --> C1x7[Conv2D 1×7]
+    C7x1 --> CAT[Concatenate]
+    C1x7 --> CAT
+    CAT --> RC3[_rcin_relu_K]
+    RC3 --> C1x1b[Conv2D 1×1]
+    C1x1b --> SHORT[_shortcut + residual]
+    SHORT --> OUT[Output]
+```
+
+`_rcin_relu_K` 在每个瓶颈块内被应用**三次**：在 1×1 瓶颈卷积之前、3×3 中间卷积之后，以及最终 1×1 扩展卷积之前。这意味着行和列归一化统计量会在每个阶段重新计算，使网络能够在表示随块演进时重新校准方向特征。
+
+### `SA_bottleneck_rc` — 挤压-注意力变体
+
+此变体使用 `elu` 激活而非 `relu`，并用联合的**挤压-激励 + 空间注意力**（`SA_layer`）机制替换了挤压-激励通道注意力。`_rcin_relu_K` 调用的位置相同，但传入 `activation='elu'`：
+
+```python
+conv_1_1 = _rcin_relu_K(input, activation='elu')
+conv_3_3 = _rcin_relu_K(conv_1_1, activation='elu')
+residual = _rcin_relu_K(conv_3_3, activation='elu')
+```
+
+这是最终 `HomoPredRes_with_paras_2D` 模型构造器中使用的瓶颈变体，跨 4 个重复组应用，膨胀卷积率为 `[1, 2, 4, 8, 1] × 4`。
+
+来源: [Model_construct.py](lib/Model_construct.py#L274-L320), [Model_construct.py](lib/Model_construct.py#L322-L360)
+
+## 模型反序列化与自定义对象注册
+
+由于 `RowNormalization` 和 `ColumNormalization` 是标准 Keras 命名空间中未包含的自定义 Keras 层，因此必须在模型加载期间显式注册。CDPred 通过 `get_model_info` 函数中的 `CustomObjectScope` 处理此问题：
+
+```python
+with CustomObjectScope({
+    'InstanceNormalization': InstanceNormalization,
+    'RowNormalization': RowNormalization,
+    'ColumNormalization': ColumNormalization,
+    'tf': tf
+}):
+    json_string = open(model_out).read()
+    temp_model = model_from_json(json_string)
+    temp_model.load_weights(model_weight)
+```
+
+这些类在两个文件——[`Model_construct.py`](lib/Model_construct.py)（用于模型构建和训练）与 [`Model_predict.py`](lib/Model_predict.py)（用于推理）——中被**复制**，以避免循环导入依赖。两者的实现完全相同，确保了反序列化时的权重兼容性。
+
+| 文件 | 用途 | 行数 |
+|---|---|---|
+| `Model_construct.py` | 模型架构定义与训练 | L107–L141 |
+| `Model_predict.py` | 预测/推理流水线 | L67–L101 |
+
+来源: [Model_predict.py](lib/Model_predict.py#L103-L113), [Model_construct.py](lib/Model_construct.py#L107-L141)
+
+## 设计原理：面向接触图的方向感知归一化
+
+标准归一化技术（BatchNorm、InstanceNorm）对称地处理空间维度，假设特征分布是各向同性的。对于 2D 残基-残基距离/接触图，此假设不成立：
+
+- **行**对应于**链 A** 中的残基——其统计量编码了 A 侧的序列上下文
+- **列**对应于**链 B** 中的残基——其统计量编码了 B 侧的序列上下文
+- **对角线及近对角线区域**携带链内信息，而**非对角线区域**携带链间信号
+
+通过独立计算行方向和列方向的统计量，`RowNormalization` 和 `ColumNormalization` 使网络能够区分沿一条链的残基轴显著的特征与沿另一条链的残基轴显著的特征。这种方向分解对于**异二聚体**预测尤为有价值，因为在异二聚体中，链 A 和链 B 具有不同的氨基酸组成和结构上下文。
+
+| 方面 | InstanceNorm | RowNorm | ColumnNorm |
+|---|---|---|---|
+| 统计粒度 | 整个空间图 | 逐列切片 | 逐行切片 |
+| 捕获内容 | 全局特征尺度 | 每列的跨行变化 | 每行的跨列变化 |
+| 生物学信号 | 整体链间模式 | 链 B 残基特异性信号 | 链 A 残基特异性信号 |
+| 不变性 | 空间平移 | 沿行平移 | 沿列平移 |
+
+来源: [Model_construct.py](lib/Model_construct.py#L107-L141), [Model_predict.py](lib/Model_predict.py#L67-L101)
+
+## 与其他归一化层的关系
+
+行归一化与列归一化层与[实例归一化](8-instance-normalization)共同构成了一个三元组，通过 `_rcin_relu_K` 组合函数统一起来。实例归一化提供全局空间基线，而行归一化与列归一化则以生物学动机注入打破空间对称性的方向先验。这种三重归一化模式取代了标准 ResNet 架构中使用的传统 BatchNormalization → ReLU 范式，是 CDPred [神经网络模型设计](6-neural-network-model-design)的标志性特征。
+
+---
+
+## 外部工具
+
+- [深入解析/外部工具/用于生成 MSA 的 ZComplexMSA](https://zread.ai/BioinfoMachineLearning/CDPred/10-zcomplexmsa-for-msa-generation)
+
+---
+slug:10-zcomplexmsa-for-msa-generation
+blog_type:normal
+---
+
+
+ZComplexMSA 是内嵌于 CDPred 的外部工具，负责生成**复合体级别的多序列比对（MSA）**——这是链间距离预测的关键进化信号输入。与为单一蛋白质链搜索同源序列的单体 MSA 工具不同，ZComplexMSA 通过配对具有生物相互作用证据的跨链同源序列，将比对搜索扩展至**复合体（二聚体）空间**。它通过不同的算法流水线同时支持**同源二聚体**和**异源二聚体**模式，最终生成供 CDPred 神经网络模型使用的 `.a3m` 比对文件。
+
+## 架构概述
+
+ZComplexMSA 采用两阶段架构：**单体比对生成**和**复合体比对组装**。单体阶段使用基于 HMM 的搜索工具（HHblits 或 Jackhmmer）查询序列数据库，而复合体阶段利用物种共现证据配对跨链的已比对序列，并将其拼接为联合 MSA。整个系统由单一入口点 [`run_zcomplexmsa.py`](external_tool/ZComplexMSA/run_zcomplexmsa.py) 统一调度，该入口点根据 `--option` 标志分发至相应的流水线。
+
+```mermaid
+flowchart TB
+    subgraph Entry["Entry Point"]
+        RUN["run_zcomplexmsa.py<br/>--option homodimer|heterodimer"]
+    end
+
+    subgraph MonoPhase["Phase 1: Monomer Alignment Generation"]
+        direction LR
+        HHBLITS["HHBlits<br/>(BFD database)"]
+        JACKHMMER["Jackhmmer<br/>(UniRef90 database)"]
+    end
+
+    subgraph ComplexPhase["Phase 2: Complex Alignment Assembly"]
+        direction TB
+        PARSE["Parse Stockholm<br/>alignments → Alignment objects"]
+        SPECIES["Species_interact<br/>.get_interactions()"]
+        CONCAT["write_concatenated_alignment()<br/>Pair + concatenate sequences"]
+        OUTPUT["Output .a3m files"]
+        PARSE --> SPECIES --> CONCAT --> OUTPUT
+    end
+
+    RUN -->|"homodimer"| HHBLITS
+    RUN -->|"heterodimer"| JACKHMMER
+    HHBLITS -->|"single .a3m"| OUTPUT
+    JACKHMMER -->|"two .sto files"| PARSE
+```
+
+内部库被组织为三个模块化包：`lib/tool/` 封装了外部搜索二进制文件，`lib/monomer_alignment_generation/` 负责比对解析与 I/O 处理，而 `lib/complex_alignment_generation/` 实现了配对与拼接逻辑，这正是 ZComplexMSA 区别于标准单体 MSA 生成器的核心所在。
+
+来源: [run_zcomplexmsa.py](external_tool/ZComplexMSA/run_zcomplexmsa.py#L1-L105), [species_interact.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/species_interact.py#L1-L234)
+
+## 内部模块结构
+
+`run_zcomplexmsa.py` 之下的库被解耦为职责清晰分离的多个模块：
+
+| 模块路径 | 职责 | 关键类/函数 |
+|---|---|---|
+| `lib/tool/hhblits.py` | HHblits 二进制文件的 Python 封装 | `HHBlits` |
+| `lib/tool/jackhmmer.py` | Jackhmmer 二进制文件的 Python 封装 | `Jackhmmer` |
+| `lib/tool/utils.py` | 计时与临时目录上下文管理器 | `timing()`, `tmpdir_manager()` |
+| `lib/monomer_alignment_generation/alignment.py` | 比对解析、一致性计算、格式转换 | `Alignment`, `read_stockholm()`, `read_a3m()`, `write_a3m()` |
+| `lib/monomer_alignment_generation/pipeline.py` | 完整的单体 MSA 流水线（全数据库） | `Monomer_alignment_generation_pipeline` |
+| `lib/complex_alignment_generation/species_interact.py` | 物种共现配对逻辑 | `Species_interact` |
+| `lib/complex_alignment_generation/pipeline.py` | 拼接比对构建与输出 | `write_concatenated_alignment()`, `fused_msa()`, `write_dimer_a3ms()` |
+| `lib/complex_alignment_generation/database/` | 相互作用证据数据库（PDB, STRING, genome） | `uniprot2pdb`, `uniprot2geno`, `uniprot2string` |
+| `lib/common/util.py` | CLI 验证、选项文件解析、目录工具 | `read_option_file()`, `is_file()`, `makedir_if_not_exists()` |
+
+<CgxTip>`HHBlits` 与 `Jackhmmer` 封装器均修改自 AlphaFold2 的数据流水线代码。它们继承了相同的参数默认值与子进程管理模式，从而与 AlphaFold2 的数据库格式及惯例保持兼容。</CgxTip>
+
+来源: [hhblits.py](external_tool/ZComplexMSA/lib/tool/hhblits.py#L1-L137), [jackhmmer.py](external_tool/ZComplexMSA/lib/tool/jackhmmer.py#L1-L132), [alignment.py](external_tool/ZComplexMSA/lib/monomer_alignment_generation/alignment.py#L1-L459), [pipeline.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/pipeline.py#L1-L273)
+
+## 同源二聚体流水线
+
+对于同源二聚体（两条相同链），其复合体 MSA 可简化为标准的**单体 MSA**，因为两条链共享相同的进化史。该流水线仅需对 BFD（Big Fantastic Database）运行 HHblits，并直接返回生成的 `.a3m` 文件——无需进行跨链配对。
+
+```mermaid
+flowchart LR
+    FASTA1["Chain A FASTA"] --> HHBLITS["HHBlits<br/>--n_iter 3<br/>--e_value 0.001<br/>--maxseq 1,000,000"]
+    BFD["BFD Database"] --> HHBLITS
+    HHBLITS --> A3M["ChainA.a3m<br/>(used directly as<br/>complex MSA)"]
+```
+
+`run_zcomplexmsa.py` 中的同源二聚体代码路径极为精简：
+
+```python
+# Homodimer: single HHblits search against BFD
+inparams = [os.path.abspath(args.fasta1), outdir, args.hhblits, params['bfd_database']]
+run_hhblits(inparams)
+```
+
+HHblits 封装器构建了完整的命令行调用，参数包括 `n_iter=3`（三次迭代搜索）、`e_value=0.001`、`maxseq=1_000_000` 及 `n_cpu=4`。输出被直接写入以输入 FASTA 文件主干名命名的 `.a3m` 文件。该文件随后会被 CDPred 的预测流水线作为同源二聚体的复合体 MSA 消费。
+
+来源: [run_zcomplexmsa.py](external_tool/ZComplexMSA/run_zcomplexmsa.py#L58-L62), [hhblits.py](external_tool/ZComplexMSA/lib/tool/hhblits.py#L40-L137)
+
+## 异源二聚体流水线
+
+异源二聚体流水线是 ZComplexMSA 核心创新所在。它通过识别两条单体比对中源自同一生物体（物种共现）的序列来执行**配对 MSA 生成**，随后拼接这些配对序列以构成联合复合体 MSA。此配对过程捕获了两条链间的共进化信号，而这是独立单体搜索无法察觉的。
+
+```mermaid
+flowchart TB
+    FASTA1["Chain A FASTA"] --> JH1["Jackhmmer<br/>vs UniRef90"]
+    FASTA2["Chain B FASTA"] --> JH2["Jackhmmer<br/>vs UniRef90"]
+    JH1 --> STO1["Alignment 1<br/>(Stockholm .sto)"]
+    JH2 --> STO2["Alignment 2<br/>(Stockholm .sto)"]
+
+    subgraph Pairing["Species Co-occurrence Pairing"]
+        PARSE1["Parse Stockholm → Alignment object"]
+        PARSE2["Parse Stockholm → Alignment object"]
+        ANNOT1["Extract species annotation<br/>from sequence headers"]
+        ANNOT2["Extract species annotation<br/>from sequence headers"]
+        MERGE["Inner join on species<br/>→ paired sequence IDs"]
+        PARSE1 --> ANNOT1
+        PARSE2 --> ANNOT2
+        ANNOT1 --> MERGE
+        ANNOT2 --> MERGE
+    end
+
+    STO1 --> PARSE1
+    STO2 --> PARSE2
+
+    MERGE --> CONCAT["Concatenate paired sequences<br/>seq_A + seq_B"]
+    CONCAT --> OUT1["Complex MSA (.a3m)"]
+    CONCAT --> OUT2["Monomer 1 MSA (.a3m)"]
+    CONCAT --> OUT3["Monomer 2 MSA (.a3m)"]
+    CONCAT --> OUT4["Interaction pairs (.csv)"]
+```
+
+### 第 1 步：并行单体搜索
+
+两条链的 FASTA 文件使用 Python 的 `multiprocessing.Pool`（2 个进程）**并行**查询 UniRef90：
+
+```python
+process_list.append([os.path.abspath(args.fasta1), outdir, args.jackhmmer, params['uniref90_fasta']])
+process_list.append([os.path.abspath(args.fasta2), outdir, args.jackhmmer, params['uniref90_fasta']])
+pool = Pool(processes=2)
+results = pool.map(run_jackhmmer, process_list)
+```
+
+每次 Jackhmmer 运行生成一个 Stockholm 格式（`.sto`）的比对文件。Jackhmmer 封装器使用 `n_iter=1`、`e_value=0.0001`、`n_cpu=8`，以及为大规模敏感性调优的预过滤阈值（`F1=0.0005`、`F2=0.00005`、`F3=0.0000005`）。
+
+来源: [run_zcomplexmsa.py](external_tool/ZComplexMSA/run_zcomplexmsa.py#L65-L76), [jackhmmer.py](external_tool/ZComplexMSA/lib/tool/jackhmmer.py#L33-L132)
+
+### 第 2 步：物种共现配对
+
+`Species_interact.get_interactions()` 方法是异源二聚体流水线的算法核心。它对每个比对独立执行三个子步骤，随后合并结果：
+
+**2a. 头部注释提取** — `extract_header_annotation()` 解析 Stockholm 比对中的每个序列头，通过基于正则表达式的拆分提取 UniProt 元数据字段（`OS` = 生物体，`GN` = 基因，`Tax` = 分类单元，`PE` = 存在证据等）。系统会选择 `OS`（生物体）或 `Tax`（分类单元）字段作为物种注释来源，以提供更多非空值的字段为准。
+
+**2b. 旁系同源检测与过滤** — `load_monomer_info()` 鉴定每个物种中最相似的序列（`most_similar_by_organism()`），随后检测**旁系同源物**——与查询序列来自同一物种且一致性低于 0.95 的序列。`filter_best_reciprocal()` 方法移除那些与旁系同源物相似度高于与查询序列相似度的序列，确保仅保留**最佳相互比对**。此举可防止对碰巧共享物种标签的趋异旁系同源物进行错误配对。
+
+**2c. 跨链合并** — `get_interactions()` 对两条链过滤后的最佳比对表执行基于 `species` 列的**内连接**：
+
+```python
+species_intersection = most_similar_in_species_1.merge(
+    most_similar_in_species_2,
+    how="inner",
+    on="species",
+    suffixes=("_1", "_2")
+)
+```
+
+仅有来自对**两条**链均具有同源物的生物体的序列能在此次连接中保留，由此生成驱动拼接操作的配对序列 ID 表（`id_1`，`id_2`）。
+
+来源: [species_interact.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/species_interact.py#L200-L234), [species_interact.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/species_interact.py#L83-L198)
+
+### 第 3 步：拼接比对构建
+
+`write_concatenated_alignment()` 接收配对 ID 表与两个 `Alignment` 对象，随后对每一对 `(id_1, id_2)` 拼接完整的已比对序列：`combined_seq = alignment_1[id_1] + alignment_2[id_2]`。重复的组合序列会被去重。该函数产出四个输出：
+
+| 输出文件 | 格式 | 内容 |
+|---|---|---|
+| `{name1}_{name2}.a3m` | A3M | **复合体 MSA** — 拼接的配对序列（CDPred 的主要输入） |
+| `{name1}_monomer_1.a3m` | A3M | 仅包含配对行的链 1 序列（过滤后的单体视图） |
+| `{name2}_monomer_2.a3m` | A3M | 仅包含配对行的链 2 序列（过滤后的单体视图） |
+| `{name1}_{name2}_interact.csv` | CSV | 配对序列 ID 及比对索引（`id_1`, `id_2`, `index_1`, `index_2`） |
+
+每条配对序列的复合体 MSA 头部遵循 `{header1}_{header2}` 约定，且目标（查询）序列始终为首个条目，其头部为 `{main_id_1}_{main_id_2}`。
+
+<CgxTip>`write_concatenated_alignment()` 中的去重操作检查的是**组合后**的序列字符串（`seq1 + seq2`）而非单个序列，因此产生相同拼接的不同配对会被正确合并——当不同的 UniRef90 簇代表序列共享相同的比对区域时，这一点至关重要。</CgxTip>
+
+来源: [pipeline.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/pipeline.py#L68-L131), [run_zcomplexmsa.py](external_tool/ZComplexMSA/run_zcomplexmsa.py#L78-L105)
+
+## 比对解析：Alignment 类
+
+`lib/monomer_alignment_generation/alignment.py` 中的 `Alignment` 类是贯穿 ZComplexMSA 的通用比对表示。它通过 `from_file()` 类方法支持三种输入格式：
+
+| 格式 | 解析器 | 输出扩展名 | 用例 |
+|---|---|---|---|
+| `stockholm` | `read_stockholm()` | `.sto` | Jackhmmer 输出（异源二聚体） |
+| `a3m` | `read_a3m()` | `.a3m` | HHblits 输出（同源二聚体） |
+| `fasta` | `read_fasta()` | `.fasta` | 原始序列输入 |
+
+`Alignment` 对象的关键属性包括：`main_id` 与 `main_seq`（查询序列）、`ids` 与 `seqs`（命中序列）、`headers`（含注释的完整头部）、`id_to_index`（查找字典）、`matrix`（numpy 字符矩阵）以及 `annotation`（Stockholm GF/GC/GS/GR 特征）。`identities_to()` 方法计算每条序列相对于目标序列的一致性，此方法驱动了 `Species_interact` 中的旁系同源检测与最佳相互比对过滤。
+
+`read_stockholm()` 解析器会剥离查询序列中存在的空位列，确保比对中的所有序列具有相同的有效长度——这是异源二聚体流水线中正确执行拼接的先决条件。
+
+来源: [alignment.py](external_tool/ZComplexMSA/lib/monomer_alignment_generation/alignment.py#L240-L380), [alignment.py](external_tool/ZComplexMSA/lib/monomer_alignment_generation/alignment.py#L84-L200)
+
+## 数据库需求与配置
+
+ZComplexMSA 依赖外部序列数据库，这些数据库必须单独下载与配置。数据库路径在**数据库选项文件**中指定（通过 `--option_file` 引用），该文件采用由 `read_option_file()` 解析的简单 `key = value` 格式。
+
+| 数据库 | 适用模式 | 下载来源 | 选项文件键 |
+|---|---|---|---|
+| BFD | 同源二聚体 | [bfd.mmseqs.com](https://bfd.mmseqs.com/) | `bfd_database` |
+| UniRef90 | 异源二聚体 | `ftp.uniprot.org/pub/databases/uniprot/uniref/uniref90/` | `uniref90_fasta` |
+| UniProt2PDB | 异源二聚体（PDB 相互作用证据） | 以 `uniprot2pdb.tar.xz` 捆绑提供 | `uniprot2pdb_dir`, `uniprot2pdb_mapping_file`, `dimers_list` |
+
+`db_option` 文件格式示例：
+
+```
+bfd_database = /path/to/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt
+uniref90_fasta = /path/to/uniref90/uniref90.fasta
+uniprot2pdb_dir = /path/to/uniprot2pdb
+uniprot2pdb_mapping_file = /path/to/uniprot2pdb/uniprot2pdb.map
+dimers_list = /path/to/uniprot2pdb/dimers_cm.list
+```
+
+`external_tool/ZComplexMSA/database/` 目录下捆绑的 `uniprot2pdb.tar.xz` 归档文件提供了预计算的 UniProt 到 PDB 的映射，这些映射编码了已知的复合体结构——这是物种共现之外额外的相互作用证据来源。
+
+来源: [README.md](external_tool/ZComplexMSA/README.md#L1-L58), [util.py](external_tool/ZComplexMSA/lib/common/util.py#L96-L110)
+
+## 环境配置
+
+ZComplexMSA 运行于具有特定生物信息学工具版本的专用 Conda 环境中：
+
+```bash
+conda create -p ./env/ -c conda-forge -c bioconda hhsuite python==3.8
+conda activate ./env/
+conda install -y -c bioconda hmmer==3.3.2 hhsuite==3.3.0
+pip install -r requirments.txt
+```
+
+Python 依赖项精简且聚焦：
+
+| 包 | 版本 | 用途 |
+|---|---|---|
+| `biopython` | 1.79 | 序列/生物信息学工具 |
+| `numpy` | 1.22.3 | 比对矩阵运算 |
+| `pandas` | 4.4.1 | 用于注释表与相互作用对的 DataFrames |
+| `tqdm` | 4.63.1 | 长时间数据库操作的进度条 |
+| `absl-py` | 1.0.0 | 日志记录（继承自 AlphaFold2 封装器） |
+
+HHblits 与 Jackhmmer 二进制文件默认位于 `{ZComplexMSA_root}/env/bin/hhblits` 与 `{ZComplexMSA_root}/env/bin/jackhmmer`，但可通过 `--hhblits` 与 `--jackhmmer` 命令行参数进行覆盖。
+
+来源: [README.md](external_tool/ZComplexMSA/README.md#L3-L10), [requirments.txt](external_tool/ZComplexMSA/requirments.txt#L1-L5), [run_zcomplexmsa.py](external_tool/ZComplexMSA/run_zcomplexmsa.py#L43-L48)
+
+## 命令行接口
+
+入口点 `run_zcomplexmsa.py` 暴露了以下参数：
+
+| 参数 | 必需 | 默认值 | 描述 |
+|---|---|---|---|
+| `--option_file` | 是 | — | 数据库配置文件路径 |
+| `--fasta1` | 是 | — | 链 A 的 FASTA 文件 |
+| `--fasta2` | 否（仅限异源二聚体） | `None` | 链 B 的 FASTA 文件 |
+| `--outdir` | 是 | — | 比对文件的输出目录 |
+| `--option` | 是 | — | `homodimer` 或 `heterodimer` |
+| `--hhblits` | 否 | `{root}/env/bin/hhblits` | HHblits 二进制文件路径 |
+| `--jackhmmer` | 否 | `{root}/env/bin/jackhmmer` | Jackhmmer 二进制文件路径 |
+
+### 同源二聚体示例
+
+```bash
+python run_zcomplexmsa.py \
+  --option_file ./bin/db_option \
+  --fasta1 ./test/homo/2FDOA.fasta \
+  --outdir ./test/homo \
+  --option homodimer
+```
+
+此命令将生成包含基于 BFD 的单体 MSA 的 `./test/homo/2FDOA.a3m`。
+
+### 异源二聚体示例
+
+```bash
+python run_zcomplexmsa.py \
+  --option_file ./bin/db_option \
+  --fasta1 ./test/hetero/1AWCA.fasta \
+  --fasta2 ./test/hetero/1AWCB.fasta \
+  --outdir ./test/hetero \
+  --option heterodimer
+```
+
+此命令将生成四个文件：`1AWCA_1AWCB.a3m`（复合体 MSA）、`1AWCA_monomer_1.a3m`、`1AWCB_monomer_2.a3m` 以及 `1AWCA_1AWCB_interact.csv`。
+
+来源: [run_zcomplexmsa.py](external_tool/ZComplexMSA/run_zcomplexmsa.py#L38-L55), [README.md](external_tool/ZComplexMSA/README.md#L28-L58)
+
+## 与 CDPred 流水线的集成
+
+当未提供预计算的 `.a3m` 文件时，CDPred 的 shell 编排脚本会自动调用 ZComplexMSA。在 [`run_CDFold.sh`](external_tool/run_CDFold.sh) 中的集成遵循以下模式：
+
+```mermaid
+flowchart LR
+    PDB["Monomer PDB files"] --> SEQ["Extract sequences<br/>→ .fasta files"]
+    SEQ --> ZCM["ZComplexMSA<br/>→ .a3m complex MSA"]
+    CDPRED["CDPred Model_predict.py<br/>→ distance prediction"] --> GDFOLD["GDFold docking<br/>→ 3D complex structure"]
+```
+
+具体而言，shell 脚本执行以下操作：
+1. 使用 `pdb_process.py` 从输入 PDB 文件中提取 FASTA 序列
+2. 激活 ZComplexMSA Conda 环境
+3. 使用适当的 `--option`（homodimer 或 heterodimer）运行 `run_zcomplexmsa.py`
+4. 停用 ZComplexMSA 环境并激活 CDPred 环境
+5. 通过 `-a` 标志将生成的 `.a3m` 文件传递给 `Model_predict.py`
+
+多聚体编排脚本 [`run_CDFold_multimer.sh`](external_tool/run_CDFold_multimer.sh) 扩展了此模式，通过使用后台 shell 进程（`&` + `wait`）对化学计量解析器识别出的所有同源与异源子复合体**并行**运行 ZComplexMSA。
+
+来源: [run_CDFold.sh](external_tool/run_CDFold.sh#L56-L95), [run_CDFold_multimer.sh](external_tool/run_CDFold_multimer.sh#L56-L105)
+
+## 相互作用证据数据库模块
+
+除了主要的物种共现方法，ZComplexMSA 还在 `lib/complex_alignment_generation/database/` 中附带三个额外的相互作用证据数据库构建器，尽管它们在默认的 `run_zcomplexmsa.py` 入口点中**未被激活**：
+
+| 模块 | 证据来源 | 关键方法 | 状态 |
+|---|---|---|---|
+| `uniprot2pdb.py` | 已知 PDB 复合体结构 | `uniprot2pdb.update()` | 可用但不在默认流水线中 |
+| `uniprot2geno.py` | 基因组邻近性（ENA/EMBL CDS 位置） | `uniprot2geno.update()` | 可用但不在默认流水线中 |
+| `uniprot2string.py` | STRING 数据库蛋白质-蛋白质相互作用 | `uniprot2string.update()` | 可用但不在默认流水线中 |
+
+这些模块生成预处理映射文件（UniProt→PDB、UniProt→基因组坐标、STRING→UniProt），可通过结构或功能相互作用证据增强物种共现配对。`pipeline.py` 中的 `Complex_alignment_concatenation_pipeline` 类支持通过 `concatenate_methods` 配置参数插入这些额外方法，该参数接受逗号分隔的列表（例如，`species_interact,pdb_interact,string_interact`）。
+
+来源: [uniprot2pdb.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/database/uniprot2pdb.py#L1-L120), [uniprot2geno.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/database/uniprot2geno.py#L1-L122), [uniprot2string.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/database/uniprot2string.py#L1-L70), [pipeline.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/pipeline.py#L200-L273)
+
+## 流水线对比：同源二聚体 vs 异源二聚体
+
+| 方面 | 同源二聚体 | 异源二聚体 |
+|---|---|---|
+| **输入** | 1 个 FASTA 文件（`--fasta1`） | 2 个 FASTA 文件（`--fasta1`, `--fasta2`） |
+| **搜索工具** | HHblits | Jackhmmer（并行，2 个进程） |
+| **数据库** | BFD | UniRef90 |
+| **输出格式** | A3M（直接来自 HHblits） | Stockholm → 解析 → 拼接的 A3M |
+| **配对逻辑** | 无（链相同） | 物种共现 + 最佳相互比对 |
+| **旁系同源过滤** | 不应用 | 应用（一致性阈值 0.95） |
+| **输出文件** | 1（`.a3m`） | 4（复合体 `.a3m`，2 个单体 `.a3m`，1 个 `.csv`） |
+| **共进化信号** | 隐式（两条链使用相同 MSA） | 显式（跨链配对序列） |
+
+根本洞见在于，对于同源二聚体，单体 MSA **即是**复合体 MSA，因为两条链共享完全相同的进化约束。而对于异源二聚体，复合体 MSA 必须通过配对两个独立比对中的序列来**构建**，此配对的质量直接决定了 CDPred 用于距离预测的链间共进化信号的强度。
+
+来源: [run_zcomplexmsa.py](external_tool/ZComplexMSA/run_zcomplexmsa.py#L56-L105), [species_interact.py](external_tool/ZComplexMSA/lib/complex_alignment_generation/species_interact.py#L95-L198)
+
+## 下一步
+
+通过 ZComplexMSA 生成复合体 MSA 后，流水线将继续使用 GDFold 进行结构对接。请继续阅读 [GDFold for Structure Docking](11-gdfold-for-structure-docking) 以了解预测的距离图谱如何转换为 3D 复合体结构。有关 MSA 特征如何馈入神经网络的更广泛背景，请参阅 [Feature Generation](5-feature-generation) 与 [Prediction Workflow](7-prediction-workflow)。
+
+---
+
+- [深入解析/外部工具/用于结构对接的 GDFold](https://zread.ai/BioinfoMachineLearning/CDPred/11-gdfold-for-structure-docking)
+
+---
+slug:11-gdfold-for-structure-docking
+blog_type:normal
+---
+
+
+GDFold 是集成到 CDPred 中作为外部工具的**梯度下降对接引擎**。它基于 **PyRosetta** 构建，通过受约束的刚体对接，将 CDPred 预测的链间距离或接触图转化为原子分辨率的复合物结构。GDFold 支持**二聚体**和**多聚体**复合物，并提供两种约束模式——基于接触的（`BoundFunc`）和基于距离的（`GaussianFunc`），其中基于距离的变体是 CDPred 流程中的默认选项。
+
+## 架构及在 CDPred 中的作用
+
+GDFold 占据 CDPred 流程的最后阶段。CDPred 的神经网络首先预测链间距离图（存储为 `.rr` 文件），GDFold 消耗这些预测结果以及单链 PDB 结构，在空间约束下通过 Rosetta 的对接协议组装出完整的复合物。该关系可概括为：
+
+```
+单链 PDB + 预测距离图 (.rr)  →  GDFold  →  Top-5 复合物模型 (.pdb)
+```
+
+下图展示了 GDFold 在更广泛的 CDPred 工作流程中的位置：
+
+```mermaid
+flowchart LR
+    A[单链 PDB] --> C[GDFold]
+    B[CDPred 距离<br/>预测 .rr] --> C
+    C --> D{二聚体或<br/>多聚体?}
+    D -->|二聚体| E[docking_new_dist.py]
+    D -->|多聚体| F[docking_gd_parallel_<br/>multi_dist.py]
+    E --> G[Top-5 排名<br/>复合物 PDB]
+    F --> H[已收敛的<br/>复合物 PDB]
+```
+
+来源：[run_CDFold.sh](/external_tool/run_CDFold.sh#L130-L152)，[run_CDFold_multimer.sh](/external_tool/run_CDFold_multimer.sh#L163-L192)
+
+## 脚本清单与分类
+
+GDFold 的 `scripts/` 目录包含 15 个文件，分为三个功能层级：
+
+| 层级 | 脚本 | 用途 | 调用方 |
+|------|--------|---------|------------|
+| **核心对接** | `docking_new.py` | 基于**接触**约束的二聚体对接 | 手动 / 自定义脚本 |
+| | `docking_new_dist.py` | 基于**距离**约束的二聚体对接 | `run_CDFold.sh` |
+| | `docking_gd_parallel.py` | GD 并行二聚体对接（接触） | 手动 |
+| | `docking_gd_parallel_dist.py` | GD 并行二聚体对接（距离） | 手动 |
+| | `docking_gd_parallel_multi.py` | 多聚体对接（接触） | 手动 |
+| | `docking_gd_parallel_multi_dist.py` | 多聚体对接（距离） | `run_CDFold_multimer.sh` |
+| **实用工具** | `utils.py` | 旋转/平移矩阵，PDB 操作 | 所有核心脚本 |
+| | `talaris2013.wts` | Rosetta 评分函数权重 | 所有核心脚本 |
+| **预处理** | `prepare_initial_pdbs.py` | 批量初始 PDB 准备 | 离线 |
+| | `rotate_translate_pdbs.py` | 通过 PyMOL 随机化链位置 | `prepare_initial_pdbs.py` |
+| | `append_pdbs.py` | 将两个链的 PDB 合并为一个文件 | 离线 |
+| | `prepare_pdbs.py` | PDB 预处理 | 离线 |
+| **提取** | `extract_contact.py` | 从天然 PDB 提取接触图 | 基准测试 |
+| | `extract_distance.py` | 从天然 PDB 提取距离图 | 基准测试 |
+| | `extract_targets.py` | 提取目标信息 | 基准测试 |
+
+来源：[ReadMe.md](/external_tool/GDFold/scripts/ReadMe.md#L1-L47)，[utils.py](/external_tool/GDFold/scripts/utils.py#L1-L136)
+
+## 约束机制：接触与距离
+
+这两种约束模式在如何将 `.rr` 预测文件中的空间信息编码到 Rosetta 的约束系统方面有着根本的区别。
+
+### 基于接触的约束（`docking_new.py`）
+
+基于接触的对接读取 `.rr` 文件，其每行格式为 `res_x res_y lb up probability`。它应用 **`BoundFunc`** 约束，强制残基对位于 `[lb, up]` 距离边界内。`probability > threshold` 的残基对获得严格的边界；低概率对的边界上限等于蛋白质直径（实际上从上方不受约束）。`setResFilebyTopNum` 函数可以在对接前进一步筛选前 N 个或前 L/k 个约束。
+
+### 基于距离的约束（`docking_new_dist.py`）
+
+基于距离的对接读取 `.rr` 文件，其每行格式为 `res_x res_y distance`（从第 4 行开始）。它应用 **`GaussianFunc`** 约束，其中 `mean=predicted_distance` 且 `sd=0.1`，在预测的残基间距离周围创建严格的高斯惩罚。只有 `distance ≤ threshold`（默认 12Å）的残基对才会被约束——该阈值作为一个截断值，排除长程预测对对接的影响。
+
+| 属性 | 接触模式 | 距离模式 |
+|----------|-------------|---------------|
+| 约束函数 | `BoundFunc(lb, up, sd, tag)` | `GaussianFunc(mean, sd=0.1)` |
+| `.rr` 格式 | `res_x res_y lb up prob` | `res_x res_y distance` |
+| 数据起始行 | 第 2 行 | 第 4 行 |
+| 过滤方式 | 按概率阈值 + top-N 选择 | 按距离阈值（`≤ thre`） |
+| 默认阈值 | 0.000001（概率） | 12（Å，距离） |
+| 原子参考 | CB（GLY 为 CA） | CB（GLY 为 CA） |
+| CDPred 使用 | 否（手动） | **是**（默认） |
+
+<CgxTip>距离阈值（`-d` 标志，默认 12Å）是对 GDFold 质量影响最大的单一参数。较低的值会产生更严格、更局部的约束，但可能会遗漏长程链间接触；较高的值会包含更多约束，但会引入来自低置信度长程预测的噪声。</CgxTip>
+
+来源：[docking_new.py](/external_tool/GDFold/scripts/docking_new.py#L80-L140)，[docking_new_dist.py](/external_tool/GDFold/scripts/docking_new_dist.py#L80-L145)
+
+## 二聚体对接流程
+
+由 `run_CDFold.sh` 调用的二聚体对接流程，遵循从链准备到模型排名的明确序列：
+
+```mermaid
+flowchart TD
+    A[输入: 2 个单链 PDB + .rr 文件] --> B[链分配<br/>从目标名称提取链 ID]
+    B --> C[PDB 合并<br/>add_chain + append_pdbs]
+    C --> D[随机初始化<br/>40× 随机旋转 + 随机平移]
+    D --> E[约束注入<br/>为每个预测对添加 GaussianFunc]
+    E --> F[蒙特卡洛对接<br/>100 个独立作业]
+    F --> G[低分辨率对接<br/>质心模式 + DockingLowRes]
+    G --> H[高分辨率对接<br/>全原子 + DockMCMProtocol]
+    H --> I[基于评分的排名<br/>解析 .fasc 输出]
+    I --> J[输出: top_5_models/<br/>model1-5.pdb]
+```
+
+### 步骤 1：链分配与 PDB 合并
+
+从目标名称中提取链 ID（例如，`T1084A_T1084B` 产生链 A 和 B）。每个单链 PDB 通过 `add_chain()` 重新标记以分配正确的链标识符，然后通过带有 `TER` 分隔符的 `append_pdbs()` 合并为一个多链 PDB。
+
+### 步骤 2：随机初始化
+
+在对接之前，第一条链会经历强烈的随机化：围绕所有三个轴进行 40 次随机旋转（每个轴 0–360°），随后沿每个轴进行随机平移（0–60 Å）。这确保了两条链从**解耦的空间构型**开始，防止 Rosetta 的对接陷入初始放置附近的局部极小值。
+
+### 步骤 3：约束注入
+
+`add_cons_to_pose()` 函数读取 `.rr` 预测文件，按距离阈值过滤残基对，并在两条链之间的 CB 原子（甘氨酸残基为 CA 原子）上附加 `GaussianFunc` 原子对约束。这些约束被添加到 Rosetta 姿态的约束集中。
+
+### 步骤 4：蒙特卡洛对接（100 个作业）
+
+Rosetta 的 `PyJobDistributor` 运行 100 个独立的对接轨迹。每个轨迹遵循相同的协议：
+
+1. **切换至质心**表示（`SwitchResidueTypeSetMover`）
+2. **设置折叠树**用于链伴侣之间的刚体对接
+3. **随机化**上游和下游伴侣方向（`RigidBodyRandomizeMover`）
+4. **扰动**刚体位置（`RigidBodyPerturbMover`，40° 旋转，20 Å 平移）
+5. **滑入接触**（`DockingSlideIntoContact`）
+6. **低分辨率对接**（带有 `interchain_cen` + 约束的 `DockingLowRes`）
+7. **切换至全原子**表示
+8. **高分辨率对接**（带有 `docking_min` + 约束的 `DockMCMProtocol`）
+
+### 步骤 5：基于评分的模型选择
+
+所有 100 个作业完成后，GDFold 解析 `.fasc` 评分文件，按总分对诱饵进行排名，并将前 5 个模型复制到 `top_5_models/model1-5.pdb`。最佳模型也会被单独保存为 `{target_name}_predicted.pdb`。中间诱饵和评分文件将被清理。
+
+来源：[docking_new_dist.py](/external_tool/GDFold/scripts/docking_new_dist.py#L34-L322)，[utils.py](/external_tool/GDFold/scripts/utils.py#L26-L95)
+
+## 多聚体对接流程
+
+多聚体流程——通过 `run_CDFold_multimer.sh` 调用 `docking_gd_parallel_multi_dist.py` 运行——通过在所有链对上进行**迭代梯度下降收敛**，扩展了二聚体的方法。
+
+### 与二聚体对接的关键区别
+
+| 方面 | 二聚体 | 多聚体 |
+|--------|-------|----------|
+| 入口脚本 | `docking_new_dist.py` | `docking_gd_parallel_multi_dist.py` |
+| 链数量 | 2 | N（任意） |
+| 约束 `.rr` 格式 | `res_x res_y distance` | `chain_i chain_j res_x res_y distance` |
+| 对接策略 | 单次 100 作业 MC 运行 | 跨伴侣对的**迭代 GD** |
+| 每次迭代作业数 | 100 | 50 |
+| 收敛条件 | 无 | 周期之间 RMSD ≤ 0.1 Å |
+| 最大周期数 | 无 | 100 |
+| 最小化 | 通过 DockMCMProtocol | 显式 `MinMover`（lbfgs，1000 迭代 × 3 重复） |
+| 输出 | `top_5_models/` | `{target}_GD.pdb` + `top_5_models/` |
+
+### 迭代梯度下降收敛
+
+多聚体对接循环构建所有成对的伴侣组合（例如，对于链 A、B、C、D → `A_BCD`、`B_ACD`、`C_ABD`、`D_ABC`）。每个周期迭代每个伴侣对，每对执行一次完整的 50 作业对接运行。在每个周期之后，计算当前最佳模型与先前最佳模型之间的 CA-RMSD。如果 RMSD ≤ 0.1 Å，则结构已收敛并提前终止循环；否则，继续运行最多 100 个周期。
+
+```python
+for epoch in range(100):
+    # 保存先前最佳模型
+    cp {target}_GD.pdb → {target}_GD_prev.pdb
+    # 对每个伴侣对进行对接
+    for partners in partner_chains:
+        do_dock(initial_start, res_path, OUT, weight_file, partners)
+    # 检查收敛
+    rmsd = CA_rmsd(current_pose, previous_pose)
+    if rmsd <= 0.1:
+        break
+```
+
+### 多聚体特有的约束格式
+
+多聚体 `.rr` 文件使用从第 4 行开始的 5 列格式：`chain_index_i chain_index_j res_x res_y distance`。链索引通过字典（`{1: 'A', 2: 'B', ...}`）映射到链字母，从而允许约束跨越复合物内的任意链对。
+
+来源：[docking_gd_parallel_multi_dist.py](/external_tool/GDFold/scripts/docking_gd_parallel_multi_dist.py#L1-L409)，[run_CDFold_multimer.sh](/external_tool/run_CDFold_multimer.sh#L163-L192)
+
+## 与 CDPred Shell 脚本的集成
+
+GDFold 在预测阶段完成后由 CDPred 的封装脚本自动调用。集成通过命令行参数进行配置：
+
+### 二聚体调用（`run_CDFold.sh`）
+
+```bash
+python $workdir/external_tool/GDFold/scripts/docking_new_dist.py \
+    $name \                      # 目标名称（如 T1084A_T1084B）
+    $pdb_file_list \             # 以空格分隔的单链 PDB 路径
+    $rr_file \                   # 预测距离 .rr 文件
+    $fold_outdir \               # 输出目录 (models/)
+    $weight_file \               # Rosetta 权重 (talaris2013.wts)
+    $dist_thred                  # 距离阈值（默认：12）
+```
+
+对于同源二聚体，如果仅提供一个 PDB，脚本会自动复制它（`pdb_file_list="$pdb_file_list $pdb_file_list"`）。
+
+来源：[run_CDFold.sh](/external_tool/run_CDFold.sh#L130-L152)
+
+### 多聚体调用（`run_CDFold_multimer.sh`）
+
+```bash
+python $workdir/external_tool/GDFold/scripts/docking_gd_parallel_multi_dist.py \
+    $name \                      # 目标名称
+    ${#pdb_file_arr[@]} \        # 链数量
+    $pdb_file_list \             # 所有单链 PDB 路径
+    $rr_file \                   # 合并的多聚体距离 .rr 文件
+    $fold_outdir \               # 输出目录
+    $weight_file \               # Rosetta 权重
+    $dist_thred                  # 距离阈值（默认：12）
+```
+
+多聚体 `.rr` 文件由 `lib/generate_multimer_rr.py` 生成，该脚本将单独的成对预测合并为带有链索引的多聚体专用格式。
+
+来源：[run_CDFold_multimer.sh](/external_tool/run_CDFold_multimer.sh#L163-L192)
+
+## 实用工具模块：几何操作
+
+`utils.py` 模块提供了所有对接脚本所依赖的几何基元：
+
+| 函数 | 用途 | 实现 |
+|----------|---------|----------------|
+| `add_chain(pdb_file, letter)` | 重新分配 PDB 中的链 ID | 重写 ATOM 记录的第 22 列 |
+| `append_pdbs(pdb1, pdb2)` | 使用 TER 分隔符合并两个 PDB | 过滤 ATOM 行，插入 TER/END |
+| `append_multi_pdbs(pdb_files)` | 合并 N 个 PDB | `append_pdbs` 逻辑的迭代扩展 |
+| `get_rotation_matrix(axis, degree)` | x/y/z 轴的 3×3 旋转矩阵 | 标准罗德里格斯旋转公式 |
+| `rotatePose(pose, R)` | 对链 1 原子应用旋转 | 对 xyz 坐标进行矩阵乘法 |
+| `translatePose(pose, t)` | 对链 1 原子应用平移 | 对 xyz 坐标进行向量加法 |
+| `setResFilebyTopNum(in, out, n)` | 过滤 top-N 约束 | 将超出 N 的约束概率置零 |
+
+<CgxTip>`rotatePose` 和 `translatePose` 函数仅变换**链 1** 的原子（`chain_begin(1)` 至 `chain_end(1)`）。链 2 作为参考系保持固定。这对于理解随机初始化至关重要：只有一条链被随机化，而另一条链作为空间锚点。</CgxTip>
+
+来源：[utils.py](/external_tool/GDFold/scripts/utils.py#L1-L136)
+
+## Rosetta 评分函数配置
+
+GDFold 使用 **`talaris2013`** 权重集作为其基础评分函数，并显式设置了 `atom_pair_constraint` 权重。约束权重因对接模式而异：
+
+| 对接阶段 | 评分函数 | 约束权重 |
+|---------------|--------------|-------------------|
+| 二聚体全原子（`docking_new_dist.py`） | `talaris2013` + 约束 | 1.0 |
+| 二聚体低分辨率 | `interchain_cen` + 约束 | 1.0 |
+| 二聚体高分辨率 | `docking_min` + 约束 | 1.0 |
+| GD 并行全原子（`docking_gd_parallel_dist.py`） | `talaris2013` + 约束 | **5.0** |
+| GD 并行低分辨率 | `interchain_cen` + 约束 | 1.0 |
+| GD 并行高分辨率 | `docking_min` + 约束 | 1.0 |
+| 多聚体全原子（`docking_gd_parallel_multi_dist.py`） | `talaris2013` + 约束 | **5.0** |
+
+GD 并行和多聚体变体在全原子评分函数上使用了**5 倍更强的约束权重**，反映出在迭代最小化过程中需要更严格地遵循预测距离。
+
+来源：[docking_new_dist.py](/external_tool/GDFold/scripts/docking_new_dist.py#L202-L220)，[docking_gd_parallel_dist.py](/external_tool/GDFold/scripts/docking_gd_parallel_dist.py#L134-L155)，[docking_gd_parallel_multi_dist.py](/external_tool/GDFold/scripts/docking_gd_parallel_multi_dist.py#L212-L230)
+
+## 输出结构
+
+GDFold 完成后，输出目录包含：
+
+| 路径 | 内容 | 生成方 |
+|------|---------|-------------|
+| `models/top_5_models/model1.pdb` | 最佳评分复合物结构 | 所有对接脚本 |
+| `models/top_5_models/model2-5.pdb` | 第 2–5 佳结构 | 所有对接脚本 |
+| `models/{name}_predicted.pdb` | 最佳模型副本（二聚体） | `docking_new_dist.py` |
+| `models/{name}_GD.pdb` | 最佳模型（GD 并行/多聚体） | `docking_gd_parallel_*.py` |
+
+中间文件（`.fasc` 评分文件、每个作业的诱饵 PDB、`score.txt`）在 top-5 选择后会被自动清理。
+
+来源：[docking_new_dist.py](/external_tool/GDFold/scripts/docking_new_dist.py#L268-L322)，[docking_gd_parallel_multi_dist.py](/external_tool/GDFold/scripts/docking_gd_parallel_multi_dist.py#L300-L395)
+
+## 命令行参考
+
+### 二聚体对接（距离模式）
+
+```
+python docking_new_dist.py <target_name> <pdb1> <pdb2> <rr_file> <output_dir> <weight_file> <dist_threshold>
+```
+
+| 参数 | 描述 | 示例 |
+|-----------|-------------|---------|
+| `target_name` | 目标标识符（如 `T0965A_T0965B`） | `T1084A_T1084B` |
+| `pdb1` | 第一个单链 PDB 的路径 | `chains/T1084A.pdb` |
+| `pdb2` | 第二个单链 PDB 的路径 | `chains/T1084B.pdb` |
+| `rr_file` | 预测距离约束文件 | `T1084A_T1084B_dist.rr` |
+| `output_dir` | 模型输出目录 | `./models/` |
+| `weight_file` | Rosetta 权重文件 | `talaris2013.wts` |
+| `dist_threshold` | 距离截断值（Å） | `12` |
+
+### 多聚体对接（距离模式）
+
+```
+python docking_gd_parallel_multi_dist.py <target_name> <num_chains> <pdb1> <pdb2> ... <pdbN> <rr_file> <output_dir> <weight_file> <dist_threshold>
+```
+
+| 参数 | 描述 | 示例 |
+|-----------|-------------|---------|
+| `target_name` | 目标标识符 | `T1034` |
+| `num_chains` | 链数量 | `4` |
+| `pdb1..pdbN` | N 个单链 PDB 的路径 | `T1034A.pdb T1034B.pdb ...` |
+| `rr_file` | 多聚体距离约束文件 | `T1034_dist.rr` |
+| `output_dir` | 模型输出目录 | `./models/` |
+| `weight_file` | Rosetta 权重文件 | `talaris2013.wts` |
+| `dist_threshold` | 距离截断值（Å） | `12` |
+
+来源：[ReadMe.md](/external_tool/GDFold/scripts/ReadMe.md#L1-L47)，[run_CDFold.sh](/external_tool/run_CDFold.sh#L35-L56)，[run_CDFold_multimer.sh](/external_tool/run_CDFold_multimer.sh#L12-L28)
+
+## 依赖项：PyRosetta
+
+GDFold 需要 **PyRosetta**（Rosetta 大分子建模套件的 Python 绑定）。每个核心对接脚本都在模块级别从 `pyrosetta` 和 `rosetta` 导入，并调用 `init()` 来初始化 Rosetta 引擎。使用的关键 Rosetta 组件包括：
+
+- **`pyrosetta.pose_from_pdb`** — 将 PDB 结构加载为 Rosetta 姿态
+- **`DockingSlideIntoContact`** — 平移链直到它们接触
+- **`RigidBodyPerturbMover`** / **`RigidBodyRandomizeMover`** — 刚体扰动
+- **`DockingLowRes`** — 粗粒化（质心）对接
+- **`DockMCMProtocol`** — 全原子蒙特卡洛最小化对接
+- **`MinMover`** — 基于 LBFGS 的能量最小化
+- **`FastRelax`** — Rosetta 弛豫协议
+- **`PyJobDistributor`** — 并行作业管理和诱饵输出
+- **`GaussianFunc`** / **`BoundFunc`** — 约束泛函形式
+- **`AtomPairConstraint`** — 原子间距离约束
+
+来源：[docking_new_dist.py](/external_tool/GDFold/scripts/docking_new_dist.py#L15-L22)，[docking_gd_parallel_multi_dist.py](/external_tool/GDFold/scripts/docking_gd_parallel_multi_dist.py#L15-L26)
+
+---
+
+**下一步**：要了解输入到 GDFold 的距离预测文件，请参见[预测工作流](7-prediction-workflow)。有关 GDFold 生成的输出格式的详细信息，请参见[输出文件与格式](12-output-files-and-formats)。要了解完整流程如何协调 CDPred 预测与 GDFold 对接，请参见[快速开始](2-quick-start)。
+
+---
