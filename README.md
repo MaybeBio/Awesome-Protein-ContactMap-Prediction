@@ -698,7 +698,17 @@ A curated collection of computational tools for `intermolecular interaction pred
 </details>
 
 ---
-https://www.nature.com/articles/s41467-026-69172-y
+
+<details>
+<summary>bAIes</summary>
+
+> bAIes, a Bayesian framework that integrates AlphaFold2 predictions with physico-chemical molecular mechanics force fields to generate accurate atomic-resolution ensembles of IDPs
+
+- **Paper:** [Atomic resolution ensembles of intrinsically disordered proteins with Alphafold](https://www.nature.com/articles/s41467-026-69172-y) (Nature Communications, 2026)
+- **Docs:** [Read more →](docs/bAIes/) *to be written*
+- **Code:**  https://github.com/COSBlab/bAIes-IDP | https://github.com/plumed/plumed2
+- **Approach:** DL
+</details>
 
 
 
@@ -708,7 +718,6 @@ https://www.nature.com/articles/s41467-026-69172-y
 <!-- PLACEHOLDER: multi-chain trRosetta variant -->
 <!-- PLACEHOLDER: ESM-2 / pLM fine-tuned contact-map variant (preprint) -->
 
----
 
 ### C. IDR-specific
 
