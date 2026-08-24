@@ -642,6 +642,16 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Approach:** DL
 </details>
 
+---
+
+<details>
+<summary>CDPred</summary>
+
+- **Paper:** [Prediction of inter-chain distance maps of protein complexes with 2D attention-based deep neural networks](https://www.nature.com/articles/s41467-022-34600-2) (Nature Communications, 2022)
+- **Docs:** [Read more →](docs/CDPred/) *to be written*
+- **Code:** https://github.com/BioinfoMachineLearning/CDPred
+- **Approach:** DL
+</details>
 
 --- 
 
