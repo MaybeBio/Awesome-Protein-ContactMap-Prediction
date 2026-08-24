@@ -1,0 +1,40 @@
+# COSBlab/bAIes-IDP
+
+Source: https://zread.ai/COSBlab/bAIes-IDP
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速上手](2-quick-start.md)
+- [入门/软硬件要求](3-software-and-hardware-requirements.md)
+
+## 深入探究
+
+- [深入探究/流水线架构](4-pipeline-architecture.md)
+- [深入探究/LAMMPS CMAP 补丁](15-lammps-cmap-patch.md)
+- [深入探究/模拟参数调优](16-simulation-parameter-tuning.md)
+### 预处理工作流
+
+- [深入探究/预处理工作流/距离矩阵读取与拟合](5-distogram-reading-and-fitting.md)
+- [深入探究/预处理工作流/PLUMED 文件生成](6-plumed-file-generation.md)
+
+### 力场转换
+
+- [深入探究/力场转换/GROMACS 到 LAMMPS 的转换](7-gromacs-to-lammps-conversion.md)
+- [深入探究/力场转换/CMAP 校正图](8-cmap-correction-maps.md)
+
+### 模拟设置
+
+- [深入探究/模拟设置/bAIes 系综模拟](9-baies-ensemble-simulations.md)
+- [深入探究/模拟设置/无规卷曲模拟](10-random-coil-simulations.md)
+
+### 输入数据与参数
+
+- [深入探究/输入数据与参数/AlphaFold-2 与 ColabFold 输入](11-alphafold-2-and-colabfold-inputs.md)
+- [深入探究/输入数据与参数/残基对截断矩阵](12-residue-pair-cutoff-matrix.md)
+
+### 基准测试与验证
+
+- [深入探究/基准测试与验证/基准蛋白质系统](13-benchmark-protein-systems.md)
+- [深入探究/基准测试与验证/bAIes 对比 bAIes-N 对比 Coil](14-baies-vs-baies-n-vs-coil.md)
+

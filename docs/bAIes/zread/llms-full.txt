@@ -1,0 +1,3141 @@
+# COSBlab/bAIes-IDP
+
+Source: https://zread.ai/COSBlab/bAIes-IDP
+
+# 入门
+
+- [入门/概述](https://zread.ai/COSBlab/bAIes-IDP/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**bAIes-IDP** 是一个计算流程，通过利用嵌入在 AlphaFold-2 预测中的距离信息，生成本质无序蛋白质 (IDPs) 和多结构域蛋白质的原子级结构系综。bAIes-IDP 并未将 AlphaFold-2 视为单结构预言机，而是提取完整的**距离分布图**（即残基间距离的预测概率分布），并将其转换为驱动分子动力学采样的贝叶斯约束，从而生成能够如实反映无序序列内在不确定性的构象多样化系综。
+
+![bAIes-IDP](<COSBlab/bAIes-IDP_github_url>/blob//baies-idp.png?raw=true)
+
+该方法的介绍详见：V. Schnapka, T. Morozova, S. Sen, M. Bonomi. *Atomic resolution ensembles of intrinsically disordered proteins with Alphafold.* BioRxiv (2025). doi: [10.1101/2025.06.18.660298](https://doi.org/10.1101/2025.06.18.660298)
+
+来源: [README.md](/README.md#L1-L54)
+
+## bAIes-IDP 的功能
+
+传统的结构预测工具（如 AlphaFold-2）通常输出单一的、往往过于紧凑的模型——这对于本质无序或结构域之间具有柔性连接段的蛋白质而言，是一种很差的表征。bAIes-IDP 通过重新利用 AlphaFold-2 内部已计算出的**原始距离分布图数据**来解决此问题。对于每一个残基对，这些距离分布图编码了距离的完整概率分布。bAIes-IDP 读取这些分布，使用解析模型（高斯或对数正态模型）对其进行拟合，并将得到的参数作为**贝叶斯偏置势**（通过 PLUMED 的 `BAIES` 模块）注入到 LAMMPS 分子动力学模拟中。最终生成的系综对与 AlphaFold-2 自身距离预测相一致的构象空间进行采样——而不会坍缩成单一静态结构。
+
+<CgxTip>该流程提供了两种不同的采样模式：**bAIes**（使用 Jeffreys 先验，保留最大不确定性）和 **bAIes-N**（无先验，赋予距离分布图峰值更大权重），此外还提供了一个用于对比的**无规卷曲**基线。先验通过 `step2-preprocess.bash` 中的一行代码控制——将 `PRIOR=JEFFREYS` 更改为 `PRIOR=NONE` 即可在 bAIes 和 bAIes-N 之间切换。</CgxTip>
+
+来源: [README.md](/README.md#L7-L11), [scripts/step2-preprocess.bash](/scripts/step2-preprocess.bash#L14-L15)
+
+## 流程架构
+
+bAIes-IDP 流程通过四个连续阶段将 AlphaFold-2 预测转化为可用于模拟的系综。每个阶段在其独立的工作目录中自包含，并生成供下一阶段使用的明确输出产物。
+
+```mermaid
+flowchart LR
+    subgraph Input["0. AlphaFold-2 预测"]
+        AF2["AlphaFold-2 / ColabFold"] --> PDB["弛豫 PDB 模型"]
+        AF2 --> DIST["距离分布图<br/>(.pkl / .npy)"]
+    end
+
+    subgraph Prep["1. 准备"]
+        PDB --> GMX["GROMACS 拓扑<br/>amber99SB-ILDN"]
+    end
+
+    subgraph PreProc["2. 预处理"]
+        DIST --> FIT["距离分布图拟合<br/>(Gauss / LogNorm)"]
+        PDB --> FIT
+        GMX --> FIT
+        FIT --> PLUMED["PLUMED 文件<br/>plumed.dat / baies_params.dat"]
+    end
+
+    subgraph Conv["3. 力场转换"]
+        GMX --> INTER["InterMol<br/>GROMACS → LAMMPS"]
+        INTER --> FF["make_ff.py<br/>简化力场 + CMAP"]
+        FF --> LMP["LAMMPS 输入<br/>.in / .data"]
+    end
+
+    subgraph Sim["4. 模拟"]
+        LMP --> LAMMPS["LAMMPS + PLUMED"]
+        PLUMED --> LAMMPS
+        LAMMPS --> ENS["结构系综<br/>(.xtc 轨迹)"]
+    end
+
+    Input --> Prep --> PreProc --> Conv --> Sim
+```
+
+来源: [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L7-L149), [scripts/README.md](/scripts/README.md#L10-L15)
+
+## 流程阶段概览
+
+| 阶段 | 目的 | 核心脚本 | 输入 | 输出 |
+|:-----:|---------|------------|--------|---------|
+| **0 — 输入** | 运行 AlphaFold-2 或 ColabFold | *(外部)* | 蛋白质序列 | PDB 模型 + 距离分布图 (`.pkl` / `.npy`) |
+| **1 — 准备** | 从 PDB 构建 GROMACS 拓扑 | `step1-prepare_gmx.bash` | 弛豫 PDB | `.gro`, `.top`, `.itp`, `.pdb` |
+| **2 — 预处理** | 拟合距离分布图并生成 PLUMED 约束 | 通过 `step2-preprocess.bash` 执行 `preprocess_bAIes.py` | GROMACS PDB, AF2 PDB, 距离分布图 | `plumed.dat`, `baies_params.dat`, `atom_list.ndx` |
+| **3 — 转换** | 使用简化力场转换为 LAMMPS | 通过 `step3-conversion.bash` 执行 `make_ff.py` | `.gro`, `.top`, `.pdb`, CMAP 文件 | `idp_nvt.in`, `idp_nvt.data` |
+| **4 — 模拟** | 使用 bAIes 偏置运行系综 MD | `lmp -in idp_nvt.in` | 所有 LAMMPS + PLUMED 文件 | 轨迹 `.xtc` |
+
+来源: [scripts/README.md](/scripts/README.md#L10-L15), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L36-L147)
+
+## 三种采样模式
+
+bAIes-IDP 提供三种不同的采样策略，每种策略基于不同的物理假设生成系综：
+
+| 模式 | 先验 | 行为 | 适用场景 |
+|------|-------|----------|----------|
+| **bAIes** | Jeffreys | 最大熵采样；不利于短距离 | IDP 的主要模式；保持构象多样性 |
+| **bAIes-N** | 无 | 对距离分布图峰值的偏置更强 | 当距离分布图置信度较高时；较不保守 |
+| **Coil** | *(无)* | 使用简化力场的无偏无规卷曲 | 基线对比；不应用 AlphaFold-2 约束 |
+
+**bAIes** 和 **bAIes-N** 模式均通过 PLUMED 的 `BAIES` 插件使用源自 AlphaFold-2 距离分布图的约束，两者的区别仅在于贝叶斯先验。**Coil** 模式完全跳过预处理步骤，并使用简化的 amber99SB-ILDN 力场运行无偏模拟，作为零模型用于验证 bAIes 约束能否显著提升系综质量。
+
+来源: [scripts/step2-preprocess.bash](/scripts/step2-preprocess.bash#L14-L16), [benchmark/README.md](/benchmark/README.md#L1-L4)
+
+## 软件栈
+
+bAIes-IDP 将多个专用科学软件包编排为一个内聚的流程：
+
+| 组件 | 角色 | 版本 / 备注 |
+|-----------|------|-----------------|
+| **AlphaFold-2** 或 **ColabFold** | 结构与距离分布图预测 | 需要带有 distmat 输出的 ColabFold 变体 |
+| **GROMACS** | 拓扑生成 (amber99SB-ILDN) | 仅在步骤 1 中用于 `pdb2gmx` |
+| **InterMol** | GROMACS → LAMMPS 格式转换 | Python 库；通过 `baies.yml` conda 环境安装 |
+| **LAMMPS** (2 Aug 2023) | MD 模拟引擎 | 必须使用 `patch_cmap.txt` 打补丁以修正 CMAP |
+| **PLUMED** (v2.10) | 偏置势框架 | 必须包含 `BAIES` 模块 |
+| **Python 3.8** | 预处理与转换脚本 | NumPy, SciPy, lmfit 用于距离分布图拟合 |
+
+<CgxTip>LAMMPS 需要一个特定的 CMAP 补丁 (`patch_cmap.txt`)，该补丁在 `installation/` 目录中提供。若无此补丁，骨架二面角校正图将无法正常工作。请在编译前应用该补丁：`patch ./src/MOLECULE/fix_cmap.cpp < patch_cmap.txt`</CgxTip>
+
+来源: [README.md](/README.md#L19-L53), [installation/README.md](/installation/README.md#L1-L99)
+
+## 仓库结构
+
+```
+bAIes-IDP/
+├── scripts/                  # 核心流程脚本
+│   ├── step1-prepare_gmx.bash       # GROMACS 拓扑生成
+│   ├── step2-preprocess.bash        # 距离分布图读取与 PLUMED 文件生成
+│   ├── preprocess_bAIes.py          # 距离分布图拟合与约束参数化
+│   ├── step3-conversion.bash        # GROMACS → LAMMPS 转换编排
+│   └── make_ff.py                   # 力场简化与 CMAP 积分
+├── tutorial/                 # 分步完整示例
+│   ├── bAIes/                # 完整 bAIes 流程 (4 步)
+│   └── coil/                 # 无规卷曲流程 (3 步，无预处理)
+├── benchmark/                # 用于复现已发表模拟的输入文件
+│   ├── bAIes/                # bAIes 模式输入 (19 个蛋白质)
+│   ├── bAIes-N/              # bAIes-N 模式输入 (17 个蛋白质)
+│   └── coil/                 # Coil 模式输入 (17 个蛋白质)
+└── installation/             # Conda 环境与 LAMMPS CMAP 补丁
+    ├── baies.yml             # Conda 环境配置
+    └── patch_cmap.txt        # LAMMPS CMAP 源码补丁
+```
+
+来源: [README.md](/README.md#L13-L18)
+
+## 基准系统
+
+该仓库包含 19 个基准蛋白质系统，涵盖三种结构行为类别，能够根据已知实验数据验证 bAIes 预测：
+
+| 类别 | 蛋白质 | 残基范围 | 描述 |
+|----------|----------|:-------------:|-------------|
+| **完全无序** | Ab40, p61_Hck, emerin_67-170, His-PknG_1-75, Colicin_N_T_domain, Hug1 | 40 – 105 | 无稳定结构；系综至关重要 |
+| **结构基序** | PaaA2, Nt-SOCS5, Alb3-A3CT, idr_SSRP1, UBact, FCP1 | 64 – 101 | 部分有序且带有无序侧翼 |
+| **AF2 预测误差** | asyn, ACTR, NHE1, Nsp2_CtlIDR, spm_FrpC, drkN | 45 – 179 | AF2 错误地预测为紧凑结构 |
+| **多结构域** | GS8, Ubq2, Ubq3 | 162 – 486 | 结构域之间具有柔性连接段 |
+
+来源: [benchmark/README.md](/benchmark/README.md#L9-L33)
+
+## 接下来的去向
+
+既然你已经了解了 bAIes-IDP 是什么及其流程的组织方式，请按照以下阅读路径开始运行：
+
+1. **[快速开始](2-quick-start)** — 在几分钟内端到端运行 PaaA2 教程
+2. **[软硬件要求](3-software-and-hardware-requirements)** — 在首次运行前安装所有依赖项
+3. **[流程架构](4-pipeline-architecture)** — 深入了解各阶段间的数据流和文件依赖关系
+4. **[基准蛋白质系统](13-benchmark-protein-systems)** — 探索 19 个验证系统及其特征
+
+---
+
+- [入门/快速上手](https://zread.ai/COSBlab/bAIes-IDP/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+通过四个具体步骤，让 bAIes-IDP 集成模拟运行起来——从 AlphaFold-2 预测到生成内禀无序蛋白的完整 LAMMPS 分子动力学轨迹。本页将引导你完成**最简路径**，以提供的教程系统（PaaA2，71 个残基）为参考，并在每个阶段提供精确的命令和预期输出。
+
+![bAIes-IDP](https://github.com/COSBlab/bAIes-IDP/raw/main/baies-idp.png)
+
+来源：[README.md](/README.md#L1-L54), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L151)
+
+---
+
+## 先决条件一览
+
+在运行流水线之前，请确保你的 Linux 工作站已安装以下软件。完整的安装细节详见[软件与硬件要求](3-software-and-hardware-requirements)。
+
+| 依赖项 | 版本 / 备注 | 用途 |
+|:---|:---|:---|
+| **AlphaFold-2** 或 **ColabFold** | 本地 AF2 或带 distogram 输出的 ColabFold | 生成结构预测 + distograms |
+| **Conda** | 任何最新版本 | 管理 `baies` Python 环境 |
+| **GROMACS** | 任何最新发行版 | 准备拓扑文件 (amber99SB-ILDN) |
+| **LAMMPS** | 2023年8月2日版 + CMAP 补丁 | 运行集成模拟 |
+| **PLUMED** | v2.10 分支（包含 bAIes） | bAIes 约束的偏置引擎 |
+
+<CgxTip>`baies` conda 环境（Python 3.8 + intermol）仅在**步骤 3**（GROMACS→LAMMPS 转换）中需要。你可以在所有其他步骤中保持其未激活状态，以避免依赖冲突。</CgxTip>
+
+来源：[installation/README.md](/installation/README.md#L1-L15), [installation/baies.yml](/installation/baies.yml#L1-L33)
+
+---
+
+## 流水线概览
+
+bAIes-IDP 工作流通过四个连续阶段，将 AlphaFold-2 预测转换为可用于 LAMMPS 的集成模拟：
+
+```mermaid
+flowchart LR
+    A["🔑 Step 0<br/>AF2 Prediction"] --> B["📦 Step 1<br/>GROMACS Preparation"]
+    B --> C["⚙️ Step 2<br/>Preprocessing"]
+    C --> D["🔄 Step 3<br/>LAMMPS Conversion"]
+    D --> E["🚀 Step 4<br/>Run Simulation"]
+
+    style A fill:#e8f4fd,stroke:#2196F3
+    style B fill:#fff3e0,stroke:#FF9800
+    style C fill:#e8f5e9,stroke:#4CAF50
+    style D fill:#fce4ec,stroke:#E91E63
+    style E fill:#f3e5f5,stroke:#9C2770
+```
+
+每个步骤对应教程中的一个工作目录（从 `tutorial/bAIes/0-inputs/` 到 `4-simulation/`），并且每个步骤都会生成明确的输出文件，作为下一步的输入。
+
+来源：[tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L20)
+
+---
+
+## 步骤 0 — 获取 AlphaFold-2 预测
+
+使用**本地 AlphaFold-2** 或 **ColabFold distogram 变体**，对你的目标 IDP 运行结构预测。你恰好需要以下两个输出：
+
+| 输出 | AF2 来源 | ColabFold 来源 |
+|:---|:---|:---|
+| **Distograms** | `result_model_X_ptm_pred_X.pkl` | `alphafold2_ptm_model_X_seed_XXX_prob_distributions.npy` |
+| **弛豫 PDB 模型** | 标准 AF2 弛豫模型 | ColabFold 排名 PDB |
+
+教程在 `tutorial/bAIes/0-inputs/` 目录中提供了两种格式的 **PaaA2** 蛋白质的现成输入。
+
+来源：[tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L22-L49)
+
+---
+
+## 步骤 1 — 准备 GROMACS 文件
+
+**工作目录**：`1-preparation`
+
+使用 amber99SB-ILDN 力场，将 AlphaFold-2 PDB 模型转换为 GROMACS 拓扑文件：
+
+```bash
+./step1-prepare_gmx.bash relaxed_model_4_ptm_pred_0.pdb
+```
+
+该脚本内部运行 `gmx pdb2gmx` 和 `gmx trjconv`，生成四个文件：
+
+| 输出文件 | 描述 |
+|:---|:---|
+| `idp.gro` | GROMACS 坐标文件 |
+| `idp.top` | GROMACS 拓扑文件 |
+| `idp.itp` | GROMACS 包含拓扑 |
+| `idp.pdb` | 重新索引的 PDB（在步骤 2 中供 PLUMED 使用） |
+
+来源：[scripts/step1-prepare_gmx.bash](/scripts/step1-prepare_gmx.bash#L1-L7), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L51-L64)
+
+---
+
+## 步骤 2 — 预处理 AlphaFold-2 输出
+
+**工作目录**：`2-preprocessing`
+
+分析 distograms 并生成 bAIes 偏置的 PLUMED 输入文件。这是核心预处理步骤，从 AlphaFold-2 预测中提取残基对距离约束：
+
+```bash
+# 使用 AlphaFold-2 distograms：
+./step2-preprocess.bash idp.pdb relaxed_model_4_ptm_pred_0.pdb result_model_4_ptm_pred_0.pkl
+
+# 或者使用 ColabFold distograms：
+./step2-preprocess.bash idp.pdb relaxed_model_4_ptm_pred_0.pdb alphafold2_ptm_model_1_seed_000_prob_distributions.npy
+```
+
+该脚本调用 `preprocess_bAIes.py` 进行高斯拟合和残基对特异性截断，然后组装 PLUMED 文件。将生成**三个文件**：
+
+| 输出文件 | 描述 |
+|:---|:---|
+| `baies_params.dat` | 原子对参数与 bAIes 约束数据 |
+| `atom_list.ndx` | 参与bAIes 约束的所有原子的索引 |
+| `plumed.dat` | 用于模拟的 PLUMED 输入文件 |
+
+生成的 `plumed.dat` 具有以下结构：
+
+```plumed
+#MOLINFO STRUCTURE=idp.pdb
+batoms: GROUP NDX_FILE=atom_list.ndx NDX_GROUP=batoms
+baies: BAIES ATOMS=batoms DATA_FILE=baies_params.dat PRIOR=JEFFREYS TEMP=2.478541306
+PRINT ARG=baies.ene FILE=COLVAR STRIDE=500
+bbias: BIASVALUE ARG=baies.ene STRIDE=2
+```
+
+`PRIOR=JEFFREYS` 设置选择标准的 bAIes 噪声模型。切换至 `PRIOR=NONE` 可使用 **bAIes-N** 变体（详见 [bAIes vs bAIes-N vs Coil](14-baies-vs-baies-n-vs-coil)）。
+
+来源：[scripts/step2-preprocess.bash](/scripts/step2-preprocess.bash#L1-L39), [scripts/preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L18-L37), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L66-L102)
+
+---
+
+## 步骤 3 — 转换为 LAMMPS
+
+**工作目录**：`3-conversion`  
+**环境**：`conda activate baies`
+
+将 GROMACS 拓扑和预处理输出转换为 LAMMPS 模拟输入：
+
+```bash
+conda activate baies
+./step3-conversion.bash idp.gro idp.pdb idp.top
+```
+
+在内部，该脚本按顺序执行两项操作：(1) **intermol 转换**——将 GROMACS `.gro`/`.top` 文件转换为 LAMMPS 格式；(2) **力场修改**——通过 `make_ff.py` 应用 CMAP 修正并简化力场。输出为：
+
+| 输出文件 | 描述 |
+|:---|:---|
+| `idp_nvt.in` | LAMMPS 输入脚本（模拟设置） |
+| `idp_nvt.data` | LAMMPS 数据文件（拓扑 + 力场） |
+
+intermol 转换产生的中间文件将被自动清理。
+
+<CgxTip>`step3-conversion.bash` 中的 `-cube 200.0` 参数将模拟盒子大小设置为 200 Å 的立方体。如果你的蛋白需要更大或更小的盒子，请在脚本中调整此值。</CgxTip>
+
+来源：[scripts/step3-conversion.bash](/scripts/step3-conversion.bash#L1-L33), [scripts/make_ff.py](/scripts/make_ff.py#L1-L16), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L104-L128)
+
+---
+
+## 步骤 4 — 运行模拟
+
+**工作目录**：`4-simulation`
+
+将所有生成的文件组装到模拟目录中并启动 LAMMPS：
+
+| 所需文件 | 来源步骤 |
+|:---|:---|
+| `idp_nvt.in`, `idp_nvt.data`, `cmap_20240524.cmap` | 步骤 3 |
+| `plumed.dat`, `baies_params.dat`, `atom_list.ndx` | 步骤 2 |
+| `idp.pdb` | 步骤 1 |
+
+运行模拟：
+
+```bash
+lmp -in idp_nvt.in
+```
+
+你可能需要在 `idp_nvt.in` 中调整的**关键参数**：
+
+| 参数行 | 默认值 | 含义 |
+|:---|:---|:---|
+| `dump 1 all xtc 10000 traj_idp.xtc` | 每 10 ps | 轨迹保存间隔 |
+| `run 2000000000` | 2 μs | 总模拟时长 |
+
+运行完成后，使用 GROMACS 工具分析轨迹：
+
+```bash
+gmx check -f traj_idp.xtc                     # 基本轨迹信息
+gmx trjconv -f traj_idp.xtc -s idp.pdb -o traj_idp_dt100ps.xtc -dt 100   # 降采样至 100 ps
+```
+
+来源：[tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L130-L151)
+
+---
+
+## 快速参考：完整命令序列
+
+对于单个蛋白，从准备好的 AF2 预测到运行模拟的整个流水线可浓缩为：
+
+```bash
+# 步骤 1：GROMACS 准备
+cd 1-preparation/
+./step1-prepare_gmx.bash relaxed_model_4_ptm_pred_0.pdb
+
+# 步骤 2：预处理
+cd ../2-preprocessing/
+./step2-preprocess.bash idp.pdb relaxed_model_4_ptm_pred_0.pdb result_model_4_ptm_pred_0.pkl
+
+# 步骤 3：LAMMPS 转换（需要 baies conda 环境）
+cd ../3-conversion/
+conda activate baies
+./step3-conversion.bash idp.gro idp.pdb idp.top
+
+# 步骤 4：运行模拟
+cd ../4-simulation/
+lmp -in idp_nvt.in
+```
+
+来源：[scripts/README.md](/scripts/README.md#L1-L30), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L151)
+
+---
+
+## 接下来去哪
+
+现在你已经能够端到端地运行该流水线，可以探索以下主题以加深理解并自定义模拟：
+
+- **[软件与硬件要求](3-software-and-hardware-requirements)** — LAMMPS+CMAP 补丁、PLUMED v2.10 和 conda 环境的完整安装指南
+- **[流水线架构](4-pipeline-architecture)** — 跨所有四个步骤的数据流和文件依赖关系
+- **[bAIes 集成模拟](9-baies-ensemble-simulations)** — 高级模拟配置与参数调优
+- **[基准蛋白系统](13-benchmark-protein-systems)** — 可从 `benchmark/` 目录直接复现的 20 个基准蛋白
+
+---
+
+- [入门/软硬件要求](https://zread.ai/COSBlab/bAIes-IDP/3-software-and-hardware-requirements)
+
+---
+slug:3-software-and-hardware-requirements
+blog_type:normal
+---
+
+
+bAIes-IDP 流水线编排了四个不同的计算阶段——结构预测、GROMACS 准备、预处理/转换和 LAMMPS 模拟——每个阶段都需要特定的软件工具。本页提供了所有依赖项的完整清单、经过验证可正常工作的确切版本，以及分步安装说明，以便你在运行首次集成预测之前，能够组装出一个功能完备的环境。
+
+来源: [README.md](/README.md#L19-L53), [installation/README.md](/installation/README.md#L1-L102)
+
+## 硬件要求
+
+bAIes-IDP 专为 **Linux 工作站**设计。模拟引擎 (LAMMPS) 受益于通过 OpenMP 实现的多核并行化，这是推荐的线程模型。对于典型的 IDP 系统（40–230 个残基），拥有 **8 个 CPU 核心**的机器已足够。较大的多结构域蛋白质（如包含 486 个残基的 GS8）将受益于更多的核心和内存，但 LAMMPS+PLUMED 模拟阶段本身不需要 GPU。
+
+请注意，初始的 AlphaFold-2 结构预测步骤有其自身的硬件需求（显存 ≥16 GB 的 GPU），但这不属于 bAIes-IDP 流水线的范畴——你可以转而在 Google Colab 上使用 ColabFold 来完全规避此要求。
+
+| 组件 | 最低配置 | 推荐配置 | 备注 |
+|---|---|---|---|
+| **操作系统** | Linux | Linux (x86_64) | 所有工具均为 Linux 原生 |
+| **CPU 核心数** | 4 | 8+ | LAMMPS 中的 OpenMP 并行化 |
+| **内存** | 8 GB | 16 GB+ | 较大的蛋白质需要更多内存 |
+| **GPU** | 无 | — | LAMMPS+PLUMED 阶段不需要 |
+
+来源: [installation/README.md](/installation/README.md#L1-L7)
+
+## 软件概览与流水线映射
+
+流水线的每个阶段会使用软件栈中特定的子集。了解哪个步骤需要哪些工具，可以防止配置错误，并有助于尽早排查出缺失的依赖项。
+
+```mermaid
+flowchart TD
+    subgraph S0["步骤 0: 输入"]
+        AF2["AlphaFold-2<br/>(本地 GPU)"]
+        CF["ColabFold<br/>(Google Colab)"]
+    end
+    subgraph S1["步骤 1: 准备"]
+        GMX["GROMACS<br/>pdb2gmx, trjconv"]
+    end
+    subgraph S2["步骤 2: 预处理"]
+        PP["preprocess_bAIes.py<br/>scipy · lmfit · matplotlib"]
+    end
+    subgraph S3["步骤 3: 转换"]
+        IM["intermol<br/>(baies conda 环境)"]
+        FF["make_ff.py<br/>numpy"]
+    end
+    subgraph S4["步骤 4: 模拟"]
+        LMP["LAMMPS<br/>(CMAP 补丁版)"]
+        PLM["PLUMED v2.10<br/>(bAIes 模块)"]
+    end
+    AF2 --> GMX --> PP --> IM --> LMP
+    CF --> GMX
+    PP --> PLM
+    IM --> FF --> LMP
+```
+
+下表汇总了每个软件依赖项，并将其映射到需要该依赖的流水线步骤。
+
+| 软件 | 流水线步骤 | 作用 | 安装章节 |
+|---|---|---|---|
+| **AlphaFold-2** 或 **ColabFold** | 步骤 0 | 结构预测 + 距离分布图 | [AlphaFold-2 / ColabFold](#alphafold-2--colabfold) |
+| **GROMACS** | 步骤 1, 步骤 4 | 拓扑生成；轨迹分析 | [GROMACS](#gromacs) |
+| **Conda** | 步骤 2, 步骤 3 | Python 环境管理 | [Conda 环境](#conda-environment-setup) |
+| **Python 3.8 + 软件包** | 步骤 2, 步骤 3 | 预处理和力场转换 | [Conda 环境](#conda-environment-environment-setup) |
+| **LAMMPS (2 Aug 2023)** | 步骤 4 | 分子动力学模拟引擎 | [包含 PLUMED 的 LAMMPS](#lammps-with-plumed) |
+| **PLUMED (v2.10)** | 步骤 4 | 偏置框架 (bAIes 模块) | [包含 PLUMED 的 LAMMPS](#lammps-with-plumed) |
+
+来源: [README.md](/README.md#L19-L53), [scripts/README.md](/scripts/README.md#L1-L30), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L151)
+
+## AlphaFold-2 / ColabFold
+
+你**至少需要**以下选项之一，以生成输入到 bAIes 预处理步骤的初始结构预测和距离分布图。
+
+**AlphaFold-2 (本地安装)** — 完整的 DeepMind AlphaFold-2 仓库，可从 [github.com/google-deepmind/alphafold](https://github.com/google-deepmind/alphafold) 获取。这需要本地 GPU，并生成包含距离分布图和弛豫后 PDB 模型的 pickle 文件（`result_model_x_ptm_pred_x.pkl`）。
+
+**ColabFold (云端替代方案)** — 如果你缺乏本地 GPU，请使用可输出距离分布的 ColabFold 变体，可从 [github.com/zshengyu14/ColabFold_distmats](https://github.com/zshengyu14/ColabFold_distmats/blob/main/AlphaFold2.ipynb) 获取。此方案在 Google Colab 上运行，并在 PDB 模型旁的 `_distmat` 子目录中生成 numpy 文件（`*_prob_distributions.npy`）。
+
+| 选项 | 所需硬件 | 距离分布图格式 | 输出文件模式 |
+|---|---|---|---|
+| AlphaFold-2 (本地) | GPU ≥16 GB VRAM | Pickle (`.pkl`) | `result_model_x_ptm_pred_x.pkl` |
+| ColabFold (云端) | 无 (浏览器) | NumPy (`.npy`) | `*_prob_distributions.npy` |
+
+来源: [README.md](/README.md#L23-L27), [installation/README.md](/installation/README.md#L10-L12), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L10-L33)
+
+## GROMACS
+
+GROMACS 在**步骤 1** 中用于使用 **amber99SB-ILDN** 力场将 PDB 模型转换为 GROMACS 拓扑文件（`.gro`、`.top`、`.itp`），并在**步骤 4** 中用于模拟后的轨迹分析（例如 `gmx check`、`gmx trjconv`）。
+
+从官方网站下载并安装：[manual.gromacs.org/current/download.html](https://manual.gromacs.org/current/download.html)
+
+流水线调用的特定 GROMACS 命令为 `gmx pdb2gmx`（拓扑生成）和 `gmx trjconv`（坐标转换），如准备脚本所示。
+
+来源: [README.md](/README.md#L38-L39), [scripts/step1-prepare_gmx.bash](/scripts/step1-prepare_gmx.bash#L1-L7), [installation/README.md](/installation/README.md#L62-L64)
+
+## Conda 环境设置
+
+名为 `baies` 的专用 conda 环境为预处理和转换步骤提供了所有 Python 依赖项。环境规范由 [`baies.yml`](/installation/baies.yml) 提供。
+
+### 创建环境
+
+```bash
+conda env create -f baies.yml
+```
+
+### 激活环境
+
+```bash
+conda activate baies
+```
+
+**在步骤 3 之前必须激活**该环境（即 GROMACS 到 LAMMPS 的转换），因为该步骤依赖于 `intermol` 库。
+
+### 软件包清单
+
+`baies.yml` 文件锁定了以下版本，这些版本已验证可相互兼容正常工作：
+
+| 软件包 | 版本 | 用途 | 流水线步骤 |
+|---|---|---|---|
+| **Python** | 3.8.19 | 运行时 | 步骤 2, 3 |
+| **intermol** | 0.1.0.dev0 | GROMACS → LAMMPS 转换 | 步骤 3 |
+| **numpy** | 1.24.4 | 数值计算 | 步骤 2, 3 |
+| **parmed** | 3.4.4 | 参数编辑 | 步骤 3 |
+| **par** | 1.3.4 | InterMol 依赖项 | 步骤 3 |
+| **parm** | 1.11 | InterMol 依赖项 | 步骤 3 |
+| **six** | 1.16.0 | Python 2/3 兼容性 | 步骤 3 |
+
+### 步骤 2 的额外依赖项
+
+预处理脚本 `preprocess_bAIes.py` 导入了 `baies.yml` 中**未**列出但通常在标准科学 Python 安装中可用的库。请确保你的环境中安装了以下内容：
+
+| 软件包 | 使用位置 | 用途 |
+|---|---|---|
+| **scipy** | `scipy.special.softmax`, `scipy.special.expit`, `scipy.optimize.curve_fit` | 距离分布图拟合 |
+| **lmfit** | `lmfit.Minimizer`, `lmfit.Parameters` | 非线性最小二乘优化 |
+| **matplotlib** | `matplotlib.pyplot` | 质量检查图（可选，通过 `--plots` 标志启用） |
+
+你可以使用以下命令将它们安装到 `baies` 环境中：
+
+```bash
+conda activate baies
+pip install scipy lmfit matplotlib
+```
+
+来源: [installation/baies.yml](/installation/baies.yml#L1-L33), [installation/README.md](/installation/README.md#L19-L60), [scripts/preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L1-L13), [scripts/README.md](/scripts/README.md#L17-L29)
+
+## 包含 PLUMED 的 LAMMPS
+
+这是最复杂的安装步骤。LAMMPS 必须从源码构建，并应用两项关键修改：一个 **CMAP 补丁**（本仓库提供）和 **PLUMED 插件**（提供 bAIes 偏置模块）。
+
+### 版本要求
+
+| 软件 | 所需版本 | 原因 |
+|---|---|---|
+| **LAMMPS** | 2 Aug 2023 (稳定版) | CMAP 补丁针对此源码树 |
+| **PLUMED** | v2.10 | 包含 bAIes 模块 |
+
+### 步骤 1 — 下载 LAMMPS 源码
+
+从 [download.lammps.org/tars/index.html](https://download.lammps.org/tars/index.html) 下载 2 Aug 2023 稳定版。
+
+### 步骤 2 — 应用 CMAP 补丁
+
+该补丁修改了 `fix_cmap.cpp`，将 `CMAPMAX` 从 6 增加到 40，从而允许比 LAMMPS 默认值更多的 CMAP 修正类型。这对 bAIes 模拟是**必需的**——标准的 LAMMPS 构建将在运行时出现“Invalid CMAP crossterm_type”错误而失败。
+
+在 LAMMPS 源码根目录下运行：
+
+```bash
+patch ./src/MOLECULE/fix_cmap.cpp < /path/to/bAIes-IDP/installation/patch_cmap.txt
+```
+
+<CgxTip>CMAP 补丁修改了 fix_cmap.cpp 中的三行代码：将 CMAPMAX 从 6 提升至 40，将硬编码的循环边界 `6` 替换为 `CMAPMAX`，并将验证检查从 `t1 > 5` 更新为 `t1 > CMAPMAX-1`。如果你升级了 LAMMPS，则必须重新应用此补丁。</CgxTip>
+
+### 步骤 3 — 配置 CMake 构建
+
+创建构建目录并配置 PLUMED 支持：
+
+```bash
+mkdir build
+cd build
+cmake -C ../cmake/presets/basic.cmake -D PKG_PLUMED=yes -D PLUMED_MODE=runtime ../cmake
+```
+
+`-D PLUMED_MODE=runtime` 标志允许在执行时解析 PLUMED，从而提供了无需重新编译 LAMMPS 即可切换 PLUMED 安装的灵活性。
+
+`cmake/presets/basic.cmake` 文件应包含以下 LAMMPS 软件包：
+
+```cmake
+set(ALL_PACKAGES KSPACE MANYBODY MOLECULE RIGID GPU EXTRA-DUMP EXTRA-FIX KOKKOS)
+
+foreach(PKG ${ALL_PACKAGES})
+  set(PKG_${PKG} ON CACHE BOOL "" FORCE)
+endforeach()
+```
+
+### 步骤 4 — 编译与安装
+
+```bash
+make
+sudo make install
+```
+
+### 步骤 5 — 验证 PLUMED bAIes 模块
+
+确保你的 PLUMED 安装中包含 **bAIes** 模块。如果没有，请从包含 bAIes 的分支安装 PLUMED v2.10：[github.com/plumed/plumed2/tree/v2.10](https://github.com/plumed/plumed2/tree/v2.10)。
+
+### 并行化
+
+**OpenMP** 是推荐的并行化策略。运行模拟时，LAMMPS 将自动使用可用的 OpenMP 线程。对于典型的 8 核工作站，40–100 个残基的 IDP 模拟将以适合微秒级采样的实用速度运行。
+
+来源: [installation/README.md](/installation/README.md#L66-L99), [installation/patch_cmap.txt](/installation/patch_cmap.txt#L1-L30), [README.md](/README.md#L41-L53)
+
+## 安装验证清单
+
+在运行完整流水线之前，请在终端中运行以下命令以验证各组件是否已正确安装：
+
+| 检查项 | 命令 | 预期结果 |
+|---|---|---|
+| Conda 环境 | `conda activate baies && python -c "import intermol"` | 无错误 |
+| GROMACS | `gmx --version` | 打印 GROMACS 版本信息 |
+| LAMMPS | `lmp -help \| head -1` | 打印 LAMMPS 版本 (2 Aug 2023) |
+| PLUMED | `plumed info --long` | 列出模块；验证 `BAIES` 存在 |
+| CMAP 补丁 | 使用 >6 种 CMAP 类型运行测试 | 无 "Invalid CMAP crossterm_type" 错误 |
+| Python 预处理 | `python preprocess_bAIes.py -h` | 打印参数帮助 |
+| Python 转换 | `python make_ff.py -h` | 打印参数帮助 |
+
+<CgxTip>如果 PLUMED 的 `BAIES` 模块缺失，模拟将在启动时因 PLUMED 错误而失败。这是最常见的安装问题——在运行步骤 4 之前，务必始终通过 `plumed info --long` 进行验证。</CgxTip>
+
+## 下一步
+
+环境完全配置好之后，请前往 [快速入门](2-quick-start) 页面查看精简的操作演练，或深入阅读 [流水线架构](4-pipeline-architecture) 页面，以了解这些软件组件在各阶段是如何交互的。
+
+---
+
+# 深入探究
+
+- [深入探究/流水线架构](https://zread.ai/COSBlab/bAIes-IDP/4-pipeline-architecture)
+
+---
+slug:4-pipeline-architecture
+blog_type:normal
+---
+
+
+bAIes-IDP 流水线通过四个阶段将 AlphaFold-2（或 ColabFold）的结构预测转化为本质无序蛋白质的原子系综：**准备 → 预处理 → 转换 → 模拟**。每个阶段都在各自独立的工作目录中运行，接收明确的输入并产生可验证的输出——这使得该流水线既可审计又可恢复。该架构支持两种并行模式：**bAIes**（使用 AF2 距离直方图约束的贝叶斯信息系综）和 **Coil**（无实验约束的随机线团基线），二者共享通用的准备和转换主干，但在预处理和模拟阶段产生分歧。
+
+来源: [README.md](/README.md#L1-L54), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L151)
+
+## 端到端流程
+
+下图展示了两种流水线变体在所有四个阶段中的完整数据流。实线箭头表示文件依赖关系；虚线箭头表示 bAIes 流水线独有的阶段。
+
+```mermaid
+flowchart TD
+    subgraph Inputs["0. External Inputs"]
+        AF2["AlphaFold-2 / ColabFold<br/>prediction outputs"]
+        AF2 --> PDB_AF["relaxed_model.pdb<br/>(AF2 structure)"]
+        AF2 --> DISTO["result_model.pkl<br/>or .npy distograms"]
+    end
+
+    subgraph Step1["1. Preparation"]
+        PDB_AF --> S1["step1-prepare_gmx.bash<br/>gmx pdb2gmx + gmx trjconv"]
+        S1 --> GRO["idp.gro"]
+        S1 --> TOP["idp.top"]
+        S1 --> ITP["idp.itp"]
+        S1 --> PDB_GMX["idp.pdb"]
+    end
+
+    subgraph Step2["2. Preprocessing (bAIes only2)"]
+        PDB_GMX --> S2["step2-preprocess.bash<br/>→ preprocess_bAIes.py"]
+        PDB_AF --> S2
+        DISTO --> S2
+        S2 --> DAT[""baies_params.dat<br/>(f-itted restraint params)""]
+        S2 --> NDX["atom_list.ndx<br/>(restrained atom list)"]
+        S2 --> PLUMED["plumed.dat<br/>(PLUMED bias config)"]
+    end
+
+    subgraph Step3["3. Conversion"]
+        GRO --> S3["step3-conversion.bash<br/>intermol + make_ff.py"]
+        PDB_GMX --> S3
+        TOP --> S3
+        CMAP["cmap_20240524.cmap<br/>(dihedral correction maps)"] --> S3
+        S3 --> LMP_IN["idp_nvt.in<br/>(LAMMPS input script)"]
+        S3 --> LMP_DATA["idp_nvt.data<br/>(LAMMPS topology)"]
+    end
+
+    subgraph Step4["4. Simulation"]
+        LMP_IN --> S4["lmp -in idp_nvt.in"]
+        LMP_DATA --> S4
+        CMAP --> S4
+        PLUMED -.-> S4
+        NDX -.-> S4
+        DAT -.-> S4
+        S4 --> TRAJ["traj_idp.xtc<br/>(ensemble trajectory)"]
+    end
+
+    style Step2 fill:#e8f4e8,stroke:#2d7d2d
+    style Step4 fill:#e8e8f4,stroke:#2d2d7d
+```
+
+**Coil 流水线**完全省略了预处理阶段，直接从准备阶段进入转换阶段再到模拟阶段，生成一个无约束的随机线团系综，作为用于比较的具有物理意义的基线。
+
+来源: [scripts/step1-prepare_gmx.bash](/scripts/step1-prepare_gmx.bash#L1-L7), [scripts/step2-preprocess.bash](/scripts/step2-preprocess.bash#L1-L39), [scripts/step3-conversion.bash](/scripts/step3-conversion.bash#L1-L33)
+
+## 阶段 1：准备 — GROMACS 拓扑生成
+
+准备阶段将 AlphaFold-2 的输出（具有非标准原子命名的 PDB 模型）桥接到 GROMACS 生态系统中，使用 **amber99SB-ILDN** 力场生成自洽的拓扑。该拓扑作为所有下游力场转换的唯一事实来源。
+
+脚本 `step1-prepare_gmx.bash` 依次执行两条 GROMACS 命令。首先，`gmx pdb2gmx` 将 AF2 弛豫后的 PDB 转换为 GROMACS 坐标（`.gro`）、拓扑（`.top`）和包含拓扑（`.itp`）文件，选择水模型为 `none` 并忽略氢原子（`-ignh`）。其次，`gmx trjconv` 对结构重新居中，输出一个保留了 GROMACS 原子编号的干净 `.pdb` 文件——这是一个关键细节，因为 AF2 输出与经 GROMACS 处理的结构之间的原子索引可能不同，而此重新编号的 PDB 正是 PLUMED 为其 `MOLINFO` 指令所引用的文件。
+
+| 输入 | 命令 | 输出文件 | 用途 |
+|---|---|---|---|
+| `relaxed_model.pdb` | `gmx pdb2gmx` | `idp.gro`, `idp.top`, `idp.itp` | 力场拓扑 + 坐标 |
+| `idp.gro` | `gmx trjconv` | `idp.pdb` | 具有正确原子编号的重新居中 PDB |
+
+来源: [scripts/step1-prepare_gmx.bash](/scripts/step1-prepare_gmx.bash#L1-L7), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L37-L47)
+
+## 阶段 2：预处理 — 距离直方图拟合与 PLUMED 生成
+
+这是 bAIes 流水线的计算核心，也是其区别于随机线团模拟的阶段。预处理阶段接收 AF2 距离直方图（残基间距离的概率分布），将每个选定的残基对拟合至解析模型，并输出定义模拟期间施加的贝叶斯约束势的三个 PLUMED 配置文件。
+
+### 距离直方图读取与残基对选择
+
+`preprocess_bAIes.py` 脚本首先读取距离直方图文件——可以是 AlphaFold-2 的 `.pkl` pickle 文件（通过 `read_pkl`）或 ColabFold 的 `.npy` 文件（通过 `read_npy`）。AF2 距离直方图包含横跨 2.0–22.0 Å 的 **64 个分箱**；最后一个分箱（覆盖 >22 Å）因不可靠而被丢弃。原始 logit 通过 softmax 转换为概率分布。同时，解析 PDB 结构以提取每个残基的 CB 原子位置（甘氨酸则为 CA），建立距离直方图残基索引与 MD 原子编号之间的映射。
+
+随后，残基对将通过三个条件进行**过滤**：(1) **序列间隔**截断值（`-seqsep`，默认为 3）移除相邻残基，以保留来自基础力场的螺旋信息；(2) **距离截断值**（可以是固定的 Å 值或残基对特定的 `cutoff_matrix`）移除最可能距离超过阈值的残基对；(3) **链过滤器**（`-chains`）可选地将多链系统限制为链内或链间残基对。
+
+### 距离直方图拟合
+
+每个选定残基对的概率分布均被拟合至解析模型。支持两种模型族：
+
+| 模型 | 公式 | 适用场景 |
+|---|---|---|
+| **高斯** (`-model gauss`) | $A \cdot \frac{1}{\sqrt{2\pi\sigma^2}} \exp\left(-\frac{(x-\mu)^2}{2\sigma^2}\right)$ | 默认模型；适用于单峰距离分布 |
+| **对数正态** (`-model lognorm`) | $A \cdot \frac{1}{x\sqrt{2\pi\sigma^2}} \exp\left(-\frac{(\ln x - \mu)^2}{2\sigma^2}\right)$ | 更适用于短距离处的偏态分布 |
+
+对于**单峰**拟合（`-nmodes 1`），直接使用 `scipy.optimize.curve_fit`，并在随机初始条件下进行迭代回退。对于**多峰**拟合，`lmfit` 库在 1–N 个峰之间执行模型选择，选择简化 χ² 最接近 1 的拟合。距离直方图中的最可能距离（`dmax`）作为第一个峰的初始条件种子，以改善收敛性。
+
+### PLUMED 文件组装
+
+拟合完成后，`step2-preprocess.bash` 将组装带有四条 PLUMED 指令的最终 `plumed.dat` 文件：
+
+```
+#MOLINFO STRUCTURE=idp.pdb
+batoms: GROUP NDX_FILE=atom_list.ndx NDX_GROUP=batoms
+baies: BAIES ATOMS=batoms DATA_FILE=baies_params.dat PRIOR=JEFFREYS TEMP=2.478541306
+PRINT ARG=baies.ene FILE=COLVAR STRIDE=500
+bbias: BIASVALUE ARG=baies.ene STRIDE=2
+```
+
+`PRIOR` 关键字在架构上具有重要意义：**JEFFREYS** 选择 Jeffreys 先验用于完整的 bAIes 采样，而 **NONE** 则生成 bAIes-N 变体（无贝叶斯先验的距离直方图约束）。温度 `2.478541306` 是 LAMMPS 单位下的约化温度（以 kcal/mol 为单位的 k_BT）。
+
+| 输出文件 | 内容 | 消费者 |
+|---|---|---|
+| `baies_params.dat` | 每个残基对的拟合 (μ, σ², 缩放系数) | PLUMED BAIES 操作 |
+| `atom_list.ndx` | `[batoms]` 组下的原子索引 | PLUMED GROUP 操作 |
+| `plumed.dat` | PLUMED 偏置配置 | LAMMPS (通过 PLUMED fix) |
+
+<CgxTip>使用 ColabFold 距离直方图时，请确保使用 `*_distmat/` 子目录下的 `_prob_distributions.npy` 文件——这是概率分布，而非原始 logit。`read_npy` 函数假定输入为已转换的概率，且具有特定的 64 分箱网格（单位为 nm）。</CgxTip>
+
+来源: [GROMACS](/scripts/preprocess_bAIes.py#L#L1-50), [0 [scripts/step2-preprocess.bash](E0-39), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L49-L92)
+
+## 阶段 3：转换 — GROMACS 至 LAMMPS 及力场简化
+
+转换阶段执行两阶段转换：首先将 GROMACS 拓扑转化为 LAMMPS 格式，随后应用**力场简化**，即用最小的 LJ 截断加 CMAP 二面角校正图替换完整的 amber99SB-ILDN 非键相互作用。
+
+### 阶段 A：Intermol 转换
+
+`intermol` Python 库执行从 GROMACS（`.gro` + `.top`）到 LAMMPS（`.lmp` + `.input`）的机械式文件格式转换。这将产生中间文件——`idp_converted.input` 和 `idp_converted.lmp`——它们保留了完整的 amber99SB-ILDN 力场，包括所有对系数、特殊键校正以及 k 空间静电相互作用。
+
+### 阶段 B：通过 `make_ff.py` 进致力场简化
+
+`make_ff.py` 脚本（在脚本目录中称为 `remove_nonbonded_cmap_plumed.py`）读取中间 LAMMPS 文件并应用两项关键修改：
+
+1. **非键简化**：带有长程静电的完整成对 LJ 相互作用被替换为截断半径为 2 Å 的 `lj/cut 2.0` 对势——这实际上移除了键合邻域之外的所有非键相互作用。所有对系数均被显式枚举（包括通过算术混合计算的交叉项），并且 `pair_modify shift yes` 确保了截断处的能量连续性。
+
+2. **CMAP 注入**：从 `cmap_20240524.cmap` 中读取骨架 φ/ψ 二面角校正图，并将其注入到 LAMMPS 输入脚本（通过 `fix drycmap all cmap`）和数据文件（追加具有残基类型特定映射索引的 CMAP 交叉项）中。该校正图用捕获 Ramachandran 取向偏好的残基特异性二维网格替换了全力场的扭转分量。
+
+3. **模拟样板**：该脚本追加默认的模拟设置——能量最小化、NVT 恒温器（298.1 K 下的 `temp/csvr`）、PLUMED fix、XTC 轨迹输出以及 2 μs 的生产运行。
+
+模拟盒被设置为一个立方体，边长由 `-cube` 参数指定（教程中默认为 200 Å），并以原点为中心。
+
+| 输入文件 | 操作 | 输出文件 |
+|---|---|---|
+| `idp.gro`, `idp.top` | `intermol.convert` | `idp_converted.input`, `idp_converted.lmp` |
+| `idp_converted.*`, `idp.pdb`, `cmap_*.cmap` | `make_ff.py` | `idp_nvt.in`, `idp_nvt.data` |
+
+<CgxTip>在编译前，必须将 LAMMPS 中的 CMAP 补丁（`installation/` 中的 `patch_cmap.txt`）应用于 `fix_cmap.cpp`——未打补丁的 LAMMPS CMAP 实现无法正确处理 bAIes 偏置交换所需的能量核算。详情参见 [LAMMPS CMAP 补丁](15-lammps-cmap-patch)。</CgxTip>
+
+来源: [scripts/step3-conversion.bash](/scripts/step3-conversion.bash#L1-L33), [scripts/make_ff.py](/scripts/make_ff.py#L1-L50), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L94-L122)
+
+## 阶段 4：模拟 — 系综生产
+
+模拟阶段将最终的 LAMMPS+PLUMED 系统收敛为一条采样自 bAIes 后验系综的轨迹。来自阶段 2 和 3 的所有文件被收集至同一目录下：
+
+| 文件 | 来源 | 角色 |
+|---|---|---|
+| `idp_nvt.in` | 阶段 3 | LAMMPS 输入脚本（力场 + 积分器设置） |
+| `idp_nvt.data` | 阶段 3 | LAMMPS 拓扑（键、角度、二面角、CMAP 交叉项） |
+| `cmap_20240524.cmap` | 阶段 3 | 二面角校正图网格数据 |
+| `plumed.dat` | 阶段 2 (仅 bAIes) | PLUMED 偏置配置 |
+| `baies_params.dat` | 阶段 2 (仅 bAIes) | 拟合的距离直方图约束参数 |
+| `atom_list.ndx` | 阶段 2 (仅 bAIes) | bAIes 约束的原子索引组 |
+| `idp.pdb` | 阶段 1 | PLUMED MOLINFO 的结构参考 |
+
+模拟通过 `lmp -in idp_nvt.in` 启动。输入脚本中可调的关键参数包括轨迹转储频率（`dump ... xtc <stride>`）、恒温器耦合以及总时间步数（`run <N>`）。模拟后分析可直接在 XTC 输出上利用 GROMACS 工具进行——例如，`gmx trjconv -f traj_idp.xtc -s idp.pdb -o traj_idp_dt100ps.xtc -dt 100` 用于时间跨步。
+
+来源: [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L124-L151), [scripts/make_ff.py](/scripts/make_ff.py#L130-L165)
+
+## 流水线变体：bAIes vs bAIes-N vs Coil
+
+流水线架构支持三种不同的模拟模式，它们共享准备和转换基础设施，但在约束势和力场上有所不同：
+
+| 特性 | bAIes | bAIes-N | Coil |
+|---|---|---|---|
+| **距离直方图约束** | ✅ 从 AF2 拟合 | ✅ 从 AF2 拟合 | ❌ 无 |
+| **贝叶斯先验** | Jeffreys (`PRIOR=JEFFREYS`) | 无 (`PRIOR=NONE`) | 不适用 |
+| **PLUMED 偏置** | BAIES + BIASVALUE | BAIES + BIASVALUE | 无 |
+| **预处理阶段** | 必需 | 必需 (使用 `prior=NONE`) | 跳过 |
+| **力场** | 简化 + CMAP | 简化 + CMAP | 简化 + CMAP |
+| **物理解释** | 贝叶斯后验系综 | 受约束系综 | 无约束线团基线 |
+| **教程路径** | `tutorial/bAIes/` | `tutorial/bAIes/` (编辑 prior) | `tutorial/coil/` |
+
+**bAIes** 变体应用 Jeffreys 先验，该先验自然地惩罚过度精确的约束，产生一个兼顾 AF2 预测置信度与物理力场的后验分布。**bAIes-N** 移除此先验，按原值施加距离直方图约束——有助于对比，但对预测不确定性的鲁棒性较差。**Coil** 作为零模型：相同的简化力场但不包含任何 AF2 导出的偏置，代表随机聚合物在相同模拟条件下的形态。
+
+来源: [scripts/step2-preprocess.bash](/scripts/step2-preprocess.bash#L13-L15), [tutorial/coil/README.md](/tutorial/coil/README.md#L1-L81)
+
+## 文件流总结
+
+下表追踪了流水线中的每一个文件，展示了其生产阶段、消费阶段和格式：
+
+| 文件 | 格式 | 生产者 | 消费者 | 内容 |
+|---|---|---|---|---|
+| `result_model_*.pkl` | Pickle | AlphaFold-2 (外部) | 阶段 2 | 原始距离直方图 (logit + 分箱) |
+| `*_prob_distributions.npy` | NumPy | ColabFold (外部) | 阶段 2 | 预转换的概率分布 |
+| `relaxed_model_*.pdb` | PDB | AlphaFold-2 (外部) | 阶段 1 | AF2 弛豫结构 |
+| `idp.gro` | GROMACS GRO | 阶段 1 | 阶段 3 | 坐标 + 盒子 |
+| `idp.top` | GROMACS TOP | 阶段 1 | 阶段 3 | 系统拓扑 |
+| `idp.itp` | GROMACS ITP | 阶段 1 | (被 .top 引用) | 分子拓扑 |
+| `idp.pdb` | PDB | 阶段 1 | 阶段 2, 3, 4 | 重新编号的结构 |
+| `baies_params.dat` | PLUMED DAT | 阶段 2 | 阶段 4 | 拟合的约束参数 |
+| `atom_list.ndx` | NDX | 阶段 2 | 阶段 4 | 原子索引组 |
+| `plumed.dat` | PLUMED | 阶段 2 | 阶段 4 | 偏置配置 |
+| `idp_nvt.in` | LAMMPS input | 阶段 3 | 阶段 4 | 模拟脚本 |
+| `idp_nvt.data` | LAMMPS data | 阶段 3 | 阶段 4 | 拓扑 + CMAP 交叉项 |
+| `cmap_20240524.cmap` | CMAP | 阶段 3 (提供) | 阶段 4 | 二面角校正网格 |
+| `traj_idp.xtc` | XTC | 阶段 4 | 后分析 | 系综轨迹 |
+
+来源: [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L151), [tutorial/coil/README.md](/tutorial/coil/README.md#L1-L81)
+
+## 后续阅读
+
+流水线架构建立了骨架框架——每个阶段都包含值得单独探索的巨大实现深度：
+
+- **距离直方图内部机制**：[距离直方图读取与拟合](5-distogram-reading-and-fitting)——详述模型选择、拟合收敛及质量诊断
+- **PLUMED 配置**：[PLUMED 文件生成](6-plumed-file-generation)——BAIES 操作语法、先验选择与温度缩放
+- **力场机制**：[GROMACS 至 LAMMPS 转换](7-gromacs-to-lammps-conversion)与 [CMAP 校正图](8-cmap-correction-maps)——简化原理与 CMAP 补丁要求
+- **模拟执行**：[bAIes 系综模拟](9-baies-ensemble-simulations)与 [随机线团模拟](10-random-coil-simulations)——生产运行配置与轨迹分析
+- **输入规范**：[AlphaFold-2 与 ColabFold 输入](11-alphafold-2-and-colabfold-inputs)与 [残基对截断矩阵](12-residue-pair-cutoff-matrix)——距离直方图格式与残基对距离阈值逻辑
+
+---
+
+- [深入探究/LAMMPS CMAP 补丁](https://zread.ai/COSBlab/bAIes-IDP/15-lammps-cmap-patch)
+
+---
+slug:15-lammps-cmap-patch
+blog_type:normal
+---
+
+
+LAMMPS CMAP 补丁是一处精简但至关重要的源码修改，它提升了 LAMMPS `fix_cmap.cpp` 中 CMAP（校正图）扭转交叉项的内部容量限制。标准 LAMMPS 发行版（2023年8月2日）将最大 CMAP 类型数硬编码为 **6**——这对于原始 CHARMM 力场已足够——但 bAIes-IDP 流水线使用了**残基特异性校正图**，最多可能需要 40 种不同类型，每种对应一个氨基酸对类别。若无此补丁，对于校正图类型索引超过 5 的系统，LAMMPS 在运行时将抛出 `"Invalid CMAP crossterm_type"` 错误。
+
+来源：[patch_cmap.txt](/installation/patch_cmap.txt#L1-L30), [README.md](/installation/README.md#L49-L55)
+
+## 为何需要此补丁
+
+CHARMM CMAP 势通过对每个残基对类型的 24×24 校正值网格进行插值，来校正主链 φ/ψ 二面体能面。LAMMPS 的 `fix_cmap.cpp` 最初通过常量 `CMAPMAX` 仅为 **6** 种类型分配存储空间和循环边界，这反映了标准 CHARMM36 力场中定义的六种唯一 CMAP 图（按第二个残基位置是脯氨酸还是非脯氨酸分类）。
+
+然而，bAIes-IDP 流水线执行了从 AMBER ff99SB-ILDN 到 LAMMPS 的**力场转换**。在此转换期间，`make_ff.py` 脚本将 AMBER 二面角项分解为 LAMMPS 兼容的形式，并辅以残基特异性的 CMAP 校正网格。由于 20 种标准氨基酸均可为其主链 φ/ψ 能面定义不同的校正图（且 PRO 对引入了额外的变体），所需 CMAP 类型的数量远超最初 6 的限制。例如，教程中的校正图文件 `cmap_20240524.cmap` 定义的类型索引远超 5——每个类型均关联一个特定的残基对，如 `ARG-(XXX)`、`PRO-(XXX)` 等，其中 `XXX` 表示任意非脯氨酸残基。
+
+| 参数 | 原始 LAMMPS | 打补丁后的 LAMMPS | 依据 |
+|---|---|---|---|
+| `CMAPMAX` | 6 | 40 | 支持所有 20 种氨基酸的残基特异性校正图 |
+| 映射导数循环 | `for (i=0; i<6; i++)` | `for (i=0; i<CMAPMAX; i++)` | 确保所有已加载的映射类型均已预计算导数 |
+| 类型边界检查 | `t1 > 5` | `t1 > CMAPMAX-1` | 针对新容量进行正确验证 |
+
+这三项修改紧密耦合：仅提升 `CMAPMAX` 而不更新循环和边界检查，将导致高索引映射缺失导数预计算，并在运行时拒绝有效类型。反之，该补丁彻底消除了硬编码的 `6` 和 `5` 字面量，将其替换为对 `CMAPMAX` 的引用，以便未来调整只需更改单个常量。
+
+来源：[patch_cmap.txt](/installation/patch_cmap.txt#L1-L30), [make_ff.py](/scripts/make_ff.py#L30-L37)
+
+## 补丁内容——逐行分析
+
+此统一差异补丁针对 `lammps-2Aug2023/src/MOLECULE/fix_cmap.cpp`，并精确应用了三项更改：
+
+**更改 1——存储容量（第 56 行）：** 常量 `CMAPMAX` 从 6 提升至 40。这控制了 `cmapgrid`、`d1cmapgrid`、`d2cmapgrid` 和 `d12cmapgrid` 数组的大小，这些数组存储校正图及其一阶、二阶和交叉导数。增加此值将为每次模拟分配最多 40 种不同 CMAP 类型的内存。
+
+**更改 2——导数预计算循环（第 182 行）：** 循环 `for (i = 0; i < 6; i++)` 被替换为 `for (i = 0; i < CMAPMAX; i++)`。这确保了对每个已加载的映射类型都调用 `set_map_derivatives()`，而不仅是前六个。若无此修复，CMAP 类型 7–40 虽会从校正图文件中读取，但其导数网格将保持未初始化状态，从而产生不正确的力和能量。
+
+**更改 3——运行时类型验证（第 453 行）：** 边界检查 `if (t1 > 5)` 变为 `if (t1 > CMAPMAX-1)`。这防止了当模拟遇到类型索引超过已分配容量的 CMAP 交叉项时，出现数组越界访问。当 `CMAPMAX=40` 时，有效类型范围变为 0–39（在 LAMMPS 数据文件中为类型索引 1–40，内部偏移量为 1）。
+
+<CgxTip>内存影响微乎其微：每个 24×24 的 CMAP 网格仅需 576 个双精度浮点数（约 4.5 KB）。从 6 种类型扩展至 40 种类型为四个网格数组增加约 150 KB 内存——相对于典型的 MD 模拟内存预算而言微不足道。</CgxTip>
+
+来源：[patch_cmap.txt](/installation/patch_cmap.txt#L1-L30)
+
+## 应用补丁
+
+该补丁必须在**编译 LAMMPS 之前**应用，且目标为特定的 LAMMPS 版本 **2023年8月2日**。操作步骤如下：
+
+1. 从[官方归档](https://download.lammps.org/tars/index.html)**下载** LAMMPS 源码包并解压。
+2. **导航**至源码根目录（包含 `src/`）。
+3. 使用标准 Unix `patch` 工具**应用**补丁：
+
+```bash
+patch ./src/MOLECULE/fix_cmap.cpp < /path/to/bAIes-IDP/installation/patch_cmap.txt
+```
+
+4. 在启用 MOLECULE 包（包含在 `cmake/presets/basic.cmake` 中）并支持 PLUMED 的情况下**编译** LAMMPS。典型的 CMake 构建命令如下：
+
+```bash
+mkdir build && cd build
+cmake -C ../cmake/presets/basic.cmake -D PKG_PLUMED=yes -D PLUMED_MODE=runtime ../cmake
+make
+sudo make install
+```
+
+`basic.cmake` 预设文件必须包含 `MOLECULE` 包（该包提供 `fix_cmap.cpp`）。典型的预设文件如下：
+
+```cmake
+set(ALL_PACKAGES KSPACE MANYBODY MOLECULE RIGID GPU EXTRA-DUMP EXTRA-FIX KOKKOS)
+foreach(PKG ${ALL_PACKAGES})
+  set(PKG_${PKG} ON CACHE BOOL "" FORCE)
+endforeach()
+```
+
+<CgxTip>如果补丁顺利逆转（退出码为 0）但出现偏移警告，请验证你正在为精确的 LAMMPS 2023年8月2日源码打补丁——不同发行版间 `fix_cmap.cpp` 的行号可能发生偏移，导致差异块误用。</CgxTip>
+
+来源：[README.md](/installation/README.md#L49-L88), [README.md](/README.md#L38-L54)
+
+## CMAP 如何集成至 bAIes-IDP 模拟流水线
+
+该补丁存在于更广泛的转换流水线中。通过 `intermol` 进行 GROMACS 到 LAMMPS 的转换后，`make_ff.py` 脚本会重写 LAMMPS 的输入和数据文件，以纳入 CMAP 校正项。集成流程如下：
+
+```mermaid
+flowchart TD
+    A["GROMACS .gro/.top files"] -->|"intermol convert"| B["Raw LAMMPS .input/.lmp"]
+    B -->|"make_ff.py"| C["Patched LAMMPS .in/.data"]
+    D["cmap_20240524.cmap<br/>(correction maps)"] -->|"make_ff.py"| C
+    E["protein.pdb"] -->|"make_ff.py"| C
+    F["plumed.dat"] -->|"make_ff.py"| C
+    C --> G["LAMMPS + PLUMED<br/>simulation"]
+    H["CMAP-patched<br/>fix_cmap.cpp"] --> G
+```
+
+在生成的 LAMMPS 输入文件（`.in`）中，CMAP 通过三条指令激活：
+
+```lammps
+fix drycmap all cmap cmap_20240524.cmap
+read_data idp_nvt.data fix drycmap crossterm CMAP
+fix_modify drycmap energy yes
+```
+
+- **`fix drycmap all cmap`** —— 实例化 CMAP fix 并加载校正图文件，该文件定义了每种残基对类型的 24×24 能量网格。
+- **`read_data ... fix drycmap crossterm CMAP`** —— 读取拓扑数据文件，并将 CMAP 交叉项部分（原子五元组：C(i-1), N(i), CA(i), C(i), N(i+1)）分配给 `drycmap` fix。
+- **`fix_modify drycmap energy yes`** —— 确保 CMAP 能量贡献显示在热力学输出列 `f_drycmap` 中。
+
+拓扑数据文件（`idp_nvt.data`）包含一个 `CMAP` 部分，将每个交叉项列为：`index type atom_Ci-1 atom_Ni atom_CAi atom_Ci atom_Ni+1`。`make_ff.py` 脚本通过读取 PDB 文件识别主链原子，并读取 CMAP 文件将每个残基对解析为其对应的类型索引，从而生成此部分。
+
+来源：[make_ff.py](/scripts/make_ff.py#L120-L175), [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L1-L12), [idp_nvt.data](/tutorial/bAIes/4-simulation/idp_nvt.data#L1-L15), [step3-conversion.bash](/scripts/step3-conversion.bash#L1-L33)
+
+## 验证与故障排除
+
+应用补丁并编译后，通过运行一个定义了超过 6 种类型的 CMAP 文件的简短 LAMMPS 模拟，来验证修复是否生效。诊断指标如下：
+
+| 症状 | 原因 | 解决方案 |
+|---|---|---|
+| 运行时出现 `"Invalid CMAP crossterm_type"` 错误 | 未应用补丁，或 LAMMPS 从未打补丁的源码编译 | 重新应用补丁并重新构建 |
+| 所有 CMAP 能量报告为零 | 输入中缺少 `fix_modify drycmap energy yes` | 将该指令添加至输入文件 |
+| 力为 NaN 或能量漂移 | 类型 > 6 的映射导数未预计算（缺少补丁更改 2） | 验证循环行读取的是 `i < CMAPMAX`，而非 `i < 6` |
+| CMAP 类型 > 39 时出现段错误 | 校正图文件中存在超过 40 种不同的 CMAP 类型 | 在 `fix_cmap.cpp` 中增加 `CMAPMAX` 并重新编译 |
+
+生成输入文件中的热力学输出行包含 `f_drycmap` 作为专用列，允许在整个模拟过程中直接监控 CMAP 能量贡献。
+
+来源：[patch_cmap.txt](/installation/patch_cmap.txt#L1-L30), [make_ff.py](/scripts/make_ff.py#L147-L149)
+
+## 与其他流水线组件的关系
+
+CMAP 补丁是一个**构建时先决条件**，必须在任何 bAIes-IDP LAMMPS 模拟运行之前得到满足。它依赖并支持以下流水线阶段：
+
+- **[GROMACS 到 LAMMPS 转换](7-gromacs-to-lammps-conversion)** —— 转换步骤产生原始 LAMMPS 文件，随后 `make_ff.py` 用 CMAP 项对其进行扩充。
+- **[CMAP 校正图](8-cmap-correction-maps)** —— 残基特异性校正图文件（如 `cmap_20240524.cmap`）在模拟启动时由打过补丁的 `fix_cmap` 读取。
+- **[bAIes 系综模拟](9-baies-ensemble-simulations)** —— 所有 bAIes 生产运行均需打过补丁的 LAMMPS 二进制文件。
+- **[随机线圈模拟](10-random-coil-simulations)** —— 随机线圈参考模拟也使用经 CMAP 校正的力场，因此需要此补丁。
+
+有关包括 LAMMPS 编译在内的完整软件设置流程，请参见[软件与硬件要求](3-software-and-hardware-requirements)。有关校正图如何生成及其物理意义的详细信息，请参见[CMAP 校正图](8-cmap-correction-maps)。
+
+---
+
+- [深入探究/模拟参数调优](https://zread.ai/COSBlab/bAIes-IDP/16-simulation-parameter-tuning)
+
+---
+slug:16-simulation-parameter-tuning
+blog_type:normal
+---
+
+
+在 bAIes-IDP 流程中调整模拟参数需要理解三个不同的参数层：**预处理控制**（影响距离分布拟合和约束选择）、**力场转换设置**（定义模拟盒子和校正势）以及 **LAMMPS/PLUMED 运行时参数**（控制积分、恒温器和系综采样）。本页为每个可调参数提供了系统性参考，包括其默认值、物理意义以及修改后的影响。
+
+## 参数架构概述
+
+bAIes-IDP 中的可调参数分布在三个流程阶段中，每个阶段都会产生限制后续选择的下游产物。理解这种依赖链至关重要：预处理阶段的修改会通过 PLUMED 文件传播到模拟本身，而 LAMMPS 运行时参数则可以独立调整，无需重新运行先前的步骤。
+
+```mermaid
+flowchart TD
+    subgraph PRE["Preprocessing (step 2)"]
+        A["-cutoff / -model / -seqsep<br/>-chains / tolerr / nmodes"] --> B["baies_params.dat<br/>atom_list.ndx"]
+    end
+    subgraph CONV["Force Field Conversion (step 3)"]
+        C["-cube / -cmap / -plumed"] --> D["idp_nvt.in<br/>idp_nvt.data"]
+    end
+    subgraph SIM["Simulation (step 4)"]
+        E["timestep / thermostat<br/>run / dump stride"] --> F["traj_idp.xtc<br/>COLVAR"]
+    end
+    subgraph PLUMED["PLUMED Runtime"]
+        G["PRIOR / TEMP / STRIDE"] --> H["Bayesian bias<br/>forces"]
+    end
+    B --> G
+    D --> E
+    G --> E
+    C -.->|plumed.dat path| G
+```
+
+上图说明了三个参数域及其数据流依赖关系。预处理参数决定*哪些*原子对接受贝叶斯约束，以及这些约束的定义*有多尖锐*。转换参数定义*物理环境*（盒子大小、CMAP 校正）。LAMMPS 和 PLUMED 运行时参数控制*积分精度*和*采样效率*。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L18-L31), [make_ff.py](/scripts/make_ff.py#L11-L20), [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L1-L390)
+
+## 预处理参数
+
+预处理通过 `preprocess_bAIes.py` 调用，并通过命令行参数控制。这些参数决定如何将 AlphaFold/ColabFold 的距离分布拟合为参数分布，以及哪些残基对被保留为贝叶斯约束。更改其中任何参数都需要重新运行步骤 2，并随后重新生成模拟中使用的 PLUMED 文件。
+
+### 命令行参考
+
+| 参数 | 标志 | 默认值 | 描述 |
+|:----------|:-----|:--------|:------------|
+| **Cutoff** | `-cutoff` | `8.0` | 距离截断值（单位 Å）。预测距离 ≥ 截断值的原子对将被排除。使用 `matrix` 可指定基于残基对的截断值。 |
+| **Model** | `-model` | `gauss` | 拟合模型：`gauss`（高斯分布）或 `lognorm`（对数正态分布）。决定 PLUMED 中的似然函数。 |
+| **Sequence separation** | `-seqsep` | `3` | 最小残基索引间隔。在同一链中满足 \|i−j\| ≤ seqsep 的原子对将被排除。 |
+| **Chain scope** | `-chains` | `all` | 对于多链蛋白质：`intra`（仅分子内）、`inter`（仅分子间）或 `all`（两者皆有）。 |
+| **MD PDB** | `-mdpdb` | `same` | 如果 GROMACS 相对 AlphaFold PDB 重新编号了原子，则需提供用于原子索引的单独 PDB。 |
+| **Output file** | `-out` | `baies_params.dat` | 输出参数文件路径。 |
+| **Index file** | `-ndxout` | `atom_list.ndx` | 为 PLUMED 输出的原子索引文件。 |
+| **Plot output** | `-plotout` | `distograms.pdf` | 拟合质量图的 PDF 路径（仅在设置 `--plots` 时生效）。 |
+| **Plots** | `--plots` | off | 启用逐对距离分布拟合图以进行质量检查。 |
+| **Verbose** | `--verbose` | off | 在预处理期间启用详细的终端输出。 |
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L18-L31)
+
+### 截断距离
+
+截断参数是影响最大的单一预处理控制项。它决定将 AlphaFold 距离分布中的哪些残基对转换为贝叶斯约束。只有当残基对 (i, j) 的最可几距离 D_max 低于截断值时，该残基对才会被保留。存在两种策略：
+
+- **固定截断值**（例如 `-cutoff 8.0`）：所有 D_max < 8 Å 的原子对均接受约束。此方法简单，但对所有残基类型一视同仁，可能会包含偶然接近而非真实物理接触的原子对。
+- **残基对矩阵**（`-cutoff matrix`）：使用基于 Baker 实验室接触势推导出的 210 个元素的残基对特异性截断距离查找表。小残基对（如 GLY–GLY: 4.47 Å）具有严格的截断值，而大芳香残基对（如 TRP–TRP: 12.81 Å）具有宽松的截断值。这产生了一种更具物理依据的约束选择。
+
+推荐在生产模拟中使用矩阵方法，因为它平衡了覆盖率与虚假约束：甘氨酸和丙氨酸等紧凑残基受到更少的约束（反映了它们较小的范德华半径），而色氨酸和精氨酸等大体积残基则保留了具有物理意义的长程接触。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L34-L197), [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L800-L850)
+
+### 拟合模型：高斯分布 vs. 对数正态分布
+
+`-model` 标志选择拟合每个距离分布的参数分布。此选择直接影响 PLUMED 的 BAIES 模块在模拟期间评估的似然函数形状：
+
+- **`gauss`**（默认）：将高斯分布 N(μ, σ²) 拟合到距离分布。拟合参数 (μ, σ) 被写入 `baies_params.dat`。高斯似然关于 μ 对称，当 AlphaFold 距离预测为单峰且近似对称时（通常对于良好定位的接触是这种情况），这是合适的。
+- **`lognorm`**：拟合对数正态分布。这产生右偏似然，对于不能取负值且通常在较大距离处表现出较长尾部的距离分布，这在物理上更为合适。当距离分布图（通过 `--plots` 启用）显示出明显不对称时，请使用此选项。
+
+<CgxTip>在生产运行确定模型选择之前，请始终先在单个 AlphaFold 模型上使用 `--plots --verbose` 运行预处理。检查生成的 PDF 以验证拟合曲线是否捕捉到了距离分布的形状——系统性的拟合不良（尤其是在峰值处）表明模型错误或需要多峰拟合。</CgxTip>
+
+### 序列间隔
+
+`-seqsep` 参数过滤掉序列中相近的残基对。默认值 `3` 移除满足 |i − j| ≤ 3 的原子对（即自身、±1、±2、±3）。这有两个目的：（1）非常局部的原子对已经由键合力场项（键、键角、二面角、CMAP）很好地描述，（2）包含它们会增加冗余约束，在不提高结构精度的情况下减慢收敛。将 seqsep 增加到 `5` 或更高会产生更稀疏的约束网络，这对于高度灵活的区域可能有益，在这些区域中，即使是中程接触也应从力场而非贝叶斯约束中产生。一般不建议将其降至 `3` 以下，因为螺旋信息已编码在 CMAP 校正图中。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L800-L840)
+
+### 内部拟合参数
+
+除命令行界面外，预处理引擎还公开了几个内部常量，高级用户可以通过直接编辑 `preprocess_bAIes.py` 来修改它们：
+
+| 参数 | 位置 | 默认值 | 作用 |
+|:----------|:---------|:--------|:-----|
+| `tolerr` | `fit_model()` / `minfnc()` | `0.005` | lmfit 最小化中的残差加权。值越小，拟合越严格。 |
+| `nmodes` | `main()` 调用 | `1` | 多峰拟合的模态数。目前在 CLI 入口点中硬编码为 1。 |
+| `convf` | `main()` 调用 | `softmax` | Logit 到概率的转换：`softmax` 或 `sigmoid`。 |
+| `maxfev` | `fit_model()` | `5000` | 每次 lmfit 迭代的最大函数评估次数。 |
+| `Niterations` | `fit_model()` | `5` | 每次拟合的随机初始条件试验次数。 |
+
+`convf` 参数控制如何将 AlphaFold 的原始 logit 转换为概率分布。`softmax` 函数（默认）是 AlphaFold 自身概率计算中使用的标准选择。替代方案 `sigmoid` 应用逐元素逻辑转换后进行重归一化，这可能为相同的 logit 产生略微不同的概率分布。为了与 AlphaFold 的内部校准保持一致，应首选 `softmax`。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L540-L580), [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L900-L945)
+
+## 力场转换参数
+
+`make_ff.py` 脚本将 GROMACS 拓扑转换为 LAMMPS 格式，并将模拟参数直接嵌入到输出文件 `idp_nvt.in` 中。这些参数定义了物理模拟环境。
+
+| 参数 | 标志 | 默认值 | 物理意义 |
+|:----------|:-----|:--------|:-----------------|
+| **Cube size** | `-cube` | `400.0` | 立方模拟盒子的边长（单位 Å）。盒子在每个维度上跨越 [−cube/2, +cube/2]。 |
+| **CMAP file** | `-cmap` | `ff.cmap` | CMAP 校正图文件，包含残基特异性的 Φ/Ψ 二面角校正。 |
+| **PLUMED file** | `-plumed` | `plumed.dat` | PLUMED 输入文件的路径（在步骤 2 中生成）。 |
+| **XTC output** | `-oxtc` | `traj.xtc` | 嵌入在 LAMMPS 输入中的轨迹输出文件名。 |
+
+### 模拟盒子大小
+
+`-cube` 参数设置周期性边界条件盒子尺寸。对于内在无序蛋白质，盒子必须足够大，以使蛋白质永远不会与其周期镜像发生相互作用。一个常用的经验法则是，盒子在每个维度上应至少超出蛋白质最大伸长长度 10 Å。对于 100 个残基的 IDP，完全伸长长度约为 360 Å（每个残基 3.6 Å），这使得默认的 400 Å 勉强足够。对于较大的蛋白质或多链系统，请增加此值。尺寸过小的盒子会导致非物理的自我相互作用并破坏系综；尺寸过大的盒子会在空体积上浪费计算资源（尽管对于真空中使用截断对类型的单蛋白质模拟，由于仅评估 LJ 截断内的非键合对，成本影响并不显著）。
+
+来源: [make_ff.py](/scripts/make_ff.py#L11-L20), [make_ff.py](/scripts/make_ff.py#L155-L195)
+
+## LAMMPS 模拟参数
+
+LAMMPS 输入文件 (`idp_nvt.in`) 包含运行时模拟参数。这些参数由 `make_ff.py` 写入，但之后可以自由编辑，无需重新运行任何先前的流程步骤。相关部分出现在文件末尾。
+
+### 积分与系综参数
+
+| 参数 | LAMMPS 指令 | 默认值 | 调优指南 |
+|:----------|:-----------------|:--------|:----------------|
+| **Timestep** | `timestep` | `1.0` fs | 全原子 MD 的标准设置。对于高能初始结构，减至 0.5 fs 可提高稳定性；如果在 SHAKE/LINCS 约束下限制氢键（bAIes 中非默认），增至 2 fs 是可行的。 |
+| **Ensemble** | `fix 1 all nve` + `fix 2 all temp/csvr` | NVE + CSVR 恒温器 | NVE 积分与 CSVR（通过速度重调整的典型采样）恒温器的组合采样 NVT 系综。 |
+| **Target temperature** | `temp/csvr T_start T_end` | `298.1 298.1` K | 平衡采样时两个值应匹配。设置 T_start ≠ T_end 可启用模拟退火。 |
+| **Thermostat time constant** | `temp/csvr ... Tdamp` | `$(100.0*dt)` = 100 fs | 控制耦合强度。较短的 Tdamp（如 10 fs）强制更严格的温度控制但可能破坏动力学。较长的 Tdamp（如 1000 fs）允许自然波动。100 fs 是 IDP 采样的合理折衷。 |
+| **Thermostat seed** | `temp/csvr ... seed` | 随机整数 | 随机速度重调整的随机种子。使用不同种子用于独立副本；保持固定用于可复现性。 |
+| **Simulation length** | `run` | `2000000000` 步 | 2 × 10⁹ 步 × 1 fs = 2 μs。根据观测量（Rg、端到端距离、二级结构含量）的收敛情况进行调整。 |
+
+### 能量最小化
+
+在动力学之前，LAMMPS 执行能量最小化以消除 AlphaFold 起始结构中的空间位阻冲突：
+
+```
+minimize 1.0e-4 1.0e-6 10000 100000
+```
+
+| 参数 | 值 | 含义 |
+|:----------|:------|:--------|
+| 能量容差 | `1.0e-4` | 当迭代间能量变化 < 10⁻⁴ kcal/mol 时停止 |
+| 力容差 | `1.0e-6` | 当最大力分量 < 10⁻⁶ kcal/mol/Å 时停止 |
+| 最大迭代次数 | `10000` | 最大力/扭矩评估次数 |
+| 最大评估次数 | `100000` | 最大能量/力评估次数 |
+
+如果最小化未能收敛（检查 LAMMPS 输出中的 "Energy tolerance not met"），将 `maxiter` 和 `maxeval` 增加一个数量级可能对较大蛋白质或存在严重初始冲突的结构有所帮助。
+
+### 非键相互作用
+
+bAIes 力场使用截断 Lennard-Jones 势，截断值为 2.0 Å（`pair_style lj/cut 2.0`）。这种极短的截断是有意为之：bAIes 方法刻意去除了长程非键相互作用（静电和长程范德华力），以产生一个**简化的类无规线团参考力场**，其中结构偏好主要来自 CMAP 二面角校正和 PLUMED 贝叶斯约束，而非显式的非键相互作用。**不要增加 LJ 截断值**，除非你理解这会从根本上改变贝叶斯框架的参考状态。
+
+### 近邻列表
+
+```
+neighbor 4.0 bin
+neigh_modify every 1 delay 1 check yes
+```
+
+`4.0` Å 的缓冲距离在对手截断之外增加缓冲，以实现高效的近邻列表重建。`neigh_modify` 设置确保每步都检查列表以保证准确性。对于大系统，将缓冲距离增加到 6.0–8.0 Å 会以存储更多原子对为代价降低列表重建频率，从而提高性能。
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L345-L390), [make_ff.py](/scripts/make_ff.py#L155-L195)
+
+### 输出控制
+
+| 参数 | LAMMPS 指令 | 默认值 | 描述 |
+|:----------|:-----------------|:--------|:------------|
+| **Thermo frequency** | `thermo` | `50` 步 | 每 50 步打印一次热力学量（步数、能量）。 |
+| **Trajectory dump** | `dump 1 all xtc` | `10000` 步 | 每 10,000 步保存一次坐标 = 10 ps（在 1 fs 时间步长下）。 |
+| **Trajectory file** | `dump ... traj_idp.xtc` | `traj_idp.xtc` | XTC 格式轨迹（压缩，兼容 GROMACS）。 |
+
+轨迹输出步长控制磁盘空间与时间分辨率之间的权衡。在 10 ps 步长和 2 μs 总时长下，轨迹包含 200,000 帧。使用 GROMACS 工具（`gmx trjconv`、`gmx check`）进行事后分析时，这是可管理的。对于大型系统上的长时间生产运行，增加步长（例如增至 100,000 = 100 ps）以减少磁盘占用。
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L386-L390)
+
+## PLUMED / BAIES 参数
+
+PLUMED 输入文件 (`plumed.dat`) 控制在模拟期间应用 AlphaFold 衍生约束的贝叶斯推断引擎。这是将 bAIes 与普通无规线团模拟区分开来的核心机制。
+
+```
+#MOLINFO STRUCTURE=idp.pdb
+batoms: GROUP NDX_FILE=atom_list.ndx NDX_GROUP=batoms
+baies: BAIES ATOMS=batoms DATA_FILE=baies_params.dat PRIOR=JEFFREYS TEMP=2.478541306
+PRINT ARG=baies.ene FILE=COLVAR STRIDE=500
+bbias: BIASVALUE ARG=baies.ene STRIDE=2
+```
+
+### BAIES 指令参数
+
+| 参数 | 默认值 | 描述 |
+|:----------|:--------|:------------|
+| `ATOMS` | `batoms` | 来自 `atom_list.ndx` 的原子组，包含所有参与贝叶斯约束的原子。 |
+| `DATA_FILE` | `baies_params.dat` | 拟合的距离分布参数（每对原子的 μ, σ）。由预处理生成。 |
+| `PRIOR` | `JEFFREYS` | 贝叶斯先验。`JEFFREYS` 应用 Jeffreys 先验，它是无信息且尺度不变的。 |
+| `TEMP` | `2.478541306` | 简化 PLUMED 单位下的温度（内部能量单位下的 k_B T）。在 298.1 K 时：k_B × 298.1 ≈ 2.4785 kJ/mol，在 PLUMED 基于 kcal/mol 的内部单位中为 0.592 kcal/mol × (298.1/298.0) ≈ 2.4785。 |
+
+<CgxTip>BAIES 指令中的 `TEMP` 参数必须与 LAMMPS 输入文件中的恒温器温度保持一致。如果更改了 `fix temp/csvr` 中的目标温度，则必须重新计算并相应更新 `plumed.dat` 中的 `TEMP`：TEMP = k_B × T_in_kelvin，以 PLUMED 内部使用的相同能量单位表示。不匹配会导致贝叶斯约束以错误的实际强度施加，从而产生有偏系综。</CgxTip>
+
+### STRIDE 参数
+
+| 指令 | STRIDE | 含义 |
+|:----------|:-------|:--------|
+| `PRINT` | `500` | 每 500 步（0.5 ps）将 BAIES 能量写入 `COLVAR`。用于监控偏置收敛。 |
+| `BIASVALUE` | `2` | 每 2 步施加一次贝叶斯偏置力。步长为 2 是一种性能优化：每隔一步计算一次力并重用，将 PLUMED 开销减半。 |
+
+`BIASVALUE` 的步长设为 2 是刻意的性能考量。由于 BAIES 力计算涉及评估所有约束对的似然，对于具有许多约束的蛋白质，这可能会变得昂贵。对于 1 fs 的时间步长，步长为 2 引入的误差可忽略不计，同时将 PLUMED 成本减半。增加至 4 或更高应通过与步长为 1 的参考进行系综特性对比来验证。
+
+来源: [plumed.dat](/tutorial/bAIes/4-simulation/plumed.dat#L1-L6)
+
+## 参数调优工作流
+
+以下流程图总结了参数调优的决策过程，从默认值开始，并根据观察到的模拟行为进行调整：
+
+```mermaid
+flowchart TD
+    START["Start with defaults"] --> CHECK1{"Protein size<br/>vs. box size?"}
+    CHECK1 -->|"Extended length<br/>≥ cube − 10 Å"| INC_CUBE["Increase -cube"]
+    CHECK1 -->|"Adequate"| CHECK2
+    INC_CUBE --> CHECK2
+
+    CHECK2{"Multichain<br/>protein?"} -->|Yes| SET_CHAINS["Set -chains<br/>intra/inter/all"]
+    CHECK2 -->|No| CHECK3
+    SET_CHAINS --> CHECK3
+
+    CHECK3{"Distogram shape<br/>asymmetric?"} -->|Yes| SET_LOGN["Set -model lognorm"]
+    CHECK3 -->|No| CHECK4
+    SET_LOGN --> CHECK4
+
+    CHECK4["Run preprocessing<br/>with --plots --verbose"]
+    CHECK4 --> INSPECT["Inspect distogram.pdf<br/>for fitting quality"]
+    INSPECT --> CHECK5{"Fits look<br/>good?"}
+    CHECK5 -->|No| ADJUST["Adjust -cutoff,<br/>-seqsep, or model"]
+    CHECK5 -->|Yes| RUN_CONV["Run conversion step"]
+    ADJUST --> CHECK4
+
+    RUN_CONV --> RUN_SIM["Run short test<br/>simulation (~10 ns)"]
+    RUN_SIM --> CHECK6{"Minimization<br/>converged?"}
+    CHECK6 -->|No| INC_MIN["Increase minimize<br/>maxiter/maxeval"]
+    CHECK6 -->|Yes| CHECK7
+    INC_MIN --> RUN_SIM
+
+    CHECK7{"Temperature<br/>stable at target?"} -->|No| FIX_TSTAT["Adjust thermostat<br/>Tdamp or seed"]
+    CHECK7 -->|Yes| PROD["Launch production run"]
+    FIX_TSTAT --> RUN_SIM
+```
+
+## 按场景调优策略
+
+### 短 IDP（< 50 个残基）
+
+使用默认参数并做最少调整。8 Å 的预处理截断值或残基对矩阵将选择可管理数量的约束。200 Å 的盒子大小通常足够（在转换中通过 `-cube 200.0` 设置）。500 ns 到 1 μs 的生产运行通常可实现 Rg 等全局属性的收敛。
+
+### 中等 IDP（50–150 个残基）
+
+默认的 400 Å 盒子适用于大多数情况。使用 `-cutoff matrix` 以利用残基对特异性截断值，这将产生更精心挑选的约束集，避免对无序尾端过度约束。监控 COLVAR 输出中的 BAIES 能量：稳定或缓慢漂移的能量表明系综仍在平衡；围绕稳定均值波动的能量表明正在采样。
+
+### 大/多结构域蛋白质（> 150 个残基）
+
+将盒子大小增加到远超默认值（例如 150+ 个残基使用 `-cube 600.0`）。考虑增加转储步长以减小轨迹文件大小。恒温器时间常数可能需要更长（200–500 fs），以避免人为抑制大规模结构域运动。使用不同的恒温器种子运行多个独立副本以评估收敛性。
+
+### 多链系统
+
+如果仅应约束分子内接触（当 AlphaFold 无法可靠预测分子间界面时适用），则设置 `-chains intra`。设置 `-chains inter` 仅约束分子间接触。默认的 `all` 两者皆应用。盒子大小必须能容纳所有链处于最伸展构型时的状态。
+
+来源: [benchmark/README.md](/benchmark/README.md#L1-L38), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L106-L151)
+
+## 快速参考：默认参数汇总
+
+| 阶段 | 参数 | 默认值 | 文件 |
+|:------|:----------|:--------|:-----|
+| 预处理 | Cutoff | 8.0 Å | CLI: `-cutoff` |
+| 预处理 | Model | `gauss` | CLI: `-model` |
+| 预处理 | Sequence separation | 3 | CLI: `-seqsep` |
+| 预处理 | Chain scope | `all` | CLI: `-chains` |
+| 预处理 | Conversion function | `softmax` | 内部: `convf` |
+| 转换 | Box size | 400.0 Å | CLI: `-cube` |
+| 模拟 | Timestep | 1.0 fs | `idp_nvt.in` |
+| 模拟 | Temperature | 298.1 K | `idp_nvt.in` |
+| 模拟 | Thermostat Tdamp | 100 fs | `idp_nvt.in` |
+| 模拟 | LJ cutoff | 2.0 Å | `idp_nvt.in` |
+| 模拟 | Neighbor skin | 4.0 Å | `idp_nvt.in` |
+| 模拟 | Minimization Etol/Ftol | 1e-4 / 1e-6 | `idp_nvt.in` |
+| 模拟 | Run length | 2 × 10⁹ 步 (2 μs) | `idp_nvt.in` |
+| 模拟 | Dump stride | 10,000 步 (10 ps) | `idp_nvt.in` |
+| PLUMED | Prior | `JEFFREYS` | `plumed.dat` |
+| PLUMED | Temperature | 2.4785 | `plumed.dat` |
+| PLUMED | PRINT stride | 500 步 | `plumed.dat` |
+| PLUMED | BIASVALUE stride | 2 步 | `plumed.dat` |
+
+有关这些参数如何与更广泛的流程交互的更多详细信息，请参见[流程架构](4-pipeline-architecture)。有关 BAIES 模块及其先验/温度设置背后的贝叶斯理论，请参见[bAIes 系综模拟](9-baies-ensemble-simulations)。有关端到端运行模拟的实用指南，请参见[快速开始](2-quick-start)。
+
+---
+
+## 预处理工作流
+
+- [深入探究/预处理工作流/距离矩阵读取与拟合](https://zread.ai/COSBlab/bAIes-IDP/5-distogram-reading-and-fitting)
+
+---
+slug:5-distogram-reading-and-fitting
+blog_type:normal
+---
+
+
+**距离直方图读取与拟合**阶段是 bAIes 预处理流程的智能核心——在此步骤中，原始的 AlphaFold-2（或 ColabFold）距离预测值将被解析、过滤，并转换为适用于贝叶斯系综重加权的参数化概率分布。该阶段将离散的预测距离直方图（成对 Cβ–Cβ 距离上的 64 区间概率数组）转换为连续的解析模型（高斯分布或对数正态分布），生成在模拟过程中驱动所有 bAIes 约束的 `baies_params.dat` 文件。
+
+## 距离直方图来源与格式
+
+AlphaFold-2 和 ColabFold 将成对残基距离预测编码为**距离直方图 (distograms)**：在 2–22 Å 跨距的 64 个距离区间上，形状为 N×N×64 的 logits 张量。该流程接受两种文件格式，并通过文件扩展名自动选择：
+
+| 来源 | 文件扩展名 | 格式 | 读取函数 |
+|--------|---------------|--------|-----------------|
+| AlphaFold-2 (本地) | `.pkl` | 包含 `distogram` 键的 Pickle 字典 | `read_pkl()` |
+| ColabFold (距离矩阵) | `.npy` | 原始 NumPy 数组 (N×N×64) | `read_npy()` |
+
+对于 **`.pkl` 文件**，读取器从 Pickle 字典中提取 `bin_edges` 和 `logits`，将每个区间平移至其中心值，从埃 (Å) 转换为纳米 (×0.1)，并将 logits 转换为适当的概率分布。提供了两种转换函数：**softmax**（默认，逐元素应用于每个 64 元素的 logit 向量）和 **sigmoid**（逐元素应用后重新归一化）。最后一个区间（覆盖 >22 Å 的范围）会被丢弃，因为它代表缺乏有效信息的尾部。
+
+对于 **`.npy` 文件**，读取器直接加载预计算的概率数组以及硬编码的 64 个区间中心值列表（单位已为纳米）——这些值与 ColabFold 特定的区间离散化方式相对应，并内嵌于代码中。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L434-L473)
+
+## 结构文件解析与原子映射
+
+在对距离直方图进行有效解释之前，流程必须在**距离直方图残基索引**（从 1 开始，顺序编号）与**分子动力学模拟原子编号**（取决于力场拓扑）之间建立映射。此映射至关重要，因为 AlphaFold 的内部残基编号与经过 `pdb2gmx` 处理后的 GROMACS 原子编号有所不同。
+
+该流程同时支持 **PDB** 和 **mmCIF** 结构文件。对于每个残基，解析器提取 **Cβ 原子**（对于缺乏 Cβ 的甘氨酸则提取 **Cα**），记录其原子索引、残基类型、链标签和 PDB 残基编号。输出字典的格式为：
+
+```
+{距离直方图索引: (原子编号, 残基类型, 链标签, PDB残基编号)}
+```
+
+单独的 `-mdpdb` 参数允许提供不同的 PDB 用于原子编号——这处理了 AlphaFold PDB 与 GROMACS 预处理的 PDB 具有不同原子索引的常见情况。当省略 `-mdpdb` 时，两种映射默认使用 AlphaFold PDB。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L229-L399), [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L401-L418)
+
+## 残基对选择与截断过滤
+
+并非所有的 N×N 残基对都具有物理上的有效信息。流程在拟合前应用了一系列过滤器，这些过滤器在 `select_and_fit_distograms()` 中实现：
+
+**序列间隔过滤器** (`-seqsep`，默认值=3)：在同一链内，满足 `|res_j − res_i| ≤ seqsep` 的残基对将被排除。这移除了距离主要由局部骨架几何结构（键、键角、二面角）而非长程结构信息决定的、显然过近的邻居残基对。默认值 3 在消除无信息量的最近邻残基对的同时，保留了螺旋接触信息。
+
+**链过滤器** (`-chains`)：对于多链系统，用户可以将约束限制为 `"intra"`（仅限链内残基对）、`"inter"`（仅限链间残基对）或 `"all"`（默认）。
+
+**距离截断过滤器** (`-cutoff`)：这是主要的物理过滤器。对于每个残基对，流程计算 **Dmax**——即距离直方图中概率最高的区间中心值。残基对**仅在 Dmax < cutoff**（单位为 nm）时被保留。存在两种截断模式：
+
+| 截断模式 | 参数 | 行为 |
+|-------------|----------|----------|
+| 固定值 | `-cutoff 8.0` | 保留所有 Dmax < 8 Å 的残基对 |
+| 残基对矩阵 | `-cutoff matrix` | 使用源自 Baker 实验室的残基对特异截断表 |
+
+**残基对截断矩阵**是一个包含 210 个条目的字典，将氨基酸对映射到 `(截断值_Å, 容差)`。它编码了这样的物理推理：小残基（例如 GLY–GLY：4.47 Å）无法形成长程接触，而大的芳香族/带电残基对（例如 ARG–TRP：11.36 Å）则可以。在教程流程中，建议使用 `-cutoff matrix` 作为默认选项。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L769-L838), [step2-preprocess.bash](/scripts/step2-preprocess.bash#L17-L27)
+
+## 拟合模型：高斯分布与对数正态分布
+
+一旦残基对通过所有过滤器，其 63 区间的离散概率分布将被拟合为连续的参数化模型。通过 `-model` 标志支持两种模型族：
+
+### 高斯分布（默认）
+
+$$P(d) = \frac{s}{\sqrt{2\pi\sigma^2}} \exp\!\left(-\frac{(d - \mu)^2}{2\sigma^2}\right)$$
+
+当距离分布近似对称时，高斯分布是自然选择——这常见于结构区域中定位良好的接触。拟合参数为 **μ**（平均距离，nm）和 **σ**（标准差，nm），在输出中报告为 `mu` 和 `sigma`。
+
+### 对数正态分布
+
+$$P(d) = \frac{s}{d\sqrt{2\pi\sigma^2}} \exp\!\left(-\frac{(\ln d - \mu)^2}{2\sigma^2}\right)$$
+
+对数正态模型自然地保证了 d > 0，并能捕捉柔性或弱约束残基对常见的右偏分布。这里的 **μ** 是对数空间的均值，**σ²** 是对数空间的方差。
+
+<CgxTip>对于单峰拟合（默认及最常见用法），`scipy.optimize.curve_fit` 执行有界 Levenberg-Marquardt 优化。μ 的初始猜测值以距离直方图峰值的 Dmax 值作为种子，这显著提升了收敛的可靠性。</CgxTip>
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L491-L520), [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L676-L735)
+
+## 多峰拟合与模型选择
+
+除单峰拟合外，流程还支持**多峰分布**——即残基对的距离直方图显示出两个或多个不同峰的情况（例如，一个接触既可以是短程的也可以是长程的）。当 `nmodes > 1` 时，拟合策略会发生显著改变：
+
+流程使用 **lmfit** 的 `Minimizer` 框架替代 `scipy.optimize.curve_fit`。对于从 1 到 `nmodes_max` 的每个峰数 k，它执行 **N 次迭代**（默认 5 次），并采用**随机初始条件**以避免陷入局部极小值。每次迭代将第一个峰的 μ 设定为 Dmax 作为种子，并在物理合理的边界内随机化其余参数。各迭代中的最佳拟合通过**约化卡方** (χ²/ν) 选出。
+
+拟合完所有峰数后，模型选择会挑选约化 χ² **最接近 1.0** 的结果——这在欠拟合 (χ² ≫ 1) 和过拟合 (χ² ≪ 1) 之间取得了平衡。随后，输出将包含每个峰的 `(μ_k, σ_k, weight_k)`，其中权重为总和为 1 的归一化缩放系数。
+
+```mermaid
+flowchart TD
+    A[距离直方图区间 + 概率] --> B{nmodes = 1?}
+    B -->|是| C[scipy.optimize.curve_fit<br/>单峰有界 LM]
+    B -->|否| D[循环 k = 1..nmodes_max]
+    D --> E[5 次迭代<br/>随机初始条件]
+    E --> F[lmfit Minimizer<br/>leastsq 方法]
+    F --> G[通过约化 χ² 选择最佳]
+    G --> H{更多峰?}
+    H -->|是| D
+    H -->|否| I[选择约化 χ²<br/>最接近 1 的模型]
+    C --> J[输出: μ, σ]
+    I --> K["输出: μ_k, σ_k, weight_k"]
+```
+
+<CgxTip>当 `curve_fit` 抛出 `RuntimeError`（收敛失败）时，`iterate_fits()` 回退机制将使用新的随机初始条件最多重试 100 次。类似地，lmfit 路径在遇到 `ValueError` 时也有一个 10 次重试的内部循环。这些回退机制使拟合过程能够应对病态的距离直方图形状，保持鲁棒性。</CgxTip>
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L536-L668), [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L737-L767)
+
+## 端到端数据流
+
+从原始 AlphaFold 输出到 PLUMED 就绪参数文件的完整距离直方图读取与拟合工作流程如下：
+
+```mermaid
+flowchart LR
+    subgraph Input
+        A1["AlphaFold .pkl<br/>或 ColabFold .npy"]
+        A2["结构 .pdb / .cif"]
+        A3["MD 拓扑 .pdb"]
+    end
+    subgraph Reading
+        B1["read_pkl() / read_npy()<br/>→ 区间, 距离直方图"]
+        B2["read_pdb() / read_cif()<br/>→ res_data 映射"]
+    end
+    subgraph Selection
+        C1["按序列间隔过滤"]
+        C2["按链过滤"]
+        C3["计算每对残基的 Dmax"]
+        C4["应用截断过滤"]
+    end
+    subgraph Fitting
+        D1["fit_distogram()<br/>→ μ, σ, [weights]"]
+    end
+    subgraph Output
+        E1["baies_params.dat"]
+        E2["atom_list.ndx"]
+    end
+    A1 --> B1
+    A2 --> B2
+    A3 --> B2
+    B1 --> C1
+    B2 --> C1
+    C1 --> C2 --> C3 --> C4
+    C4 --> D1
+    D1 --> E1
+    D1 --> E2
+```
+
+输出文件 `baies_params.dat` 为每个选定的残基对包含一行。对于单峰高斯拟合（默认），每行指定：
+
+```
+#! FIELDS Id atom_i atom_j mu sigma
+#! SET model gaussian
+1 57 127 1.056467 0.266714
+```
+
+其中 `atom_i` 和 `atom_j` 为 GROMACS 原子编号（来自 MD PDB），`mu` 为拟合的平均距离（单位 nm），`sigma` 为 √(σ²)（单位 nm）。伴随的 `atom_list.ndx` 文件列出了至少参与一个约束的所有唯一原子，格式化为名为 `[ batoms ]` 的 GROMACS 风格索引组。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L840-L882), [baies_params.dat](/tutorial/bAIes/2-preprocessing/baies_params.dat#L1-L101)
+
+## 命令行界面与关键参数
+
+预处理脚本作为 `step2-preprocess.bash` 中的核心步骤被调用。完整的参数集及默认值如下：
+
+| 参数 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `-pdb` | *(必选)* | 用于残基映射的 AlphaFold PDB 或 CIF 文件 |
+| `-mdpdb` | `same` | 若原子索引与 AlphaFold 不同，则指定 MD 模拟 PDB |
+| `-pkl` | *(必选)* | 距离直方图文件（AF2 的 `.pkl` 或 ColabFold 的 `.npy`） |
+| `-out` | `baies_params.dat` | PLUMED bAIes 的输出参数文件 |
+| `-cutoff` | `8.0` | 截断值（单位 Å），或使用 `matrix` 表示残基对特异截断 |
+| `-model` | `gauss` | 拟合模型：`gauss` 或 `lognorm` |
+| `-seqsep` | `3` | 残基对的最小序列间隔 |
+| `-chains` | `all` | 链过滤器：`all`、`intra` 或 `inter` |
+| `-ndxout` | `atom_list.ndx` | 输出原子索引文件 |
+| `--plots` | off | 生成包含拟合质量图的 PDF |
+| `--verbose` | off | 打印详细进度信息 |
+
+典型的调用方式（如教程中所示）：
+
+```bash
+./preprocess_bAIes.py -pdb result_model_4_ptm_pred_0.pkl \
+    -mdpdb idp.pdb \
+    -pkl result_model_4_ptm_pred_0.pkl \
+    -out baies_params.dat \
+    -model gauss \
+    -cutoff matrix \
+    -ndxout atom_list.ndx \
+    --verbose
+```
+
+在初始设置期间强烈推荐使用 `--plots` 标志：它会生成一个多页 PDF，每页展示原始距离直方图区间及拟合曲线，从而能够直观验证解析模型是否忠实捕捉了预测分布。
+
+来源: [preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L14-L34), [step2-preprocess.bash](/scripts/step2-preprocess.bash#L17-L27)
+
+## 与下游流程的集成
+
+此阶段的输出直接馈入两个下游消费者。**PLUMED 插件**通过 `BAIES` 操作读取 `baies_params.dat` 和 `atom_list.ndx`，在 LAMMPS 模拟期间应用贝叶斯约束（参见 [PLUMED 文件生成](6-plumed-file-generation)）。**GROMACS 原子索引文件**确保了在 AlphaFold→GROMACS→LAMMPS 转换链中原子身份映射的正确性（参见 [GROMACS 到 LAMMPS 转换](7-gromacs-to-lammps-conversion)）。在此阶段对拟合模型（`gauss` 对比 `lognorm`）和截断策略（`matrix` 对比固定值）的选择会对约束质量产生级联效应——[残基对截断矩阵](12-residue-pair-cutoff-matrix)页面提供了基于矩阵截断的完整参考表，而[模拟参数调优](16-simulation-parameter-tuning)则讨论了这些选择如何影响系综收敛。
+
+---
+
+## 力场转换
+
+- [深入探究/力场转换/GROMACS 到 LAMMPS 的转换](https://zread.ai/COSBlab/bAIes-IDP/7-gromacs-to-lammps-conversion)
+
+---
+slug:7-gromacs-to-lammps-conversion
+blog_type:normal
+---
+
+
+GROMACS 到 LAMMPS 的转换是 bAIes-IDP 流水线中的关键转换步骤，它将基于 GROMACS 的力场准备工作（amber99SB-ILDN）与 LAMMPS 原生模拟输入衔接起来。这一两阶段过程首先调用 **InterMol** 进行机械的文件格式转换，然后应用 `make_ff.py` 将力场重塑为 IDP 系综采样所需的简化形式——剥离长程静电相互作用，注入 CMAP 校正图，展开对系数，并追加 PLUMED/bAIes 模拟指令。
+
+来源：[step3-conversion.bash](/scripts/step3-conversion.bash#L1-L33), [make_ff.py](/scripts/make_ff.py#L1-L237)
+
+## 两阶段转换架构
+
+转换过程由 `step3-conversion.bash` 统一调度，它将两个不同的操作串联成一个完整的流水线。第一阶段利用 InterMol 库进行直接的格式转换；第二阶段进行特定于 bAIes 框架的力场重构。第一阶段生成的中间文件会被第二阶段消耗，随后被删除，仅保留最终的 LAMMPS 就绪输出。
+
+```mermaid
+flowchart TD
+    subgraph Inputs
+        GRO["idp.gro<br/>(GROMACS 坐标)"]
+        PDB["idp.pdb<br/>(PDB 参考)"]
+        TOP["idp.top<br/>(GROMACS 拓扑)"]
+    end
+
+    subgraph "Phase 1: InterMol Translation"
+        IM["python -m intermol.convert<br/>--gro_in .gro .top<br/>--lammps"]
+    end
+
+    subgraph "Intermediary Files (deleted)"
+        CONV_IN["idp_converted.input"]
+        CONV_LMP["idp_converted.lmp"]
+        CONV_LOG["idp_conversion.log"]
+    end
+
+    subgraph "Phase 2: Force Field Restructuring (make_ff.py)"
+        MFF["make_ff.py<br/>-i _converted.input<br/>-top _converted.lmp<br/>-pdb / -cmap / -plumed"]
+    end
+
+    subgraph "Final LAMMPS Outputs"
+        NVT_IN["idp_nvt.in<br/>(LAMMPS 输入脚本)"]
+        NVT_DATA["idp_nvt.data<br/>(LAMMPS 拓扑 + CMAP)"]
+    end
+
+    subgraph "Additional Inputs"
+        CMAP["cmap_20240524.cmap<br/>(CMAP 校正图)"]
+        PLUMED["plumed.dat / baies.dat<br/>(PLUMED 文件)"]
+    end
+
+    GRO --> IM
+    TOP --> IM
+    IM --> CONV_IN
+    IM --> CONV_LMP
+
+    CONV_IN --> MFF
+    CONV_LMP --> MFF
+    PDB --> MFF
+    CMAP --> MFF
+    PLUMED --> MFF
+
+    MFF --> NVT_IN
+    MFF --> NVT_DATA
+```
+
+来源：[step3-conversion.bash](/scripts/step3-conversion.bash#L17-L32), [make_ff.py](/scripts/make_ff.py#L225-L236)
+
+## 第一阶段：InterMol 格式转换
+
+第一阶段使用 **InterMol** 库（v0.1.0.dev0）执行直接的 GROMACS 到 LAMMPS 文件格式转换。InterMol 读取 GROMACS 坐标文件（`.gro`）和拓扑文件（`.top`）——这两者均由 `gmx pdb2gmx` 使用 amber99SB-ILDN 力场生成——并将它们转换为等效的 LAMMPS 文件：
+
+```bash
+python -m intermol.convert --gro_in ${gro} ${top} --lammps >> ${name}_conversion.log
+```
+
+此操作生成三个中间文件：`idp_converted.input`（LAMMPS 输入脚本）、`idp_converted.lmp`（LAMMPS 数据/拓扑文件）和 `idp_conversion.log`（转换日志）。这些文件包含对 amber99SB-ILDN 力场**忠实但未修改的**转换结果，包括长程静电相互作用（`kspace_style`）、`special_bonds` 设置以及混合对系数规则——所有这些将在第二阶段中被重构或移除。
+
+<CgxTip>在运行转换之前必须激活 `baies` conda 环境（Python 3.8），因为该环境包含 `intermol` 包。使用 `conda env create -f baies.yml` 创建该环境。</CgxTip>
+
+来源：[step3-conversion.bash](/scripts/step3-conversion.bash#L17-L18), [baies.yml](/installation/baies.yml#L1-L33), [installation/README.md](/installation/README.md#L19-L26)
+
+## 第二阶段：力场重构
+
+`make_ff.py` 脚本是转换流水线的核心。它读取由 InterMol 生成的 LAMMPS 文件，并系统地**简化和扩充**力场，以适应 IDP 系综模拟。这并非简单的格式转换——它从根本上重塑了能量函数。
+
+来源：[make_ff.py](/scripts/make_ff.py#L1-L237)
+
+### 输入脚本转换（`read_input_lammps`）
+
+`read_input_lammps` 函数逐行处理 `idp_converted.input`，执行针对性的替换和删除操作：
+
+| 原始 LAMMPS 指令 | 转换操作 | 原理 |
+|---|---|---|
+| `pair_style`（包含 PME/LJ） | 替换为 `pair_style lj/cut 2.0` | 移除长程静电相互作用；仅使用短程 LJ |
+| `pair_coeff i j ε σ` | 解析并存储，截断距离为 2^(1/6)·σ | 在 LJ 最小值处计算 WCA 风格的截断 |
+| `pair_modify mix arithmetic` | 展开为所有显式对系数 | 将混合规则解析为具体值；添加 `pair_modify shift yes` |
+| `kspace_style` | **移除** | 简化力场中无长程静电相互作用 |
+| `special_bonds` | **移除** | 简化力场中不需要 |
+| `read_data` | 替换为支持 CMAP 的 `read_data ... fix drycmap crossterm CMAP` | 将 CMAP 校正项注入拓扑 |
+| `thermo_style` | 替换为支持 CMAP 的输出：`step ecoul evdwl ebond eangle edihed f_drycmap eimp` | 追踪 CMAP 能量贡献（`f_drycmap`） |
+| `run` | **移除** | 替换为特定于模拟的运行代码块 |
+
+在处理完现有指令后，该函数追加一段完整的模拟设置代码块：CMAP fix 声明、邻列表设置、时间步长（1.0 fs）、能量最小化、NVE + CSVR 恒温器系综、PLUMED fix、XTC 轨迹输出，以及 2 µs 的运行命令。
+
+来源：[make_ff.py](/scripts/make_ff.py#L102-L179)
+
+### 对系数展开
+
+一项关键的转换是**显式展开所有成对 LJ 参数**。InterMol 的输出仅指定了对角线（`i-i`）对系数以及混合规则（通常为算术平均）。`make_ff.py` 脚本执行以下操作：
+
+1. 读取所有对角线 `pair_coeff i i ε σ` 条目，并使用计算出的截断距离 2^(1/6)·σ（即 LJ 能量最小距离）存储它们。
+2. 对于 `pair_modify mix arithmetic` 规则，使用 Lorentz-Berthelot 组合规则计算所有非对角线对：**ε_ij = √(ε_i · ε_j)** 和 **σ_ij = (σ_i + σ_j) / 2**。
+3. 显式写入所有 N² 个对系数及其各自的截断距离。
+4. 添加 `pair_modify shift yes` 以确保 LJ 势在截断距离处为零。
+
+对于包含 26 种原子类型的教程系统，这将生成 351 行显式对系数（26×26 对角线 + 非对角线，考虑对称性）。
+
+来源：[make_ff.py](/scripts/make_ff.py#L123-L154)
+
+### 数据文件与 CMAP 注入（`read_data_lammps`）
+
+`read_data_lammps` 函数处理 `idp_converted.lmp`，并进行两项关键修改：
+
+**盒子尺寸覆盖**：模拟盒子的尺寸被替换为用户指定边长的立方盒子（默认通过 `-cube 200.0` 设为 200 Å），以原点为中心。这确保了为 IDP 提供充足的无溶剂化自由空间。
+
+**CMAP 交叉项注入**：该函数读取 PDB 文件以识别所有适合 CMAP 校正的主链二面角位置。对于每个残基 *i*（不包括末端），它提取五原子序列 **C(i-1)–N(i)–CA(i)–C(i)–N(i+1)**，然后：
+
+1. 根据残基对（残基 *i*，残基 *i+1*）确定 CMAP 类型，对位置 *i+1* 的脯氨酸进行特殊处理（映射为 `"PRO"`），而其他所有残基则映射为 `"XXX"`。
+2. 从 `.cmap` 文件头中查找 CMAP 类型索引。
+3. 将 `CMAP` 部分追加到数据文件中，包含每个交叉项条目：`index cmap_type C-1 N CA C N+1`。
+
+来源：[make_ff.py](/scripts/make_ff.py#L182-L222), [make_ff.py](/scripts/make_ff.py#L22-L81)
+
+## 命令行接口
+
+`make_ff.py` 脚本接受以下参数：
+
+| 标志 | 描述 | 默认值 |
+|---|---|---|
+| `-i` | 输入 LAMMPS 输入文件（来自 InterMol） | *必填* |
+| `-top` | 输入 LAMMPS 数据/拓扑文件（来自 InterMol） | *必填* |
+| `-pdb` | 用于 CMAP 主链映射的 PDB 文件 | `protein.pdb` |
+| `-cmap` | CMAP 校正图数据文件 | `ff.cmap` |
+| `-oin` | 输出 LAMMPS 输入文件路径 | *必填* |
+| `-otop` | 输出 LAMMPS 拓扑文件路径 | `conff.data` |
+| `-cube` | 立方盒子边长（Å） | `400.0` |
+| `-oxtc` | XTC 轨迹输出文件名 | `traj.xtc` |
+| `-plumed` | 用于 bAIes 约束的 PLUMED 输入文件 | `plumed.dat` |
+
+来源：[make_ff.py](/scripts/make_ff.py#L8-L19)
+
+## 转换脚本用法
+
+`step3-conversion.bash` 脚本将两个阶段封装为单次调用。它接受三个位置参数——GROMACS 坐标文件、PDB 参考文件和 GROMACS 拓扑文件：
+
+```bash
+# 首先激活所需环境
+conda activate baies
+
+# 运行转换
+./step3-conversion.bash idp.gro idp.pdb idp.top
+```
+
+该脚本硬编码了两个辅助文件名：`cmap_20240524.cmap`（CMAP 校正图）和 `baies.dat`（来自 [PLUMED 文件生成](6-plumed-file-generation) 的 PLUMED/bAIes 参数文件）。通用的输出前缀 `idp` 也是硬编码的。转换完成后，中间文件（`idp_converted.input`、`idp_converted.lmp`、`idp_conversion.log`）将被自动删除。
+
+来源：[step3-conversion.bash](/scripts/step3-conversion.bash#L1-L33), [tutorial/bAIes/3-conversion/step3-conversion.bash](/tutorial/bAIes/3-conversion/step3-conversion.bash#L1-L33)
+
+## 输出文件结构
+
+转换过程生成两个 LAMMPS 输入文件，它们共同定义了完整的模拟系统：
+
+### `idp_nvt.in` — LAMMPS 输入脚本
+
+此文件包含模拟流程和力场配置。其结构如 PaaA2 的教程示例所示（1165 个原子，26 种原子类型）：
+
+```
+units real
+atom_style full
+dimension 3
+boundary p p p
+
+bond_style hybrid harmonic
+angle_style hybrid harmonic
+dihedral_style hybrid multi/harmonic charmm
+
+pair_style lj/cut 2.0
+
+fix drycmap all cmap cmap_20240524.cmap          # CMAP 校正
+read_data idp_nvt.data fix drycmap crossterm CMAP  # 拓扑 + CMAP
+fix_modify drycmap energy yes                      # CMAP 能量追踪
+
+pair_coeff 1 1   0.1700000   3.2500000   3.6480017  # 显式 LJ 参数
+pair_coeff 2 2   0.0157000   1.0690800   1.2000017  # 截断距离 = 2^(1/6)·σ
+...
+pair_modify shift yes
+
+thermo_style custom step ecoul evdwl ebond eangle edihed f_drycmap eimp
+
+neighbor 4.0 bin
+neigh_modify every 1 delay 1 check yes
+timestep 1.0
+thermo 50
+minimize 1.0e-4 1.0e-6 10000 100000
+
+fix 1 all nve
+fix 2 all temp/csvr 298.1 298.1 $(100.0*dt) <seed>
+
+fix pl all plumed plumedfile baies.dat outfile p.log
+dump 1 all xtc 10000 traj_idp.xtc
+run    2000000000
+```
+
+主要模拟默认设置：**1 fs 时间步长**，动力学运行前进行**能量最小化**，**NVE + CSVR 恒温器**设置为 298.1 K，**10 ps 轨迹输出**，以及 **2 µs 的总运行时长**。所有这些参数均可在转换后进行修改。
+
+来源：[tutorial/bAIes/3-conversion/idp_nvt.in](/tutorial/bAIes/3-conversion/idp_nvt.in#L1-L18), [tutorial/bAIes/3-conversion/idp_nvt.in](/tutorial/bAIes/3-conversion/idp_nvt.in#L371-L389)
+
+### `idp_nvt.data` — LAMMPS 拓扑文件
+
+此文件包含所有力场参数和原子坐标。其头部声明了系统维度：
+
+```
+1165 atoms
+1175 bonds
+2120 angles
+4208 dihedrals
+69 crossterms         ← CMAP 项（每个非末端残基一个）
+0 impropers
+
+26 atom types
+...
+-100.0000000  100.0000000 xlo xhi   ← 立方盒子（200 Å 边长）
+```
+
+该文件包含 Masses、Bond Coeffs、Angle Coeffs、Dihedral Coeffs、Atoms、Bonds、Angles、Dihedrals，以及末尾的 **CMAP** 部分。每个 CMAP 交叉项行指定：`index cmap_type C-1 N CA C N+1`，将五个主链原子映射到其残基特定的校正图类型（在 [CMAP 校正图](8-cmap-correction-maps) 中定义）。
+
+来源：[tutorial/bAIes/3-conversion/idp_nvt.data](/tutorial/bAIes/3-conversion/idp_nvt.data#L1-L18), [tutorial/bAIes/3-conversion/idp_nvt.data](/tutorial/bAIes/3-conversion/idp_nvt.data#L17409-L17480)
+
+## bAIes 与随机卷曲转换的对比
+
+**bAIes** 和 **随机卷曲** 流水线之间的转换步骤略有不同。两者都使用相同的 InterMol + `make_ff.py` 两阶段过程，但随机卷曲变体省略了 PLUMED 集成：
+
+| 方面 | bAIes 流水线 | 随机卷曲流水线 |
+|---|---|---|
+| 脚本 | `step3-conversion.bash` | `step2-conversion.bash` |
+| PLUMED 参数 | `-plumed baies.dat`（或 `plumed.dat`） | **不传递** |
+| 流水线步骤编号 | 步骤 3（预处理之后） | 步骤 2（无需预处理） |
+| LAMMPS 输入包含 | `fix pl all plumed plumedfile baies.dat outfile p.log` | 无 PLUMED fix |
+| 目的 | 带有 AF2 约束的贝叶斯系综 | 无约束随机卷曲参考 |
+
+来源：[tutorial/bAIes/3-conversion/step3-conversion.bash](/tutorial/bAIes/3-conversion/step3-conversion.bash#L22-L29), [tutorial/coil/2-conversion/step2-conversion.bash](/tutorial/coil/2-conversion/step2-conversion.bash#L21-L28)
+
+## 力场转换总结
+
+转换从根本上改变了能量函数，从完整的 amber99SB-ILDN 转换为适合 IDP 采样的简化形式：
+
+| 组件 | 原始（GROMACS/amber99SB-ILDN） | 转换后（LAMMPS/bAIes） |
+|---|---|---|
+| 键合项（键、键角、二面角） | ✅ 保留 | ✅ 保留（harmonic + multi/harmonic + charmm） |
+| Lennard-Jones | 使用 PME，混合规则 | `lj/cut 2.0`，显式全对，移位 |
+| 静电相互作用 | PME 长程 | **移除**（无 `kspace_style`） |
+| CMAP 校正 | GROMACS CMAP 部分 | LAMMPS `fix drycmap` + 交叉项数据 |
+| 特殊键 | GROMACS 1-4 相互作用 | **移除** |
+| PLUMED/bAIes 偏置 | — | 通过 `fix pl all plumed` 注入 |
+| 盒子 | 紧凑（来自 .gro） | 立方体，用户指定（`-cube`） |
+
+<CgxTip>移除长程静电相互作用和特殊键是刻意为之：bAIes 框架使用简化的隐式溶剂力场，其中 CMAP 校正和 bAIes 约束补偿了被省略的项。这不是一个通用目的的转换——它特定于 bAIes/coil IDP 采样方法。</CgxTip>
+
+来源：[make_ff.py](/scripts/make_ff.py#L102-L179), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L92-L120)
+
+## 环境与前置条件
+
+在运行转换之前，请确保：
+
+1. **Conda 环境**：`conda activate baies`（由 [baies.yml](/installation/baies.yml) 创建，需要 Python 3.8、InterMol 0.1.0.dev0、NumPy 1.24.4、ParmEd 3.4.4）。
+2. **GROMACS 输入文件**：来自[步骤 1 准备](/scripts/step1-prepare_gmx.bash)的 `.gro`、`.pdb`、`.top`。
+3. **CMAP 文件**：工作目录中必须存在 `cmap_20240524.cmap`（参见 [CMAP 校正图](8-cmap-correction-maps)）。
+4. **PLUMED 文件**（仅 bAIes）：来自 [PLUMED 文件生成](6-plumed-file-generation) 的 `baies.dat` 或 `plumed.dat`。
+5. **PDB 文件**：`make_ff.py` 需要 GROMACS 生成的 `.pdb` 文件来映射主链原子以生成 CMAP 交叉项。
+
+来源：[installation/README.md](/installation/README.md#L19-L26), [scripts/step1-prepare_gmx.bash](/scripts/step1-prepare_gmx.bash#L1-L7)
+
+## 后续步骤
+
+转换完成后，生成的 `idp_nvt.in` 和 `idp_nvt.data` 文件——连同 CMAP 文件和 PLUMED 输入——即可用于 LAMMPS 模拟。在转换期间注入的 CMAP 校正机制详见 [CMAP 校正图](8-cmap-correction-maps)，模拟协议本身包含在 [bAIes 系综模拟](9-baies-ensemble-simulations) 和 [随机卷曲模拟](10-random-coil-simulations) 中。
+
+---
+
+- [深入探究/力场转换/CMAP 校正图](https://zread.ai/COSBlab/bAIes-IDP/8-cmap-correction-maps)
+
+---
+slug:8-cmap-correction-maps
+blog_type:normal
+---
+
+
+CMAP校正图是主链φ/ψ二面体能栅，在GROMACS到LAMMPS的力场转换过程中，它用**残基对特异性的**能量面替代了标准的AMBER99SB-ILDN扭转校正。这是bAIes-IDP将折叠蛋白力场转化为适用于内在无序蛋白（IDP）系综采样的力场的关键机制，它在跨越整个φ/ψ扭转空间的24×24网格上编码了每个残基对的校正势。
+
+## 理论基础
+
+在CHARMM力场谱系中，CMAP（校正图）项作为主链二面角能量学的二维样条插值能量校正被引入。最初的CMAP方法对所有残基类型使用单一的校正图——这对于主链偏好主要由二级结构上下文主导的折叠蛋白而言，是一个合理的近似。然而，对于IDP，**残基特异性的构象倾向**是系综行为的主要决定因素：脯氨酸强烈偏好聚脯氨酸-II区，甘氨酸采样广阔的φ/ψ空间，而带电残基则表现出明显的偏好。因此，bAIes-IDP CMAP系统为每种残基对类型（例如，`ARG-XXX`、`ARG-PRO`）提供了一个独特的24×24能量栅，其中`XXX`表示任何非脯氨酸的后续残基，`PRO`则触发专门的脯氨酸图。每个网格单元以kcal/mol为单位存储特定(φ, ψ)组合下的能量值，LAMMPS在运行时通过双三次样条插值计算校正能量。
+
+来源: [cmap_20240524.cmap](/tutorial/bAIes/3-conversion/cmap_20240524.cmap#L1-L5), [make_ff.py](/scripts/make_ff.py#L1-L30)
+
+## CMAP文件格式
+
+CMAP数据文件（例如，`cmap_20240524.cmap`）是一个纯文本文件，包含一个或多个残基对特异性的能量栅。其结构遵循以下层级：
+
+| 结构元素 | 描述 | 示例 |
+|---|---|---|
+| 头部 | 文件标识符 | `# Backbone Phi/Psi Dihedrals correction map` |
+| 类型声明 | 残基对和类型索引 | `# ARG-(XXX), type 1` |
+| φ-bin标签 | φ角的行标识符 | `# -180.0` |
+| 能量行 | 每行5个以空格分隔的kcal/mol值 | `-0.927602 -1.027478 -2.606330 -3.651128 -1.426216` |
+
+每个类型块包含**24行**（每个φ bin一行，从−180°到+165°，以15°为增量）和**24列**（每个ψ bin一列，范围相同）。为了可读性，能量值每行写入5个，这导致每个φ行大约产生5行数据。一个残基对类型的完整网格大约包含144个能量值，跨越约29行。教程中的参考CMAP文件包含6803行，覆盖所有20×2 = 40种可能的残基对类型（每种氨基酸 × {XXX, PRO}）。
+
+来源: [cmap_20240524.cmap](/tutorial/bAIes/3-conversion/cmap_20240524.cmap#L1-L30)
+
+## 残基对类型解析
+
+分配给每个主链二面角对的CMAP类型取决于**当前残基及其C端相邻残基的标识**。`make_ff.py`中的解析逻辑实现了一个二类方案：
+
+```python
+res_pair = (pdb_cmaps_dict[k][0][1], pdb_cmaps_dict[k][0][2]) \
+    if pdb_cmaps_dict[k][0][2] == "PRO" \
+    else (pdb_cmaps_dict[k][0][1], "XXX")
+```
+
+如果后续残基（i+1）是脯氨酸，则使用特定的`{residue}-PRO`图；对于所有其他后续残基，则应用通用的`{residue}-XXX`图。这种分叉处理捕捉了公认的构象限制：由于脯氨酸的环状侧链锁定了φ ≈ −75°，从而对其前一个残基的ψ角施加了限制。然后从CMAP文件头中查找类型索引（例如，`ARG-(XXX)` → 类型 1，`ARG-(Pro)` → 类型 2），并将其写入LAMMPS数据文件的交叉项部分。
+
+来源: [make_ff.py](/scripts/make_ff.py#L211-L220)
+
+## 交叉项的原子拓扑
+
+每个CMAP交叉项引用**五个主链原子**，这五个原子定义了两个连续的二面角φ和ψ：
+
+```
+C_{i-1} — N_i — CA_i — C_i — N_{i+1}
+```
+
+| 位置 | 原子 | 作用 |
+|---|---|---|
+| 1 | C_{i-1} | 前一残基的羰基碳 |
+| 2 | N_i | 当前残基的酰胺氮 |
+| 3 | CA_i | 当前残基的α-碳 |
+| 4 | C_i | 当前残基的羰基碳 |
+| 5 | N_{i+1} | 后一残基的酰胺氮 |
+
+`make_ff.py`中的`read_pdb()`函数解析PDB文件，为每个有效的残基位置（排除缺少C_{i-1}或N_{i+1}的末端）提取这些原子索引。LAMMPS数据文件中的每个交叉项条目写入格式为：`index  type  C_{i-1}  N_i  CA_i  C_i  N_{i+1}`。对于教程系统（69个交叉项），这意味着69个主链位置在模拟期间都会接受其残基对特异性的CMAP校正。
+
+来源: [make_ff.py](/scripts/make_ff.py#L39-L72), [idp_nvt.data](/tutorial/bAIes/3-conversion/idp_nvt.data#L17410-L17430)
+
+## 集成到LAMMPS模拟中
+
+转换脚本（`step3-conversion.bash`）通过对LAMMPS输入文件和数据文件进行两项协调修改来编排CMAP的集成：
+
+**输入文件**（`idp_nvt.in`）— 三条LAMMPS指令激活CMAP fix：
+
+```
+fix drycmap all cmap cmap_20240524.cmap
+read_data idp_nvt.data fix drycmap crossterm CMAP
+fix_modify drycmap energy yes
+```
+
+`fix cmap`命令加载CMAP网格文件并注册`drycmap` fix。`read_data`命令读取数据文件，同时将其`CMAP`交叉项部分映射到`drycmap` fix。`fix_modify energy yes`指令确保CMAP能量显示在`f_drycmap`下的热力学输出中。
+
+**数据文件**（`idp_nvt.data`）— 两项结构性添加：
+
+1. 头部在二面角计数行之后立即声明`N crossterms`
+2. 末尾的`CMAP`部分列出所有交叉项条目及其类型索引和五个原子ID
+
+`make_ff.py`中的`read_input_lammps()`函数将`pair_style`行重写为`lj/cut 2.0`，注入CMAP fix指令，并替换`thermo_style`以包含`f_drycmap`用于能量追踪。
+
+来源: [make_ff.py](/scripts/make_ff.py#L97-L125), [step3-conversion.bash](/scripts/step3-conversion.bash#L18-L28), [idp_nvt.in](/tutorial/bAIes/3-conversion/idp_nvt.in#L10-L14)
+
+## LAMMPS CMAPMAX补丁
+
+标准的LAMMPS 2023年8月2日发行版硬编码了`CMAPMAX = 6`，最多只允许6种不同的CMAP网格类型。这对于最初的CHARMM CMAP（仅定义了6个图：2个用于甘氨酸，4个用于通用/脯氨酸组合）已经足够，但**对bAIes-IDP不足**，后者最多需要40种类型（20种氨基酸 × 2种后续分类）。补丁文件`patch_cmap.txt`对`fix_cmap.cpp`进行了三处针对性修改：
+
+| 位置 | 原始代码 | 补丁代码 | 目的 |
+|---|---|---|---|
+| 常量定义 | `CMAPMAX = 6` | `CMAPMAX = 40` | 允许40种不同的网格类型 |
+| 导数预计算循环 | `for (i = 0; i < 6; i++)` | `for (i = 0; i < CMAPMAX; i++)` | 为所有加载的图计算导数 |
+| 类型边界检查 | `t1 > 5` | `t1 > CMAPMAX-1` | 根据新限制验证类型索引 |
+
+第三项修改尤为重要：它用`CMAPMAX`常量替换了硬编码的魔术数字，确保了未来的一致性。如果没有此补丁，对于任何≥ 6的类型索引，LAMMPS都将抛出`Invalid CMAP crossterm_type`。
+
+<CgxTip>必须在编译LAMMPS**之前**应用此补丁。从LAMMPS源码根目录执行：`patch ./src/MOLECULE/fix_cmap.cpp < patch_cmap.txt`。如果未打补丁，当CMAP文件定义超过6种类型时，将导致运行时崩溃。</CgxTip>
+
+来源: [patch_cmap.txt](/installation/patch_cmap.txt#L1-L30), [README.md](/installation/README.md#L44-L50)
+
+## 转换流水线中的CMAP
+
+CMAP校正图在**步骤3 — 力场转换**期间注入，该步骤将InterMol转换的LAMMPS文件转换为最终的bAIes模拟输入。CMAP集成的流水线流程如下：
+
+```mermaid
+flowchart TD
+    A["GROMACS .gro/.top"] -->|"InterMol"| B["转换后的 .input + .lmp"]
+    C["PDB 文件"] --> D["read_pdb()<br/>提取主链原子<br/>与残基对"]
+    E["cmap_20240524.cmap"] --> F["解析类型头部<br/>→ cmap_types 字典"]
+    D --> G["read_data_lammps()"]
+    F --> G
+    B --> H["read_input_lammps()"]
+    E --> H
+    G --> I["输出 .data 文件<br/>+ CMAP 交叉项部分"]
+    H --> J["输出 .in 文件<br/>+ fix drycmap cmap 指令"]
+    I --> K["LAMMPS 模拟"]
+    J --> K
+```
+
+转换脚本接受CMAP文件作为参数（`cmap=cmap_20240524.cmap`），并通过`-cmap`标志将其传递给`make_ff.py`。同一个CMAP文件具有双重目的：(1)其类型头部被解析以构建用于数据文件的残基对→类型索引查找表，(2)其完整内容被LAMMPS的`fix cmap`命令引用以进行运行时网格计算。
+
+<CgxTip>可以替换CMAP文件以实现不同的主链校正策略（例如，无规卷积与bAIes优化）。只需向`make_ff.py`提供不同的`-cmap`文件——类型索引和网格维度必须与打过补丁的LAMMPS的`CMAPMAX`和`CMAPDIM`常量保持一致。</CgxTip>
+
+来源: [step3-conversion.bash](/scripts/step3-conversion.bash#L14-L28), [make_ff.py](/scripts/make_ff.py#L196-L237)
+
+## 网格参数与约定
+
+bAIes-IDP中的CMAP网格遵循标准的CHARMM CMAP约定，由LAMMPS的`fix_cmap.cpp`常量强制执行：
+
+| 参数 | 值 | 描述 |
+|---|---|---|
+| `CMAPDIM` | 24 | 网格分辨率：每个图24×24个点 |
+| `CMAPXMIN` | −360.0 | 全周期最小值（度） |
+| `CMAPXMIN2` | −180.0 | 半周期最小值（度） |
+| 网格间距 | 15° | φ和ψ均为(360° / 24 bins) |
+| 能量单位 | kcal/mol | 与LAMMPS的`units real`一致 |
+| 插值方式 | 双三次样条 | 通过LAMMPS中的`set_map_derivatives()`实现 |
+
+24×24的分辨率在角度精度（15°的分箱）和计算成本之间提供了平衡。在LAMMPS初始化期间，通过`set_map_derivatives()`在所有网格点预计算导数（∂E/∂φ, ∂E/∂ψ, ∂²E/∂φ∂ψ），从而在模拟步进期间实现高效的受力计算。
+
+来源: [patch_cmap.txt](/installation/patch_cmap.txt#L7-L12), [cmap_20240524.cmap](/tutorial/bAIes/3-conversion/cmap_20240524.cmap#L1-L25)
+
+## 延伸阅读
+
+CMAP校正图是力场转换过程的一个组成部分。有关完整的转换工作流上下文，请参阅[GROMACS到LAMMPS的转换](7-gromacs-to-lammps-conversion)。有关LAMMPS补丁安装的详细信息，请参阅[LAMMPS CMAP补丁](15-lammps-cmap-patch)。有关经CMAP校正的模拟如何融入更广泛的bAIes系综策略，请参阅[bAIes系综模拟](9-baies-ensemble-simulations)。
+
+---
+
+## 模拟设置
+
+- [深入探究/模拟设置/bAIes 系综模拟](https://zread.ai/COSBlab/bAIes-IDP/9-baies-ensemble-simulations)
+
+---
+slug:9-baies-ensemble-simulations
+blog_type:normal
+---
+
+
+bAIes 集合模拟是 bAIes-IDP 流水线的最终环节：这是一次由 **LAMMPS + PLUMED** 驱动的分子动力学运行，它将 AlphaFold-2（或 ColabFold）的距离信息作为贝叶斯限制整合到原子力场中。其结果是获得一个热力学一致的、具有原子级分辨率的集合，包含本质无序或多结构域蛋白的构象。本页涵盖了模拟输入文件、它们的作用与结构、启动命令，以及关键的可调参数。
+
+## 模拟文件清单
+
+bAIes 模拟在工作目录中需要 **六个文件**。这些文件是流水线早期阶段——[GROMACS 到 LAMMPS 的转换](7-gromacs-to-lammps-conversion)和 [PLUMED 文件生成](6-plumed-file-generation)——的输出，被延续至模拟阶段：
+
+| 文件 | 来源阶段 | 用途 |
+| :--- | :---: | :--- |
+| `idp_nvt.in` | 步骤 3 – 转换 | LAMMPS 输入脚本：力场、积分器、PLUMED 耦合、输出及运行设置 |
+| `idp_nvt.data` | 步骤 3 – 转换 | LAMMPS 数据文件：原子坐标、拓扑、键/角/二面角列表 |
+| `cmap_20240524.cmap` | 步骤 3 – 转换 | 骨架构象交叉项的 CMAP 修正映射（参见 [CMAP 修正映射](8-cmap-correction-maps)） |
+| `plumed.dat` | 步骤 2 – 预处理 | PLUMED 驱动文件：定义 bAIes 偏置、原子组及输出 |
+| `baies_params.dat` | 步骤 2 – 预处理 | 从 AlphaFold 距离图推导出的逐对限制参数 (µ, σ) |
+| `atom_list.ndx` | 步骤 2 – 预处理 | 参与所有 bAIes 限制的原子 ID 索引 |
+
+此外，步骤 1 中由 GROMACS 生成的 `idp.pdb` 文件也必须存在——`plumed.dat` 内部的 `#MOLINFO` 指令会引用该文件以获取残基/链元数据。
+
+来源: [README.md](/tutorial/bAIes/README.md#L89-L151), [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L1-L390), [plumed.dat](/tutorial/bAIes/4-simulation/plumed.dat#L1-L6)
+
+## LAMMPS 输入文件剖析
+
+`idp_nvt.in` 脚本编排了整个模拟过程。其各节按出现顺序排列，遵循精确的架构：
+
+```mermaid
+flowchart TD
+    A["单位与风格声明<br/>units real / atom_style full"] --> B["力场定义<br/>键 / 角 / 二面角 / 对势风格"]
+    B --> C["CMAP 修正<br/>fix drycmap all cmap ..."]
+    C --> D["系统数据加载<br/>read_data idp_nvt.data"]
+    D --> E["对势系数<br/>26×26 LJ 参数矩阵"]
+    E --> F["能量最小化<br/>minimize 1e-4 1e-6 10000 100000"]
+    F --> G["NVE + 恒温器<br/>fix nve + fix temp/csvr 298.1 K"]
+    G --> H["PLUMED 耦合<br/>fix pl all plumed plumedfile plumed.dat"]
+    H --> I["轨迹输出与运行<br/>dump xtc + run 2G steps"]
+```
+
+### 单位制与力场风格
+
+模拟在 **LAMMPS `real` 单位制**（Å, kcal/mol, fs）下运行，并采用 `atom_style full` 以携带每个原子的电荷和分子标识。力场为混合组合：
+
+| 风格 | 类型 | 作用 |
+| :--- | :--- | :--- |
+| `bond_style hybrid harmonic` | 谐振 | 键伸缩 |
+| `angle_style hybrid harmonic` | 谐振 | 角弯曲 |
+| `dihedral_style hybrid multi/harmonic charmm` | 多重谐振 + CHARMM | 正常二面角旋转 |
+| `pair_style lj/cut 2.0` | Lennard-Jones（截断 2.0 Å） | 仅限短程排除体积排斥 |
+
+<CgxTip>极短的 2.0 Å LJ 截断使其成为一个**干性、隐式溶剂力场**——远程静电和吸引色散被省略。CMAP 修正和 bAIes 限制补偿了因这一简化而丢失的物理效应。</CgxTip>
+
+### CMAP 修正集成
+
+CMAP 修正会在 `read_data` **之前**应用，使 LAMMPS 能够直接从数据文件中解析 CMAP 交叉项：
+
+```
+fix drycmap all cmap cmap_20240524.cmap
+read_data idp_nvt.data fix drycmap crossterm CMAP
+fix_modify drycmap energy yes
+```
+
+`fix_modify drycmap energy yes` 指令确保 CMAP 能量出现在热力学输出中——这是 bAIes 偏置运行期间能量核算的关键要求。
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L1-L12), [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L8-L12)
+
+### 能量最小化
+
+在动力学开始之前，LAMMPS 执行最速下降最小化，以消除来自 AlphaFold 起始结构的任何空间位阻冲突：
+
+```
+minimize 1.0e-4 1.0e-6 10000 100000
+```
+
+| 参数 | 值 | 含义 |
+| :--- | :--- | :--- |
+| 能量容差 | `1.0e-4` kcal/mol | 当迭代间的能量变化低于此值时停止 |
+| 力容差 | `1.0e-6` kcal/mol·Å | 当最大力分量低于此值时停止 |
+| 最大迭代次数 | `10000` | 最大力评估次数 |
+| 最大步数 | `100000` | 最大最小化步数 |
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L384-L384)
+
+### 集合与恒温器
+
+最小化之后，系统在 **NVE** 系综下结合 **CSVR（正则随机速度缩放）** 恒温器在 298.1 K 下进行传播：
+
+```
+fix 1 all nve
+fix 2 all temp/csvr 298.1 298.1 $(100.0*dt) 1679636
+```
+
+| 参数 | 值 | 含义 |
+| :--- | :--- | :--- |
+| 目标温度 | 298.1 K | 生理温度 |
+| 耦合时间 | `100.0 × dt` = 100 fs | 恒温器弛豫时间尺度 |
+| 随机种子 | `1679636` | 可复现性控制（为独立副本更改此值） |
+
+CSVR 恒温器（Bussi 等人）生成正确的正则分布，这对于 bAIes 的贝叶斯推理框架产生具有统计意义的集合至关重要。
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L386-L387)
+
+### PLUMED 耦合
+
+bAIes 偏置通过 PLUMED 注入模拟中，作为 LAMMPS 的 fix 加载：
+
+```
+fix pl all plumed plumedfile plumed.dat outfile p.log
+```
+
+PLUMED 在每个时间步计算 bAIes 偏置能量和力（由 `plumed.dat` 中的 `STRIDE=2` 控制），并将其作为附加势反馈给 LAMMPS。PLUMED 的内部日志写入 `p.log`。
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L389-L389)
+
+### 轨迹输出与运行时长
+
+最后两行控制输出和持续时间：
+
+```
+dump 1 all xtc 10000 traj_idp.xtc
+run    2000000000
+```
+
+| 参数 | 值 | 物理意义 |
+| :--- | :--- | :--- |
+| 输出步长 | `10000` 步 | 每帧 10 ps（在 1 fs 时间步长下） |
+| 轨迹格式 | XTC | 压缩的、GROMACS 兼容的格式 |
+| 总步数 | `2,000,000,000` | **2 µs** 的模拟时间 |
+
+XTC 格式允许直接使用 GROMACS 工具进行后处理，无需格式转换。
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L389-L390)
+
+## PLUMED 配置深入解析
+
+`plumed.dat` 文件是 bAIes 模拟的核心枢纽——每一行都在贝叶斯限制框架中发挥特定作用：
+
+```
+#MOLINFO STRUCTURE=idp.pdb
+batoms: GROUP NDX_FILE=atom_list.ndx NDX_GROUP=batoms
+baies: BAIES ATOMS=batoms DATA_FILE=baies_params.dat PRIOR=JEFFREYS TEMP=2.478541306
+PRINT ARG=baies.ene FILE=COLVAR STRIDE=500
+bbias: BIASVALUE ARG=baies.ene STRIDE=2
+```
+
+| 行 | 指令 | 功能 |
+| :--- | :--- | :--- |
+| 1 | `#MOLINFO STRUCTURE=idp.pdb` | 从 GROMACS PDB 加载残基/链元数据用于原子名解析 |
+| 2 | `batoms: GROUP ...` | 通过读取 `atom_list.ndx` 中 `[ batoms ]` 标题下的 ID 来定义原子组 |
+| 3 | `baies: BAIES ...` | **核心 bAIes 动作**——从逐对高斯限制中计算贝叶斯对数似然偏置 |
+| 4 | `PRINT ...` | 每 500 步将 bAIes 偏置能量记录到 `COLVAR` 中，用于收敛监测 |
+| 5 | `bbias: BIASVALUE ...` | 每 2 步将 bAIes 能量作为偏置势应用于 MD 积分器 |
+
+### BAIES 动作参数
+
+`BAIES` 关键字接受三个关键参数：
+
+| 参数 | 教程值 | 描述 |
+| :--- | :--- | :--- |
+| `ATOMS` | `batoms` | 受限 Cα 原子的 GROUP |
+| `DATA_FILE` | `baies_params.dat` | 来自距离图拟合的逐对 (µ, σ) 高斯参数 |
+| `PRIOR` | `JEFFREYS` | Jeffreys 先验——无信息贝叶斯先验，避免对任何特定距离产生偏倚 |
+| `TEMP` | `2.478541306` | 以 kcal/mol 为单位的约化温度（298.1 K 时的 k<sub>B</sub>T） |
+
+<CgxTip>`TEMP=2.478541306` 值是 298.1 K 时以 kcal/mol 为单位的 **k<sub>B</sub>T**（k<sub>B</sub> = 0.0019872041 kcal·mol<sup>−1</sup>·K<sup>−1</sup>）。这使 PLUMED 偏置与 LAMMPS 恒温器处于同一热力学系综。</CgxTip>
+
+Jeffreys 先验是 bAIes 方法学的基础：它对距离参数施加尺度不变的、无信息的先验，确保后验集合仅反映 AlphaFold 的证据，而不会产生人工收缩。
+
+来源: [plumed.dat](/tutorial/bAIes/4-simulation/plumed.dat#L1-L6)
+
+## bAIes 限制参数文件
+
+`baies_params.dat` 文件为每个受限原子对编码了**拟合的高斯模型**。每一行代表在[距离图读取与拟合](5-distogram-reading-and-fitting)期间从 AlphaFold 距离图提取的一个距离限制：
+
+```
+#! FIELDS Id atom_i atom_j mu sigma
+#! SET model gaussian
+1 57 127 1.056467 0.266714
+2 79 127 0.851589 0.199167
+...
+98 1080 1152 0.735730 0.106444
+```
+
+| 列 | 单位 | 含义 |
+| :--- | :--- | :--- |
+| `Id` | — | 顺序限制索引 |
+| `atom_i` | LAMMPS 原子 ID | 对中的第一个原子 (Cα) |
+| `atom_j` | LAMMPS 原子 ID | 对中的第二个原子 (Cα) |
+| `mu` | nm | 拟合的高斯距离分布均值 |
+| `sigma` | nm | 标准差——编码了 AlphaFold 对此距离的**不确定性** |
+
+教程中的 PaaA2 系统在 56 个独特的 Cα 原子上包含 **98 个受限对**。具有较小 σ 值的对（例如 0.018–0.030 nm）对应于结构基序内的高置信度局部接触；具有较大 σ 的对（例如 0.20–0.27 nm）捕获了无序或长程相互作用，在这些区域 AlphaFold 提供了较弱距离信息。
+
+来源: [baies_params.dat](/tutorial/bAIes/4-simulation/baies_params.dat#L1-L101)
+
+## 原子索引文件
+
+`atom_list.ndx` 文件列出了参与至少一个 bAIes 限制的所有唯一原子 ID：
+
+```
+[ batoms ]
+57 79 91 103 115 127 149 163 187 197 230 258 274 285 300 
+320 335 349 368 383 400 415 429 440 461 475 490 514 533 557 
+567 589 605 615 629 640 669 743 765 776 793 805 820 836 851 
+875 899 916 926 941 965 985 995 1017 1034 1058 1080 1095 1119 1130 
+1152 
+```
+
+这些是 LAMMPS 从 1 开始的原子 ID，对应于 Cα 原子。该 GROUP 被 `plumed.dat` 中的 `batoms: GROUP NDX_FILE=atom_list.ndx NDX_GROUP=batoms` 所引用。对于 PaaA2（71 个残基），列出的 56 个原子表明并非每个残基的 Cα 都受限——只有那些具有信息性距离图信号的原子才被包括。
+
+来源: [atom_list.ndx](/tutorial/bAIes/4-simulation/atom_list.ndx#L1-L7)
+
+## 运行模拟
+
+### 启动命令
+
+当所有六个文件（加上 `idp.pdb`）都在工作目录中时，执行：
+
+```bash
+lmp -in idp_nvt.in
+```
+
+此单条命令将触发：CMAP 加载 → 数据读取 → 最小化 → NVE+CSVR 动力学与 PLUMED/bAIes 偏置 → XTC 轨迹输出。默认配置在 298.1 K 下产生一条 **2 µs** 的轨迹。
+
+### 并行执行
+
+推荐使用 OpenMP 并行化（如主 README 中所述）。对于典型的多核节点：
+
+```bash
+export OMP_NUM_THREADS=<N>
+lmp -in idp_nvt.in
+```
+
+带有 PLUMED 插件的 LAMMPS 支持用于力计算的 OpenMP 线程，使其成为单蛋白 bAIes 运行最直接的并行化策略。
+
+### 运行多个副本
+
+要启动统计上独立的副本，请在 `idp_nvt.in` 中**更改 CSVR 随机种子**（`fix 2 all temp/csvr` 行的最后一个整数）。每个种子产生不同的随机恒温器轨迹，从而从同一正则分布中产生独立样本：
+
+```
+# 副本 1
+fix 2 all temp/csvr 298.1 298.1 $(100.0*dt) 1679636
+
+# 副本 2
+fix 2 all temp/csvr 298.1 298.1 $(100.0*dt) 5432109
+```
+
+来源: [README.md](/README.md#L36-L36), [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L386-L387)
+
+## 关键可调参数
+
+LAMMPS 输入文件公开了几个参数，你可以根据你的系统和计算预算进行调整。所有修改均直接在 `idp_nvt.in` 中进行：
+
+| 参数 | 默认值 | 在 `idp_nvt.in` 中的位置 | 指导 |
+| :--- | :--- | :--- | :--- |
+| 时间步长 | `1.0` fs | `timestep 1.0` | 1 fs 是原子级 MD 的标准；仅在粗粒化变体中增加 |
+| 温度 | `298.1` K | `fix 2 all temp/csvr 298.1 298.1 ...` | 匹配 IDP 的实验条件 |
+| 恒温器耦合 | `100` fs | `$(100.0*dt)` | 过小 → 过度耦合；过大 → 温度控制不佳 |
+| 输出步长 | `10000` 步 (10 ps) | `dump 1 all xtc 10000 ...` | 减小以进行更细粒度分析；增大以节省磁盘 |
+| 运行时长 | `2,000,000,000` 步 (2 µs) | `run 2000000000` | IDP 收敛通常需要 ≥1 µs；根据实际运行时间约束调整 |
+| 最小化容差 | `1e-4 / 1e-6` | `minimize 1.0e-4 1.0e-6 ...` | 若最小化失败则收紧；对于已松弛的结构则放宽 |
+| LJ 截断 | `2.0` Å | `pair_style lj/cut 2.0` | **切勿修改**——此值与干性力场参数化相耦合 |
+
+`plumed.dat` 中的 `TEMP` 值（`2.478541306`）必须与 LAMMPS 恒温器温度保持一致；如果你更改了目标温度，请相应地重新计算以 kcal/mol 为单位的 k<sub>B</sub>T。
+
+来源: [idp_nvt.in](/tutorial/bAIes/4-simulation/idp_nvt.in#L382-L390), [plumed.dat](/tutorial/bAIes/4-simulation/plumed.dat#L3-L3)
+
+## 模拟后轨迹分析
+
+XTC 轨迹可以直接使用 GROMACS 工具进行分析，无需格式转换：
+
+| 任务 | 命令 |
+| :--- | :--- |
+| 轨迹完整性检查 | `gmx check -f traj_idp.xtc` |
+| 降采样至 100 ps 帧 | `gmx trjconv -f traj_idp.xtc -s idp.pdb -o traj_idp_dt100ps.xtc -dt 100` |
+| 计算回转半径 | `gmx gyrate -f traj_idp.xtc -s idp.pdb -o rg.xvg` |
+| 端到端距离 | `gmx distance -f traj_idp.xtc -s idp.pdb -select 'com of group 1 plus com of group 2' -o e2e.xvg` |
+
+由 PLUMED 的 `PRINT` 指令生成的 `COLVAR` 文件每 500 步记录一次 bAIes 偏置能量。绘制此量随时间的变化可以揭示模拟是否已平衡（偏置能量稳定）或仍在探索构象空间。
+
+来源: [README.md](/tutorial/bAIes/README.md#L141-L151)
+
+## 基准模拟系统
+
+`benchmark/bAIes/` 目录为跨越三种无序行为类别的 **19 个蛋白质系统** 提供了可随时运行的输入文件。所有系统均遵循上述相同的文件结构：
+
+| 类别 | 蛋白质 | 典型特征 |
+| :--- | :--- | :--- |
+| **完全无序** | Ab40, p61_Hck, emerin_67-170, His-PknG_1-75, Colicin_N_T_domain, Hug1 | 全局小 σ；宽泛集合 |
+| **结构基序** | PaaA2, Nt-SOCS5, Alb3-A3CT, idr_SSRP1, UBact, FCP1 | 基序区域紧缩 σ；连接区松弛 |
+| **AF2 预测错误** | asyn, ACTR, NHE1, Nsp2_CtlIDR, spm_FrpC, drkN | AF2 错误地预测了结构；bAIes 通过宽泛 σ 进行修正 |
+| **多结构域** | GS8, Ubq2, Ubq3 | 结构域层级接触得以保留；结构域间保持灵活性 |
+
+每个基准目录都包含具有特定蛋白质命名的相同六个文件（例如 `PaaA2_nvt.in`、`plumed_PaaA2.dat`、`baies_gauss_matrix.dat`）。要重现基准测试，只需在该目录中运行 `lmp -in <protein>_nvt.in`。
+
+来源: [README.md](/benchmark/README.md#L1-L38), [plumed_PaaA2.dat](/benchmark/bAIes/PaaA2/plumed_PaaA2.dat#L1-L6)
+
+## 后续步骤
+
+运行 bAIes 集合模拟后，你可能想要：
+- 与**随机线团基线**进行比较 → [随机线团模拟](10-random-coil-simulations)
+- 了解距离图限制是如何推导的 → [距离图读取与拟合](5-distogram-reading-and-fitting)
+- 调优影响性能的关键参数 → [模拟参数调优](16-simulation-parameter-tuning)
+- 与实验数据进行验证 → [基准蛋白质系统](13-benchmark-protein-systems)
+
+---
+
+- [深入探究/模拟设置/无规卷曲模拟](https://zread.ai/COSBlab/bAIes-IDP/10-random-coil-simulations)
+
+---
+slug:10-random-coil-simulations
+blog_type:normal
+---
+
+
+无规卷曲模拟在 bAIes-IDP 框架中作为**基线零模型**——这是一个纯粹由物理力场生成的系综，不包含任何源自 AlphaFold 的约束。bAIes 模拟通过 PLUMED 利用贝叶斯距离偏置来增强力场，而无规卷曲模拟则完全依赖于由残基对 CMAP 二面角映射图校正的 amber99SB-ILDN 力场。这种精简的流程生成了参考系综，用于衡量 bAIes 的增强效果，使其在基准测试和验证中不可或缺。
+
+## 流程概述
+
+无规卷曲流程是一个**三步工作流**——明显短于四步的 bAIes 流程，因为它完全跳过了 AlphaFold 距离直方图的预处理和 PLUMED 的生成。这种结构上的简化反映了核心区别：无规卷曲模拟不需要外部结构预测。
+
+```mermaid
+flowchart LR
+    A["PDB Structure<br/>(AlphaFold/ColabFold)"] --> B["Step 1<br/>GROMACS Preparation"]
+    B --> C[".gro .itp .top .pdb"]
+    C --> D["Step 2<br/>LAMMPS Conversion"]
+    D --> E["_nvt.in<br/>_nvt.data<br/>.cmap"]
+    E --> F["Step 3<br/>LAMMPS Simulation"]
+    F --> G["traj_idp.xtc<br/>(Ensemble)"]
+
+    style A fill:#e8f4f8,stroke:#2196F3
+    style F fill:#fff3e0,stroke:#FF9800
+    style G fill:#e8f5e9,stroke:#4CAF50
+```
+
+| 步骤 | 目录 | 输入 | 输出 | 关键工具 |
+|------|-----------|-------|--------|----------|
+| 1. 准备 | `1-preparation/` | PDB 文件 | `.gro`, `.itp`, `.top`, `.pdb` | GROMACS `pdb2gmx` + `trjconv` |
+| 2. 转换 | `2-conversion/` | GROMACS 文件 + CMAP | `_nvt.in`, `_nvt.data` | `intermol` + `make_ff.py` |
+| 3. 模拟 | `3-simulation/` | LAMMPS 输入 | `traj_idp.xtc` | LAMMPS (`lmp`) |
+
+来源: [README.md](/tutorial/coil/README.md#L1-L81)
+
+## 步骤 1：GROMACS 准备
+
+该流程首先使用 **amber99SB-ILDN** 力场将 PDB 结构转换为 GROMACS 拓扑文件。输入的 PDB 文件可以来源于任何途径——AlphaFold 弛豫模型、ColabFold 预测，甚至实验结构——因为无规卷曲模拟完全忽略了预测的距离信息。
+
+以 PDB 文件作为参数执行准备脚本：
+
+```bash
+./step1-prepare_gmx.bash relaxed_model_4_ptm_pred_0.pdb
+```
+
+该脚本内部运行两个 GROMACS 命令。首先，`gmx pdb2gmx` 将 PDB 转换为 GROMACS 坐标（`.gro`）、拓扑（`.top`）和包含拓扑（`.itp`）文件，选择力场选项 6（amber99SB-ILDN）并禁用水分子。其次，`gmx trjconv` 对结构重新居中，并输出一致的 `.pdb` 文件供下游原子索引使用：
+
+```bash
+name=idp
+echo 6 | gmx pdb2gmx -f ${1} -water none -o ${name}.gro -p ${name}.top -i ${name}.itp -ignh
+echo 0 | gmx trjconv -f ${name}.gro -s ${name}.gro -o ${name}.pdb
+```
+
+`-ignh` 标志会忽略输入 PDB 中的氢原子，让 GROMACS 根据力场模板重新构建它们。生成的 `.top` 文件引用了 `amber99sb-ildn.ff/forcefield.itp`，并包含完整的原子规格，如电荷、质量、键参数、角度参数、二面角参数以及隐式溶剂设置。
+
+来源: [step1-prepare_gmx.bash](/tutorial/coil/1-preparation/step1-prepare_gmx.bash#L1-L7), [idp.top](/tutorial/coil/1-preparation/idp.top#L1-L30)
+
+## 步骤 2：LAMMPS 转换
+
+此步骤执行**两阶段转换**：首先通过 `intermol` 库将 GROMACS 文件转换为中间 LAMMPS 格式，然后应用 `make_ff.py` 脚本生成最终可用于模拟的 LAMMPS 输入文件及简化力场。
+
+**环境要求**：运行前需激活 `baies` conda 环境，因其包含 `intermol` 包：
+
+```bash
+conda activate baies
+./step2-conversion.bash idp.gro idp.pdb idp.top
+```
+
+### 阶段 1：GROMACS → LAMMPS (intermol)
+
+`intermol` 库处理力场参数（键、键角、二面角和配对系数）从 GROMACS 格式到 LAMMPS 格式的机械转换。这会生成中间文件（`idp_converted.input` 和 `idp_converted.lmp`），其中包含直接转换结果，但缺少 CMAP 校正和模拟协议。
+
+### 阶段 2：力场修改 (make_ff.py)
+
+`make_ff.py` 脚本是核心转换引擎。它读取中间 LAMMPS 文件和 CMAP 校正映射图，然后生成最终的 `_nvt.in` 和 `_nvt.data` 文件。该脚本执行以下关键操作：
+
+- **LJ 截断简化**：将原始配对样式替换为 `lj/cut 2.0`（2.0 Å 截断），并显式写出所有配对系数（包括通过算术混合的交叉项：ε_ij = √(ε_i·ε_j), σ_ij = 0.5·(σ_i + σ_j)），截断距离设为 2^(1/6)·σ（LJ 势能最小值处）。
+- **CMAP 集成**：插入 `fix drycmap all cmap` 指令，并将 CMAP 交叉项数据追加到拓扑文件中，通过从 PDB 读取残基对类型来分配正确的校正映射图。
+- **模拟盒子**：设置立方体模拟盒子（教程中默认为 200 Å；可通过 `-cube` 参数配置，脚本中默认为 400 Å）。
+- **恒温器协议**：追加在 298.1 K 下的 NVE 积分与 CSVR 恒温器。
+- **能量最小化**：在生产动力学之前插入最小化步骤。
+- **轨迹输出**：配置每 10,000 步导出一次 XTC（在 1 fs 步长下为 10 ps）。
+
+包含所有参数的转换脚本调用如下：
+
+```bash
+./make_ff.py -i ${name}_converted.input \
+             -top ${name}_converted.lmp \
+             -pdb ${pdb} -cmap ${cmap} \
+             -oin ${name}_nvt.in \
+             -otop ${name}_nvt.data \
+             -cube 200.0 \
+             -oxtc traj_${name}.xtc
+```
+
+| `make_ff.py` 参数 | 描述 | 默认值 |
+|------------------------|-------------|---------|
+| `-i` | 输入 LAMMPS 文件 (来自 intermol) | 必需 |
+| `-top` | 输入拓扑 LAMMPS 文件 | 必需 |
+| `-pdb` | 用于 CMAP 原子索引的 PDB 文件 | `protein.pdb` |
+| `-cmap` | CMAP 校正映射图文件 | `ff.cmap` |
+| `-oin` | 输出 LAMMPS 输入文件 | 必需 |
+| `-otop` | 输出拓扑数据文件 | `conff.data` |
+| `-cube` | 立方体盒子边长 (Å) | `400.0` |
+| `-oxtc` | 轨迹输出文件名 | `traj.xtc` |
+
+转换完成后，中间文件（`*_converted.input`、`*_converted.lmp`、`*_conversion.log`）将被自动删除。
+
+来源: [step2-conversion.bash](/tutorial/coil/2-conversion/step2-conversion.bash#L1-L32), [make_ff.py](/tutorial/coil/2-conversion/make_ff.py#L1-L235)
+
+## 步骤 3：运行模拟
+
+在 LAMMPS 输入文件就位后，只需一条命令即可启动无规卷曲模拟：
+
+```bash
+lmp -in idp_nvt.in
+```
+
+### 所需文件
+
+模拟目录必须包含：
+
+| 文件 | 用途 |
+|------|---------|
+| `idp_nvt.in` | 包含力场、积分和输出设置的 LAMMPS 输入脚本 |
+| `idp_nvt.data` | 拓扑数据：原子、键、键角、二面角、CMAP 交叉项 |
+| `cmap_20240524.cmap` | 残基对二面角校正映射图 (φ/ψ 网格) |
+| `idp.pdb` | PDB 参考文件 (用于 GROMACS 轨迹分析工具) |
+
+### 力场组成
+
+LAMMPS 中的无规卷曲力场由四种相互作用类型组成，均源自带有 CMAP 校正的 amber99SB-ILDN：
+
+```
+bond_style hybrid harmonic
+angle_style hybrid harmonic
+dihedral_style hybrid multi/harmonic charmm
+pair_style lj/cut 2.0
+fix drycmap all cmap cmap_20240524.cmap
+```
+
+**CMAP 校正**是区别于通用 amber99SB-ILDN 模拟的关键要素。每个残基对（如 `ARG-XXX`、`PRO-XXX`）都有一个 24×24 的 φ/ψ 二面角能量校正网格，以逐残基的方式调节主链偏好。这些校正编码了残基特定的构象倾向，能够消除二级结构偏置，推动系综趋向无规卷曲行为。
+
+来源: [idp_nvt.in](/tutorial/coil/3-simulation/idp_nvt.in#L1-L25)
+
+### 积分与恒温器
+
+模拟协议遵循两阶段方法：
+
+1. **能量最小化**：`minimize 1.0e-4 1.0e-6 10000 100000` —— 使用 10⁻⁴（能量）和 10⁻⁶（力）的容差阈值消除初始结构中的空间位阻，最多进行 10,000 次迭代和 100,000 次力评估。
+
+2. **生产动力学**：NVE 积分（`fix 1 all nve`）耦合 CSVR 恒温器（`fix 2 all temp/csvr 298.1 298.1 $(100.0*dt) <seed>`），在 **298.1 K** 下运行，耦合时间为 100 fs。CSVR（通过速度重缩放进行正则采样）恒温器在维持近 NVE 动力学>的同时提供严格的正则采样。
+
+```
+timestep 1.0          # 1 femtosecond
+fix 1 all nve
+fix 2 all temp/csvr 298.1 298.1 $(100.0*dt) 1679636
+```
+
+<CgxTip>CSVR 种子在转换时随机生成。若需可复现的模拟，请在 `idp_nvt.in` 中手动将种子整数设为固定值。</CgxTip>
+
+来源: [idp_nvt.in](/tutorial/coil/3-simulation/idp_nvt.in#L383-L388)
+
+### 可配置的模拟参数
+
+`idp_nvt.in` 末尾的两行控制着模拟输出和持续时间：
+
+| 行 | 默认值 | 含义 |
+|------|---------|---------|
+| `dump 1 all xtc 10000 traj_idp.xtc` | 每 10,000 步 | 轨迹保存间隔 (在 1 fs 步长下为 10 ps) |
+| `run 2000000000` | 2 × 10⁹ 步 | 总模拟时长 (在 1 fs 步长下为 2 μs) |
+
+如需更长的生产运行或不同的采样频率，可直接编辑这些值。例如，要运行 5 μs 并以 100 ps 间隔保存帧：
+
+```
+dump 1 all xtc 100000 traj_idp.xtc
+run    5000000000
+```
+
+来源: [README.md](/tutorial/coil/README.md#L60-L81), [idp_nvt.in](/tutorial/coil/3-simulation/idp_nvt.in#L387-L388)
+
+## 轨迹分析
+
+XTC 轨迹格式与 GROMACS 分析工具兼容。两个常用的后处理命令如下：
+
+**检查轨迹元数据：**
+```bash
+gmx check -f traj_idp.xtc
+```
+
+**降采样至 100 ps 帧**（减小文件大小以便存储和下游分析）：
+```bash
+gmx trjconv -f traj_idp.xtc -s idp.pdb -o traj_idp_dt100ps.xtc -dt 100
+```
+
+`-s idp.pdb` 标志为 `trjconv` 提供了单晶胞和拓扑信息所需的结构参考。`-dt 100` 标志以 100 ps 间隔提取帧。
+
+来源: [README.md](/tutorial/coil/README.md#L75-L81)
+
+## 无规卷曲 vs. bAIes：核心差异
+
+理解两个流程之间的结构差异，有助于明确为何无规卷曲可作为零模型：
+
+| 方面 | 无规卷曲 | bAIes |
+|--------|-------------|-------|
+| 流程步骤 | 3 (准备 → 转换 → 模拟) | 4 (准备 → 预处理 → 转换 → 模拟) |
+| AlphaFold 距离直方图 | 未使用 | 必需输入 |
+| PLUMED 约束 | 无 | 通过 `plumed.dat` 施加贝叶斯距离偏置 |
+| `make_ff.py` | 无 `-plumed` 参数 | 在 LAMMPS 输入中包含 `fix pl all plumed` |
+| `baies_params.dat` | 模拟中未使用 | 包含每个约束对的 μ, σ |
+| 物理力场 | 相同 | 相同 |
+| CMAP 校正 | 相同 | 相同 |
+| 系综特征 | 不受预测偏置影响 | 偏向 AF2 距离分布 |
+
+两个流程共享**相同的基础物理力场**——带有相同 CMAP 二面角校正和 LJ 参数的 amber99SB-ILDN。唯一的区别在于是否激活基于 PLUMED 的贝叶斯约束。这种受控差异使得卷曲系综成为理想的基线：bAIes 系综中的任何结构偏差都可以归因于源自 AlphaFold 的约束，而非力场伪影。
+
+<CgxTip>在进行基准测试时，务必使用与相应 bAIes 模拟相同的模拟参数（步长、恒温器、盒子大小、运行时长）来运行无规卷曲模拟，以确保比较的公平性。</CgxTip>
+
+来源: [README.md](/tutorial/coil/README.md#L1-L81), [README.md](/tutorial/bAIes/README.md#L1-L151), [make_ff.py (coil)](/tutorial/coil/2-conversion/make_ff.py#L14-L23), [make_ff.py (bAIes)](/scripts/make_ff.py#L14-L24)
+
+## 基准系统
+
+所有 18 种基准蛋白质的预构建无规卷曲输入文件可在 `benchmark/coil/` 下获取。每个目录包含三个可直接运行的文件：
+
+| 文件 | 描述 |
+|------|-------------|
+| `<protein>_nvt.in` | LAMMPS 输入脚本 |
+| `<protein>_nvt.data` | 拓扑和力场数据 |
+| `dry_ff_20240524_correct.cmap` | CMAP 校正映射图 |
+
+基准系统包括：ACTR, Ab40, Alb3-A3CT, Colicin_N_T_domain, FCP1, His-PknG_1-75, Hug1_, NHE1, Nsp2_CtlIDR, Nt-SOCS5, PaaA2, UBact, asyn, drkN, emerin_67-170, idr_SSRP1, p61_Hck, 和 spm_FrpC。这些系统与 bAIes 及 bAIes-N 基准集直接对应，从而能够进行系统的 [bAIes vs bAIes-N vs Coil](14-baies-vs-baies-n-vs-coil) 比较。
+
+来源: [benchmark/coil/](/benchmark/coil/)
+
+## 后续步骤
+
+- 按照[快速入门](2-quick-start)指南设置你自己的无规卷曲模拟
+- 在 [CMAP 校正映射图](8-cmap-correction-maps)中了解 CMAP 校正映射图如何塑造能量景观
+- 在 [bAIes vs bAIes-N vs Coil](14-baies-vs-baies-n-vs-coil)中比较无规卷曲与 bAIes 及 bAIes-N 系综
+- 在[模拟参数调优](16-simulation-parameter-tuning)中为生产运行调整模拟参数
+
+---
+
+## 输入数据与参数
+
+- [深入探究/输入数据与参数/AlphaFold-2 与 ColabFold 输入](https://zread.ai/COSBlab/bAIes-IDP/11-alphafold-2-and-colabfold-inputs)
+
+---
+slug:11-alphafold-2-and-colabfold-inputs
+blog_type:normal
+---
+
+
+bAIes-IDP 流水线的结构先验源自结构预测引擎生成的**距离图**（distograms）——即残基对距离的概率分布。这些距离图编码了 AlphaFold-2 或 ColabFold 对残基间距离的统计置信度，是区分 bAIes 系综与普通随机线团模拟的核心输入。本页详细介绍了两种受支持的预测后端、其输出格式，以及 bAIes-IDP 如何使用它们。
+
+## 受支持的预测后端
+
+bAIes-IDP 接受来自两种来源的距离图，每种都有特定的文件格式和分箱方案。流水线根据文件扩展名自动检测格式，并路由至相应的读取函数。
+
+| 属性 | AlphaFold-2 (本地) | ColabFold (距离矩阵) |
+|:---|:---|:---|
+| **距离图文件** | `result_model_X_ptm_pred_X.pkl` | `alphafold2_ptm_model_X_seed_XXX_prob_distributions.npy` |
+| **格式** | Python pickle (`.pkl`) | NumPy 数组 (`.npy`) |
+| **分箱** | 64 个箱，2–22 Å，Δ = 0.3125 Å | 63 个箱，自定义非均匀 (nm) |
+| **存储键** | `data['distogram']['logits']` + `data['distogram']['bin_edges']` | 直接 N×N×64 概率数组 |
+| **转换** | 对 logits 进行 Softmax → 概率 | 预计算的概率 |
+| **PDB 模型** | `relaxed_model_X_ptm_pred_X.pdb` | `ranked_0.pdb` (或等效文件) |
+| **参考实现** | [google-deepmind/alphafold](https://github.com/google-deepmind/alphafold) | [zshengyu14/ColabFold_distmats](https://github.com/zshengyu14/ColabFold_distmats/blob/main/AlphaFold2.ipynb) |
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L39-L49), [preprocess_bAIes.py](scripts/preprocess_bAIes.py#L415-L450), [README.md](README.md#L25-L28)
+
+## AlphaFold-2 Pickle 格式
+
+在本地运行 AlphaFold-2 时，五个模型循环中的每一个都会生成一个结果 pickle 文件。bAIes 流水线读取**其中一个**此类文件（通常是排名最高的模型）作为其距离图来源。该 pickle 包含一个嵌套字典，键为 `'distogram'`，其本身包含两个数组：
+
+- **`bin_edges`**：一个 64 元素的数组，范围跨度为 2.0–22.0 Å，均匀间距为 Δ = 0.3125 Å。最后一个箱是距离 ≥ 22 Å 的兜底箱，在处理过程中会被丢弃。
+- **`logits`**：一个 N×N×64 的原始对数几率分数张量，其中 N 为查询序列中的残基数。
+
+`read_pkl` 函数对 64 个箱应用 **softmax** 归一化，将 logits 转换为合适的概率分布，然后将箱中心偏移 Δ/2，并将单位从埃（Å）转换为纳米（×0.1）。最后一个箱（≥ 22 Å）会被排除在下游拟合之外。代码中也实现了备用的 `sigmoid` 转换路径，但 softmax 是默认选项。
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L415-L438)
+
+## ColabFold NumPy 格式
+
+ColabFold 距离矩阵实现将以 `_distmat` 结尾的子目录中的距离图输出为 `.npy` 文件。每个文件遵循命名规范 `alphafold2_ptm_model_X_seed_XXX_prob_distributions.npy`，并存储一个预计算的 N×N×64 概率数组——无需 softmax 转换。
+
+与均匀的 AF2 分箱不同，ColabFold 的分箱在纳米空间中是**非均匀的**（硬编码范围从 0.2156 nm 到 2.153 nm）。这反映了修改版 ColabFold notebook 的内部表示。`read_npy` 函数直接加载数组，并与其固定的箱中心一同返回。
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L440-L450)
+
+## 各后端的必需输入文件
+
+除距离图外，两个后端还必须生成一个**弛豫 PDB 模型**，用作 MD 模拟的起始结构。`0-inputs` 目录中期望的完整输入集结构如下：
+
+### AlphaFold-2 输入目录
+
+```
+0-inputs/
+└── <Protein>_AF2/
+    └── result_model_4_ptm_pred_0.pkl   # 距离图 pickle (选定的一个模型)
+```
+
+同样需要弛豫 PDB (`relaxed_model_4_ptm_pred_0.pdb`)，但它由 GROMACS 准备步骤 (`step1-prepare_gmx.bash`) 直接使用，而不是预处理脚本。
+
+### ColabFold 输入目录
+
+```
+0-inputs/
+└── <Protein>_Colabfold/
+    ├── <Protein>_XXXX.a3m                                    # MSA 比对 (参考信息)
+    ├── <Protein>_XXXX_scores_rank_001_*.json                 # 各模型得分
+    ├── <Protein>_XXXX_predicted_aligned_error_v1.json        # PAE 矩阵
+    ├── <Protein>_XXXX_pae.png                                # PAE 图 (可视化检查)
+    ├── <Protein>_XXXX_plddt.png                              # pLDDT 图 (可视化检查)
+    ├── config.json                                           # 运行配置
+    └── <Protein>_XXXX_distmat/                               # 距离图子目录
+        ├── alphafold2_ptm_model_1_seed_000_prob_distributions.npy
+        ├── alphafold2_ptm_model_1_seed_000_mean.csv
+        ├── alphafold2_ptm_model_1_seed_000_std.csv
+        ├── alphafold2_ptm_model_1_seed_000_12A_prob.csv
+        └── ... (模型 2–5 重复)
+```
+
+`.csv` 文件（mean、std、12A_prob）**不会被** bAIes-IDP 预处理使用——它们是供人工检查的补充输出。仅读取 `_prob_distributions.npy` 文件。
+
+来源：[tutorial/bAIes/README.md](tutorial/bAIes/README.md#L12-L38)
+
+## 格式自动检测与处理流程
+
+预处理流水线根据传递给 `-pkl` 参数的文件扩展名自动检测距离图来源。下图说明了输入解析如何流向距离图读取与拟合：
+
+```mermaid
+flowchart TD
+    A["-pkl 参数"] --> B{文件扩展名?}
+    B -->|".pkl"| C["read_pkl()"]
+    B -->|".npy"| D["read_npy()"]
+    B -->|其他| E["ValueError: 格式无法识别"]
+    C --> F["从 pickle['distogram']<br/>提取 bin_edges + logits"]
+    F --> G["对 64 个箱进行 Softmax<br/>→ 概率分布"]
+    G --> H["偏移箱中心 (Δ/2)<br/>Å → nm 转换 (×0.1)<br/>丢弃最后一个箱 (≥22 Å)"]
+    D --> I["加载 N×N×64 数组<br/>+ 硬编码 nm 箱"]
+    H --> J["bins, distograms"]
+    I --> J
+    J --> K["select_and_fit_distograms()"]
+    K --> L["按截断值与序列间隔筛选"]
+    L --> M["拟合每个选定的残基对<br/>(高斯或对数正态)"]
+    M --> N["write_output() → baies_params.dat<br/>atom_list.ndx"]
+```
+
+关键的调度逻辑位于 `main` 函数中，它会检查 `pkl_file.endswith('.pkl')` 还是 `.npy`，并对其他任何格式抛出 `ValueError`。这意味着预处理脚本在其下游逻辑中是**格式无关的**——一旦加载了箱和距离图，无论来源如何，拟合与输出流水线都是完全相同的。
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L886-L900), [preprocess_bAIes.py](scripts/preprocess_bAIes.py#L39-L49)
+
+## 各后端的命令行调用
+
+`step2-preprocess.bash` 脚本封装了 `preprocess_bAIes.py`，并接受三个位置参数。**第三个参数**决定了使用哪个后端：
+
+| 参数 | 位置 | AF2 示例 | ColabFold 示例 |
+|:---|:---:|:---|:---|
+| `mdpdb` | 1 | `idp.pdb` | `idp.pdb` |
+| `pdb` | 2 | `relaxed_model_4_ptm_pred_0.pdb` | `relaxed_model_4_ptm_pred_0.pdb` |
+| `dist` | 3 | `result_model_4_ptm_pred_0.pkl` | `alphafold2_ptm_model_1_seed_000_prob_distributions.npy` |
+
+**AlphaFold-2 调用：**
+```bash
+./step2-preprocess.bash idp.pdb relaxed_model_4_ptm_pred_0.pdb result_model_4_ptm_pred_0.pkl
+```
+
+**ColabFold 调用：**
+```bash
+./step2-preprocess.bash idp.pdb relaxed_model_4_ptm_pred_0.pdb alphafold2_ptm_model_1_seed_000_prob_distributions.npy
+```
+
+`-pdb` 标志（第二个参数）指向 **AlphaFold/ColabFold PDB** 用于残基索引，而 `-mdpdb`（第一个参数）指向 **GROMACS 预处理的 PDB**，该 PDB 在经过 `pdb2gmx` 处理后可能具有不同的原子编号。当两个 PDB 之间的原子索引不一致时，必须同时提供两者，以便脚本能将距离图残基索引映射到正确的 MD 模拟原子编号。
+
+来源：[step2-preprocess.bash](scripts/step2-preprocess.bash#L1-L39), [tutorial/bAIes/README.md](tutorial/bAIes/README.md#L58-L72)
+
+## PDB/CIF 模型文件
+
+两个后端都会生成一个弛豫 PDB 结构，bAIes-IDP 将其用于两个目的：
+
+1. **拓扑生成**：将 PDB 输入至 `gmx pdb2gmx`（使用 amber99SB-ILDN 力场），生成用于 GROMACS→LAMMPS 转换的 `.gro`、`.top` 和 `.itp` 文件。
+2. **残基-原子映射**：`read_pdb` 函数提取每个 CB 原子（甘氨酸残基则为 CA）及其残基类型、链标签和序列索引。此映射将距离图残基对索引连接到 PLUMED 在模拟期间将施加限制的具体原子编号。
+
+脚本还通过 `read_cif` 支持 **mmCIF** 格式，该格式遵循相同的 CB/CA 提取逻辑，但解析的是 CIF 字典结构而非固定宽度的 PDB 列。
+
+<CgxTip>当 AlphaFold-2 对残基重新编号或分配的链标签与你的 GROMACS 预处理 PDB 不同时，请务必通过 `-pdb`（AF2 结构）和 `-mdpdb`（GROMACS 结构）参数分别提供这两个文件。当原子索引不同时，仅提供一个文件将导致生成不正确的 PLUMED 限制。</CgxTip>
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L277-L365), [step1-prepare_gmx.bash](scripts/step1-prepare_gmx.bash#L1-L7)
+
+## ColabFold 补充输出
+
+虽然 bAIes-IDP 仅使用 `.npy` 距离图和弛豫 PDB，但 ColabFold 会生成几个额外的文件，这些文件在正式提交 bAIes 运行前对**质量评估**极具价值：
+
+| 文件 | 用途 | bAIes 是否使用？ |
+|:---|:---|:---:|
+| `*_scores_rank_*.json` | 各模型的 pLDDT、pTM、iptm 得分 | 否 |
+| `*_predicted_aligned_error_v1.json` | 预测对齐误差 (PAE) 矩阵 | 否 |
+| `*_pae.png` / `*_plddt.png` | 可视化质量图 | 否 |
+| `*_mean.csv` | 各残基对的平均成对距离 | 否 |
+| `*_std.csv` | 成对距离的标准差 | 否 |
+| `*_12A_prob.csv` | 距离 < 12 Å 的概率 | 否 |
+| `*.a3m` | 输入 MSA 比对 | 否 |
+
+对于 IDP，低 pLDDT 分数和高 PAE 值是符合预期的，这并**不**表示预测失败——事实上，它们证实了 bAIes 旨在建模的无序特性。
+
+来源：[tutorial/bAIes/0-inputs](tutorial/bAIes/0-inputs)
+
+## 选择最佳模型
+
+AlphaFold-2 和 ColabFold 每次预测都会生成五个模型（模型 1–5，具有不同的循环迭代和随机种子）。选择将哪个模型输入 bAIes 非常关键，因为距离图的质量直接影响限制的准确性。标准做法是基于 pTM 或 iptm 得分选择**排名最高的模型**。在教程示例中，选择了模型 4（如 `result_model_4_ptm_pred_0.pkl` 所示），该模型在 ColabFold 的评分中排名第一。
+
+<CgxTip>对于内在无序蛋白，所有五个模型通常会产生相似的距离图，因为根据设计，其预测置信度本就较低。对于同时包含有序和无序区域的多结构域蛋白，模型选择则更为重要——请使用排名最高的模型，以确保锚定系综的有序结构域具有准确的距离图。</CgxTip>
+
+来源：[tutorial/bAIes/README.md](tutorial/bAIes/README.md#L12-L20)
+
+## 输入准备清单
+
+在继续执行预处理步骤之前，请验证你的 `0-inputs` 目录是否满足以下要求：
+
+- [ ] **距离图文件**已存在：`.pkl` (AF2) 或 `_prob_distributions.npy` (ColabFold)
+- [ ] **弛豫 PDB 模型**已存在，且包含所有具有标准原子名称的残基
+- [ ] PDB 使用与 amber99SB-ILDN 兼容的**标准残基名称**（`pdb2gmx` 所需）
+- [ ] 对于多链系统，距离图与 PDB 之间的链标签保持一致
+- [ ] 选定的模型是**排名最高**的预测（检查 ColabFold 的得分 JSON 文件）
+
+输入验证通过后，请继续阅读[距离图读取与拟合](5-distogram-reading-and-fitting)，了解预处理脚本如何将这些原始预测转换为 PLUMED 兼容的限制参数；或跳转至[残基对截断矩阵](12-residue-pair-cutoff-matrix)，了解依赖残基类型的距离截断值如何筛选包含的距离图残基对。
+
+---
+
+- [深入探究/输入数据与参数/残基对截断矩阵](https://zread.ai/COSBlab/bAIes-IDP/12-residue-pair-cutoff-matrix)
+
+---
+slug:12-residue-pair-cutoff-matrix
+blog_type:normal
+---
+
+
+**残基对截断矩阵**是一个 20×20 的特定氨基酸距离查找表，在 bAIes-IDP 预处理流程的 distogram 选择与拟合阶段，它替代了单一的全局截断值。在决定将哪些 AlphaFold-2 distogram 作为约束纳入时，该矩阵不再为每个残基对应用统一的距离阈值（例如 8 Å），而是为 210 种独特的氨基酸组合中的每一种分配基于物理意义的、依赖残基对的截断值——从而实现了更精确的约束选择，能够兼顾不同残基类型在尺寸和接触化学性质上的异质性。
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L33-L244), [step2-preprocess.bash](scripts/step2-preprocess.bash#L19-L26)
+
+## 起源与物理基础
+
+截断值源自对高分辨率蛋白质结构中残基-残基接触距离的统计分析，最初由 **Baker 实验室**（华盛顿大学）提出。矩阵中的每个条目是一个包含两个值的元组：**(d_cutoff, σ)**，其中 `d_cutoff` 是将残基对视为有意义接触时的最大 Cβ–Cβ 距离（单位：埃），`σ` 是该截断值的相关展宽或不确定度。该矩阵以对称字典的形式存储，以有序残基类型对为键，其值跨越了宽广的动态范围——从最小残基对 (GLY–GLY) 的 **4.467 Å** 到最大残基对 (TRP–TRP) 的 **12.806 Å**。这一约 3 倍的范围反映了小脂肪族残基与大芳香族残基在范德华半径和侧链伸展范围上的巨大差异；如果对所有残基对应用统一的标量截断值，要么会对小残基相互作用造成过度约束，要么会对大残基相互作用造成约束不足。
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L33-L244)
+
+## 矩阵结构与覆盖范围
+
+该矩阵被定义为一个包含 210 个条目的 Python 字典，覆盖了**所有 20 种标准氨基酸**。键为遵循以下约定的有序元组 `(residue_i, residue_j)`：基于固定的字母顺序 **(较小的残基, 较大的残基)** (ALA < ARG < ASN < ASP < CYS < GLN < GLU < GLY < HIS < ILE < LEU < LYS < MET < PHE < PRO < SER < THR < TRP < TYR < VAL)。对角线条目（例如 `("GLY","GLY")`）代表同类型残基对，非对角线条目代表跨类型残基对。由于字典仅存储上三角部分，当未找到直接键时，会尝试查找反向键 `(res_j, res_i)` 作为回退机制。
+
+| 残基对类别 | 示例对 | 截断值 (Å) | σ | 物理依据 |
+|---|---|---|---|---|
+| 小–小 | GLY–GLY | 4.467 | 0.017 | 最小侧链体积 |
+| 小–中 | GLY–LEU | 6.554 | 0.125 | 不对称伸展范围 |
+| 小–大 | GLY–ARG | 9.166 | 0.334 | 一侧为延伸侧链 |
+| 中–中 | VAL–VAL | 6.759 | 0.145 | 中等分支侧链 |
+| 中–大 | PRO–ARG | 10.266 | 0.506 | 环状 + 胍基伸展范围 |
+| 大–大 | TRP–TRP | 12.806 | 0.473 | 最大芳香族体积 |
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L33-L244)
+
+## 矩阵在流程中的使用方式
+
+截断矩阵在 `select_and_fit_distograms()` 函数的 **distogram 选择与拟合** 阶段进入处理流程。对于从 N×N distogram 数组中提取的每个残基对 (i, j)，应用以下决策逻辑：
+
+```mermaid
+flowchart TD
+    A["对于每个残基对 (i, j)"] --> B{"cutoff == 'matrix'?"}
+    B -- 是 --> C["在 cutoff_matrix 中<br/>查找 (res_type_i, res_type_j)"]
+    C --> D{"找到键?"}
+    D -- 否 --> E["尝试反向键<br/>(res_type_j, res_type_i)"]
+    D -- 是 --> F["defcutoff = matrix[key][0]"]
+    E --> F
+    B -- 否 --> G["defcutoff = float(cutoff)<br/>(统一标量, 默认 8.0 Å)"]
+    F --> H{"Dmax < defcutoff × 0.1<br/>(Å → nm 转换)?"}
+    G --> H
+    H -- 是 --> I["拟合 distogram 并<br/>作为 PLUMED 约束纳入"]
+    H -- 否 --> J["跳过该对:<br/>最概然距离超出<br/>残基对接触阈值"]
+```
+
+关键的比较是 **Dmax < defcutoff × 0.1**，其中 `Dmax` 是 AlphaFold-2 distogram 中最高概率对应的距离（单位：nm），而 `defcutoff × 0.1` 将矩阵截断值从埃转换为纳米。只有最概然 Cβ–Cβ 距离**低于**特定残基对截断值的残基对，才会被选中进行拟合并作为 bAIes 约束纳入。这确保了约束集仅由那些预测接触距离与特定氨基酸组合的有意义相互作用在物理上一致的残基对组成。
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L775-L844)
+
+## 激活与命令行界面
+
+通过向 `preprocess_bAIes.py` 的 `-cutoff` 参数传递字符串 `'matrix'` 来激活残基对截断矩阵。这是标准预处理流程中的**推荐默认项**，`step2-preprocess.bash` 脚本显式设置了 `-cutoff matrix` 即印证了这一点。另一种方式是提供以埃为单位的数值（默认：`8.0`），这将对所有残基对应用统一的阈值，而不区分残基类型。
+
+| 参数 | 值 | 行为 |
+|---|---|---|
+| `-cutoff matrix` | 字符串字面量 | 采用 Baker 实验室矩阵中特定残基对的截断值 |
+| `-cutoff 8.0` | 数值 (Å) | 对所有残基对应用统一的 8.0 Å 截断值 |
+| `-cutoff 10.0` | 数值 (Å) | 对所有残基对应用统一的 10.0 Å 截断值（更宽松） |
+
+step2 脚本的调用展示了典型的用法：
+
+```bash
+./preprocess_bAIes.py -pdb ${pdb} -mdpdb ${mdpdb} -pkl ${dist} \
+    -out ${dat} -model gauss -cutoff matrix -ndxout ${ndx} --verbose
+```
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L16-L30), [step2-preprocess.bash](scripts/step2-preprocess.bash#L19-L26)
+
+## 对约束选择的影响
+
+相比于统一截断值，矩阵的实际效果是**重新分配**了残基对空间中**纳入的约束**。使用统一的 8 Å 截断值时，GLY–GLY 残基对（矩阵截断值：4.47 Å）会纳入许多最概然距离在 4.47–8.0 Å 之间的 distogram——这些距离太大，无法代表有意义的甘氨酸-甘氨酸接触。相反，TRP–TRP 残基对（矩阵截断值：12.81 Å）会排除所有最概然距离在 8.0–12.81 Å 之间的 distogram，丢弃了处于物理合理距离上的真实色氨酸-色氨酸接触。矩阵同时纠正了这两种失效模式。
+
+σ 值（元组的第二个元素）编码了每个截断值的**不确定度或展宽**，反映了在结构数据库中观察到的接触距离的变异性。像 GLY 这样的小残基呈现紧致的分布（σ ≈ 0.02–0.27 Å），而像 ARG 和 TRP 这样的大柔性残基则表现出较宽的分布（σ ≈ 0.7–0.9 Å）。这些 σ 值存储在矩阵数据结构中，但在当前的选择逻辑中**并未被使用**——截断决策仅使用第一个元素（`cutoff_matrix[key][0]`）。它们仍可用于未来的扩展，例如软截断阈值或基于不确定度加权的约束方案。
+
+来源：[preprocess_bAIes.py](scripts/preprocess_bAIes.py#L33-L244), [preprocess_bAIes.py](scripts/preprocess_bAIes.py#L804-L819)
+
+<CgxTip>该截断矩阵在构造上是对称的，但仅以上三角形式存储（按字母顺序排列的键）。第 807–810 行的查找代码通过在正向键缺失时尝试反向键来处理此问题——务必确保残基类型字符串与矩阵中使用的精确三字母代码（GLY、ALA 等）完全匹配，因为查找过程是区分大小写的精确匹配。</CgxTip>
+
+<CgxTip>在调试 `-cutoff matrix` 与 `-cutoff 8.0` 之间约束数量差异时，请检查大–大残基对（例如 TRP–TRP、ARG–ARG、TYR–TYR）的 Dmax 值——这些残基对的矩阵截断值远高于 8.0 Å，受截断模式选择的影响尤为显著。</CgxTip>
+
+## 与流程阶段的关系
+
+残基对截断矩阵仅在 [Distogram 读取与拟合](5-distogram-reading-and-fitting) 预处理阶段中运行，它决定了哪些 AlphaFold-2 distogram 被提升为拟合后的约束。其输出——即被选中并拟合的残基对集合——直接流入 [PLUMED 文件生成](6-plumed-file-generation) 阶段，并最终进入 [bAIes 系综模拟](9-baies-ensemble-simulations)。该矩阵在 [GROMACS 到 LAMMPS 转换](7-gromacs-to-lammps-conversion) 或 [CMAP 校正图](8-cmap-correction-maps) 阶段不起作用，这些阶段处理所有非键相互作用，独立于源自 distogram 的约束。
+
+---
+
+## 基准测试与验证
+
+- [深入探究/基准测试与验证/基准蛋白质系统](https://zread.ai/COSBlab/bAIes-IDP/13-benchmark-protein-systems)
+
+---
+slug:13-benchmark-protein-systems
+blog_type:normal
+---
+
+
+bAIes-IDP 基准测试套件为 20 个内在无序蛋白 (IDP) 系统提供了**可直接运行的 LAMMPS 模拟数据**，涵盖四种不同的无序类别。这些系统重现了 Schnapka, Morozova, Sen & Bonomi (2025) 所报告的结果，可作为评估 bAIes 系综质量相对于实验可观测量的验证参考点。每个系统均在三种模拟方案下预打包——**bAIes**、**bAIes-N** 和 **coil**——从而在一致的力场框架内，实现偏置系综与无偏随机线圈基线之间的直接比较。
+
+来源: [README.md](/benchmark/README.md#L1-L38)
+
+## 系统目录与分类
+
+20 个基准测试蛋白被组织为**四个功能类别**，反映了 IDP 系综建模中不同的挑战。此分类不仅是分类学上的划分——每个类别都探测了 AlphaFold-2 预测的不同失效模式，并需要不同的 bAIes 校正策略。
+
+| 类别 | 系统 | 数量 | 残基范围 | 挑战 |
+| :--- | :--- | :---: | :---: | :--- |
+| **Disordered** | Ab40, p61_Hck, emerin_67-170, His-PknG_1-75, Colicin_N_T_domain, Hug1_ | 6 | 40–105 | 完全无序；AF2 预测完全缺乏结构基础 |
+| **Structure motifs** | PaaA2, Nt-SOCS5, Alb3-A3CT, idr_SSRP1, UBact, FCP1 | 6 | 64–101 | 在无序区域内存在局部结构 |
+| **AF2 prediction errors** | asyn, ACTR, NHE1, Nsp2_CtlIDR, spm_FrpC, drkN | 6 | 45–179 | AF2 预测出置信度高但错误的局部结构 |
+| **Multidomain** | GS8, Ubq2, Ubq3 | 3 | 162–486 | 由柔性连接子连接的多个折叠结构域 |
+
+来源: [README.md](/benchmark/README.md#L15-L36)
+
+### 详细系统规格
+
+| 蛋白标签 | 类别 | 残基 | 原子 | 键 | 二面角 | 交叉项 | 盒子尺寸 (Å) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Ab40 | Disordered | 40 | 598 | 604 | 2,128 | 38 | 200 |
+| p61_Hck | Disordered | 78 | — | — | — | — | — |
+| emerin_67-170 | Disordered | 105 | — | — | — | — | — |
+| His-PknG_1-75 | Disordered | 95 | — | — | — | — | — |
+| Colicin_N_T_domain | Disordered | 90 | — | — | — | — | — |
+| Hug1_ | Disordered | 73 | — | — | — | — | — |
+| PaaA2 | Structure motifs | 71 | 1,165 | 1,175 | 4,208 | 69 | 200 |
+| Nt-SOCS5 | Structure motifs | 70 | — | — | — | — | — |
+| Alb3-A3CT | Structure motifs | 101 | — | — | — | — | — |
+| idr_SSRP1 | Structure motifs | 89 | — | — | — | — | — |
+| UBact | Structure motifs | 64 | — | — | — | — | — |
+| FCP1 | Structure motifs | 85 | — | — | — | — | — |
+| asyn | AF2 errors | 140 | 2,016 | 2,027 | 7,209 | 138 | 200 |
+| ACTR | AF2 errors | 71 | — | — | — | — | — |
+| NHE1 | AF2 errors | 120 | — | — | — | — | — |
+| Nsp2_CtlIDR | AF2 errors | 45 | — | — | — | — | — |
+| spm_FrpC | AF2 errors | 179 | — | — | — | — | — |
+| drkN | AF2 errors | 59 | — | — | — | — | — |
+| GS8 | Multidomain | 486 | 7,480 | 7,577 | 27,369 | 484 | 2,000 |
+| Ubq2 | Multidomain | 162 | 2,599 | 2,618 | 9,429 | 160 | 2,000 |
+| Ubq3 | Multidomain | 228 | — | — | — | — | — |
+
+<CgxTip>多结构域系统 (GS8, Ubq2, Ubq3) 使用 **2,000 Å** 的模拟盒子，而单结构域系统使用 **200 Å** 的盒子。这反映了多结构域蛋白可及的构象空间显著增大，并防止在扩展构型中出现周期性边界伪影。</CgxTip>
+
+来源: [Ab40_nvt.data](/benchmark/bAIes/Ab40/Ab40_nvt.data#L1-L20), [GS8_nvt.data](/benchmark/bAIes/GS8/GS8_nvt.data#L1-L20), [Ubq2_nvt.data](/benchmark/bAIes/Ubq2/Ubq2_nvt.data#L1-L20), [PaaA2_nvt.data](/benchmark/bAIes/PaaA2/PaaA2_nvt.data#L1-L20), [asyn_nvt.data](/benchmark/bAIes/asyn/asyn_nvt.data#L1-L20)
+
+## 基准测试目录架构
+
+基准测试数据组织在 `benchmark/` 目录下，包含三个平行的子目录，每个模拟方案对应一个。每个蛋白系统目录包含 LAMMPS 就绪的模拟输入，其中 bAIes 和 bAIes-N 方案在公共力场基础设施之上添加了 PLUMED 偏置文件。
+
+```
+benchmark/
+├── bAIes/          ← 完整 bAIes 系综 (Jeffreys 先验)
+│   └── <protein>/
+│       ├── <protein>_nvt.data        # LAMMPS 拓扑与坐标
+│       ├── <protein>_nvt.in          # LAMMPS 输入脚本
+│       ├── atom_list_matrix.ndx      # PLUMED 的原子索引组
+│       ├── baies_gauss_matrix.dat    # 拟合的距离图高斯分布
+│       ├── dry_ff_20240524_correct.cmap  # CMAP 校正图
+│       └── plumed_<protein>.dat      # PLUMED 偏置配置
+├── bAIes-N/        ← 无 Jeffreys 先验的 bAIes (平坦先验)
+│   └── <protein>/
+│       └── (与 bAIes 相同的 6 文件结构)
+└── coil/           ← 随机线圈参考 (无 bAIes 偏置)
+    └── <protein>/
+        ├── <protein>_nvt.data
+        ├── <protein>_nvt.in
+        └── dry_ff_20240524_correct.cmap
+```
+
+来源: [benchmark/](/benchmark/README.md#L1-L38)
+
+## 模拟方案变体
+
+三个基准测试子目录编码了用于验证 bAIes 的三种模拟方案。理解它们的结构差异对于解释基准测试比较至关重要。
+
+### bAIes — 带 Jeffreys 先验的偏置系综
+
+**bAIes** 方案通过 PLUMED 应用完整的贝叶推断结构系综 (bAIes) 偏置，使用 **Jeffreys 先验** (`PRIOR=JEFFREYS`)。此先验施加了无信息、尺度不变的正则化，防止系综过拟合于从距离图导出的高斯约束。每个 bAIes 系统的 PLUMED 配置都遵循相同的模式：
+
+```plumed
+#MOLINFO STRUCTURE=<protein>.pdb
+batoms: GROUP NDX_FILE=atom_list_matrix.ndx NDX_GROUP=batoms
+baies: BAIES ATOMS=batoms DATA_FILE=baies_gauss_matrix.dat PRIOR=JEFFREYS TEMP=2.478541306
+PRINT ARG=baies.ene FILE=COLVAR STRIDE=500
+bbias: BIASVALUE ARG=baies.ene STRIDE=2
+```
+
+关键参数为：`TEMP=2.478541306` (LAMMPS real 单位制下的约化温度，对应于 300 K)，`STRIDE=500` 用于能量输出，`STRIDE=2` 用于偏置评估。`baies_gauss_matrix.dat` 文件将拟合的 AlphaFold-2 距离图编码为一组 pairwise 距离约束 (每对原子的高斯均值 μ 和宽度 σ)。
+
+来源: [plumed_Ab40.dat](/benchmark/bAIes/Ab40/plumed_Ab40.dat#L1-L6), [plumed_GS8.dat](/benchmark/bAIes/GS8/plumed_GS8.dat#L1-L6)
+
+### bAIes-N — 无先验的偏置系综
+
+**bAIes-N** 方案使用相同的从距离图导出的偏置，但**无先验** (`PRIOR=NONE`)。此变体通过“原生”运行偏置来孤立 Jeffreys 先验的效应——距离图高斯分布直接应用，无需贝叶正则化。比较 bAIes 与 bAIes-N 可确切揭示先验在多大程度上校正了过度自信的 AlphaFold-2 距离预测。
+
+```plumed
+# bAIes-N 变体 — 仅 PRIOR 行不同
+baies: BAIES ATOMS=batoms DATA_FILE=baies_gauss_matrix.dat PRIOR=NONE TEMP=2.478541306
+```
+
+来源: [plumed_Ab40.dat](/benchmark/bAIes-N/Ab40/plumed_Ab40.dat#L1-L6)
+
+### Coil — 无偏随机线圈参考
+
+**coil** 方案完全移除了 bAIes 偏置。这些目录仅包含 LAMMPS 数据文件、输入脚本和 CMAP 校正图——没有 PLUMED 文件，没有高斯矩阵，没有原子索引组。coil 模拟对纯力场 (带 CMAP 校正) 进行采样，建立了用于衡量 bAIes 改进程度的零模型基线。
+
+| 文件 | bAIes | bAIes-N | coil |
+| :--- | :---: | :---: | :---: |
+| `*_nvt.data` | ✅ | ✅ | ✅ |
+| `*_nvt.in` | ✅ | ✅ | ✅ |
+| `dry_ff_*.cmap` | ✅ | ✅ | ✅ |
+| `atom_list_matrix.ndx` | ✅ | ✅ | — |
+| `baies_gauss_matrix.dat` | ✅ | ✅ | — |
+| `plumed_*.dat` | ✅ | ✅ | — |
+
+来源: [benchmark/bAIes/Ab40/](/benchmark/bAIes/Ab40/plumed_Ab40.dat#L1-L6), [benchmark/bAIes-N/Ab40/](/benchmark/bAIes-N/Ab40/plumed_Ab40.dat#L1-L6), [benchmark/coil/Ab40/](/benchmark/coil/Ab40/Ab40_nvt.in#L1-L15)
+
+## 距离图导出的偏置数据
+
+`baies_gauss_matrix.dat` 文件是将 AlphaFold-2 预测桥接到分子动力学的核心输入。每行指定一个 pairwise 距离约束，作为原子 `atom_i` 和 `atom_j` 之间原子间距的高斯分布，均值为 `mu` (单位 Å)，标准差为 `sigma` (单位 Å)。例如，在 Ab40 系统中：
+
+```
+#! FIELDS Id atom_i atom_j mu sigma
+#! SET model gaussian
+1  7  64  1.044356  0.306678
+2  44 135  1.229774  0.437833
+3  64 135  1.140156  0.364508
+...
+```
+
+相应的 `atom_list_matrix.ndx` 文件定义了 **PLUMED 原子组** `[ batoms ]`，它收集了高斯矩阵中引用的所有原子索引。这些是 Cβ (对于甘氨酸为 Cα) 原子，其 pairwise 距离受 bAIes 偏置约束。高斯约束的数量随 AlphaFold-2 距离图中置信预测的接触数而变化，并在四个无序类别间差异显著——无序系统往往具有更少且更弱的约束，而多结构域系统则携带许多高置信度的结构域间接触。
+
+来源: [baies_gauss_matrix.dat](/benchmark/bAIes/Ab40/baies_gauss_matrix.dat#L1-L16), [atom_list_matrix.ndx](/benchmark/bAIes/Ab40/atom_list_matrix.ndx#L1-L4)
+
+## LAMMPS 输入配置
+
+所有基准测试系统共享一致的 LAMMPS 输入配置，使用从 GROMACS 转换而来的 **AWM** (全原子) 干力场。输入脚本建立如下：
+
+- **单位**: `real` (Å, kcal/mol, amu, fs)
+- **原子风格**: `full` (带电荷的分子拓扑)
+- **成键项**: `harmonic` 键，`harmonic` 角，`charmm` + `multi/harmonic` 二面角
+- **非成键项**: 截断值为 2.0 Å 的 `lj/cut 2.0` (隐式溶剂干力场)
+- **CMAP 校正**: 通过 `fix drycmap all cmap dry_ff_20240524_correct.cmap` 应用
+
+CMAP 校正图 (`dry_ff_20240524_correct.cmap`) 与 `20240524` 力场参数化版本锁定，并在给定方案内的所有系统中保持一致。`pair_coeff` 块编码了由干力场转换导出的 24–29 种原子类型特定的 Lennard-Jones 参数 (ε, σ, 截断值)。
+
+<CgxTip>所有 20 个系统间一致的力场参数确保了基准测试差异**仅源于 bAIes 偏置** (或其缺失)，而非力场变异。这种受控设置对于 [bAIes vs bAIes-N vs Coil](14-baies-vs-baies-n-vs-coil) 中的公平方案比较至关重要。</CgxTip>
+
+来源: [Ab40_nvt.in](/benchmark/bAIes/Ab40/Ab40_nvt.in#L1-L20), [Ab40_nvt.in (coil)](/benchmark/coil/Ab40/Ab40_nvt.in#L1-L20)
+
+## 运行基准测试
+
+要执行基准测试模拟，请导航至相应方案下所需的蛋白目录，并调用带 PLUMED 补丁的 LAMMPS (针对 bAIes/bAIes-N)：
+
+```bash
+# bAIes 或 bAIes-N (需要 LAMMPS+PLUMED)
+cd benchmark/bAIes/<protein>/
+lmp -in <protein>_nvt.in -plumed plumed_<protein>.dat
+
+# Coil (纯 LAMMPS，无需 PLUMED)
+cd benchmark/coil/<protein>/
+lmp -in <protein>_nvt.in
+```
+
+注意，`*_nvt.in` 脚本仅包含力场和拓扑声明——必须根据你的模拟要求追加积分时间步长、恒温器和运行步长。有关为每个系统尺寸类别设置适当 NVT 系综参数的指导，请参见 [模拟参数调优](16-simulation-parameter-tuning)。
+
+来源: [README.md](/benchmark/README.md#L1-L38)
+
+## 后续步骤
+
+- **定量比较方案**: [bAIes vs bAIes-N vs Coil](14-baies-vs-baies-n-vs-coil) — 了解 Jeffreys 先验和 bAIes 偏置各自如何对四个无序类别的系综质量做出贡献。
+- **学习预处理流水线**: [距离图读取与拟合](5-distogram-reading-and-fitting) — 追踪 AlphaFold-2 预测如何成为此处使用的 `baies_gauss_matrix.dat` 文件。
+- **设置你自己的系统**: [快速开始](2-quick-start) — 将 bAIes 流水线应用于感兴趣的新 IDP。
+
+---
+
+- [深入探究/基准测试与验证/bAIes 对比 bAIes-N 对比 Coil](https://zread.ai/COSBlab/bAIes-IDP/14-baies-vs-baies-n-vs-coil)
+
+---
+slug:14-baies-vs-baies-n-vs-coil
+blog_type:normal
+---
+
+
+bAIes-IDP 框架提供了三种不同的模拟模式，用于生成内禀无序和多结构域蛋白质的构象系综：**bAIes**、**bAIes-N** 和 **Coil**。这些模式共享一个通用的简化分子动力学引擎（LAMMPS + amber99SB-ILDN 力场 + CMAP 校正），但在 **AlphaFold-2 预测信息是否以及如何偏置模拟** 方面存在关键差异。理解这些差异对于选择合适的系综生成策略和解释最终的构象分布至关重要。
+
+来源: [README.md](/README.md#L1-L54), [benchmark/README.md](/benchmark/README.md#L1-L38)
+
+## 概念基础
+
+这三种模式构成了一个关于从 AlphaFold-2 distogram 中提取的残基对距离信息的物理建模保真度层次结构：
+
+```mermaid
+graph TD
+    AF2["AlphaFold-2 Distograms<br/>(残基对距离分布)"]
+    
+    subgraph Ensemble Modes
+        B["bAIes<br/>贝叶斯 + 杰弗里斯先验"]
+        BN["bAIes-N<br/>贝叶斯 + 无先验"]
+        C["Coil<br/>纯 MD / 随机线圈"]
+    end
+    
+    AF2 -->|"Distogram 拟合<br/>(高斯/对数正态)"| B
+    AF2 -->|"Distogram 拟合<br/>(高斯/对数正态)"| BN
+    AF2 -.->|"未使用"| C
+    
+    B -->|"PRIOR=JEFFREYS"| PLUMED_B["PLUMED BAIES 偏置<br/>带贝叶斯正则化"]
+    BN -->|"PRIOR=NONE"| PLUMED_BN["PLUMED BAIES 偏置<br/>无正则化"]
+    C -->|"无 PLUMED"| MD["纯 LAMMPS MD<br/>(仅力场)"]
+    
+    style B fill:#4a90d9,color:#fff
+    style BN fill:#d9a84a,color:#fff
+    style C fill:#999,color:#fff
+```
+
+**bAIes** 应用贝叶斯最大熵偏置，将 AlphaFold-2 distogram 信息编码为距离约束，并通过 **杰弗里斯先验** 进行正则化——这是一种在重参数化下保持不变的无信息先验，可防止对潜在不可靠的 distogram 预测产生过拟合。**bAIes-N** 使用相同的 distogram 派生约束，但 **禁用该先验**（`PRIOR=NONE`），这实际上应用了一个平坦（均匀）的先验，在没有贝叶斯正则化的情况下信任 AlphaFold-2 的预测。**Coil** 完全不使用 AlphaFold-2 信息，在简化的力场下运行纯分子动力学——这充当了对应于随机线圈模型的纯物理基线。
+
+来源: [benchmark/bAIes/ACTR/plumed_ACTR.dat](/benchmark/bAIes/ACTR/plumed_ACTR.dat#L1-L6), [benchmark/bAIes-N/ACTR/plumed_ACTR.dat](/benchmark/bAIes-N/ACTR/plumed_ACTR.dat#L1-L6)
+
+## 架构对比
+
+下表总结了三种模拟模式在结构和算法上的差异：
+
+| 方面 | bAIes | bAIes-N | Coil |
+|:---|:---|:---|:---|
+| **AlphaFold-2 distogram** | 必需 | 必需 | 未使用 |
+| **PLUMED 集成** | 是 (`fix pl all plumed`) | 是 (`fix pl all plumed`) | 否 |
+| **先验类型** | `JEFFREYS`（无信息，重参数化不变） | `NONE`（平坦/均匀） | 不适用 |
+| **贝叶斯正则化** | 是——惩罚过度自信的 distogram 拟合 | 否——原始最大熵偏置 | 不适用 |
+| **预处理步骤** | 必需（distogram 拟合 → PLUMED 文件） | 必需（与 bAIes 相同） | 不需要 |
+| **流水线步骤** | 4（输入 → 准备 → 预处理 → 转换 → 模拟） | 4（与 bAIes 相同） | 3（准备 → 转换 → 模拟） |
+| **偏置数据文件** | `baies_gauss_matrix.dat`、`atom_list_matrix.ndx`、`plumed_*.dat` | 与 bAIes 相同 | 无 |
+| **力场** | 简化 amber99SB-ILDN + CMAP | 相同 | 相同 |
+| **恒温器** | NVT + CSVR (298.1 K) | NVT + CSVR (298.1 K) | NVT + CSVR (298.1 K) |
+| **用例** | 带有 AF2 信息偏置的生产级 IDP 系综 | 消融实验：无正则化的偏置 | 基线：纯物理随机线圈 |
+
+来源: [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L151), [tutorial/coil/README.md](/tutorial/coil/README.md#L1-L81), [benchmark/bAIes/ACTR/ACTR_nvt.in](/benchmark/bAIes/ACTR/ACTR_nvt.in#L255-L270), [benchmark/coil/ACTR/ACTR_nvt.in](/benchmark/coil/ACTR/ACTR_nvt.in#L255-L268)
+
+## 先验：杰弗里斯 vs 无
+
+区分 bAIes 和 bAIes-N 的唯一参数是 PLUMED 配置中的 `PRIOR` 关键字。这对 AlphaFold-2 distogram 信息如何转化为模拟偏置有着深远的影响。
+
+**bAIes 配置**（`PRIOR=JEFFREYS`）：
+```
+baies: BAIES ATOMS=batoms DATA_FILE=baies_gauss_matrix.dat PRIOR=JEFFREYS TEMP=2.478541306
+```
+
+**bAIes-N 配置**（`PRIOR=NONE`）：
+```
+baies: BAIES ATOMS=batoms DATA_FILE=baies_gauss_matrix.dat PRIOR=NONE TEMP=2.478541306
+```
+
+**杰弗里斯先验** 是从统计模型的费舍尔信息度量推导出的参考先验。对于建模为高斯分布的距离约束（如 `baies_gauss_matrix.dat` 中），杰弗里斯先验充当了一个天然的正则化器：当潜在的统计证据不充分时，它 **降权那些窄峰值的约束**（AlphaFold-2 中的高置信度），并 **升权那些携带较少信息的宽分布**。这可以防止模拟陷入对虚假 AlphaFold-2 预测过拟合的构象中——这对于 AlphaFold-2 置信度（pLDDT）系统性偏低的内禀无序区尤为重要。
+
+当 `PRIOR=NONE` 时，偏置应用从 distogram 高斯分布导出的原始最大熵分布，而没有任何贝叶斯校正。这相当于假设所有约束参数上的先验是均匀的，意味着每个 distogram 预测都同等地加权，而不考虑其信息内容。对于预测良好的结构区，bAIes 和 bAIes-N 会产生相似的结果；对于无序或预测较差的区域，bAIes 中的杰弗里斯先验提供了 bAIes-N 所缺乏的关键正则化。
+
+<CgxTip>在进行基准测试时，bAIes-N 充当了对杰弗里斯先验进行受控消融的角色——直接比较 bAIes 与 bAIes-N 可以孤立出贝叶斯正则化对系综质量的影响。这是验证先验是否改善了与实验可观测量一致性的主要诊断手段。</CgxTip>
+
+来源: [benchmark/bAIes/ACTR/plumed_ACTR.dat](/benchmark/bAIes/ACTR/plumed_ACTR.dat#L1-L6), [benchmark/bAIes-N/ACTR/plumed_ACTR.dat](/benchmark/bAIes-N/ACTR/plumed_ACTR.dat#L1-L6), [benchmark/bAIes/ACTR/baies_gauss_matrix.dat](/benchmark/bAIes/ACTR/baies_gauss_matrix.dat#L1-L6)
+
+## Distogram 数据：在 bAIes 和 bAIes-N 之间共享
+
+bAIes 和 bAIes-N 都使用相同的 `baies_gauss_matrix.dat` 文件，该文件由预处理流水线（`preprocess_bAIes.py`）生成。此文件包含每个选定残基对的拟合高斯参数：
+
+```
+#! FIELDS Id atom_i atom_j mu sigma
+#! SET model gaussian
+1 59 135 1.053628 0.286834
+2 59 159 1.211149 0.299356
+...
+```
+
+每行指定：定义约束对的原子索引（`atom_i`、`atom_j`）、高斯平均距离 `μ`（单位 nm）和高斯宽度 `σ`（单位 nm）。残基对基于距离截断标准（默认 8 Å，或来自 Baker 实验室矩阵的残基对特定截断值）进行选择，且最小序列间隔为 3 个残基，以保留局部螺旋信息。Coil 模式不生成也不使用此文件——它完全在力场下运行。
+
+来源: [benchmark/bAIes/ACTR/baies_gauss_matrix.dat](/benchmark/bAIes/ACTR/baies_gauss_matrix.dat#L1-L28), [scripts/preprocess_bAIes.py](/scripts/preprocess_bAIes.py#L28-L42)
+
+## 基准测试文件清单
+
+基准测试目录映射了这三种模拟模式，在 `benchmark/bAIes/`、`benchmark/bAIes-N/` 和 `benchmark/coil/` 中包含相同的蛋白质系统。文件组成揭示了架构差异：
+
+| 文件 | bAIes | bAIes-N | Coil |
+|:---|:---:|:---:|:---:|
+| `*_nvt.in` (LAMMPS 输入) | ✓ | ✓ | ✓ |
+| `*_nvt.data` (拓扑/力) | ✓ | ✓ | ✓ |
+| `dry_ff_20240524_correct.cmap` (CMAP) | ✓ | ✓ | ✓ |
+| `plumed_*.dat` (PLUMED 配置) | ✓ | ✓ | ✗ |
+| `baies_gauss_matrix.dat` (约束参数) | ✓ | ✓ | ✗ |
+| `atom_list_matrix.ndx` (原子选择) | ✓ | ✓ | ✗ |
+
+20 个基准测试蛋白质系统涵盖了四种无序类别：**完全无序**（Ab40、p61_Hck、emerin67-170、His-PknG1-75、Colicin_NT_domain、Hug1）、**结构基序**（PaaA2、Nt-SOCS5、Alb3-A3CT、idr_SSRP1、UBact、FCP1）、**AlphaFold-2 预测误差**（asyn、ACTR、NHE1、Nsp2_ctlIDR、spm_FrpC、drkN）和 **多结构域**（GS8、Ubq2、Ubq3）。这种分类对于 bAIes 与 bAIes-N 的比较尤其具有启发性：存在 AlphaFold-2 预测误差的地方，正是杰弗里斯先验的正则化效应最关键之处。
+
+来源: [benchmark/README.md](/benchmark/README.md#L9-L38)
+
+## 流水线分叉点
+
+这三条流水线共享相同的 GROMACS 准备步骤（使用 amber99SB-ILDN 的 PDB → `.gro`/`.itp`/`.top`）和相同的 LAMMPS 转换步骤（通过 InterMol + `make_ff.py` 力场简化的 GROMACS → LAMMPS）。关键的分叉发生在预处理阶段：
+
+```mermaid
+flowchart TD
+    PDB["AF2 弛豫 PDB"] --> Prep["步骤 1: GROMACS 准备<br/>(所有模式共享)"]
+    Prep --> Split{"需要<br/>预处理？"}
+    
+    Split -->|"是"| PreProc["步骤 2: 预处理<br/>(preprocess_bAIes.py)"]
+    PreProc --> PlumedFiles["plumed.dat<br/>baies_gauss_matrix.dat<br/>atom_list_matrix.ndx"]
+    
+    Split -->|"否"| Skip["跳过"]
+    
+    Prep --> Conv["步骤 3: LAMMPS 转换<br/>(所有模式共享)"]
+    PlumedFiles --> Sim_B["bAIes / bAIes-N 模拟<br/>LAMMPS + PLUMED"]
+    Conv --> Sim_B
+    Skip --> Sim_C["Coil 模拟<br/>仅 LAMMPS"]
+    Conv --> Sim_C
+    
+    style PreProc fill:#4a90d9,color:#fff
+    style Skip fill:#999,color:#fff
+    style Sim_B fill:#4a90d9,color:#fff
+    style Sim_C fill:#999,color:#fff
+```
+
+对于 **Coil**，预处理步骤被完全省略——流水线直接从准备进行到转换再到模拟。对于 **bAIes** 和 **bAIes-N**，预处理步骤将 AlphaFold-2 distogram 拟合为高斯（或对数正态）模型，并生成三个 PLUMED 辅助文件。随后的唯一差异是生成的 `plumed.dat` 文件中的 `PRIOR` 关键字。
+
+<CgxTip>要将 bAIes 模拟转换为 bAIes-N（或反之），只需更改 `plumed_*.dat` 文件中的 `PRIOR=` 关键字——无需修改其他文件。这使得消融研究极易重现。</CgxTip>
+
+来源: [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L55-L93), [tutorial/coil/README.md](/tutorial/coil/README.md#L13-L38)
+
+## LAMMPS 输入差异
+
+这三种模式的 LAMMPS 输入文件（`*_nvt.in`）几乎完全相同，但有两个显著差异：
+
+**1. PLUMED 修复（仅存在于 bAIes 和 bAIes-N）：**
+```
+fix pl all plumed plumedfile plumed_ACTR.dat outfile p.log
+```
+此行在 LAMMPS 中激活 PLUMED 接口，加载 bAIes 偏置势。在 Coil 输入文件中不存在此行。
+
+**2. 二面角样式顺序：**
+- bAIes/bAIes-N：`dihedral_style hybrid charmm multi/harmonic`
+- Coil：`dihedral_style hybrid multi/harmonic charmm`
+
+这种重新排序反映了力场简化后数据文件中二面角参数的索引方式。Coil 流水线使用不带 PLUMED 相关修改的 `make_ff.py`，导致二面角分配顺序不同。这两种顺序在物理上是等价的——它们只是将相同的二面角类型映射到不同的样式索引。
+
+所有三种模式共享相同的设置：单位系统（`real`）、原子样式（`full`）、对势样式（`lj/cut 2.0`）、CMAP 校正、恒温器（298.1 K 下的 CSVR）、积分器（使用速度 Verlet 的 NVE）、时间步长（1.0 fs）和默认模拟长度（2 × 10⁹ 步 = 2 μs）。
+
+来源: [benchmark/bAIes/ACTR/ACTR_nvt.in](/benchmark/bAIes/ACTR/ACTR_nvt.in#L1-L15), [benchmark/coil/ACTR/ACTR_nvt.in](/benchmark/coil/ACTR/ACTR_nvt.in#L1-L15), [benchmark/bAIes/ACTR/ACTR_nvt.in](/benchmark/bAIes/ACTR/ACTR_nvt.in#L255-L270)
+
+## 何时使用每种模式
+
+| 场景 | 推荐模式 | 理由 |
+|:---|:---|:---|
+| 生产级 IDP 系综预测 | **bAIes** | 杰弗里斯先验正则化不可靠的 distogram 预测，对无序区至关重要 |
+| 评估先验对系综质量的影响 | **bAIes-N**（作为消融） | 通过与 bAIes 比较孤立出贝叶斯正则化的效应 |
+| 力场基线 / 参考系综 | **Coil** | 提供纯物理的零模型；与 bAIes 的偏差揭示了 AF2 信息驱动的结构偏好 |
+| 具有高 pLDDT 的结构良好蛋白质 | **bAIes** 或 **bAIes-N** | 当 distogram 可靠时两者收敛；杰弗里斯先验影响极小 |
+| 具有柔性连接子的多结构域蛋白质 | **bAIes** | 连接子区域能最大程度地从先验正则化中获益 |
+
+典型的验证工作流按以下顺序进行：**Coil** → **bAIes-N** → **bAIes**，其中每一步都增加了一层建模复杂性。将 Coil 与 bAIes-N 比较揭示了由 AlphaFold-2 distogram 贡献的结构信息；将 bAIes-N 与 bAIes 比较揭示了杰弗里斯先验的正则化效应。与实验观测量（SAXS、NMR、FRET）的一致性应单调提升：对于选择得当的系统，Coil ≤ bAIes-N ≤ bAIes。
+
+来源: [benchmark/README.md](/benchmark/README.md#L1-L38), [tutorial/bAIes/README.md](/tutorial/bAIes/README.md#L1-L11)
+
+## 后续步骤
+
+- 有关基准测试蛋白质系统的完整列表及其分类，请参阅 [基准测试蛋白质系统](13-benchmark-protein-systems)。
+- 有关区分 bAIes/bAIes-N 与 Coil 的 distogram 拟合和 PLUMED 文件生成的详细信息，请参阅 [Distogram 读取与拟合](5-distogram-reading-and-fitting) 和 [PLUMED 文件生成](6-plumed-file-generation)。
+- 有关所有三种模式共享的 CMAP 校正图，请参阅 [CMAP 校正图](8-cmap-correction-maps)。
+- 有关适用于所有模式的模拟参数调优，请参阅 [模拟参数调优](16-simulation-parameter-tuning)。
+
+---
