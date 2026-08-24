@@ -1,0 +1,3843 @@
+# ShuklaGroup/esmdynamic
+
+Source: https://zread.ai/ShuklaGroup/esmdynamic
+
+# 入门
+
+- [入门/概述](https://zread.ai/ShuklaGroup/esmdynamic/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**ESMDynamic**是一个深度学习模型，能够**仅从单一氨基酸序列预测蛋白质动态接触图**——无需多序列比对（MSA）。ESMDynamic基于Meta的ESMFold结构预测模型构建，新增了三个专门的预测头，用于表征在整个分子动力学（MD）系综中残基接触随时间的演化方式。该模型由UIUC的Shukla Group作为bioRxiv预印本发表，能够快速、准确地预测哪些接触是动态的、它们形成的频率以及发生转变的时间尺度——所有这些仅需输入一条蛋白质序列即可完成。
+
+![模型](https://github.com/ShuklaGroup/esmdynamic/blob/main/model_scheme.png?raw=true)
+
+来源：[README.md](/README.md#L1-L30), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L213-L220)
+
+## ESMDynamic 预测内容
+
+传统的静态结构预测（如ESMFold或AlphaFold）只能给出一个结构——即一个接触图。但蛋白质是动态的：接触的形成和断裂发生在纳秒到微秒的时间尺度上。ESMDynamic弥合了这一差距，能够从单一序列预测**三种互补特性**，每种特性均涵盖五个MD模拟温度（320 K、348 K、379 K、413 K、450 K）：
+
+| 预测头 | 任务类型 | 输出 | 生物学意义 |
+|---|---|---|---|
+| **动态接触** | 二分类 | 每个残基对、每个温度的概率 ∈ [0,1] | 在整个MD系综中，接触是否在形成和断裂状态之间*转变* |
+| **接触频率** | 回归 | 每个残基对、每个温度的占据值 ∈ [0,1] | 在系综中接触处于形成状态的时间占比 |
+| **接触动力学** | 多分类（6个类别 × 开/关速率） | 每个残基对、每个温度的动力学类别 | 接触形成（开启时间）和断裂（关闭时间）的粗粒化时间尺度 |
+
+每个预测头还会产生辅助输出——分类头提供每个残基对的置信度分数，频率回归头提供成对残差估计——从而支持具备不确定性感知的下游分析。
+
+来源：[esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L260-L288), [predict.py](/esm/esmdynamic/predict.py#L15-L33), [output_interpretation.md](/output_interpretation.md#L1-L53)
+
+## 架构概览
+
+ESMDynamic采用了**冻结骨干网络 + 可训练预测头**的设计。ESMFold（30亿参数蛋白质语言模型 + 折叠主干）处理输入序列以生成丰富的结构表示。这些表示随后被输入到三个独立的`DynamicHead`模块中，每个模块包含其各自的`DynamicModule`（带有循环机制的改进版Evoformer），在任务专属的预测线性层之前对成对特征进行精炼。
+
+```mermaid
+graph TD
+    SEQ["氨基酸序列"] --> ESMFOLD["ESMFold (冻结)<br/>ESM-2 3B + FoldingTrunk"]
+    ESMFOLD --> SS["序列特征 s_s<br/>[B, L, 1024]"]
+    ESMFOLD --> SZ["成对特征 s_z<br/>[B, L, L, 128]"]
+    ESMFOLD --> AUX["辅助输出<br/>lddt, ptm, distogram, lm_logits"]
+
+    SS --> DYN_HEAD["DynamicHead × 3<br/>(dynamic, kinetic, frequency)"]
+    SZ --> DYN_HEAD
+    AUX --> DYN_HEAD
+
+    DYN_HEAD --> TRANS["转换层<br/>(序列 + 成对偏置)"]
+    TRANS --> DM["DynamicModule<br/>(Evoformer 模块 + 循环)"]
+    DM --> PRED["预测线性层<br/>(任务专属输出)"]
+
+    PRED --> DYNAMIC_OUT["动态接触<br/>概率 + 预测 + 置信度"]
+    PRED --> KINETIC_OUT["动力学<br/>开/关类别 + 置信度"]
+    PRED --> FREQ_OUT["频率<br/>占据率 + 残差"]
+```
+
+<CgxTip>ESMFold在推理期间运行于`torch.no_grad()`下——其权重被完全冻结。仅训练`DynamicHead`参数，与对完整30亿以上参数模型进行端到端微调相比，这大幅降低了训练成本。</CgxTip>
+
+来源：[esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L236-L240), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L119-L135), [dynamic_module.py](/esm/esmdynamic/dynamic_module.py#L35-L122)
+
+## 项目结构
+
+本仓库扩展了Meta AI已归档的[Evolutionary Scale Modeling (ESM)](https://github.com/facebookresearch/esm)框架。ESMDynamic专属代码位于`esm/esmdynamic/`目录内，而继承的ESM基础设施（ESM-2语言模型、ESMFold、反向折叠）则保留在原始的包布局中。
+
+```
+esmdynamic/
+├── esm/                          # 核心包 (扩展自 facebookresearch/esm)
+│   ├── esmdynamic/               # ★ ESMDynamic 专属模块
+│   │   ├── esmdynamic.py         #   ESMDynamic 模型 + DynamicHead
+│   │   ├── dynamic_module.py     #   基于 Evoformer 的 DynamicModule
+│   │   ├── pretrained.py         #   从 Illinois Data Bank 加载权重
+│   │   ├── predict.py            #   run_esmdynamic CLI 入口点
+│   │   └── training/             #   训练流水线
+│   │       ├── train.py          #     训练循环 + 指标
+│   │       ├── loss.py           #     Focal + CE + MSE 损失
+│   │       └── data_reader.py    #     数据集 + 数据加载
+│   ├── esmfold/v1/               # ESMFold 结构预测 (继承)
+│   ├── inverse_folding/          # ESM-IF 反向折叠 (继承)
+│   ├── model/                    # ESM-1, ESM-2, MSA Transformer (继承)
+│   └── pretrained.py             # 模型注册表 (扩展了 esmdynamic)
+├── examples/
+│   └── esmdynamic/               # 示例 FASTA/CSV + Colab 笔记本
+├── scripts/                      # 下载权重、提取、atlas 工具
+├── tests/                        # 单元测试
+├── Dockerfile                    # 包含所有依赖 + 权重的 Docker 镜像
+└── setup.py                      # 包配置 (入口点: run_esmdynamic)
+```
+
+来源：[setup.py](/setup.py#L26-L43), [Dockerfile](/Dockerfile#L1-L96)
+
+## 核心功能
+
+| 功能 | 详情 |
+|---|---|
+| **单序列输入** | 无需MSA或模板搜索——使用ESM-2 3B蛋白质语言模型嵌入 |
+| **多链支持** | 接受以`:`链分隔符组成的多聚体序列；链之间插入25个残基的poly-G连接子 |
+| **五种温度条件** | 在320K–450K下进行预测，与mdCATH模拟温度相匹配 |
+| **三个预测头** | 动态接触（分类）、频率（回归）、动力学（多分类）——可独立选择 |
+| **低内存推理** | 通过`--low_memory`标志启用顺序执行预测头及GPU卸载 |
+| **批量处理** | 通过`run_esmdynamic`支持FASTA和CSV输入及批量推理 |
+| **交互式可视化** | Plotly HTML热力图 + PNG图 + 原始文本/PyTorch输出 |
+| **预训练权重** | 从Illinois Data Bank自动下载 (DOI: 10.13012/B2IDB-3773897_V2) |
+| **人类蛋白质组预测** | 数据仓库中提供UniProt UP000005640的预计算预测 |
+
+来源：[predict.py](/esm/esmdynamic/predict.py#L36-L110), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L458-L546), [README.md](/README.md#L138-L166)
+
+## 安装选项
+
+ESMDynamic提供两种安装路径。推荐使用**Docker**方式，因为它能处理所有依赖版本（CUDA 12.9、PyTorch 2.8、OpenFold），并在构建期间自动下载模型权重。**Conda**方式也可用，但可能会因包弃用而遇到依赖冲突。
+
+| 方式 | 步骤 | 最适用场景 |
+|---|---|---|
+| **Docker**（推荐） | `docker build -t esmdynamic .` → `docker run --gpus all ...` | 生产使用、可复现性 |
+| **Conda** | 创建环境 → 安装CUDA/PyTorch → pip安装依赖 → pip安装仓库 | 开发、自定义配置 |
+| **Google Colab** | 打开笔记本 → 输入序列 → 运行 | 快速探索、本地无需GPU |
+
+<CgxTip>Docker构建会预先下载所有三个权重文件（ESMFold 3B、ESM-2 3B、ESMDynamic）到镜像中，因此推理可立即启动而无需网络请求。请参阅Dockerfile末尾附近的`wget`命令。</CgxTip>
+
+来源：[Dockerfile](/Dockerfile#L79-L89), [README.md](/README.md#L43-L78)
+
+## 数据集与训练数据
+
+ESMDynamic在**mdCATH**上训练——这是一个源自CATH域的大规模分子动力学数据集。以下三个数据集公开可用：
+
+| 数据集 | 来源 | 用途 |
+|---|---|---|
+| **ATLAS**（测试集） | ATLAS MD模拟数据库 | 独立测试评估 |
+| **mdCATH** | mdCATH HuggingFace数据集 | 训练（主要） |
+| **RCSB Clusters** | RCSB PDB | 额外的结构多样性 |
+
+训练对动态接触分类头使用**焦点损失**（α=0.85, γ=2），对动力学使用**带类别权重的交叉熵**，对频率回归使用**MSE**——所有损失通过模块化损失包装器组合，仅激活被选中的预测头。
+
+来源：[README.md](/README.md#L151-L189), [loss.py](/esm/esmdynamic/training/loss.py#L146-L184)
+
+## 后续步骤
+
+本文档的组织结构将带你从入门操作深入到实现细节的理解：
+
+1. **[快速开始](2-quick-start)** — 使用Docker或Colab运行你的第一次预测
+2. **[输出解读](3-output-interpretation)** — 了解每个输出文件的内容及使用方法
+3. **[架构概览](4-architecture-overview)** — ESMFold → DynamicModule → 预测头的详细数据流
+4. **[ESMDynamic 模型类](5-esmdynamic-model-class)** — `ESMDynamic`与`DynamicHead`的API参考
+5. **[DynamicModule 与 Evoformer 循环](6-dynamicmodule-and-evoformer-recycling)** — 带有循环机制的改进版Evoformer的工作原理
+6. **[多头预测设计](7-multi-head-prediction-design)** — 分类、回归与动力学预测头的内部机制
+7. **[训练流水线与数据加载](8-training-pipeline-and-data-loading)** — 如何在你自己的MD数据上进行训练或微调
+8. **[损失函数与评估指标](9-loss-functions-and-metrics)** — 焦点损失、交叉熵、MSE及指标计算
+9. **[批量预测脚本](10-bulk-prediction-script)** — `run_esmdynamic` CLI的详细介绍
+10. **[Colab 笔记本工作流](11-colab-notebook-workflow)** — 交互式预测演示流程
+11. **[预训练模型与权重加载](12-pretrained-model-and-weight-loading)** — 权重下载与状态字典管理
+12. **[低内存推理模式](13-low-memory-inference-mode)** — 通过顺序执行预测头优化GPU内存
+13. **[反向折叠与 ESM-IF](14-inverse-folding-and-esm-if)** — 继承的反向折叠功能
+
+---
+
+- [入门/快速上手](https://zread.ai/ShuklaGroup/esmdynamic/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+几分钟内即可运行 ESMDynamic —— 仅从蛋白质序列预测**动态接触图**、**接触频率**和**接触动力学**，无需多序列比对。本页将引导你完成安装、首次预测以及理解输出结构。
+
+![model](https://github.com/ShuklaGroup/esmdynamic/blob/main/model_scheme.png?raw=true)
+
+来源: [README.md](/README.md#L1-L30)
+
+## 选择你的路径
+
+ESMDynamic 根据你的使用场景提供三种入口：
+
+| 方式 | 最适用场景 | 是否需要 GPU？ | 配置时间 |
+|--------|----------|---------------|------------|
+| **Google Colab Notebook** | 快速探索，< 5 条序列 | 否（提供免费 GPU） | ~2 分钟 |
+| **Docker**（推荐） | 批量预测，可复现环境 | 是（推荐） | ~10 分钟构建 |
+| **Conda + pip** | 自定义环境，开发 | 是（推荐） | ~15 分钟 |
+
+来源: [README.md](/README.md#L33-L42)
+
+## 安装
+
+### 选项 A：Docker（推荐）
+
+Docker 是**最简单且最可靠**的安装路径。`Dockerfile` 构建了一个固定所有依赖项的镜像 —— 包括 CUDA 12.9、PyTorch 2.8.0 和 OpenFold —— 并在构建期间**自动下载所有模型权重**。
+
+**前提条件**：[Docker](https://docs.docker.com/engine/install/) 和 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)（用于 GPU 访问）。
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/ShuklaGroup/esmdynamic.git
+cd esmdynamic
+
+# 2. 构建 Docker 镜像（包含权重下载 ~5 GB）
+docker build -t esmdynamic .
+
+# 3. 运行带有 GPU 访问权限的容器，挂载当前目录
+docker run --rm -it --gpus all -v "$PWD":/workspace esmdynamic
+
+# 4. 验证安装
+run_esmdynamic -h
+```
+
+<CgxTip>Docker 构建会将四个权重文件（总计约 5 GB）下载到 `/root/.cache/torch/hub/checkpoints/` 中：ESMFold-3B、ESM2-3B、ESM2 接触回归和 ESMDynamic。此过程在 `docker build` 期间自动完成 —— 无需手动下载。</CgxTip>
+
+来源: [Dockerfile](/Dockerfile#L1-L96), [README.md](/README.md#L43-L57)
+
+### 选项 B：Conda + pip
+
+对于无法使用 Docker 的系统，手动配置 Conda 环境也可行。**注意**：由于部分包已被弃用（尤其是 OpenFold），此路径可能需要进行故障排查。
+
+```bash
+# 1. 创建并激活环境
+conda create -n esmdynamic python=3.11.13
+conda activate esmdynamic
+
+# 2. 安装 CUDA 工具包
+conda install -c nvidia cuda-nvcc=12.9.86 cuda-toolkit=12.9.1
+
+# 3. 安装支持 CUDA 12.9 的 PyTorch
+pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+    --index-url https://download.pytorch.org/whl/cu129
+
+# 4. 安装科学计算/机器学习依赖项
+pip3 install mdtraj scipy omegaconf pytorch_lightning biopython \
+    ml_collections einops py3Dmol modelcif matplotlib \
+    'plotly[express]' dm-tree tensorboard
+
+# 5. 安装 NVIDIA dllogger 和 OpenFold（必须使用 ColabFold fork！）
+pip3 install git+https://github.com/NVIDIA/dllogger.git
+pip3 install --no-build-isolation 'git+https://github.com/sokrypton/openfold.git'
+
+# 6. 安装 ESMDynamic
+pip install git+https://github.com/ShuklaGroup/esmdynamic.git
+
+# 7. 验证（首次使用时下载权重）
+run_esmdynamic -h
+```
+
+来源: [README.md](/README.md#L59-L78), [environment.yml](/environment.yml#L1-L130)
+
+### 选项 C：Google Colab
+
+若想获得最快速的零安装体验，可直接在浏览器中打开 [Colab Notebook](https://colab.research.google.com/github/ShuklaGroup/esmdynamic/blob/main/examples/esmdynamic/esmdynamic.ipynb)。它提供免费的 GPU 和手动序列输入功能 —— 非常适合探索少数几个蛋白质。
+
+来源: [README.md](/README.md#L35-L36)
+
+## 你的首次预测
+
+### 使用命令行 (`run_esmdynamic`)
+
+`run_esmdynamic` CLI 是主要的推理接口。它通过三种互斥的输入模式接受序列：
+
+```mermaid
+flowchart LR
+    A["输入来源"] --> B["--sequence<br/>(单个字符串)"]
+    A --> C["--fasta<br/>(.fasta 文件)"]
+    A --> D["--csv<br/>(.csv 文件)"]
+    B --> E["加载与批量处理序列"]
+    C --> E
+    D --> E
+    E --> F["ESMDynamic 模型"]
+    F --> G["动态接触图"]
+    F --> H["接触频率"]
+    F --> I["接触动力学"]
+    G --> J["输出目录"]
+    H --> J
+    I --> J
+```
+
+**单条序列** —— 预测单个蛋白质的最快方式：
+
+```bash
+run_esmdynamic --sequence "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDDL" \
+    --output_dir my_first_prediction
+```
+
+**FASTA 文件** —— 使用标头作为蛋白质 ID：
+
+```bash
+run_esmdynamic --fasta examples/esmdynamic/example.fasta --output_dir fasta_outputs
+```
+
+**CSV 文件** —— 第一列为 ID，第二列为序列：
+
+```bash
+run_esmdynamic --csv examples/esmdynamic/example.csv --output_dir csv_outputs
+```
+
+仓库中附带的示例文件包含四种蛋白质 —— **ASCT2**（单链转运蛋白）、**SWEET2b**（单链）、**De_novo**（设计肽段）和 **HIV1P**（由 `:` 分隔的多链同源二聚体）：
+
+```csv
+id,seq
+ASCT2,DQVRRCLRANLLVLLTVVAVVAGVALGLGVSGAGGALALGPERLSAFVFPGELLLRLLRMIILPLVVCSLIGGAASLDPGALGRLGAWALLFFLVTTLLASALGVGLALALQPGAASAAINASVGAAGSAENAPSKEVLDSFLDLARNIFPSNLVSAAFRSYSTTYEERNITGTRVKVPVGQEVEGMNILGLVVFAIVFGVALRKLGPEGELLIRFFNSFNEATMVLVSWIMWYAPVGIMFLVAGKIVEMEDVGLLFARLGKYILCCLLGHAIHGLLVLPLIYFLFTRKNPYRF
+SWEET2b,DSLYDISCFAAGLAGNIFALALFLSPVTTFKRILKAKSTERFDGLPYLFSLLNCLICLWYGLPWVADGRLLVATVNGIGAVFQLAYICLFIFYADSRKTRMKIIGLLVLVVCGFALVSHASVFFFDQPLRQQFVGAVSMASLISMFASPLAVMGVVIRSESVEFMPFYLSLSTFLMSASFALYGLLLRDFFIYFPNGLGLILGAMQLALYAY
+De_novo,ASMEDLQAEARAFLSEEMIAEFKAAFDMFDADGGGDISYKAVGTVFRMLGINPSKEVLDYLKEKIDVDGSGTIDFEEFLVLMVYIMKQDA
+HIV1P,PQITLWQRPLVTIKIGGQLKEALLDTGADDTVLEEMSLPGRWKPKMIGGIGGFIKVRQYDQILIEICGHKAIGTVLVGPTPVNIIGRNLLTQIGCTLNF:PQITLWQRPLVTIKIGGQLKEALLDTGADDTVLEEMSLPGRWKPKMIGGIGGFIKVRQYDQILIEICGHKAIGTVLVGPTPVNIIGRNLLTQIGCTLNF
+```
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L36-L110), [example.csv](/examples/esmdynamic/example.csv#L1-L5), [example.fasta](/examples/esmdynamic/example.fasta#L1-L8), [README.md](/README.md#L80-L121)
+
+### 使用 Python API
+
+对于编程式访问，可直接在 Python 中加载模型：
+
+```python
+import esm
+
+# 加载预训练模型（首次调用时自动下载权重）
+model = esm.pretrained.esmdynamic()
+model = model.to("cuda")
+model.eval()
+
+# 从单条序列进行预测
+with torch.no_grad():
+    result = model.predict_from_seqs(["MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDDL"])
+
+# 访问输出
+dynamic_prob = result["dynamic_prob"]       # [B, T, L, L] - 动态接触概率
+dynamic_pred = result["dynamic_pred"]       # [B, T, L, L] - 二值预测（阈值为 0.5）
+kinetic_prob  = result["kinetic_prob"]      # [B, T, 2, L, L, C] - 动力学类别概率
+frequency_pred = result["frequency_pred"]   # [B, T, L, L] - 接触频率/占有率
+```
+
+**选择性加载预测头** —— 仅加载所需的预测头以节省内存：
+
+```python
+# 仅加载 dynamic + kinetic 预测头（跳过 frequency）
+model = esm.pretrained.esmdynamic(heads_to_load=["dynamic", "kinetic"])
+```
+
+<CgxTip>`predict_from_seqs()` 方法通过 `@torch.no_grad()` 装饰器封装了 `forward_from_seq()` 以用于推理。若用于训练，请直接使用 `forward_from_seq()`，该方法会计算梯度。`low_memory=True` 标志会使各个预测头顺序执行而非并行 —— 速度大幅变慢，但能显著降低显存占用。</CgxTip>
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L213-L220), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L548-L595), [pretrained.py](/esm/esmdynamic/pretrained.py#L32-L36)
+
+## CLI 参考
+
+完整的 `run_esmdynamic` 参数参考：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|----------|------|---------|-------------|
+| `--sequence` | str | *(必选组)* | 单个氨基酸序列字符串 |
+| `--fasta` | str | *(必选组)* | FASTA 文件路径 |
+| `--csv` | str | *(必选组)* | CSV 文件路径（第 1 列 = ID，第 2 列 = 序列） |
+| `--batch_size` | int | `1` | 每批的序列数量 |
+| `--chunk_size` | int | `256` | 模型分块大小（控制显存与速度的权衡） |
+| `--device` | {cpu,cuda} | `cuda` | 计算设备 |
+| `--output_dir` | str | `outputs` | 输出文件目录 |
+| `--chain_ids` | str | `A-Z` | 多链的链 ID 标签（例如 `ABCDEF`） |
+| `--low_memory` | flag | `False` | 顺序运行预测头（更慢，显存占用更少） |
+| `--save_html` | flag | `True*` | 保存交互式 Plotly HTML 热图 |
+| `--save_png` | flag | `True*` | 保存 PNG 热图/图表 |
+| `--save_txt` | flag | `True*` | 保存纯文本/CSV 矩阵 |
+| `--save_raw_pt` | flag | `True*` | 保存包含所有原始输出的 `.pt` 打包文件 |
+| `--num_recycles` | int | `None` | 覆盖 Evoformer 循环次数 |
+
+*\*若未指定任何 `--save_*` 标志，则默认启用全部四个。*
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L36-L110), [README.md](/README.md#L84-L111)
+
+## 多链蛋白质
+
+对于多聚体，在 CLI 和文件输入中均使用冒号 (`:`) 分隔各链序列：
+
+```bash
+# 同源二聚体：两条相同的链
+run_esmdynamic --sequence "CHAIN_A_SEQ:CHAIN_B_SEQ" --output_dir multimer_out
+```
+
+在 CSV 文件中，序列列内使用 `:` 作为分隔符。在 **Colab Notebook** 中，请改用 `/`。模型会在链之间插入一段 25 残基的聚甘氨酸 linker，并使用 512 的残基索引偏移量来分隔各链的坐标空间。
+
+来源: [README.md](/README.md#L115-L116), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L413-L456)
+
+## 输出结构
+
+每个预测的蛋白质都会生成一个目录树，包含五种模拟温度下的各温度输出：**320 K, 348 K, 379 K, 413 K, 450 K**。
+
+```
+outputs/
+└── PROTEIN_ID/
+    ├── PROTEIN_ID.pdb                          # ESMFold 预测结构
+    ├── PROTEIN_ID_all_outputs.pt               # 原始张量打包文件
+    ├── dynamic/
+    │   ├── *_dynamic_prob_320K.{html,png,txt}  # 接触概率热图
+    │   ├── *_dynamic_pred_320K.{html,png,txt}  # 二值接触预测
+    │   ├── *_dynamic_confidence_320K.{csv,png} # 逐残基置信度分数
+    │   └── ... (348K, 379K, 413K, 450K 同理)
+    ├── frequency/
+    │   ├── *_frequency_pred_320K.{html,png,txt}     # 占有率/频率图
+    │   ├── *_frequency_error_320K.{html,png,txt}    # 残差预测
+    │   └── ...
+    ├── kinetics/
+    │   ├── *_kinetics_on_class_320K.{html,png,txt}  # 结合速率类别预测
+    │   ├── *_kinetics_off_class_320K.{html,png,txt} # 解离速率类别预测
+    │   ├── *_kinetics_on_probabilities_320K.npz     # 完整类别概率
+    │   ├── *_kinetics_on_classes_320K.txt           # 类别索引图例
+    │   ├── *_kinetics_confidence_320K.{csv,png}     # 逐残基置信度
+    │   └── ...
+    ├── native/
+    │   └── *_native_contacts.{html,png,txt}    # ESMFold 静态接触
+    ├── dynamic_nonnative/
+    │   └── *_dynamic_nonnative_320K.{html,png,txt}  # 动态但非原生接触
+    └── native_nondynamic/
+        └── *_native_nondynamic_320K.{html,png,txt}  # 原生但非动态接触
+```
+
+在浏览器中打开任意 `.html` 文件，即可查看带有缩放、平移和悬停检查功能的**交互式 Plotly 热图**：
+
+![viz](https://github.com/ShuklaGroup/esmdynamic/blob/main/viz_plotly.gif?raw=true)
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L323-L613), [README.md](/README.md#L131-L135)
+
+## 内存与性能调优
+
+| 场景 | 建议 |
+|----------|---------------|
+| 显存 ≤ 16 GB 的 GPU | 减小 `--chunk_size`（尝试 128 或 64），或使用 `--low_memory` |
+| 显存 ≥ 24 GB 的 GPU | 默认 `--chunk_size 256` 效果良好；提高 `--batch_size` 以增加吞吐量 |
+| 仅 CPU | 设置 `--device cpu` —— 推理速度会显著变慢 |
+| 大蛋白质（> 500 个残基） | 使用 `--low_memory` 标志以顺序运行预测头 |
+
+`--low_memory` 标志会触发 `forward_from_seq_low_memory()`，该方法将 ESMFold 和每个 DynamicHead 逐一加载到 GPU，并在步骤间卸载至 CPU。这会大幅削减峰值显存占用，代价是推理速度降低约 3 倍。
+
+来源: [README.md](/README.md#L125-L126), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L458-L546)
+
+## 故障排查
+
+| 问题 | 解决方案 |
+|---------|----------|
+| `CUDA requested but not available` | 脚本会自动回退到 CPU。请使用 `nvidia-smi` 验证 NVIDIA 驱动 |
+| OpenFold 构建失败 | 确保使用了 **ColabFold fork**：`git+https://github.com/sokrypton/openfold.git` 并附加 `--no-build-isolation` |
+| 权重下载失败 | 检查网络连接。权重缓存在 `torch.hub.get_dir()/checkpoints/` 中。若需离线使用，可从 [Illinois Data Bank](https://doi.org/10.13012/B2IDB-3773897_V2) 提前下载 |
+| `No sequences were loaded` | 验证 FASTA/CSV 格式。CSV 需要标题行；FASTA 需要以 `>` 前缀的标题 |
+| GPU 显存溢出 (OOM) | 减小 `--chunk_size`，添加 `--low_memory`，或减小 `--batch_size` |
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L616-L658), [Dockerfile](/Dockerfile#L68-L72)
+
+## 下一步
+
+现在你已经能够运行预测了，接下来可以去往此处：
+
+1. **理解你的输出** → [输出解读](3-output-interpretation) —— 深入解析动态接触图、动力学类别和频率值
+2. **探索架构** → [架构概览](4-architecture-overview) —— ESMFold 表征如何输入至 DynamicModule 预测头
+3. **扩展推理规模** → [批量预测脚本](10-bulk-prediction-script) —— 用于大规模预测的高级 CLI 模式
+4. **尝试 Colab 工作流** → [Colab Notebook 工作流](11-colab-notebook-workflow) —— 交互式可视化与探索
+5. **在受限硬件上节省内存** → [低内存推理模式](13-low-memory-inference-mode) —— 深入了解预测头的顺序评估
+
+---
+
+- [入门/输出解读](https://zread.ai/ShuklaGroup/esmdynamic/3-output-interpretation)
+
+---
+slug:3-output-interpretation
+blog_type:normal
+---
+
+
+ESMDynamic 通过三个互补的输出头 —— **动态接触分类**、**接触频率回归** 和 **接触动力学分类** —— 生成一组丰富且多维的预测结果，每个头都在五个分子动力学（MD）模拟温度下进行评估。本页将引导你了解每一个输出文件、其含义、形状以及使用方法。阅读到最后，你将能够自信地浏览输出目录，正确解读每个矩阵和向量，并通过编程方式加载数据以进行下游分析。
+
+来源: [output_interpretation.md](/output_interpretation.md#L1-L262), [predict.py](/esm/esmdynamic/predict.py#L1-L658), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L1-L636)
+
+## 输出目录结构
+
+当你在标识符为 `MY_PROTEIN` 的蛋白质上运行 `run_esmdynamic` 时，脚本会创建一个结构化的目录。每条序列都会获得自己的子目录，其中包含一个 PDB 文件、一个原始 PyTorch 打包文件，以及用于每个预测头和派生的天然接触分析的独立文件夹：
+
+```
+outputs/
+└── MY_PROTEIN/
+    ├── MY_PROTEIN.pdb                     # ESMFold 预测的 3D 结构
+    ├── MY_PROTEIN_all_outputs.pt          # 原始 PyTorch 打包文件（所有预测结果）
+    ├── dynamic/                           # 分类头输出
+    ├── frequency/                         # 回归头输出
+    ├── kinetics/                          # 动力学头输出
+    ├── native/                            # 静态结构接触
+    ├── dynamic_nonnative/                 # 静态结构中不存在的动态接触
+    └── native_nondynamic/                 # 未被预测为动态的静态接触
+```
+
+根据你传递给 `run_esmdynamic` 的标志，每个文件夹都包含多种温度下的文件，且格式多样（`.txt`、`.png`、`.html`）。默认情况下，当未显式指定格式标志时，所有四个格式标志（`--save_html`、`--save_png`、`--save_txt`、`--save_raw_pt`）均处于启用状态。
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L323-L613), [output_interpretation.md](/output_interpretation.md#L16-L29)
+
+## 温度轴
+
+所有三个预测头均在 **五个离散温度条件** 下产生输出：**320 K、348 K、379 K、413 K 和 450 K**。这些温度对应于 mdCATH 分子动力学训练数据集中使用的温度。它们**不是**实验或生理温度 —— 它们是逐步增加构象采样的 MD 模拟条件。
+
+| 温度 | 解释 | 推荐用途 |
+|-------------|---------------|-----------------|
+| **320 K** | 最低柔性区间 | **从这里开始。** 最保守的预测；最接近折叠良好、有序的状态。 |
+| **348 K** | 轻微增加的柔性 | 与 320 K 比较，查看哪些接触开始波动。 |
+| **379 K** | 中等柔性 | 揭示勉强稳定的接触。 |
+| **413 K** | 高柔性 | 许多接触变为动态；适合用于识别最持久的相互作用。 |
+| **450 K** | 近解折叠区间 | 只有最具弹性的接触存活；有助于识别折叠核心。 |
+
+<CgxTip>始终从 320 K 开始分析，然后向更高温度移动以探索渐进的无序状态。320 K 的输出是解释动态接触最可靠的切入点。</CgxTip>
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L15-L16), [output_interpretation.md](/output_interpretation.md#L35-L43)
+
+## 输出头 1：动态接触分类 (`dynamic/`)
+
+该头回答了一个基本问题：**“该残基对是否在构象系综中的接触与非接触状态之间切换？”** 这是一个二分类任务，通过 sigmoid 激活函数实现，并在对矩阵中进行了对称化处理。
+
+### 输出文件
+
+对于每个温度 `T`，你将找到：
+
+| 文件模式 | 类型 | 形状 | 描述 |
+|-------------|------|-------|-------------|
+| `*_dynamic_prob_{T}K.txt` | 对矩阵 | L × L | 成为动态接触的连续概率 ∈ [0, 1] |
+| `*_dynamic_prob_{T}K.png` | 热力图 | — | Viridis 配色的概率图 |
+| `*_dynamic_prob_{T}K.html` | 交互式 | — | Plotly 热力图（悬停查看数值） |
+| `*_dynamic_pred_{T}K.txt` | 对矩阵 | L × L | 二值预测（阈值 = 0.5） |
+| `*_dynamic_pred_{T}K.png` | 热力图 | — | 黑白二值图 |
+| `*_dynamic_pred_{T}K.html` | 交互式 | — | Plotly 二值图 |
+| `*_dynamic_confidence_{T}K.csv` | 逐残基 | L | 每个残基的置信度分数 |
+| `*_dynamic_confidence_{T}K.png` | 折线图 | — | 置信度随残基索引的变化 |
+
+### 如何解读
+
+- **`dynamic_prob`**：接近 **1.0** 的值表明该对为动态（发生切换）的确定性很高。接近 **0.0** 的值表明该对始终处于接触状态或从不接触。接近 **0.5** 的值是模糊的 —— 这些是需要谨慎对待的残基对。
+
+- **`dynamic_pred`**：`dynamic_prob` 在 0.5 处的硬阈值版本。值 `1` = 动态，`0` = 非动态。适用于快速的二值查询。
+
+- **`dynamic_confidence`**：逐残基分数，指示该位置的分类可靠性。**大于 0.9 的值被视为高置信度。** 低置信度残基通常出现在链末端或模型信号较弱的无序区域。
+
+在内部，分类头对原始 logit 应用 `sigmoid`，然后通过 `(prob + prob.T) / 2` **对称化** 矩阵，以确保 `prob[i,j] == prob[j,i]`。预测结果随后为 `(prob > 0.5).long()`。
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L173-L185), [predict.py](/esm/esmdynamic/predict.py#L343-L399), [output_interpretation.md](/output_interpretation.md#L47-L71)
+
+## 输出头 2：接触频率回归 (`frequency/`)
+
+该头回答：**“该残基对在构象系综中有多大比例的时间处于接触状态？”** 这是一个回归任务，其目标是接触占用率 —— 一个介于 0（从不接触）和 1（始终接触）之间的值。
+
+### 输出文件
+
+| 文件模式 | 类型 | 形状 | 描述 |
+|-------------|------|-------|-------------|
+| `*_frequency_pred_{T}K.txt` | 对矩阵 | L × L | 预测的接触占用率 ∈ [0, 1] |
+| `*_frequency_pred_{T}K.png` | 热力图 | — | Viridis 配色的占用率图 |
+| `*_frequency_pred_{T}K.html` | 交互式 | — | Plotly 占用率热力图 |
+| `*_frequency_error_{T}K.txt` | 对矩阵 | L × L | 预测的残差/误差（不确定性的代理） |
+| `*_frequency_error_{T}K.png` | 热力图 | — | 误差幅度图 |
+| `*_frequency_error_{T}K.html` | 交互式 | — | Plotly 误差热力图 |
+
+### 如何解读
+
+- **`frequency_pred`**：值为 **0.9** 意味着该对有 90% 的时间处于接触状态（非常稳定）。值为 **0.1** 意味着该对几乎不形成接触（瞬态或不存在）。值为 **0.5** 意味着该对处于接触和脱离接触的时间大致相等 —— 这是*动态*接触的标志。
+
+- **`frequency_error`**：模型对频率值预测的残差。值越高表示不确定性越大。使用此值来**过滤不可靠的预测** —— 例如，丢弃 `frequency_error > threshold` 的残基对。
+
+**关键细节**：一个残基对可能具有**高动态概率**（分类头认为它发生切换），同时具有**低频率**（只有 10% 的时间处于接触）。这并不矛盾 —— 它们描述了不同的方面：接触*是否*切换 vs. 接触*多频繁*形成。
+
+回归头在内部对对称化的原始预测应用 `sigmoid`，将输出裁剪至 [0, 1]。它还包含一个**逐对残差头**，用于预测逐对修正，从而产生 `frequency_residual_pred` 输出。
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L186-L189), [predict.py](/esm/esmdynamic/predict.py#L401-L443), [output_interpretation.md](/output_interpretation.md#L73-L95)
+
+## 输出头 3：接触动力学分类 (`kinetics/`)
+
+该头回答：**“该接触形成和断裂的时间尺度是多少？”** 它将每个残基对分类到粗粒化的动力学区间中，包括**接通时间**（一旦形成，接触持续多久）和**断开时间**（断裂后，接触需多久重新形成）。这是一个包含 6 个类别和 2 种速率类型（接通/断开）的多分类任务，产生的 logit 形状为 `[B, n_conditions, n_rates, L, L, n_classes]`。
+
+### 输出文件
+
+| 文件模式 | 类型 | 形状 | 描述 |
+|-------------|------|-------|-------------|
+| `*_kinetics_on_class_{T}K.txt` | 对矩阵 | L × L | 预测的接通时间类别索引 (0–5) |
+| `*_kinetics_on_class_{T}K.png` | 热力图 | — | 接通时间类别图（离散色彩映射） |
+| `*_kinetics_on_class_{T}K.html` | 交互式 | — | Plotly 接通时间类别热力图 |
+| `*_kinetics_on_probabilities_{T}K.npz` | 压缩格式 | L × L × 6 | 每个类别的完整 softmax 概率 |
+| `*_kinetics_on_classes_{T}K.txt` | 图例 | 6 行 | 类别索引 → 名称映射 |
+| `*_kinetics_off_class_{T}K.*` | 同接通 | — | 所有接通时间文件的断开时间类似物 |
+| `*_kinetics_off_probabilities_{T}K.npz` | 压缩格式 | L × L × 6 | 每个类别的完整 softmax 概率 |
+| `*_kinetics_off_classes_{T}K.txt` | 图例 | 6 行 | 类别索引 → 名称映射 |
+| `*_kinetics_confidence_{T}K.csv` | 逐残基 | L | 逐残基动力学置信度 |
+| `*_kinetics_confidence_{T}K.png` | 折线图 | — | 置信度随残基索引的变化 |
+
+### 动力学类别定义
+
+**接通时间（接触寿命）** —— 一旦形成，接触持续多久：
+
+| 类别索引 | 名称 | 时间尺度 |
+|-------------|------|-----------|
+| 0 | `always_on` | 接触始终存在（稳定） |
+| 1 | `1to10ns` | 极短寿命：1–10 纳秒 |
+| 2 | `10to100ns` | 短寿命：10–100 纳秒 |
+| 3 | `100to300ns` | 中等寿命：100–300 纳秒 |
+| 4 | `gt300ns` | 长寿命：> 300 纳秒 |
+| 5 | `never_on` | 接触从不形成 |
+
+**断开时间（形成时间）** —— 断裂的接触需多久重新形成：
+
+| 类别索引 | 名称 | 时间尺度 |
+|-------------|------|-----------|
+| 0 | `always_off` | 接触从未形成 |
+| 1 | `1to10ns` | 极快重新形成：1–10 纳秒 |
+| 2 | `10to100ns` | 快速重新形成：10–100 纳秒 |
+| 3 | `100to300ns` | 缓慢重新形成：100–300 纳秒 |
+| 4 | `gt300ns` | 极慢重新形成：> 300 纳秒 |
+| 5 | `never_off` | 接触从不断裂（永久） |
+
+### 如何解读
+
+- **比较性地使用动力学**，而不是作为绝对的时间尺度测量。将接触排名为“快形成 vs. 慢形成”或“短寿命 vs. 长寿命”，而不是将类别边界解释为精确值。
+
+- **`.npz` 概率文件**包含每个残基对在所有 6 个类别上的完整 softmax 分布。访问单个类别概率图的方式如：`probs = np.load("kinetics_on_probabilities_320K.npz"); probs["1to10ns"]` 给出 1–10 纳秒接通时间类别的 L × L 概率矩阵。
+
+- **`*_classes_*.txt` 图例文件**提供从整数类别索引到人类可读名称的映射，这在读取整数值的类别预测图时必不可少。
+
+- **置信度**是跨接通/断开速率平均的逐残基分数，指示该位置的动力学预测可靠性。
+
+<CgxTip>动力学预测是粗粒度的，并且在纳秒尺度的 MD 模拟 (mdCATH) 上训练。不要将类别边界解释为精确的实验时间尺度。使用它们来相对地对接触进行排名 —— 例如，“这些接触比那些接触断裂得更快。”</CgxTip>
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L17-L33), [predict.py](/esm/esmdynamic/predict.py#L448-L531), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L144-L158), [output_interpretation.md](/output_interpretation.md#L97-L139)
+
+## 天然接触分析 (`native/`, `dynamic_nonnative/`, `native_nondynamic/`)
+
+这些是通过将动态分类预测与 ESMFold 预测的静态结构进行比较而计算出的**派生输出**。天然接触图是通过 MDTraj 使用 **8 Å Cα–Cα 距离阈值** 从 ESMFold PDB 计算得出的。
+
+### 文件夹内容
+
+| 文件夹 | 文件模式 | 含义 |
+|--------|-------------|---------|
+| `native/` | `*_native_contacts.*` | ESMFold 静态结构中处于接触状态的残基对 |
+| `dynamic_nonnative/` | `*_dynamic_nonnative_{T}K.*` | 被预测为动态但**不在**静态结构中的残基对 —— 这些是*隐秘*或*条件形成*的接触 |
+| `native_nondynamic/` | `*_native_nondynamic_{T}K.*` | 在静态结构中但**未被**预测为动态的残基对 —— 这些是*稳定*的接触 |
+
+### 如何解读
+
+- **`dynamic_nonnative`** 尤为有趣：这些是动态模型预测在构象波动期间会形成的接触，即使它们在单一静态结构中不存在。这是**隐秘动力学**的标志 —— 仅凭静态结构预测无法观察到的功能相关运动。
+
+- **`native_nondynamic`** 往往**稀疏**，特别是在较高温度下，因为折叠良好的蛋白质中的大多数接触在低温 T 下被分类为非动态，但在高温 T 下变为动态。在 450 K 时，此类别可能会产生**空白或接近空白的图**。
+
+计算过程是一个简单的集合操作：`dynamic_nonnative = dynamic_pred AND NOT native_contacts` 和 `native_nondynamic = native_contacts AND NOT dynamic_pred`，并在温度维度上进行广播。
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L360-L409), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L602-L636), [predict.py](/esm/esmdynamic/predict.py#L536-L602)
+
+## PDB 文件与原始 PyTorch 打包文件
+
+### PDB 文件 (`MY_PROTEIN.pdb`)
+
+标准 PDB 格式的 ESMFold 预测 3D 结构。它可用于：
+
+- 在 PyMOL、ChimeraX 或 Py3Dmol 中可视化结构
+- 将预测的接触映射到 3D 坐标上
+- 计算额外的结构特征（例如，溶剂可及性）
+
+### 原始打包文件 (`MY_PROTEIN_all_outputs.pt`)
+
+一个包含**所有裁剪后输出**的单个 PyTorch 字典，便于编程访问：
+
+```python
+import torch
+
+out = torch.load("MY_PROTEIN_all_outputs.pt")
+print(out.keys())
+# dict_keys(['sequence', 'labels', 'boundaries',
+#            'dynamic_prob', 'dynamic_pred', 'dynamic_confidence',
+#            'frequency_pred', 'frequency_residual_pred',
+#            'kinetic_prob', 'kinetic_pred_class', 'kinetic_confidence',
+#            'native_contacts', 'dynamic_nonnative_contacts',
+#            'native_nondynamic_contacts', 'pdb_path'])
+```
+
+例如，`dynamic_prob` 键包含 5 个 numpy 数组的列表（每个温度对应一个），每个数组的形状为 L × L。`labels` 键提供残基标识符（如 `A-K15`）用于标注坐标轴。`boundaries` 键存储多聚体输入的链边界位置。
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L334-L338), [predict.py](/esm/esmdynamic/predict.py#L604-L613), [output_interpretation.md](/output_interpretation.md#L169-L197)
+
+## 多聚体输入
+
+对于多链蛋白质，在序列字符串中用冒号 (`:`) 分隔各链。模型在内部插入一个 25 残基的甘氨酸连接段，该连接段会从所有输出矩阵和可视化中**自动裁剪掉**：
+
+```
+CHAIN_A_SEQUENCE:CHAIN_B_SEQUENCE
+```
+
+- **连接段残基已从**所有输出对矩阵和逐残基向量中**移除**
+- **链边界**在 PNG 和 HTML 热力图中显示为**白线**
+- **残基标签**遵循 `{ChainID}-{AA}{Position}` 格式，例如 `A-K15`、`B-F42`
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L134-L164), [output_interpretation.md](/output_interpretation.md#L200-L216)
+
+## 输出格式与保存标志
+
+`run_esmdynamic` 脚本提供四个独立的格式标志。当**未指定任何标志**时，所有标志默认为 `True`：
+
+| 标志 | 保存内容 | 何时使用 |
+|------|-------|-------------|
+| `--save_html` | 交互式 Plotly `.html` 热力图 | 探索性分析；悬停查看精确值；与协作者共享 |
+| `--save_png` | 静态 `.png` 热力图和折线图 | 发表出版；快速视觉检查 |
+| `--save_txt` | 原始 `.txt`/`.csv` 文本文件 | 编程加载；下游流水线 |
+| `--save_raw_pt` | 单个 `.pt` 打包文件 | Python 原生访问；最便于脚本编写 |
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L76-L108)
+
+## 在 Python 中加载输出
+
+### 文本文件（纯 numpy）
+
+```python
+import numpy as np
+
+# 加载对矩阵
+dyn_prob = np.loadtxt("dynamic/MY_PROTEIN_dynamic_prob_320K.txt")
+freq_pred = np.loadtxt("frequency/MY_PROTEIN_frequency_pred_320K.txt")
+
+# 加载逐残基 CSV
+import csv
+with open("dynamic/MY_PROTEIN_dynamic_confidence_320K.csv") as f:
+    reader = csv.DictReader(f)
+    confidences = {row["residue"]: float(row["value"]) for row in reader}
+```
+
+### 动力学概率（压缩 numpy）
+
+```python
+probs = np.load("kinetics/MY_PROTEIN_kinetics_on_probabilities_320K.npz")
+print(probs.files)  # ['always_on', '1to10ns', '10to100ns', '100to300ns', 'gt300ns', 'never_on']
+
+# 访问特定类别的概率图
+fast_contacts = probs["1to10ns"]  # 形状: L × L
+```
+
+### 原始打包文件
+
+```python
+import torch
+
+out = torch.load("MY_PROTEIN_all_outputs.pt")
+
+# 320 K (索引 0) 的动态概率
+dyn_320 = out["dynamic_prob"][0]  # numpy 数组, L × L
+
+# 379 K (索引 2) 的频率预测
+freq_379 = out["frequency_pred"][2]  # numpy 数组, L × L
+
+# 动力学：320 K 的接通时间预测类别
+kin_on_320 = out["kinetic_pred_class"][0]["on"]  # numpy 数组, L × L
+```
+
+来源: [predict.py](/esm/esmdynamic/predict.py#L315-L320), [output_interpretation.md](/output_interpretation.md#L228-L244)
+
+## 推荐分析工作流
+
+以下流程图展示了解释 ESMDynamic 输出的建议步骤，从最可靠的信号开始，逐步叠加更多细节：
+
+```mermaid
+flowchart TD
+    A["1. 检查 320 K 下的 dynamic_prob<br/>识别高置信度动态对"] --> B["2. 与 320 K 下的 frequency_pred 交叉比对<br/>区分稳定接触与瞬态接触"]
+    B --> C["3. 检查动力学类别<br/>按接通时间/断开时间尺度对对进行排名"]
+    C --> D["4. 根据置信度/误差进行过滤<br/>移除不可靠的残基位置"]
+    D --> E["5. 跨温度比较<br/>追踪哪些接触在较高 T 时变为动态"]
+    E --> F["6. 检查 dynamic_nonnative<br/>发现静态结构中不存在的隐秘接触"]
+    
+    style A fill:#4CAF50,color:white
+    style F fill:#2196F3,color:white
+```
+
+**逐步总结：**
+
+1. **从 320 K 的 `dynamic_prob` 开始** —— 这是哪些残基对具有构象动态性的主要映射图。
+2. **与 320 K 的 `frequency_pred` 比较** —— 具有高动态概率且频率接近 0.5 的对是“经典”的切换接触；具有高动态概率且低频率的对是瞬态、极少形成的接触。
+3. **检查关键对的动力学类别** —— 快速接通/断开时间表示快速互变；缓慢接通/断开时间表示罕见的大尺度波动。
+4. **使用置信度和误差图进行过滤** —— 丢弃低置信度或高误差残基位置处的预测。
+5. **探索更高温度** 以查看随着柔性增加哪些接触变为动态。
+6. **检查 `dynamic_nonnative`** 寻找隐秘接触 —— 这些是生物学上最有趣的输出，揭示了仅在动态期间形成的接触。
+
+来源: [output_interpretation.md](/output_interpretation.md#L219-L226)
+
+## 总结：三个输出头一览
+
+| 输出头 | 任务 | 输出类型 | 范围 | 最适合回答的问题 |
+|------|------|-------------|-------|------------------------|
+| **动态** | 二分类 | 概率 + 二值图 + 置信度 | [0, 1] | “这个接触是否切换？” |
+| **频率** | 回归 | 占用率 + 误差 | [0, 1] | “这个接触形成的频率有多高？” |
+| **动力学** | 多分类（6 类 × 2 种速率） | 类别索引 + 完整概率分布 + 置信度 | {0,…,5} | “这个接触形成/断裂有多快？” |
+
+| 派生输出 | 计算 | 生物学含义 |
+|---------------|-------------|-------------------|
+| **native_contacts** | ESMFold PDB 中 Cα 距离 < 8 Å | 静态结构接触 |
+| **dynamic_nonnative** | dynamic_pred AND NOT native | 隐秘/条件性接触 |
+| **native_nondynamic** | native AND NOT dynamic_pred | 稳定的、持久的接触 |
+
+## 重要注意事项
+
+- **仅限接触级动力学**：预测描述的是成对接触行为。仅从这些输出可能难以推断全局几何位移（例如，无接触变化的结构域重定向）。
+- **纳秒区间**：动力学类别在 mdCATH 模拟上训练，该模拟采样纳秒到数百纳秒的时间尺度。无法捕获微秒或毫秒级现象。
+- **温度为 MD 模拟**：五个温度输出对应于 MD 模拟条件，而非实验测量。450 K 的输出并不对应于 450 K 的湿实验实验 —— 它代表在以该温度执行的 MD 模拟中观察到的动力学。
+- **`native_nondynamic` 稀疏性**：在高温下，极少接触能同时保持天然和非动态。在 413 K 和 450 K 时预期会产生稀疏或空白的图。
+
+来源: [output_interpretation.md](/output_interpretation.md#L248-L253), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L260-L288)
+
+## 后续步骤
+
+现在你已经理解了每个输出的含义，可以深入了解产生这些输出的架构，或者开始自己运行预测：
+
+- **准备运行你的第一次预测？** → [快速入门](2-quick-start)
+- **想了解这三个输出头是如何实现的？** → [多头预测设计](7-multi-head-prediction-design)
+- **对处理这些特征的基于 Evoformer 的 DynamicModule 感到好奇？** → [DynamicModule 与 Evoformer 循环](6-dynamicmodule-and-evoformer-recycling)
+- **需要运行大规模预测？** → [批量预测脚本](10-bulk-prediction-script)
+- **GPU 显存有限？** → [低显存推理模式](13-low-memory-inference-mode)
+
+---
+
+# 深入探究
+
+- [深入探究/架构概述](https://zread.ai/ShuklaGroup/esmdynamic/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+ESMDynamic 是一个**蛋白质动态接触图预测器**，构建为 Meta 的 ESMFold 的微调扩展。ESMDynamic 并非预测单一静态结构，而是在 ESMFold 冻结的主干网络上附加专门的预测头，从而仅从单条氨基酸序列推断**随温度变化的动态接触**、**接触动力学时间尺度**以及**接触频率**。本页提供了整个系统的结构图、各模块间的数据流，以及每个组件背后的设计原理。
+
+![model](https://github.com/ShuklaGroup/esmdynamic/blob/main/model_scheme.png?raw=true)
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L1-L636), [README.md](/README.md#L1-L226)
+
+## 系统架构图
+
+下面的 Mermaid 图展示了顶层架构和前向传播的数据流。ESMFold 作为一个**冻结的特征提取器**：其内部的 Evoformer 主干网络产生序列级 (`s_s`) 和成对 (`s_z`) 表示，以及辅助输出（lddt logits、distogram logits、pTM logits、语言模型 logits）。每个 `DynamicHead` 消费这些冻结的输出，应用学习的偏置转移，运行其自身的 `DynamicModule`（一个带有循环的轻量级 Evoformer），并将生成的成对特征映射到特定任务的预测。
+
+```mermaid
+flowchart TB
+    subgraph Input
+        SEQ["Amino Acid Sequence"]
+    end
+
+    subgraph ESMFold["ESMFold (Frozen)"]
+        ESM2["ESM-2 3B<br/>Language Model"]
+        TRUNK["FoldingTrunk<br/>48 Evoformer Blocks<br/>+ Structure Module"]
+        ESM2 -->|"embeddings + attention"| TRUNK
+    end
+
+    subgraph FrozenOutputs["Frozen Outputs"]
+        SS["s_s: [B,L,1024]<br/>Sequence State"]
+        SZ["s_z: [B,L,L,128]<br/>Pairwise State"]
+        LDDT["lddt_logits"]
+        DISTO["distogram_logits"]
+        PTM["ptm_logits"]
+        LM["lm_logits"]
+    end
+
+    subgraph Heads["Dynamic Heads (Trainable)"]
+        DYNS["DynamicHead<br/>task_type=classification<br/>n_conditions=5"]
+        KINS["DynamicHead<br/>task_type=kinetics<br/>n_conditions=5, n_classes=6"]
+        FREQ["DynamicHead<br/>task_type=regression<br/>n_conditions=5"]
+    end
+
+    subgraph Outputs["Prediction Outputs"]
+        DYNO["Dynamic Contact Maps<br/>[B,5,L,L] prob"]
+        KINO["Kinetics Classes<br/>[B,5,2,L,L,6] prob"]
+        FREQO["Contact Frequency<br/>[B,5,L,L] pred"]
+        NATIVE["Native vs Dynamic<br/>Contact Decomposition"]
+    end
+
+    SEQ --> ESMFold
+    TRUNK --> SS & SZ & LDDT & DISTO & PTM & LM
+    SS & SZ & LDDT & DISTO & PTM & LM --> DYNS & KINS & FREQ
+    DYNS --> DYNO
+    KINS --> KINO
+    FREQ --> FREQO
+    DYNO --> NATIVE
+```
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L218-L300), [esmfold.py](/esm/esmfold/v1/esmfold.py#L1-L80)
+
+## 核心模块清单
+
+代码库被组织为不同的层：**冻结的 ESMFold 主干网络**、**可训练的动态扩展**、**训练框架**以及**推理/可视化流水线**。下表将每个模块映射到其角色和关键类。
+
+| 模块路径 | 角色 | 关键类 / 函数 | 可训练 |
+|---|---|---|---|
+| `esm/esmfold/v1/esmfold.py` | 冻结的蛋白质结构主干网络 | `ESMFold` | ❌ 冻结 |
+| `esm/esmfold/v1/trunk.py` | ESMFold 的 48 块 Evoformer + 结构模块 | `FoldingTrunk` | ❌ 冻结 |
+| `esm/esmfold/v1/tri_self_attn_block.py` | 三角注意力块 (OpenFold) | `TriangularSelfAttentionBlock` | ❌ 冻结 |
+| `esm/esmdynamic/esmdynamic.py` | 顶层模型 + 统一预测头 | `ESMDynamic`, `DynamicHead` | ✅ 可训练 |
+| `esm/esmdynamic/dynamic_module.py` | 用于动态接触的轻量级 Evoformer | `DynamicModule` | ✅ 可训练 |
+| `esm/esmdynamic/pretrained.py` | 从 Illinois Data Bank 加载权重 | `esmdynamic()` | — |
+| `esm/esmdynamic/predict.py` | CLI 推理 + 可视化输出 | `run_esmdynamic` | — |
+| `esm/esmdynamic/training/train.py` | 带有特定头优化器的训练循环 | `train()` | — |
+| `esm/esmdynamic/training/loss.py` | Focal loss + 交叉熵 + MSE 损失 | `esmdynamic_loss()` | — |
+| `esm/esmdynamic/training/data_reader.py` | mdCATH 数据集加载 + 加权采样 | `DynContactDataset` | — |
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L1-L50), [dynamic_module.py](/esm/esmdynamic/dynamic_module.py#L1-L123), [loss.py](/esm/esmdynamic/training/loss.py#L1-L185), [predict.py](/esm/esmdynamic/predict.py#L1-L658)
+
+## ESMDynamic 类 — 顶层协调器
+
+`ESMDynamic` 类是系统的入口点。在初始化时，它使用 `requires_grad_(False)` 加载冻结的 ESMFold 模型 (`esm.pretrained.esmfold_v1()`)，然后为每个选定的预测任务实例化一个 `DynamicHead`。三个默认头为：
+
+| 头名称 | 任务类型 | `n_conditions` | `n_classes` | 输出形状 | 描述 |
+|---|---|---|---|---|---|
+| `dynamic` | 分类 | 5 | — | `[B, 5, L, L]` | 5 个温度下的二元动态接触概率 |
+| `kinetic` | 动力学 | 5 | 6 | `[B, 5, 2, L, L, 6]` | 每个温度的开启/关闭时间尺度类别（6 个类别） |
+| `frequency` | 回归 | 5 | — | `[B, 5, L, L]` | 5 个温度下的接触占用率/频率 |
+
+5 个默认温度对应于 `[320, 348, 379, 413, 450]` K，从而在单次前向传播中实现多温度预测。可以通过 `heads_to_load=["dynamic", "kinetic"]` 选择性加载头，或者通过 `head_definitions` 完全自定义头。
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L218-L300), [predict.py](/esm/esmdynamic/predict.py#L12-L13)
+
+## DynamicHead — 统一的多任务预测头
+
+无论任务类型如何，每个 `DynamicHead` 都遵循相同的架构模板，仅在输出维度和后处理逻辑上有所不同。前向传播分三个阶段进行：
+
+**阶段 1 — 偏置转移**：预测头对 ESMFold 的序列状态和成对状态计算学习的加性校正。序列转移将 `lddt_logits` 和 `lm_logits` 拼接（生成维度为 `23 + 37×50 = 1873` 的向量），通过 `LayerNorm → Linear → Linear`，并将结果加到 `s_s` 上。成对转移将 `ptm_logits` 和 `distogram_logits` 拼接（维度为 `64 + 64 = 128`），应用相同的 `LayerNorm → Linear → Linear` 模式，并加到 `s_z` 上。这些转移允许每个头针对其特定任务特化共享的冻结表示。
+
+**阶段 2 — DynamicModule**：经过偏置校正的 `s_s_0` 和 `s_z_0` 被馈入头自身的 `DynamicModule` 实例，该实例运行一个带有循环的轻量级 Evoformer（默认 2 个块，而 ESMFold 为 48 个），并带有循环（默认 4 次循环）。这将生成精炼的成对特征 `[B, L, L, 128]`。
+
+**阶段 3 — 预测线性层 + 可选头**：成对特征通过单个 `nn.Linear(pair_state_dim, out_dim)` 投影。然后根据任务类型对输出进行重塑和后处理——分类使用 sigmoid + 对称化，动力学/多分类使用 softmax + 对称化，回归使用 sigmoid 对称化。可选地，应用**置信度头**（每个残基、每个温度的精度预测）和**残差头**（回归的成对误差预测）。
+
+```mermaid
+flowchart LR
+    subgraph DynamicHead["DynamicHead Forward Pass"]
+        direction TB
+        A["ESMFold Outputs<br/>(s_s, s_z, lddt, disto, ptm, lm)"]
+        B["Seq Transition<br/>LayerNorm→Linear→Linear"]
+        C["Pair Transition<br/>LayerNorm→Linear→Linear"]
+        D["s_s_0 = s_s + seq_Δ<br/>s_z_0 = s_z + pair_Δ"]
+        E["DynamicModule<br/>(2 Evoformer blocks<br/>+ 4 recycles)"]
+        F["prediction_linear<br/>[B,L,L,128] → [B,L,L,out_dim]"]
+        G{"task_type?"}
+        H["classification:<br/>sigmoid + symmetrize"]
+        I["kinetics:<br/>softmax + symmetrize<br/>reshape [B,C,R,L,L,K]"]
+        J["regression:<br/>sigmoid symmetrize"]
+        K["Optional:<br/>confidence_head<br/>residual_head"]
+        A --> B & C
+        B & C --> D
+        D --> E --> F --> G
+        G --> H & I & J
+        H & I & J --> K
+    end
+```
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L57-L199)
+
+## DynamicModule — 带有循环的轻量级 Evoformer
+
+`DynamicModule` 在架构上与 ESMFold 的 `FoldingTrunk` 相同，但**省略了结构模块**，并且仅使用 2 个 `TriangularSelfAttentionBlock` 实例而非 48 个。每个块实现了完整的 AlphaFold2 风格的 Evoformer 更新：**三角乘法更新**（传入 + 传出）、**三角自注意力**（起始 + 终止节点）、**序列到成对**和**成对到序列**通信，以及序列和成对轨道上的**残基 MLP**。
+
+循环机制与 ESMFold 的镜像相同：在每次循环迭代中，上一次迭代的 `s_s` 和 `s_z` 被分离、层归一化，并作为偏置加到初始输入中。一个**循环 distogram 嵌入**（15 个 bin）也被加到 `s_z` 中，提供来自上一次迭代的几何反馈。除最后一次迭代外，所有循环迭代均禁用梯度，实现了“仅通过最后一次循环计算梯度”策略。
+
+| 参数 | DynamicModule (默认) | FoldingTrunk (ESMFold) |
+|---|---|---|
+| `num_blocks` | 2 | 48 |
+| `sequence_state_dim` | 1024 | 1024 |
+| `pairwise_state_dim` | 128 | 128 |
+| `sequence_head_width` | 32 | 32 |
+| `pairwise_head_width` | 32 | 32 |
+| `max_recycles` | 4 | 4 |
+| `position_bins` | 32 | 32 |
+| 结构模块 | ❌ 未包含 | ✅ 包含 |
+
+<CgxTip>`DynamicModule` 复用了 ESMFold 中完全相同的 `TriangularSelfAttentionBlock` 类——只有块数不同。这意味着所有三角注意力操作（来自 OpenFold）都是共享代码，确保了冻结主干网络和可训练扩展之间的架构一致性。</CgxTip>
+
+来源: [dynamic_module.py](/esm/esmdynamic/dynamic_module.py#L1-L123), [trunk.py](/esm/esmfold/v1/trunk.py#L80-L244), [tri_self_attn_block.py](/esm/esmfold/v1/tri_self_attn_block.py#L1-L100)
+
+## 天然接触分解
+
+当加载 `dynamic` 头时，`ESMDynamic.forward()` 会执行一个额外的后处理步骤：它将 ESMFold 预测的 PDB 转换为**天然接触图**（Cα 距离 < 8 Å，通过 MDTraj），然后计算两个衍生矩阵——**动态但非天然**接触和**天然但非动态**接触。这种分解直接识别了仅在升高温度下出现的接触（动态、非天然）与在静态结构中存在但非动态的接触（天然、非动态），这是该模型的核心科学输出。
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L330-L398), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L598-L636)
+
+## 推理模式
+
+ESMDynamic 通过 `predict_from_seqs()` 支持两种推理路径：
+
+| 模式 | 方法 | 内存策略 | 适用场景 |
+|---|---|---|---|
+| **标准** | `forward_from_seq()` | 完整模型在 GPU 上 | 默认；最快 |
+| **低内存** | `forward_from_seq_low_memory()` | 顺序执行头；头之间进行 CPU 卸载 | GPU VRAM < 16 GB |
+
+低内存模式在计算完冻结输出后将 ESMFold 移至 CPU，然后一次将一个 `DynamicHead` 加载到 GPU，在每个头完成后分离并卸载结果，并显式调用 `torch.cuda.empty_cache()`。这以约 3 倍的执行速度为代价，换取了大幅降低的峰值显存占用。
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L440-L530), [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L530-L598)
+
+## 权重加载架构
+
+预训练权重通过 `esm/esmdynamic/pretrained.py` 加载，该文件从 **Illinois Data Bank** (`https://databank.illinois.edu/datafiles/7odsk/download`) 下载 ESMDynamic 检查点。加载过程使用 `strict=False` 以允许部分匹配——这是必不可少的，因为冻结的 ESMFold 权重在构建时已嵌入模型中，检查点只需提供可训练的头参数。加载器在应用状态字典之前，会验证没有缺失任何关键（非 ESMFold、非 dummy）键。
+
+来源: [pretrained.py](/esm/esmdynamic/pretrained.py#L1-L36)
+
+## 项目目录结构
+
+```
+esm/
+├── esmdynamic/                    ← 核心 ESMDynamic 扩展
+│   ├── esmdynamic.py              ← ESMDynamic + DynamicHead 类
+│   ├── dynamic_module.py          ← 轻量级 Evoformer (DynamicModule)
+│   ├── pretrained.py              ← 从 Illinois Data Bank 加载权重
+│   ├── predict.py                 ← CLI 推理脚本 (run_esmdynamic)
+│   └── training/                  ← 训练框架
+│       ├── train.py               ← 训练循环 + 特定头优化器
+│       ├── loss.py                ← Focal loss, CE, MSE + 模块化封装
+│       └── data_reader.py         ← DynContactDataset + 加权采样器
+├── esmfold/v1/                    ← 冻结的 ESMFold 主干网络
+│   ├── esmfold.py                 ← ESMFold 模型类
+│   ├── trunk.py                   ← FoldingTrunk (48 块 Evoformer)
+│   └── tri_self_attn_block.py     ← TriangularSelfAttentionBlock
+├── model/                         ← ESM-1, ESM-2, MSA Transformer
+└── inverse_folding/               ← ESM-IF (逆折叠工具)
+
+examples/esmdynamic/               ← 示例 FASTA/CSV + Colab notebook
+scripts/                           ← 权重下载 + 解压工具
+tests/                             ← 单元测试
+```
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L1-L50), [dynamic_module.py](/esm/esmdynamic/dynamic_module.py#L1-L123)
+
+## 设计原理总结
+
+ESMDynamic 的架构体现了一种深思熟虑的**冻结并扩展**策略。通过保持 ESMFold 完全冻结，该模型保留了 ESMFold 在数百万蛋白质上训练期间学习到的强大的序列-结构表示，而轻量级的 `DynamicModule`（2 个块对 48 个块）仅增加了预测动态特性所需的容量。每个头都有自己具有独立配置的 `DynamicModule` 实例，允许特定任务的深度和循环次数。**多温度输出** (`n_conditions=5`) 被嵌入到线性投影中，而不需要单独的前向传播，使得设计兼具参数高效性和推理高效性。可选的**置信度**和**残差**头无需外部后处理即可提供校准的不确定性估计。
+
+<CgxTip>冻结并扩展的设计意味着训练仅更新约 2% 的总参数（DynamicHead 权重）。这防止了对 ESMFold 结构知识的灾难性遗忘，并允许在相对较小的动态接触数据集（mdCATH，约 4K 个蛋白质）上进行训练，而不会对主干网络过拟合。</CgxTip>
+
+来源: [esmdynamic.py](/esm/esmdynamic/esmdynamic.py#L218-L300), [train.py](/esm/esmdynamic/training/train.py#L1-L200)
+
+## 下一步
+
+既然你已经了解了架构全貌，可以深入研究各组件的专属页面：
+
+1. **[ESMDynamic 模型类](5-esmdynamic-model-class)** — `ESMDynamic` 和 `DynamicHead` 的详细 API 参考，包括构造函数参数、前向传播签名和输出字典键。
+2. **[DynamicModule 和 Evoformer 循环](6-dynamicmodule-and-evoformer-recycling)** — 轻量级 Evoformer、循环循环和 `TriangularSelfAttentionBlock` 组合的内部机制。
+3. **[多头预测设计](7-multi-head-prediction-design)** — 分类、动力学和回归头在输出整形、对称化和可选子头方面的差异。
+4. **[预训练模型与权重加载](12-pretrained-model-and-weight-loading)** — 逐步的权重解析、部分加载和 Illinois Data Bank 集成。
+5. **[低内存推理模式](13-low-memory-inference-mode)** — 针对内存受限环境的 GPU/CPU 编排策略。
+
+---
+
+- [深入探究/预训练模型与权重加载](https://zread.ai/ShuklaGroup/esmdynamic/12-pretrained-model-and-weight-loading)
+
+---
+slug:12-pretrained-model-and-weight-loading
+blog_type:normal
+---
+
+
+ESMDynamic项目实现了一个**双层预训练权重加载系统**——基础层继承自Meta的ESM框架，负责处理ESM-1/2/MSA/IF/Fold模型；ESMDynamic专用层则负责协调从Illinois Data Bank加载经过微调的动态接触预测模型。理解这一层级结构对于正确初始化模型、排查权重不匹配问题以及使用自定义检查点扩展框架至关重要。
+
+## 加载架构概述
+
+本仓库的权重加载遵循**委派链**模式：`esm.pretrained`中的顶层入口点将任务分派给特定模型的加载器，每个加载器负责解析权重来源（远程URL或本地文件）、实例化模型架构、验证状态字典，并以受控的严格度加载参数。
+
+```mermaid
+flowchart TD
+    A["esm.pretrained.esmdynamic()"] --> B["esm.esmdynamic.pretrained.esmdynamic()"]
+    B --> C["_load_model(model_name)"]
+    C --> D{model_name ends with .pt?}
+    D -->|Yes| E["torch.load() — local file"]
+    D -->|No| F["torch.hub.load_state_dict_from_url() — Illinois Data Bank"]
+    E --> G["Instantiate ESMDynamic()"]
+    F --> G
+    G --> H["Validate state dict keys"]
+    H --> I["model.load_state_dict(strict=False)"]
+    I --> J["Return model"]
+
+    K["ESMDynamic.__init__()"] --> L["esm.pretrained.esmfold_v1()"]
+    L --> M["esm.esmfold.v1.pretrained._load_model()"]
+    M --> N{model_name ends with .pt?}
+    N -->|Yes| O["torch.load() — local file"]
+    N -->|No| P["torch.hub.load_state_dict_from_url() — fair-esm URL"]
+    O --> Q["Instantiate ESMFold(cfg)"]
+    P --> Q
+    Q --> R["Validate state dict keys"]
+    R --> S["model.load_state_dict(strict=False)"]
+    S --> T["Return model (frozen)"]
+```
+
+当你调用`esm.pretrained.esmdynamic()`时，会顺序执行两次独立的权重下载：首先是从Illinois Data Bank下载ESMDynamic检查点，然后（在`ESMDynamic.__init__`期间）从Facebook的CDN下载ESMFold v1检查点。这意味着**首次加载时需要网络连接**，不过PyTorch Hub会在`torch.hub.get_dir()/checkpoints/`目录下本地缓存文件，以供后续使用。
+
+来源：[pretrained.py](esm/pretrained.py#L423-L428), [pretrained.py](esm/esmdynamic/pretrained.py#L1-L36), [pretrained.py](esm/esmfold/v1/pretrained.py#L1-L55)
+
+## ESMDynamic预训练加载器
+
+位于`esm/esmdynamic/pretrained.py`的ESMDynamic专用加载器设计得极其精简——它仅执行四项操作：来源解析、模型实例化、键验证和状态字典加载。
+
+**来源解析**会检查`model_name`字符串是否以`.pt`结尾。如果是，则将该字符串视为本地文件路径并直接调用`torch.load()`；否则，使用`torch.hub.load_state_dict_from_url()`（设置`progress=True`且`map_location="cpu"`）从固定URL `https://databank.illinois.edu/datafiles/7odsk/download` 所在的Illinois Data Bank仓库中获取。下载的文件以`{model_name}.pt`名称缓存，从而避免重复运行时重新下载。
+
+来源：[pretrained.py](esm/esmdynamic/pretrained.py#L6-L29)
+
+### 键验证逻辑
+
+ESMDynamic加载器在调用`load_state_dict`之前会执行**选择性键验证**。它会将新实例化模型所需的键与检查点中找到的键进行比对，但会**容忍缺失的**以`"esmfold."`或`"dummy"`为前缀的键。这一设计反映了ESMDynamic包含一个冻结的ESMFold子模块（其权重单独加载，见下文）以及一个注册的dummy缓冲区的架构事实：
+
+```python
+missing_essential_keys = []
+for missing_key in expected_keys - found_keys:
+    if not (missing_key.startswith("esmfold.") or missing_key.startswith("dummy")):
+        missing_essential_keys.append(missing_key)
+
+if missing_essential_keys:
+    raise RuntimeError(f"Keys '{', '.join(missing_essential_keys)}' are missing.")
+
+model.load_state_dict(model_data, strict=False)
+```
+
+任何**未**以`"esmfold."`或`"dummy"`为前缀的缺失键都将被视为致命错误——这能在早期捕获损坏或不兼容的检查点。随后的`strict=False`加载会静默跳过已验证过的缺失键，并允许检查点中存在额外的键（向前兼容）。
+
+<CgxTip>ESMDynamic检查点**不**包含ESMFold权重。ESMFold子模块在`ESMDynamic.__init__()`内部独立初始化和加载。这种分离使得ESMDynamic检查点更加紧凑，但也意味着首次使用时会发生两次网络获取。</CgxTip>
+
+来源：[pretrained.py](esm/esmdynamic/pretrained.py#L16-L28)
+
+### `esmdynamic()`公共API
+
+该模块暴露了一个单一的公共函数：
+
+```python
+from esm.esmdynamic.pretrained import esmdynamic
+model = esmdynamic()  # 返回加载了预训练权重的ESMDynamic
+```
+
+该函数委派给`_load_model("esmdynamic")`，后者负责获取名为`"esmdynamic.pt"`的检查点。同一函数通过顶层`esm.pretrained`模块重新导出，以实现统一访问：
+
+```python
+import esm
+model = esm.pretrained.esmdynamic()  # 等效入口点
+```
+
+来源：[pretrained.py](esm/esmdynamic/pretrained.py#L32-L36), [pretrained.py](esm/pretrained.py#L423-L428)
+
+## ESMDynamic中的ESMFold权重加载
+
+当构造`ESMDynamic`实例时设置`load_esmfold=True`（默认值），其内部会调用`esm.pretrained.esmfold_v1()`以获取一个完全加载的ESMFold模型，随后立即将其冻结：
+
+```python
+if self.load_esmfold:
+    self.esmfold = esm.pretrained.esmfold_v1()
+    self.esmfold.requires_grad_(False)
+```
+
+ESMFold加载器遵循与ESMDynamic加载器相同的模式——在本地解析`.pt`路径，或远程从`https://dl.fbaipublicfiles.com/fair-esm/models/{model_name}.pt`获取。其键验证容忍以`"esm."`为前缀的缺失键（即内部ESM-2语言模型，其权重以不同的命名嵌入在ESMFold检查点中）：
+
+| 方面 | ESMDynamic加载器 | ESMFold加载器 |
+|---|---|---|
+| **远程URL** | `https://databank.illinois.edu/datafiles/7odsk/download` | `https://dl.fbaipublicfiles.com/fair-esm/models/{name}.pt` |
+| **默认模型名称** | `"esmdynamic"` | `"esmfold_3B_v1"` |
+| **容忍的缺失键前缀** | `"esmfold."`, `"dummy"` | `"esm."` |
+| **进度条** | `True` | `False` |
+| **返回值** | `ESMDynamic`模型 | `ESMFold`模型 |
+
+来源：[esmdynamic.py](esm/esmdynamic/esmdynamic.py#L236-L239), [pretrained.py](esm/esmfold/v1/pretrained.py#L8-L33)
+
+## 基础ESM预训练加载 (ESM-1, ESM-2, MSA, IF)
+
+基础`esm/pretrained.py`模块提供了传统的ESM模型加载基础设施。其核心调度函数`load_model_and_alphabet()`会根据名称是否以`.pt`结尾，路由至`load_model_and6_alphabet_local()`或`load_model_and_alphabet_hub()`。
+
+### Hub与本地加载
+
+**Hub加载**从`https://dl.fbaipublicfiles.com/fair-esm/models/{model_name}.pt`下载模型权重，并可选择从`https://dl.fbaipublicfiles.com/fair-esm/regression/{model_name}-contact-regression.pt`下载回归接触权重。`load_hub_workaround()`函数处理两种失败模式：由PyTorch版本不兼容引起的`RuntimeError`（回退到直接从Hub缓存执行`torch.load`），以及由模型名称错误引起的`HTTPError`。
+
+**本地加载**通过`torch.load()`直接读取`.pt`文件，并通过在同一路径主干后附加`-contact-regression.pt`来并置回归权重。
+
+来源：[pretrained.py](esm/pretrained.py#L24-L77)
+
+### 特定架构的状态字典升级
+
+`load_model_and_alphabet_core()`函数根据模型名称前缀分派给两个版本化加载器之一：
+
+| 前缀 | 加载器 | 模型 |
+|---|---|3|
+| `"esm2"` | `_load_model_and_alphabet_core_v2` | ESM-2系列（8M至15B） |
+| 所有其他 | `_load_model_and_alphabet_core_v1` | ESM-1B, ESM-1v, MSA Transformer, ESM-IF |
+
+**v1加载器**通过剥离检查点前缀命名空间（`encoder_`、`encoder.`、`sentence_encoder.`、`decoder_`、`decoder.`）并应用特定架构的名称重映射，来处理四种架构类型。对于逆折叠模型（`invariant_gvp`），`update_name()`函数将内部代码名映射到开源名（例如，`W_v` → `embed_graph.embed_node`）。
+
+**v2加载器**使用基于正则表达式的`upgrade_state_dict()`，该函数移除`encoder.sentence_encoder.`和`encoder.`前缀，然后直接从检查点的`cfg["model"]`超参数构造一个`ESM2`实例。
+
+构造完成后，两个加载器都会执行**严格键审计**：比对期望键与找到的键，当回归数据缺失时，仅允许`contact_head.regression.weight`和`contact_head.regression.bias`作为预期的缺失键，对于任何其他差异则抛出`RuntimeError`。
+
+来源：[pretrained.py](esm/pretrained.py#L85-L221)
+
+## 可用预训练模型
+
+下表列出了通过`esm.pretrained`暴露并在`hubconf.py`中注册以兼容PyTorch Hub的所有预训练模型访问器：
+
+| 访问器 | 系列 | 参数量 | 训练数据 | 返回值 |
+|---|---|---|---|---|
+| `esm1_t6_43M_UR50S` | ESM-1 | 43M | UniRef50 Sparse | `(Model, Alphabet)` |
+| `esm1_t12_85M_UR50S` | ESM-1 | 85M | UniRef50 Sparse | `(Model, Alphabet)` |
+| `esm1_t34_670M_UR50S` | ESM-1 | 670M | UniRef50 Sparse | `(Model, Alphabet)` |
+| `esm1_t34_670M_UR50D` | ESM-1 | 670M | UniRef50 Dense | `(Model, Alphabet)` |
+| `esm1_t34_670M_UR100` | ESM-1 | 670M | UniRef100 | `(Model, Alphabet)` |
+| `esm1b_t33_650M_UR50S` | ESM-1b | 650M | UniRef50 Sparse | `(Model, Alphabet)` |
+| `esm1v_t33_650M_UR90S_{1–5}` | ESM-1v | 650M | UniRef90 (集成) | `(Model, Alphabet)` |
+| `esm_msa1b_t12_100M_UR50S` | ESM-MSA | 100M | UniRef50 Sparse | `(Model, Alphabet)` |
+| `esm2_t6_8M_UR50D` | ESM-2 | 8M | UniRef50 Dense | `(Model, Alphabet)` |
+| `esm2_t12_35M_UR50D` | ESM-2 | 35M | UniRef50 Dense | `(Model, Alphabet)` |
+| `esm2_t30_150M_UR50D` | ESM-2 | 150M | UniRef50 Dense | `(Model, Alphabet)` |
+| `esm2_t33_650M_UR50D` | ESM-2 | 650M | UniRef50 Dense | `(Model, Alphabet)` |
+| `esm2_t36_3B_UR50D` | ESM-2 | 3B | UniRef50 Dense | `(Model, Alphabet)` |
+| `esm2_t48_15B_UR50D` | ESM-2 | 15B | UniRef50 Dense | `(Model, Alphabet)` |
+| `esmfold_v0` | ESMFold | 3B | PDB (≤2020-05) | `ESMFold` |
+| `esmfold_v1` | ESMFold | 3B | PDB (扩展) | `ESMFold` |
+| `esm_if1_gvp4_t16_142M_UR50` | ESM-IF | 142M | CATH + AF2 | `(Model, Alphabet)` |
+| **`esmdynamic`** | **ESMDynamic** | **3B+heads** | **MD轨迹** | **`ESMDynamic`** |
+
+注意返回类型的差异：ESM-1/2/MSA/IF模型返回一个`(model, alphabet)`元组，而ESMFold和ESMDynamic直接返回模型对象（字母表内嵌在模型中）。
+
+来源：[pretrained.py](esm/pretrained.py#L224-L428), [hubconf.py](hubconf.py#L8-L32)
+
+## PyTorch Hub集成
+
+`hubconf.py`文件为PyTorch Hub注册了所有模型加载器，从而支持通过以下方式加载：
+
+```python
+model, alphabet = torch.hub.load("ShuklaGroup/esmdynamic", "esm2_t33_650M_UR50D")
+```
+
+`dependencies = ["torch"]`声明确保了PyTorch在导入前可用。所有ESM-1/2/MSA/IF/Fold函数均从`esm.pretrained`导入，而`esmdynamic`函数可通过同一模块访问。请注意，ESMDynamic函数**未**列在`hubconf.py`的显式导入中——在模块加载后，仍可通过`esm.pretrained.esmdynamic`访问它。
+
+来源：[hubconf.py](hubconf.py#L1-L33)
+
+## 从本地检查点加载
+
+ESMDynamic和ESMFold加载器均支持通过传入文件路径而非模型名称，从本地`.pt`文件加载：
+
+```python
+# 从本地检查点加载ESMDynamic
+from esm.esmdynamic.pretrained import _load_model
+model = _load_model("/path/to/my_esmdynamic.pt")
+
+# 从本地检查点加载ESMFold（由ESMDynamic内部使用）
+from esm.esmfold.v1.pretrained import _load_model
+fold_model = _load_model("/path/to/esmfold_3B_v1.pt")
+
+# 从本地检查点加载基础ESM模型
+import esm
+model, alphabet = esm.pretrained.load_model_and_alphabet("/path/to/esm2_t33_650M_UR50D.pt")
+```
+
+对于基础ESM模型，本地加载还会在同一目录中搜索并置的回归权重文件（`{stem}-contact-regression.pt`）。如果回归文件缺失，将发出警告，提示接触预测将无法产生正确结果。
+
+来源：[pretrained.py](esm/esmdynamic/pretrained.py#L7-L9), [pretrained.py](esm/esmfold/v1/pretrained.py#L9-L11), [pretrained.py](esm/pretrained.py#L67-L77)
+
+## 批量权重下载脚本
+
+`scripts/download_weights.sh` shell脚本提供了一种**离线优先**的工作流，用于预下载所有基础ESM模型权重。它需要`aria2c`以支持并行下载，并会解析README.md表格以提取模型URL，然后使用每个文件10个并行连接下载模型和回归权重。重新运行该脚本可恢复未完成的下载（通过`.aria2`控制文件检测）。
+
+```bash
+# 将所有权重下载到默认目录（当前工作目录）
+bash scripts/download_weights.sh
+
+# 下载到指定目录
+bash scripts/download_weights.sh /path/to/weights/
+```
+
+<CgxTip>此脚本仅从`dl.fbaipublicfiles.com`下载基础ESM模型权重。来自Illinois Data Bank的ESMDynamic权重**未**包含在内，必须通过Python API或手动下载`https://databank.illinois.edu/datafiles/7odsk/download`单独获取。</CgxTip>
+
+来源：[download_weights.sh](scripts/download_weights.sh#L1-L60)
+
+## 状态字典加载严格度比较
+
+这三个加载子系统在检查点与模型架构之间强制键匹配的严格程度上有所不同：
+
+```mermaid
+flowchart LR
+    subgraph "Base ESM (esm/pretrained.py)"
+        A1["strict=regression_data is not None"] --> A2["Full key audit with allowed missing set"]
+    end
+    subgraph "ESMFold (esmfold/v1/pretrained.py)"
+        B1["strict=False"] --> B2["Allow missing esm.* keys, raise on others"]
+    end
+    subgraph "ESMDynamic (esmdynamic/pretrained.py)"
+        C1["strict=False"] --> C2["Allow missing esmfold.* + dummy* keys, raise on others"]
+    end
+```
+
+| 加载器 | `strict`标志 | 显式验证 | 允许的缺失前缀 | 遇到未知额外键时抛出异常？ |
+|---|---|---|---|---|
+| 基础ESM | 若有回归数据为`True`，否则为`False` | 使用`expected_missing`集合进行完整审计 | `contact_head.regression.{weight,bias}` | 是（当存在回归数据时） |
+| ESMFold | `False` | 前缀过滤检查 | `esm.*` | 否 |
+| ESMDynamic | `False` | 前缀过滤检查 | `esmfold.*`, `dummy*` | 否 |
+
+基础ESM加载器最为严格——它执行详尽的键审计，并在存在回归权重时遇到任何意外键时抛出异常。ESMFold和ESMDynamic加载器则采用更宽松的方法：它们验证所有必需的键是否存在（排除已知的可选前缀），然后使用`strict=False`加载，以允许带有额外键的向前兼容检查点。
+
+来源：[pretrained.py](esm/pretrained.py#L186-L221), [pretrained.py](esm/esmfold/v1/pretrained.py#L20-L31), [pretrained.py](esm/esmdynamic/pretrained.py#L16-L28)
+
+## 加载头与选择性权重加载
+
+在构造`ESMDynamic`模型时，`heads_to_load`参数控制实例化哪些预测头——进而决定检查点中必须存在哪些头的权重。三个默认头为`"dynamic"`、`"kinetic"`和`"frequency"`：
+
+```python
+# 仅加载动态接触头（内存占用更小）
+model = esm.pretrained.esmdynamic(heads_to_load=["dynamic"])
+
+# 加载动态和动力学头
+model = esm.pretrained.esmdynamic(heads_to_load=["dynamic", "kinetic"])
+
+# 加载所有头（默认）
+model = esm.pretrained.esmdynamic()
+```
+
+当指定`heads_to_load`时，仅使用`default_head_definitions`中匹配的子集来构建`self.heads`（一个`nn.ModuleDict`）。这意味着从检查点加载的状态字典将包含所有头的键，但`strict=False`加载会静默忽略未实例化头的额外键。这提供了一种无需修改检查点即可减少GPU内存占用的便捷方法。
+
+来源：[esmdynamic.py](esm/esmdynamic/esmdynamic.py#L252-L325)
+
+## 权重加载故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| 模型下载时出现`HTTPError` | 模型名称错误或网络问题 | 对照上表验证模型名称；检查网络连接 |
+| `RuntimeError: Keys '...' are missing` | 检查点架构不匹配 | 确保检查点与模型版本匹配；检查`esmfold.`/`dummy`/`esm.`前缀过滤 |
+| 来自`load_hub_workaround`的`RuntimeError` | PyTorch版本不兼容 | 升级PyTorch，或`load_hub_workaround`中的回退路径应自动处理此问题 |
+| 回归权重警告 | 缺少`-contact-regression.pt`文件 | 对于本地加载，将回归文件与模型`.pt`文件并置；Hub加载会自动获取 |
+| `esm2_t48_15B_UR50D`上出现`OOM` | 15B模型超出GPU内存 | 使用带ZeRO CPU卸载的FSDP（参见README），或使用[低内存推理模式](13-low-memory-inference-mode) |
+| 首次加载缓慢 | 两次顺序网络下载 | 预下载权重；ESMDynamic检查点大小与ESMFold 3B相当 |
+
+来源：[pretrained.py](esm/pretrained.py#L31-L43), [pretrained.py](esm/pretrained.py#L214-L217)
+
+## 下一步
+
+现在你已经了解了预训练权重是如何解析、验证和加载的，接下来可以探索如何高效运行推理：
+
+- **[低内存推理模式](13-low-memory-inference-mode)** —— 了解`forward_from_seq_low_memory()`如何在ESMFold和头计算之间卸载模块，以适配显存受限的GPU。
+- **[批量预测脚本](10-bulk-prediction-script)** —— 查看封装了加载和预测流水线并支持批处理与多格式输出的生产就绪型CLI。
+- **[ESMDynamic模型类](5-esmdynamic-model-class)** —— 深入了解接收这些预训练权重的模型架构。
+
+---
+
+- [深入探究/低内存推理模式](https://zread.ai/ShuklaGroup/esmdynamic/13-low-memory-inference-mode)
+
+---
+slug:13-low-memory-inference-mode
+blog_type:normal
+---
+
+
+ESMDynamic 的低内存推理模式是一种**即时模块卸载**策略，该策略通过避免将完整模型同时保留在设备上来降低 GPU 峰值内存。低内存路径不再将 ESMFold 和所有 DynamicHeads 同时加载到 GPU 上，而是仅在需要某个子模块时才将其移至设备，随后立即将其卸载回 CPU——从而为下一阶段释放显存（VRAM）。这使得在原本会因内存不足而失败的 GPU 上进行推理成为可能，其代价是每个序列增加了额外的 CPU↔GPU 传输开销。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L458-L546), [predict.py](esm/esmdynamic/predict.py#L70-L73)
+
+## 工作原理：逐模块卸载
+
+核心实现位于 `ESMDynamic.forward_from_seq_low_memory()` 中。当检测到 CUDA 设备时，该方法将执行以下序列：(1) **将整个模型逐出至 CPU**，并调用 `torch.cuda.empty_cache()` 回收显存；(2) **仅将 ESMFold 移至 GPU**，运行结构前向传播，然后将主干网络输出分离并移至 CPU；(3) **将 ESMFold 卸载回 CPU**，删除 GPU 端的主干网络输出，并再次清空缓存；(4) **遍历每个 DynamicHead**，每次将一个头部连同缓存在 CPU 的主干网络输出一起移至 GPU，运行该头部的前向传播，将结果分离并移至 CPU，然后卸载该头部并清空缓存；(5) 最后，将整个模型移回 GPU 以备下次调用。这确保了 ESMFold 与任何 DynamicHead 在任何时刻都不会同时占用 GPU 内存。
+
+```mermaid
+flowchart TD
+    A["Start: Model on GPU"] --> B["Evict entire model to CPU"]
+    B --> C["torch.cuda.empty_cache()"]
+    C --> D["Move ESMFold → GPU"]
+    D --> E["Compute trunk output"]
+    E --> F["Detach trunk → CPU"]
+    F --> G["Offload ESMFold → CPU"]
+    G --> H["del trunk_out + empty_cache()"]
+    H --> I{{"For each DynamicHead"}}
+    I --> J["Move head → GPU"]
+    J --> K["Move trunk_detached → GPU"]
+    K --> L["Run head forward pass"]
+    L --> M["Detach head_out → CPU"]
+    M --> N["Offload head → CPU"]
+    N --> O["del trunk_device, head_out + empty_cache()"]
+    O --> I
+    I --> P["Move model back to GPU"]
+    P --> Q["Return combined_outputs"]
+```
+
+上图追踪了在一次 `forward_from_seq_low_memory` 调用过程中每个子模块的精确生命周期。关键的约束条件是，GPU 绝不会同时持有 ESMFold 权重与任何 DynamicHead 权重——其峰值内存受限于 `max(sizeof(ESMFold), sizeof(largest_head)) + sizeof(input_tensors)`，而非 `sizeof(full_model)`。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L458-L546)
+
+## API 接口：`low_memory` 参数
+
+低内存路径通过公共的 `predict_from_seqs()` 方法暴露，该方法作为规范的推理入口。当 `low_memory=True` 时，它会委托给 `forward_from_seq_low_memory()`；否则，它将调用标准的 `forward_from_seq()`，后者会将整个模型常驻于 GPU。
+
+| 参数 | 类型 | 默认值 | 描述 |
+|-----------|------|---------|-------------|
+| `low_memory` | `bool` | `None` | 启用即时模块卸载。以 CPU↔GPU 传输延迟为代价换取 GPU 内存节省。 |
+| `sequences` | `Union[str, List[str]]` | 必需 | 待预测的一个或多个氨基酸序列。 |
+| `num_recycles` | `Optional[int]` | `None` | 覆盖循环迭代次数（默认：训练时的最大循环次数）。 |
+| `residue_index_offset` | `int` | `512` | 多聚体预测中链之间的残基索引间隔。 |
+| `chain_linker` | `str` | `"G" * 25` | 多聚体输入中链之间的连接序列。 |
+
+**编程式用法：**
+
+```python
+from esm.pretrained import esmdynamic
+
+model = esmdynamic()
+model = model.to("cuda")
+model.eval()
+
+# 标准推理 — 完整模型位于 GPU
+result = model.predict_from_seqs(["MKTVRQERLKSI"], low_memory=False)
+
+# 低内存推理 — 逐模块卸载
+result = model.predict_from_seqs(["MKTVRQERLKSI"], low_memory=True)
+```
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L548-L595)
+
+## CLI 激活
+
+批量预测脚本 `esm.esmdynamic.predict` 将 `--low_memory` 标志作为与其他推理选项兼容的参数暴露。设置该标志后，它会在每个批次中向 `model.predict_from_seqs()` 传入 `low_memory=True`。
+
+```bash
+# 标准推理
+python -m esm.esmdynamic.predict --fasta proteins.fasta --output_dir results/
+
+# 低内存推理
+python -m esm.esmdynamic.predict --fasta proteins.fasta --output_dir results/ --low_memory
+```
+
+| CLI 标志 | 类型 | 默认值 | 作用 |
+|----------|------|---------|--------|
+| `--low_memory` | `store_true` | `False` | 通过 `forward_from_seq_low_memory` 激活即时模块卸载。 |
+| `--chunk_size` | `int` | `256` | 控制注意力分块粒度（无论是否启用 `--low_memory` 均有效）。 |
+| `--device` | `cpu\|cuda` | `cuda` | 目标设备；低内存模式仅在 `cuda` 时有效。 |
+| `--batch_size` | `int` | `1` | 每批序列数；低内存模式在 `batch_size=1` 时效果最佳。 |
+
+来源: [predict.py](esm/esmdynamic/predict.py#L49-L73), [predict.py](esm/esmdynamic/predict.py#L616-L658)
+
+## 互补策略：分块大小控制
+
+除了模块卸载之外，ESMDynamic 还通过 `set_chunk_size()` 支持**注意力分块**，该策略通过将大型注意力操作拆分为更小的块，降低了每个子模块前向传播内的峰值内存。这与低内存模式是正交的——这两种策略可组合且能同时使用。
+
+分块大小通过两个层级传播：(1) `ESMDynamic.set_chunk_size()` 为 ESMFold 主干网络委托给 `self.esmfold.set_chunk_size()`；(2) 遍历每个 `DynamicHead.dynamic_module`，为其内部的 Evoformer 风格块调用其 `set_chunk_size()`。在内部，`DynamicModule` 在前向传播期间将 `chunk_size` 传递给每个 `TriangularSelfAttentionBlock`，后者将三角形乘法更新拆分为按分块大小的切片。
+
+```python
+model = esmdynamic()
+model.set_chunk_size(64)   # 更小的分块 → 每次注意力操作的峰值显存更低
+model = model.to("cuda")
+
+# 将分块与低内存卸载结合以实现最大程度的内存节省
+result = model.predict_from_seqs(["MKTVRQERLKSI"], low_memory=True)
+```
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L327-L332), [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L74-L75), [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L98-L103)
+
+## 内存预算对比
+
+下表总结了在典型推理工作负载下，每种策略的大致 GPU 内存预算。精确数值取决于序列长度、加载的头部数量以及硬件。
+
+| 策略 | GPU 峰值内存 | 推理速度 | 适用场景 |
+|----------|----------------|-----------------|----------|
+| **标准** | `sizeof(ESMFold) + sizeof(all heads) + activations` | 最快（无传输） | 显存 ≥16 GB 的 GPU，短至中等长度序列 |
+| **低内存卸载** | `max(sizeof(ESMFold), sizeof(head)) + activations` | 较慢（每阶段均有 CPU↔GPU 传输） | 显存 8–12 GB 的 GPU，任意序列长度 |
+| **缩减分块大小** | `sizeof(model) + reduced_activations` | 适中变慢（分块注意力） | 在注意力计算期间导致 OOM 的长序列 |
+| **卸载 + 分块** | `max(sizeof(ESMFold), sizeof(head)) + reduced_activations` | 最慢（两种开销并存） | 极小显存 GPU，长序列 |
+
+<CgxTip>最常见的失败模式是在 ESMFold 的语言模型前向传播（fp16 下的 ESM-2 3B 参数）期间发生 OOM。如果单独使用 `--low_memory` 仍不够，请将其与 `--chunk_size 64` 及 `--batch_size 1` 结合使用。对于 15B 参数的 ESM-2 变体，请改用 `examples/esm2_infer_fairscale_fsdp_cpu_offloading.py` 中文档化的 FSDP CPU 卸载方案。</CgxTip>
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L503-L517), [esm2_infer_fairscale_fsdp_cpu_offloading.py](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L16-L21)
+
+## 面向 ESM-2 15B 的 FSDP CPU 卸载
+
+对于 ESM-2 15B 参数模型（ESMFold 在内部将其嵌入为语言模型主干），本仓库提供了一个基于 FairScale FSDP 的示例，该示例跨设备分片模型参数并将其卸载至 CPU。这是一种与 ESMDynamic 内置低内存模式**独立且互补的技术**——它运作在参数分片层级而非模块层级。
+
+示例中使用的 FSDP 配置：
+
+| FSDP 参数 | 值 | 目的 |
+|----------------|-------|---------|
+| `mixed_precision` | `True` | 以 fp16 运行计算以节省内存 |
+| `cpu_offload` | `True` | 在不使用时将参数卸载至 CPU |
+| `state_dict_device` | `cpu` | 将状态字典保留在 CPU 上以减少 GPU 内存 |
+| `flatten_parameters` | `True` | 展平参数分片以提升效率 |
+
+此方法将每个 ESM-2 层单独封装在 FSDP 中，从而实现细粒度的参数卸载。这主要在使用原始 ESM-2 模型提取嵌入，或者 ESMFold 内部的 ESM-2 主干超出可用显存时适用。
+
+来源: [esm2_infer_fairscale_fsdp_cpu_offloading.py](examples/esm2_infer_fairscale_fsdp_cpu_offloading.py#L1-L52)
+
+## 实现细节：输出分离与清理
+
+低内存路径中一个微妙但重要的方面是其激进的**张量分离与删除**策略。在每个子模块前向传播之后，所有输出张量都会被 `.detach().cpu()`——这会断开计算图（阻止梯度累积）并确保不会残留任何 GPU 端引用。中间的 GPU 张量（`trunk_out`、`trunk_device`、`head_out`）会在调用 `torch.cuda.empty_cache()` 之前被显式 `del`，这迫使 PyTorch 将内存释放回 CUDA 分配器，而不是将其保留在缓存分配器的池中。这一序列——分离 → 移至 CPU → 删除 → empty_cache——在每个阶段边界处重复，对于实现预期的内存缩减至关重要。
+
+<CgxTip>请勿在同样封装了 `torch.cuda.empty_cache()` 的 `torch.no_grad()` 上下文内部调用 `forward_from_seq_low_memory()`。清空缓存的调用必须在任何梯度追踪作用域之外急切执行才能生效。该方法被设计为通过 `predict_from_seqs()` 调用，后者已在外层应用了 `@torch.no_grad()`。</CgxTip>
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L511-L542)
+
+## 约束与权衡
+
+低内存模式带有几个将其与标准推理路径区分开来的刻意约束：
+
+- **无梯度计算** — `forward_from_seq_low_memory()` 明确指出其“无法在训练期间使用”。所有输出均被分离，断开了任何自动求导图。如需训练，请参阅[训练流程与数据加载](8-training-pipeline-and-data-loading)。
+- **CPU↔GPU 传输开销** — 每个序列都会产生与 `sizeof(ESMFold weights) + Σ(sizeof(head_i weights))` 成正比的传输延迟。对于在许多短序列上进行的批量推理，此开销可能十分显著；请考虑使用缩减批大小的标准模式是否会更快。
+- **串行头部执行** — 各头部被逐一处理。在标准模式下，所有头部共享相同的设备端主干网络输出，拷贝开销为零；而在低内存模式下，主干网络输出需为每个头部重新传输至 GPU。
+- **原生接触计算** — 在所有头部完成后，模型会被恢复至 GPU，以执行 PDB 生成与原生接触计算步骤。这意味着 ESMFold 的 `output_to_pdb` 调用仍然需要充足的 GPU 内存来存放结构张量。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L458-L470), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L360-L411)
+
+## 相关页面
+
+- [ESMDynamic 模型类](5-esmdynamic-model-class) — `ESMDynamic` 类的完整 API 参考，包括标准推理。
+- [DynamicModule 与 Evoformer 循环](6-dynamicmodule-and-evoformer-recycling) — `chunk_size` 如何控制 DynamicModule 内部的注意力切片。
+- [批量预测脚本](10-bulk-prediction-script) — `predict.py` 的完整 CLI 参考，包含所有输出格式选项。
+- [预训练模型与权重加载](12-pretrained-model-and-weight-loading) — 模型初始化与权重下载机制。
+
+---
+
+- [深入探究/逆折叠与 ESM-IF](https://zread.ai/ShuklaGroup/esmdynamic/14-inverse-folding-and-esm-if)
+
+---
+slug:14-inverse-folding-and-esm-if
+blog_type:normal
+---
+
+
+**ESM-IF1 逆折叠模型**解决了蛋白质逆折叠问题：从 3D 骨架原子坐标预测氨基酸序列。ESM-IF1 在由 AlphaFold2 预测的 1200 万个蛋白质结构上进行训练，在结构留出的骨架上实现了 **51% 的天然序列恢复率**，对于埋藏残基的恢复率更是提升至 **72%**。该模型结合了通过几何向量感知器（GVP）进行的不变几何输入处理与序列到序列的 Transformer，并采用跨度掩码进行训练，以容忍部分掩码的骨架坐标。本页涵盖了单链和多链蛋白质复合物的完整架构、模块交互以及编程 API。
+
+来源: [README.md](examples/inverse_folding/README.md#L1-L15), [gvp_transformer.py](esm/inverse_folding/gvp_transformer.py#L19-L29)
+
+## 架构概述
+
+ESM-IF1 遵循**两阶段编码器-解码器**范式。编码器首先通过 GVP-GNN 将原始骨架坐标转换为旋转不变的结构表示，随后经过 Transformer 编码器层。解码器接着自回归地逐个生成序列词元，并在每一步关注编码器的输出。根据构造，整个流水线是**旋转等变的**——来自 GVP 的向量特征被旋转到由 N-CA-C 原子定义的局部坐标系中，确保预测结果对输入结构的全局方向保持不变。
+
+```mermaid
+graph TB
+    subgraph Input
+        COORDS["Backbone Coords<br/>(N, CA, C)"]
+        CONF["Confidence Scores"]
+    end
+
+    subgraph Encoder["GVPTransformerEncoder"]
+        FEAT["GVPInputFeaturizer<br/>Dihedrals + Orientations + Distances"]
+        GVPENC["GVPEncoder<br/>(GVPConvLayer × N)"]
+        ROT["Local Rotation Frame<br/>(Rotation Invariance)"]
+        TENC["TransformerEncoderLayer × L"]
+        DIH["DihedralFeatures<br/>(φ, ψ, ω → sin/cos)"]
+    end
+
+    subgraph Decoder["TransformerDecoder"]
+        TDEC["TransformerDecoderLayer × M<br/>(Self-Attn + Cross-Attn + FFN)"]
+        PROJ["Output Projection<br/>→ Vocab Logits"]
+    end
+
+    COORDS --> FEAT
+    COORDS --> DIH
+    COORDS --> GVPENC
+    CONF --> FEAT
+    FEAT --> TENC
+    GVPENC --> ROT
+    ROT --> TENC
+    DIH --> TENC
+    TENC --> TDEC
+    TDEC --> PROJ
+    PROJ --> SEQ["Predicted Sequence"]
+
+    style Encoder fill:#e8f4fd,stroke:#1a73e8
+    style Decoder fill:#fce8e6,stroke:#d93025
+    style Input fill:#e6f4ea,stroke:#1e8e3e
+```
+
+来源: [gvp_transformer.py](esm/inverse_folding/gvp_transformer.py#L31-L55), [gvp_transformer_encoder.py](esm/inverse_folding/gvp_transformer_encoder.py#L27-L90)
+
+## 核心模型：GVPTransformerModel
+
+顶层模型类 `GVPTransformerModel` 协调整个编码器-解码器流水线。其 `forward()` 方法在骨架坐标上运行编码器，并在移位的输出词元上运行解码器（教师强制），而其 `sample()` 方法则执行自回归多项式解码，并通过增量状态缓存提高效率。
+
+| 方法 | 用途 | 关键参数 |
+|--------|---------|----------------|
+| `forward()` | 用于训练/评分的教师强制前向传播 | `coords`, `padding_mask`, `confidence`, `prev_output_tokens` |
+| `sample()` | 自回归序列采样 | `coords`, `partial_seq`, `temperature`, `confidence` |
+| `build_encoder()` | 构建 `GVPTransformerEncoder` | `args`, `alphabet`, `embed_tokens` |
+| `build_decoder()` | 构建 `TransformerDecoder` | `args`, `alphabet`, `embed_tokens` |
+| `build_embedding()` | 共享词元嵌入构造器 | `args`, `dictionary`, `embed_dim` |
+
+`sample()` 方法每次解码一个词元，在多项式采样前对 logits 应用温度缩放。它通过 `partial_seq` 参数支持**部分序列**——被设置为 `<mask>` 的位置会被采样，而已知位置则被固定。这对于多链条件生成至关重要，因为非目标链会被填充。
+
+来源: [gvp_transformer.py](esm/inverse_folding/gvp_transformer.py#L31-L137)
+
+## 编码器：GVPTransformerEncoder
+
+编码器是架构最丰富的组件，在将**五个不同的特征流**传递给 Transformer 编码器层之前，先将它们融合。每个特征流捕获了 3D 结构的不同方面：
+
+| 特征组件 | 来源 | 描述 |
+|-------------------|--------|-------------|
+| **掩码词元嵌入** | `embed_tokens` | 掩码词元的缩放嵌入（结构输入无序列） |
+| **二面角特征** | `DihedralFeatures` | 骨架二面角 (φ, ψ, ω) 的 sin/cos → 嵌入至 `embed_dim` |
+| **GVP 输出** | `GVPEncoder` → `embed_gvp_output` | 旋转至局部坐标系的 GVP-GNN 节点特征 → 线性投影 |
+| **GVP 输入特征** | `GVPInputFeaturizer` → `embed_gvp_input_features` | 局部坐标系中的原始节点标量/向量特征 (15维 → `embed_dim`) |
+| **置信度** | `embed_confidence` | RBF 编码的置信度分数 (16个分箱) → 线性投影 |
+
+所有五个组件被**求和**（而非拼接），然后在 dropout 之前添加正弦位置嵌入。所得表示经过带有 LayerNorm 的 `args.encoder_layers` 层 Transformer 编码器层，生成形状为 `(seq_len, batch, embed_dim)` 的最终编码器输出。
+
+<CgxTip>嵌入组件的求和（而非拼接）意味着每个特征流必须投影到相同的 `embed_dim`。这一设计选择降低了参数量，并允许每个特征流直接作用于同一表示空间，而无需更大的融合层。</CgxTip>
+
+### 旋转不变机制
+
+来自 GVP 编码器的向量输出被旋转到由 N-CA-C 骨架原子定义的**局部旋转坐标系**中。该坐标系由 `e1 = normalize(C - CA)` 构建，然后通过 `N - CA` 进行 Gram-Schmidt 正交化得到 `e2`，最后 `e3 = e1 × e2`。GVP 标量特征直接通过不变（已经是旋转不变的），而向量特征则在展平与投影前旋转 `R^T`。这保证了编码器输出对输入坐标的任何全局 SO(3) 旋转保持不变。
+
+来源: [gvp_transformer_encoder.py](esm/inverse_folding/gvp_transformer_encoder.py#L27-L185), [util.py](esm/inverse_folding/util.py#L157-L182)
+
+## GVP 编码器与几何特征
+
+### GVPInputFeaturizer
+
+特征化器将原始 N-CA-C 坐标转换为适合 GVP-GNN 的图结构节点与边特征：
+
+**节点特征** (标量: 7维, 向量: 3维):
+- **标量**: 二面角 (φ, ψ, ω) 提升为 sin/cos (6个值) + 坐标掩码 (1个值)
+- **向量**: 前向/后向 CA 方向 (2 × 3D) + 侧链方向 (1 × 3D)
+
+**边特征** (标量: 34维, 向量: 1维):
+- **标量**: RBF 编码的距离 (16个分箱) + 位置嵌入 (16维) + 源/目标坐标掩码 (2个值)
+- **向量**: CA 原子间的归一化方向向量
+
+`_dist()` 方法通过欧氏距离识别 top-k 最近邻以构建图，并对缺失坐标和填充有特殊处理。
+
+来源: [features.py](esm/inverse_folding/features.py#L47-L165)
+
+### GVPEncoder
+
+`GVPEncoder` 封装了 `GVPGraphEmbedding`（生成初始节点/边嵌入）及其后的一堆 `GVPConvLayer` 模块。每个 `GVPConvLayer` 通过 `GVPConv`（扩展了 PyTorch Geometric 的 `MessagePassing`）执行消息传递，然后应用残差更新和逐点前馈 GVP 网络。层数由 `args.num_encoder_layers` 控制。
+
+```mermaid
+graph LR
+    COORDS["Coords + Mask"] --> EMBED["GVPGraphEmbedding<br/>embed_node + embed_edge"]
+    EMBED --> L1["GVPConvLayer 1<br/>MsgPass → FFN"]
+    L1 --> L2["GVPConvLayer 2<br/>MsgPass → FFN"]
+    L2 --> LN["GVPConvLayer N<br/>MsgPass → FFN"]
+    LN --> OUT["Node Embeddings<br/>(scalar, vector)"]
+
+    style EMBED fill:#e8f4fd,stroke:#1a73e8
+    style OUT fill:#e6f4ea,stroke:#1e8e3e
+```
+
+来源: [gvp_encoder.py](esm/inverse_folding/gvp_encoder.py#L1-L57), [gvp_modules.py](esm/inverse_folding/gvp_modules.py#L227-L399)
+
+### 几何向量感知器 (GVP)
+
+`GVP` 模块是几何流水线的基础构建块。它对元组输入 `(s, V)` 进行操作，其中 `s` 是标量张量，`V` 是向量张量。前向传播计算如下：
+
+1. `vh = W_h(V^T)` — 向量通道的线性投影
+2. `vn = ||vh||` — 投影向量的范数（标量不变量）
+3. `s_out = σ(W_s([s; vn]))` — 由拼接的标量 + 范数特征得出的标量输出
+4. `v_out = g(W_v(vh))` — 带有门控的向量输出（通过 `W_g(s_out)` 的向量门控或范数门控）
+
+此设计确保**标量输出是旋转不变的**（仅依赖于向量范数），而**向量输出是旋转等变的**（在旋转下可预测地变换）。
+
+来源: [gvp_modules.py](esm/inverse_folding/gvp_modules.py#L120-L198)
+
+## 解码器：TransformerDecoder
+
+解码器遵循标准的自回归 Transformer 设计，包含 `args.decoder_layers` 个 `TransformerDecoderLayer` 模块。每层包含：
+
+1. 对已生成词元的**掩码自注意力**（带因果掩码）
+2. 对编码器输出的**交叉注意力**（结构表示）
+3. **前馈网络**（带 ReLU 的 2 层 MLP）
+
+`extract_features()` 方法支持**增量解码**——在步骤之间缓存注意力键/值状态，以避免在每个词元位置对完整前缀重新计算。最终的输出投影将 `embed_dim` 映射为 `vocab_size` 维的 logits。
+
+来源: [transformer_decoder.py](esm/inverse_folding/transformer_decoder.py#L27-L229), [transformer_layer.py](esm/inverse_folding/transformer_layer.py#L140-L305)
+
+## 模块依赖图
+
+下表总结了 `esm/inverse_folding/` 中的所有模块及其职责：
+
+| 模块 | 关键类 | 角色 |
+|--------|--------------|------|
+| `gvp_transformer.py` | `GVPTransformerModel` | 顶层模型：编码器 + 解码器协调，采样 |
+| `gvp_transformer_encoder.py` | `GVPTransformerEncoder` | 编码器：融合 GVP + 二面角 + 置信度特征，运行 Transformer 层 |
+| `gvp_encoder.py` | `GVPEncoder` | GVP-GNN：图嵌入 → GVPConvLayer 堆叠 |
+| `gvp_modules.py` | `GVP`, `GVPConv`, `GVPConvLayer`, `LayerNorm`, `Dropout` | 核心 GVP 原语与消息传递层 |
+| `gvp_utils.py` | `flatten_graph`, `unflatten_graph` | 为兼容 PyTorch Geometric 的批次展平 |
+| `features.py` | `GVPInputFeaturizer`, `GVPGraphEmbedding`, `DihedralFeatures` | 坐标 → 图特征提取 |
+| `transformer_decoder.py` | `TransformerDecoder` | 带增量状态的自回归解码器 |
+| `transformer_layer.py` | `TransformerEncoderLayer`, `TransformerDecoderLayer` | 标准 Transformer 注意力 + FFN 层 |
+| `util.py` | `CoordBatchConverter`, `load_structure`, `score_sequence`, 等 | I/O 工具，评分，坐标处理 |
+| `multichain_util.py` | `extract_coords_from_complex`, `sample_sequence_in_complex`, 等 | 多链复合物处理 |
+
+来源: [__init__.py](esm/inverse_folding/__init__.py#L1-L9)
+
+## 编程 API
+
+### 加载模型
+
+预训练的 ESM-IF1 模型通过 `esm.pretrained` 加载。模型标识符 `esm_if1_gvp4_t16_142M_UR50` 的编码含义为：4 层 **GVP**，16 层 **Transformer** 编码器，**1.42 亿参数**，在 UniRef50 上训练。务必调用 `.eval()` 以禁用训练模式的 dropout，从而实现可复现的推理。
+
+```python
+import esm
+model, alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
+model = model.eval()
+```
+
+在内部，加载路径会检测 `invariant_gvp` 架构标签并实例化 `GVPTransformerModel`，重新映射检查点键以匹配开源模块命名约定。
+
+来源: [pretrained.py](esm/pretrained.py#L97-L143)
+
+### 输入格式
+
+模型接受骨架坐标作为 **L × 3 × 3** 数组，其中 L 为序列长度。`coords[i][0]` 是 N 原子位置，`coords[i][1]` 是 CA 原子位置，`coords[i][2]` 是 C 原子位置。坐标使用 biotite 从 PDB 或 mmCIF 文件加载：
+
+```python
+import esm.inverse_folding.util as util
+
+# 单链
+structure = util.load_structure("path/to/file.pdb", chain_id="A")
+coords, seq = util.extract_coords_from_structure(structure)
+
+# 多链复合物
+structure = util.load_structure("path/to/file.pdb", chain_ids=["A", "B", "C"])
+coords, native_seqs = esm.inverse_folding.multichain_util.extract_coords_from_complex(structure)
+```
+
+来源: [util.py](esm/inverse_folding/util.py#L21-L82), [multichain_util.py](esm/inverse_folding/multichain_util.py#L17-L40)
+
+### 采样序列
+
+**单链**采样是对模型的直接调用：
+
+```python
+sampled_seq = model.sample(coords, temperature=1.0)
+```
+
+**多链**采样在仅设计目标链的同时，以整个复合物骨架为条件。其实现拼接了所有链（目标链在前），链间带有 10 个残基的 NaN 填充，然后为非目标位置提供 `<pad>` 词元，为目标位置提供 `<mask>` 词元：
+
+```python
+import esm.inverse_folding.multichain_util as mc_util
+
+sampled_seq = mc_util.sample_sequence_in_complex(
+    model, coords, target_chain_id="C", temperature=1.0
+)
+```
+
+| 温度 | 效果 | 用例 |
+|-------------|--------|----------|
+| `1e-6` | 近确定性，最大化天然序列恢复率 | 优化序列恢复 |
+| `1.0` | 默认，中等多样性 | 平衡设计 |
+| `>1.0` | 高多样性，低恢复率 | 探索序列空间 |
+
+<CgxTip>注意在较高温度下采样序列中可能出现的**氨基酸重复**（例如 `EEEEEEEE`）。这是一种已知的失效模式——在下游使用前，应过滤掉具有长同聚物片段的序列。</CgxTip>
+
+来源: [gvp_transformer.py](esm/inverse_folding/gvp_transformer.py#L84-L137), [multichain_util.py](esm/inverse_folding/multichain_util.py#L56-L89)
+
+### 评分序列
+
+评分计算给定结构下序列的**条件对数似然**——对变异效应预测和序列优化非常有用。返回两个平均值：`ll_fullseq`（所有残基）和 `ll_withcoord`（排除缺失坐标的残基）：
+
+```python
+# 单链
+ll_fullseq, ll_withcoord = esm.inverse_folding.util.score_sequence(
+    model, alphabet, coords, seq
+)
+
+# 多链复合物
+ll_fullseq, ll_withcoord = esm.inverse_folding.multichain_util.score_sequence_in_complex(
+    model, alphabet, coords, target_chain_id="C", target_seq=seq
+)
+```
+
+来源: [util.py](esm/inverse_folding/util.py#L95-L113), [multichain_util.py](esm/inverse_folding/multichain_util.py#L92-L125)
+
+### 提取结构表示
+
+编码器输出可作为形状为 L × 512 的**结构嵌入**，对结构比较或属性预测等下游任务很有用：
+
+```python
+# 单链
+rep = esm.inverse_folding.util.get_encoder_output(model, alphabet, coords)
+
+# 多链复合物
+rep = esm.inverse_folding.multichain_util.get_encoder_output_for_complex(
+    model, alphabet, coords, target_chain_id="C"
+)
+```
+
+来源: [util.py](esm/inverse_folding/util.py#L116-L123), [multichain_util.py](esm/inverse_folding/multichain_util.py#L127-L153)
+
+### 部分掩码骨架坐标
+
+要掩码骨架的某些部分（例如用于设计部分结构），请将坐标值设置为 `np.inf`：
+
+```python
+coords[:10, :] = float('inf')  # 掩码前 10 个残基
+```
+
+模型的跨度掩码训练使其对此类部分输入具有鲁棒性——它仍能为掩码区域预测出合理的序列。
+
+来源: [examples/inverse_folding/README.md](examples/inverse_folding/README.md#L225-L230)
+
+## 多链设计策略
+
+多链逆折叠通过**带填充的链拼接**实现。`_concatenate_coords()` 函数将目标链置于首位，然后依次拼接每条额外链，链间以 10 个残基的 NaN 填充块分隔。在采样期间，非目标链位置提供 `<pad>` 词元（以便解码器跳过），目标链位置提供 `<mask>` 词元（以便解码器采样）。
+
+```mermaid
+graph LR
+    subgraph Complex
+        A["Chain A<br/>(target)"]
+        B["Chain B"]
+        C["Chain C"]
+    end
+
+    subgraph Concatenated
+        AP["Chain A coords"]
+        P1["10× NaN padding"]
+        BP["Chain B coords"]
+        P2["10× NaN padding"]
+        CP["Chain C coords"]
+    end
+
+    A --> AP
+    B --> BP
+    C --> CP
+    AP --> P1
+    P1 --> BP
+    BP --> P2
+    P2 --> CP
+
+    subgraph Tokens
+        MT["<mask> <mask> ..."]
+        PT["<pad> <pad> ..."]
+    end
+
+    AP -.-> MT
+    P1 -.-> PT
+    BP -.-> PT
+    P2 -.-> PT
+    CP -.-> PT
+```
+
+此设计允许 GVP 编码器查看完整的结构上下文（链间接触，界面几何），而解码器仅为目标链生成残基。经验表明，多链条件生成**通常会降低困惑度并提高序列恢复率**，尽管单链模式在某些蛋白质上可能表现更好——两种方法均应尝试。
+
+来源: [multichain_util.py](esm/inverse_folding/multichain_util.py#L43-L89)
+
+## 命令行界面
+
+### 采样序列
+
+```bash
+python sample_sequences.py data/5YH2.pdb \
+    --chain C --temperature 1 --num-samples 3 \
+    --outpath output/sampled_sequences.fasta
+
+# 多链条件生成
+python sample_sequences.py data/5YH2.pdb \
+    --chain C --temperature 1 --num-samples 3 \
+    --outpath output/sampled_sequences.fasta \
+    --multichain-backbone
+```
+
+### 评分序列
+
+```bash
+python score_log_likelihoods.py data/5YH2.pdb \
+    data/5YH2_mutated_seqs.fasta --chain C \
+    --outpath output/scores.csv
+
+# 多链条件生成
+python score_log_likelihoods.py data/5YH2.pdb \
+    data/5YH2_mutated_seqs.fasta --chain C \
+    --outpath output/scores.csv \
+    --multichain-backbone
+```
+
+| CLI 参数 | 描述 | 默认值 |
+|-------------|-------------|---------|
+| `pdbfile` | 输入 PDB 或 mmCIF 文件路径 | (必需) |
+| `--chain` | 目标链 ID | `None` |
+| `--temperature` | 采样温度 | `1.0` |
+| `--num-samples` | 采样序列数 | `1` |
+| `--outpath` | 输出文件路径 | `output/sampled_seqs.fasta` |
+| `--multichain-backbone` | 以所有链为条件 | `False` (单链) |
+| `--nogpu` | 即使可用也禁用 GPU | `False` |
+
+来源: [sample_sequences.py](examples/inverse_folding/sample_sequences.py#L53-L125), [score_log_likelihoods.py](examples/inverse_folding/score_log_likelihoods.py#L73-L132)
+
+## 旋转等变性验证
+
+测试套件通过比较原始坐标的 logits 与随机旋转坐标的 logits 来验证 **SO(3) 等变性**。该测试对输入坐标应用随机旋转矩阵 `R ∈ SO(3)`，并断言输出 logits 在容差范围内匹配（`atol=1e-2`），确认模型的预测对全局旋转保持不变：
+
+```python
+R = special_ortho_group.rvs(3)
+R = torch.tensor(R, dtype=torch.float32)
+coords_rotated = torch.matmul(coords, R)
+logits_rotated, _ = model.forward(coords_rotated, ...)
+np.testing.assert_allclose(logits.numpy(), logits_rotated.numpy(), atol=1e-2)
+```
+
+来源: [test_inverse_folding.py](tests/test_inverse_folding.py#L1-L72)
+
+## 与 ESMDynamic 的关系
+
+虽然 ESMDynamic（本仓库的主要焦点）从序列预测动态结构属性，但 ESM-IF1 解决的是**逆问题**——从结构预测序列。两者共享 ESM 生态系统的基础设施（字母表处理、预训练权重加载、批次转换），但在不同的输入/输出模态上运行。ESM-IF1 的编码器输出（512 维结构表示）可作为桥接结构到动态推理的下游模型的输入，补充了 [ESMDynamic 模型类](5-esmdynamic-model-class) 的序列到动态流水线。
+
+来源: [gvp_transformer_encoder.py](esm/inverse_folding/gvp_transformer_encoder.py#L27-L185), [pretrained.py](esm/pretrained.py#L97-L143)
+
+## 延伸阅读
+
+- **单链 notebook**: `examples/inverse_folding/notebook.ipynb` — 采样、评分与编码器提取
+- **多链 notebook**: `examples/inverse_folding/notebook_multichain.ipynb` — 复合物条件生成工作流
+- **预印本**: Hsu et al., "Learning inverse folding from protein structures with Geometric Vector Perceptrons" ([bioRxiv](https://doi.org/10.1101/2022.04.10.487779))
+- **GVP 来源**: Jing et al., "Learning from Protein Structure with Geometric Vector Perceptrons" (ICLR 2021)
+
+关于本仓库中正向折叠的对应部分，请参阅 [架构概述](4-architecture-overview)。有关模型权重加载的详细信息，请参阅 [预训练模型与权重加载](12-pretrained-model-and-weight-loading)。
+
+---
+
+## 核心预测流水线
+
+- [深入探究/核心预测流水线/ESMDynamic 模型类](https://zread.ai/ShuklaGroup/esmdynamic/5-esmdynamic-model-class)
+
+---
+slug:5-esmdynamic-model-class
+blog_type:normal
+---
+
+
+**`ESMDynamic`** 类是核心神经网络模块，负责编排整个预测流程——从 ESMFold 结构推断到多头动态接触预测。它由一个冻结的 ESMFold 骨干网络和任意数量的 **`DynamicHead`** 模块组合而成，每个模块能够在多种温度条件下执行分类、回归、多分类或动力学任务。理解此类对于推断自定义和训练集成至关重要，因为每条预测路径都流经其前向方法。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L213-L220)
+
+## 架构概述
+
+`ESMDynamic` 模型遵循**两阶段架构**：冻结的 ESMFold 编码器生成结构级表示，随后由特定任务的 `DynamicHead` 模块消耗，每个模块封装了自己的 `DynamicModule`（轻量级 Evoformer）。输出字典累积了每个头的预测结果，当存在 `"dynamic"` 分类头时，后处理步骤会从 ESMFold PDB 中推导出天然接触图，并计算集合差异 *dynamic − native* 和 *native − dynamic*。
+
+```mermaid
+graph TD
+    subgraph Input
+        SEQ["Amino Acid Sequences"]
+    end
+
+    subgraph ESMFold["ESMFold (Frozen)"]
+        EF["esm.pretrained.esmfold_v1()"]
+    end
+
+    subgraph Structure_Dict["Structure Dictionary"]
+        SS["s_s — sequence state"]
+        SZ["s_z — pairwise state"]
+        LDDT["lddt_head"]
+        LM["lm_logits"]
+        PTM["ptm_logits"]
+        DISTO["distogram_logits"]
+        RI["residue_index"]
+        MASK["mask"]
+    end
+
+    subgraph Heads["DynamicHead Modules"]
+        DH_DYN["DynamicHead<br/>'dynamic'<br/>classification"]
+        DH_KIN["DynamicHead<br/>'kinetic'<br/>kinetics"]
+        DH_FREQ["DynamicHead<br/>'frequency'<br/>regression"]
+    end
+
+    subgraph PostProcess["Post-Processing"]
+        PDB["PDB Generation"]
+        NAT["Native Contacts<br/>(mdtraj, 8 Å Cα)"]
+        DNN["dynamic_nonnative"]
+        NND["native_nondynamic"]
+    end
+
+    SEQ --> EF
+    EF --> Structure_Dict
+    SS --> DH_DYN & DH_KIN & DH_FREQ
+    SZ --> DH_DYN & DH_KIN & DH_FREQ
+    LDDT & LM & PTM & DISTO & RI & MASK --> DH_DYN & DH_KIN & DH_FREQ
+    DH_DYN --> PDB
+    PDB --> NAT
+    NAT --> DNN & NND
+```
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L213-L411)
+
+## ESMDynamicConfig
+
+`ESMDynamicConfig` 数据类管理三个默认的 `DynamicModule` 配置——每个头一个。每个字段都是一个 `DynamicModuleConfig` 实例，控制类 Evoformer 块的数量、状态维度、头宽度、循环和 dropout。
+
+| 字段 | 默认实例 | 用途 |
+|---|---|---|
+| `dynamic_module` | `DynamicModuleConfig()` | **动态接触分类**头的配置 |
+| `kinetic_module` | `DynamicModuleConfig()` | **动力学**头的配置 |
+| `frequency_module` | `DynamicModuleConfig()` | **接触频率回归**头的配置 |
+
+`DynamicModuleConfig` 的默认值（定义在 `DynamicModule` 伴生类中）为：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `num_blocks` | 2 | `TriangularSelfAttentionBlock` 层的数量 |
+| `sequence_state_dim` | 1024 | 序列表示维度 (C_s) |
+| `pairwise_state_dim` | 128 | 成对表示维度 (C_z) |
+| `sequence_head_width` | 32 | 序列注意力的头宽度 |
+| `pairwise_head_width` | 32 | 成对注意力的头宽度 |
+| `position_bins` | 32 | 相对位置编码的分箱数 |
+| `max_recycles` | 4 | 最大 Evoformer 循环迭代次数 |
+| `dropout` | 0.0 | Dropout 概率 |
+| `layer_drop` | 0.0 | 层 Dropout 概率 |
+
+<CgxTip>`ESMDynamicConfig` 中的三个 `DynamicModuleConfig` 字段是*独立*的——你可以针对每个头调整 `num_blocks`、`max_recycles` 或任何其他参数，而不会影响其余头。这对于平衡准确率与速度至关重要：分类头可能受益于更多循环，而回归头则未必。</CgxTip>
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L24-L29), [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L17-L33)
+
+## DynamicHead — 统一预测头
+
+`DynamicHead` 是一个自包含的 `nn.Module`，执行单任务的完整预测工作流：它接收 ESMFold 结构字典，构建经偏差校正的序列和成对输入，将它们通过 `DynamicModule` 运行，然后应用特定任务的预测、置信度和残差头。
+
+### 构造器签名
+
+```python
+DynamicHead(
+    name: str,                  # 头标识符 (例如, "dynamic", "kinetic", "frequency")
+    task_type: str,             # "classification" | "regression" | "multiclass" | "kinetics"
+    seq_input_dim: int,         # 拼接的 lddt + lm_logits 维度
+    seq_state_dim: int,         # 目标序列状态维度 (1024)
+    pair_input_dim: int,        # 拼接的 ptm + distogram 维度
+    pair_state_dim: int,        # 目标成对状态维度 (128)
+    dynamic_cfg,                # 内部 DynamicModule 的 DynamicModuleConfig
+    n_conditions: int = 5,      # 温度条件数
+    n_classes: Optional[int] = None,  # 类别数 (multiclass/kinetics 必需)
+    use_confidence_head: bool = False,
+    use_residual_head: bool = False,
+)
+```
+
+### 内部架构
+
+该头包含五个子模块，组织成清晰的数据流管道：
+
+| 子模块 | 维度 | 用途 |
+|---|---|---|
+| `seq_transition` | `LayerNorm → Linear → Linear` | 偏差校正：将 lddt + lm_logits 合并到序列状态空间 |
+| `pair_transition` | `LayerNorm → Linear → Linear` | 偏差校正：将 ptm + distogram 合并到成对状态空间 |
+| `dynamic_module` | `DynamicModule` | 带循环的 Evoformer 风格处理 |
+| `prediction_linear` | `Linear(pair_state_dim, out_dim)` | 将成对特征映射到特定任务输出 |
+| `confidence_head` | `LayerNorm → Linear → ReLU → Linear` | 每残基每温度置信度 (可选) |
+| `residual_head` | `LayerNorm → Linear → ReLU → Linear` | 回归任务的成对残差 (可选) |
+
+### 特定任务的输出维度
+
+`prediction_linear` 的 `out_dim` 随 `task_type` 变化：
+
+| `task_type` | `out_dim` 公式 | 示例 (默认值) |
+|---|---|---|
+| `"classification"` | `n_conditions` | 5 |
+| `"regression"` | `n_conditions` | 5 |
+| `"multiclass"` | `n_conditions × n_classes` | 5 × 6 = 30 |
+| `"kinetics"` | `n_conditions × n_classes × 2` | 5 × 6 × 2 = 60 |
+
+### 前向方法 — 数据流
+
+`DynamicHead.forward` 方法执行以下步骤：
+
+1. **偏差构建**：拼接 `lddt_head` 与 `lm_logits`（序列），以及 `ptm_logits` 与 `distogram_logits`（成对），然后应用各自的过渡网络作为加性偏差施加于 `s_s` 和 `s_z`。
+2. **DynamicModule 传递**：将经偏差校正的状态通过带有循环的 `self.dynamic_module` 进行传递。
+3. **预测线性变换 + 重塑**：将 `prediction_linear` 应用于成对输出，然后重塑并置换为规范轴顺序。
+4. **特定任务激活**：应用 sigmoid（分类/回归）或 softmax（多分类/动力学），随后进行**对称化**——`(M + Mᵀ) / 2`——以强制接触图对称性。
+5. **置信度头**（如果启用）：生成每残基、每温度的置信度分数。
+6. **残差头**（如果启用）：生成成对残差，同样进行对称化。
+
+<CgxTip>对称化统一应用于所有任务类型，因为接触图本质上是对称的：如果残基 *i* 接触残基 *j*，则 *j* 接触 *i*。`DynamicHead` 通过在激活函数后对预测值与其转置取平均来强制执行此对称性，这比预对称化 logits 更为合理。</CgxTip>
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L32-L209)
+
+## ESMDynamic — 主模型类
+
+### 构造器
+
+```python
+ESMDynamic(
+    load_esmfold=True,           # 加载冻结的 ESMFold 骨干网络
+    esmdynamic_config=None,      # OmegaConf 结构化的 ESMDynamicConfig
+    esmfold_config=None,         # (保留，尚未接入)
+    head_definitions=None,       # 自定义头规格列表 (与 heads_to_load 互斥)
+    heads_to_load=None,          # 按名称选择默认头，例如 ["dynamic", "kinetic"]
+    **kwargs,                    # 转发至 ESMDynamicConfig
+)
+```
+
+### ESMFold 骨干网络集成
+
+当 `load_esmfold=True`（默认值）时，构造器实例化 `esm.pretrained.esmfold_v1()` 并立即使用 `requires_grad_(False)` 冻结它。ESMFold 模型提供 `DynamicHead` 模块消耗的结构表示（`s_s`、`s_z`、`lddt_head`、`lm_logits`、`ptm_logits`、`distogram_logits`、`residue_index`）。从 ESMFold 配置中提取五个维度常量，用于计算过渡输入维度：
+
+| 常量 | 值 | 用于 |
+|---|---|---|
+| `esmfold_n_tokens_embed` | 23 | 序列 token 嵌入维度 |
+| `esmfold_lddt_bins` | 50 | lDDT 直方图分箱数 |
+| `esmfold_cfg_trunk_sequence_state_dim` | 1024 | 序列状态维度 (C_s) |
+| `esmfold_distogram_bins` | 64 | Distogram 分箱数 |
+| `esmfold_cfg_trunk_pairwise_state_dim` | 128 | 成对状态维度 (C_z) |
+
+由此得出 `seq_input_dim = 23 + 37 × 50 = 1873` 和 `pair_input_dim = 2 × 64 = 128`。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L221-L326)
+
+### 头选择与默认定义
+
+构造器定义了三个**默认头规格**，除非被覆盖，否则将实例化它们：
+
+| 头名称 | `task_type` | `n_conditions` | `n_classes` | 置信度头 | 残差头 |
+|---|---|---|---|---|---|
+| `"dynamic"` | `"classification"` | 5 | None | ✅ | ❌ |
+| `"kinetic"` | `"kinetics"` | 5 | 6 | ✅ | ❌ |
+| `"frequency"` | `"regression"` | 5 | None | ❌ | ✅ |
+
+**动力学头**使用 `n_classes=6`，对应时间类别：*始终观测到*、*1–10 ns*、*10–100 ns*、*100–300 ns*、*300+ ns*、*从未观测到*。当 `task_type="kinetics"` 时，`n_rates=2` 维度（开启时间 / 关闭时间）在 `DynamicHead` 中被硬编码。
+
+头选择遵循**互斥**逻辑：你可以提供 `head_definitions`（自定义头字典列表）或 `heads_to_load`（默认头名称子集），但不能同时提供两者。如果两者均未提供，则实例化**所有三个默认头**。头以 `nn.ModuleDict` 形式存储在 `self.heads` 中。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L252-L325)
+
+## 前向方法 — 四条预测路径
+
+`ESMDynamic` 类公开了四种运行预测的方法，每种适用于不同用例：
+
+```mermaid
+flowchart TD
+    A["predict_from_seqs()"] -->|"low_memory=False"| B["forward_from_seq()"]
+    A -->|"low_memory=True"| C["forward_from_seq_low_memory()"]
+    B --> D["forward()"]
+    C --> E["JIT module loading<br/>per-head GPU transfer"]
+    D --> F["ESMFold → Heads → Post-process"]
+    E --> F
+    
+    G["forward()<br/>(raw tensors)"] --> F
+
+    style A fill:#e1f5fe
+    style B fill:#fff3e0
+    style C fill:#fce4ec
+    style D fill:#e8f5e9
+    style G fill:#f3e5f5
+```
+
+### `forward()` — 张量级入口点
+
+核心 `forward` 方法接受预分词的张量（`aa`、`mask`、`residx`）或 `precomputed` ESMFold 输出字典。它在 `torch.no_grad()` 下运行 ESMFold，然后遍历所有头，最后如果存在 `"dynamic"` 头，则执行天然接触后处理。
+
+```python
+structure = self.forward(
+    aa=torch.Tensor,              # 分词后的氨基酸 [B, L]
+    mask=torch.Tensor,            # 有效残基掩码 [B, L]
+    residx=torch.Tensor,          # 残基索引 [B, L]
+    masking_pattern=torch.Tensor,  # 可选输入掩码
+    num_recycles=int,             # 覆盖循环次数
+    precomputed=dict,             # 预计算的 ESMFold 输出 (训练捷径)
+)
+```
+
+**关键行为：**
+- ESMFold 始终在 `torch.no_grad()` 下执行——梯度仅流经头。
+- 如果 `load_esmfold=False`，则**必须**提供 `precomputed` 字典（在训练期间使用，以避免冗余的 ESMFold 调用）。
+- 如果未提供 `mask` 且未给出预计算输出，则 `mask` 默认为 `torch.ones_like(aa)`。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L334-L411)
+
+### `forward_from_seq()` — 序列级入口 (带梯度)
+
+接受原始氨基酸字符串，通过 `batch_encode_sequences` 对其进行编码，并委托给 `forward()`。**启用梯度**——在训练期间或需要通过整个流程进行反向传播时使用此方法。
+
+```python
+structure = model.forward_from_seq(
+    sequences=["MKTAYIAKQRQ", "GAHVAVDAI"],  # str 或 List[str]
+    residx=None,                # 可选残基索引
+    num_recycles=None,          # 默认：训练最大循环次数
+    residue_index_offset=512,   # 链间残基间隔
+    chain_linker="G" * 25,      # 多甘氨酸链接子
+)
+```
+
+多聚体序列通过用 `":"` 连接链序列来指定（例如，`"CHAIN1:CHAIN2"`）。`batch_encode_sequences` 实用程序处理分词、带链间偏移的残基索引以及链接子插入。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L413-L456)
+
+### `forward_from_seq_low_memory()` — GPU 内存高效推断
+
+实现**即时模块加载**以降低峰值 GPU 内存。策略为：
+
+1. 将整个模型移至 CPU，释放 GPU 缓存。
+2. **仅**将 ESMFold 移至 GPU，计算结构，将 ESMFold 移回 CPU。
+3. **对于每个头**：将头移至 GPU，将主干移至 GPU，计算，将结果移至 CPU，释放 GPU 缓存。
+4. 将完整模型恢复到原始设备。
+
+这种逐头的顺序执行以吞吐量换取内存，从而能够在更长序列或更小 GPU 上进行预测。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L458-L546)
+
+### `predict_from_seqs()` — 推荐的推断 API
+
+**主要的面向用户方法**。使用 `@torch.no_grad()` 装饰，它禁用梯度计算，并根据 `low_memory` 标志分派至 `forward_from_seq` 或 `forward_from_seq_low_memory`。
+
+```python
+prediction = model.predict_from_seqs(
+    sequences=["MKTAYIAKQRQ"],
+    low_memory=False,           # 对内存受限的 GPU 设为 True
+    num_recycles=None,
+    residue_index_offset=512,
+    chain_linker="G" * 25,
+)
+```
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L548-L595)
+
+## 输出字典结构
+
+所有前向方法均返回一个**结构字典**，累积 ESMFold 输出、逐头预测和派生量。键遵循命名约定，其中 `{name}` 为头标识符（例如，`"dynamic"`、`"kinetic"`、`"frequency"`）。
+
+### 常见 ESMFold 键
+
+| 键 | 形状 | 描述 |
+|---|---|---|
+| `s_s` | `[B, L, 1024]` | 最终序列状态 |
+| `s_z` | `[B, L, L, 128]` | 最终成对状态 |
+| `lddt_head` | `[B, L, 50, 37]` | lDDT 预测 logits |
+| `lm_logits` | `[B, L, 23]` | 语言模型 logits |
+| `ptm_logits` | `[B, L, L, 64]` | 预测 TM-score logits |
+| `distogram_logits` | `[B, L, L, 64]` | Distogram logits |
+| `residue_index` | `[B, L]` | 残基索引 |
+| `mask` | `[B, L]` | 有效残基掩码 |
+
+### 按任务类型的逐头输出键
+
+**分类** (`task_type="classification"`, 例如 `"dynamic"`)：
+
+| 键 | 形状 | 描述 |
+|---|---|---|
+| `{name}_logits` | `[B, N, L, L]` | 原始 logits (N = n_conditions) |
+| `{name}_prob` | `[B, N, L, L]` | Sigmoid 概率 (对称化) |
+| `{name}_pred` | `[B, N, L, L]` | 二值预测 (阈值 0.5) |
+| `{name}_confidence` | `[B, N, L]` | 每残基每温度置信度 |
+| `{name}_output` | `dict` | 原始 DynamicModule 输出 |
+
+**动力学** (`task_type="kinetics"`, 例如 `"kinetic"`)：
+
+| 键 | 形状 | 描述 |
+|---|---|---|
+| `{name}_logits` | `[B, N, 2, L, L, C]` | Logits (N=温度, 2=开/关, C=n_classes) |
+| `{name}_prob` | `[B, N, 2, L, L, C]` | Softmax 概率 (对称化) |
+| `{name}_pred_class` | `[B, N, 2, L, L]` | Argmax 类别索引 |
+| `{name}_confidence` | `[B, N, L]` | 每残基每温度置信度 |
+
+**回归** (`task_type="regression"`, 例如 `"frequency"`)：
+
+| 键 | 形状 | 描述 |
+|---|---|---|
+| `{name}_value` | `[B, N, L, L]` | 原始回归输出 |
+| `{name}_pred` | `[B, N, L, L]` | Sigmoid 裁剪的对称化预测 |
+| `{name}_residual_pred` | `[B, N, L, L]` | 成对残差预测 |
+| `{name}_output` | `dict` | 原始 DynamicModule 输出 |
+
+### 派生接触键 (当存在 `"dynamic"` 头时)
+
+| 键 | 形状 | 描述 |
+|---|---|---|
+| `pdbs` | `List[str]` | ESMFold 生成的 PDB 字符串 |
+| `native_contacts` | `[B, L, L]` | 静态接触图 (8 Å Cα 阈值) |
+| `dynamic_nonnative_contacts` | `[B, N, L, L]` | 静态结构中不存在的动态接触 |
+| `native_nondynamic_contacts` | `[B, N, L, L]` | 未被预测为动态的静态接触 |
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L119-L209), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L360-L410)
+
+## 天然接触计算
+
+当加载 `"dynamic"` 头时，`forward` 方法执行后处理步骤，将动态预测与 ESMFold 预测的静态结构进行比较。`compute_native_contacts` 方法：
+
+1. 通过 `self.esmfold.output_to_pdb()` 将 ESMFold 输出转换为 PDB 字符串。
+2. 使用 **mdtraj** 加载每个 PDB 并计算所有成对的 Cα 距离。
+3. 应用 **8.0 Å 阈值**生成二值天然接触图。
+4. 将对角线置零（排除残基自接触）。
+
+该方法返回每批次接触图列表，为 `torch.int64` 张量。随后将它们填充以匹配动态预测维度，并用于计算两个差集图：`dynamic_nonnative_contacts`（预测为动态但不在静态结构中的接触——可能是**隐式或条件依赖的接触**）和 `native_nondynamic_contacts`（在静态结构中但未被预测为动态的接触——**稳定的、始终形成的接触**）。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L360-L436)
+
+## 设备管理与分块大小设定
+
+`ESMDynamic` 类通过注册的 `dummy_buffer`（一个随模型调用 `.to(device)` 时移动的零值张量）来跟踪其设备。`device` 属性读取此缓冲区的设备，提供了一种无需检查参数即可确定模型位置的可靠方法。
+
+```python
+@property
+def device(self):
+    return self.dummy_buffer.device
+```
+
+`set_chunk_size` 方法将分块大小传播到 ESMFold（用于内存高效注意力）和每个头的 `DynamicModule`（支持分块三角自注意力）。这对于减少长序列上的峰值内存很有用。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L327-L332), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L597-L599)
+
+## 自定义头配置
+
+高级用户可以通过 `head_definitions` 参数定义完全自定义的头。每个元素是具有以下模式的字典：
+
+```python
+custom_heads = [
+    dict(
+        name="my_custom_head",
+        task_type="multiclass",       # "classification" | "regression" | "multiclass" | "kinetics"
+        n_conditions=3,               # 例如，3 个温度条件
+        n_classes=4,                  # multiclass/kinetics 必需
+        dynamic_cfg=DynamicModuleConfig(num_blocks=1, max_recycles=2),  # 自定义 Evoformer 配置
+        use_confidence_head=True,
+        use_residual_head=False,
+    ),
+]
+model = ESMDynamic(head_definitions=custom_heads)
+```
+
+`dynamic_cfg` 字段接受任何兼容 `DynamicModuleConfig` 的关键字参数，从而实现逐头控制 Evoformer 深度、循环和注意力配置。使用 `head_definitions` 时，`heads_to_load` 参数必须为 `None`——两者互斥。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L252-L325)
+
+---
+
+**下一步**：深入了解 [DynamicModule 与 Evoformer 循环](6-dynamicmodule-and-evoformer-recycling) 中的 Evoformer 循环内部机制，或探索多头设计如何在 [多头预测设计](7-multi-head-prediction-design) 中生成特定任务输出。有关推断工作流，请参阅 [批量预测脚本](10-bulk-prediction-script) 或 [Colab 笔记本工作流](11-colab-notebook-workflow)。
+
+---
+
+- [深入探究/核心预测流水线/DynamicModule 与 Evoformer 循环](https://zread.ai/ShuklaGroup/esmdynamic/6-dynamicmodule-and-evoformer-recycling)
+
+---
+slug:6-dynamicmodule-and-evoformer-recycling
+blog_type:normal
+---
+
+
+**DynamicModule** 是 ESMFold 的 `FoldingTrunk` 的专用变体，它剥离了结构预测机制，转向对序列和成对表征进行迭代精炼，以用于**动态接触预测**。其架构继承了 AlphaFold2/ESMFold 的 Evoformer 风格三角自注意力块和循环机制，但用更简单的、基于嵌入的循环信号替换了 `StructureModule` 和基于距离直方图的回收桶——在减少计算开销的同时，保留了使 Evoformer 循环机制有效的迭代精炼能力。
+
+来源: [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L1-L123), [trunk.py](esm/esmfold/v1/trunk.py#L1-L244)
+
+## 与 FoldingTrunk 的架构关系
+
+`DynamicModule` 刻意镜像了 `FoldingTrunk` 的 Evoformer 核心——相同的 `TriangularSelfAttentionBlock` 组合、相同的 `RelativePosition` 嵌入、相同的基于 `LayerNorm` 的循环门控——但在终端阶段产生了分歧。`FoldingTrunk` 将循环表征通过 `StructureModule` 生成 3D 坐标（然后根据 Cβ–Cβ 距离为下一次循环计算距离直方图），而 `DynamicModule` **完全省略了结构模块**。这种省略是决定性的架构决策：动态接触预测直接在已学习的成对表征空间上进行操作，无需中间的几何实例化。
+
+```mermaid
+graph TB
+    subgraph FoldingTrunk["FoldingTrunk (ESMFold)"]
+        FT_IN["s_s₀, s_z₀"] --> FT_RECYCLE["Recycle Loop"]
+        FT_RECYCLE --> FT_BLOCKS["48 × TriSelfAttnBlock"]
+        FT_BLOCKS --> FT_SM["StructureModule"]
+        FT_SM --> FT_3D["3D Coordinates"]
+        FT_3D --> FT_DISTO["Distogram Bins"]
+        FT_DISTO --> FT_RECYCLE
+    end
+
+    subgraph DynamicModule["DynamicModule (ESMDynamic)"]
+        DM_IN["s_s₀, s_z₀"] --> DM_RECYCLE["Recycle Loop"]
+        DM_RECYCLE --> DM_BLOCKS["2 × TriSelfAttnBlock"]
+        DM_BLOCKS --> DM_OUT["s_s, s_z"]
+        DM_OUT --> DM_RECYCLE
+    end
+
+    style FoldingTrunk fill:#f0f0f0,stroke:#999
+    style DynamicModule fill:#e6f3ff,stroke:#3366cc
+```
+
+下表捕捉了两个模块之间精确的结构分歧：
+
+| 方面 | `FoldingTrunk` | `DynamicModule` |
+|---|---|---|
+| **Evoformer 块** | 48 | 2 |
+| **序列状态维度** (c_s) | 1024 | 1024 |
+| **成对状态维度** (c_z) | 128 | 128 |
+| **StructureModule** | 存在 (IPA + ResNet) | **已省略** |
+| **循环距离直方图来源** | 来自 3D 坐标的 Cβ–Cβ 距离 | 可学习的 `nn.Embedding` (无坐标) |
+| **循环桶数量** | 15 | 15 |
+| **Trunk→SM 投影** | `trunk2sm_s`, `trunk2sm_z` | **不需要** |
+| **输出** | 结构字典 (坐标, pLDDT 等) | 仅 `{s_s, s_z}` 表征 |
+| **默认最大循环次数** | 4 | 4 |
+
+来源: [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L35-L72), [trunk.py](esm/esmfold/v1/trunk.py#L36-L51), [trunk.py](esm/esmfold/v1/trunk.py#L110-L148)
+
+## DynamicModuleConfig
+
+配置数据类控制所有超参数。它有意作为 `FoldingTrunkConfig` 的子集——缺少 `StructureModuleConfig` 字段，且 `num_blocks` 默认为 **2** 而不是 48，这反映了动态接触预测较轻的精炼负担（繁重的工作已由冻结的 ESMFold 骨干网络完成）。
+
+```python
+@dataclass
+class DynamicModuleConfig:
+    _name: str = "DynamicModuleConfig"
+    num_blocks: int = 2              # 每次循环的 Evoformer 块数
+    sequence_state_dim: int = 1024   # c_s — 必须能被 sequence_head_width 整除
+    pairwise_state_dim: int = 128    # c_z — 必须能被 pairwise_head_width 整除
+    sequence_head_width: int = 32    # 每个注意力头的宽度 (序列)
+    pairwise_head_width: int = 32    # 每个注意力头的宽度 (成对)
+    position_bins: int = 32          # 相对位置嵌入的桶数
+    dropout: float = 0               # Dropout 率
+    layer_drop: float = 0            # 层 Dropout 率
+    cpu_grad_checkpoint: bool = False # 在 CPU 上进行梯度检查点
+    max_recycles: int = 4            # 循环迭代次数
+    chunk_size: T.Optional[int] = None # 轴向注意力分块大小 (内存与速度的权衡)
+```
+
+可整除约束 `c_s % sequence_head_width == 0` 和 `c_z % pairwise_head_width == 0` 在构造时进行断言，并分别将注意力头数确定为 `c_s // sequence_head_width` 和 `c_z // pairwise_head_width`。
+
+来源: [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L16-L33), [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L40-L51)
+
+## 模块构造
+
+`__init__` 方法组装了三类别子模块：
+
+**1. 位置嵌入** — 一个 `RelativePosition` 模块（与 `FoldingTrunk` 共享实现），将残基索引差映射到成对表征空间。它使用 `2 * position_bins + 2` 个嵌入条目（额外的偏移量将索引 0 保留给被掩码的残基对）。
+
+**2. Evoformer 块** — 一个包含 `num_blocks` 个 `TriangularSelfAttentionBlock` 实例的 `nn.ModuleList`，每个实例对 `(s, z)` 元组进行操作，其中 `s ∈ ℝ^{B×L×c_s}` 且 `z ∈ ℝ^{B×L×L×c_z}`。
+
+**3. 循环基础设施** — 三个对循环信号进行门控和丰富的组件：
+- `recycle_s_norm`: `LayerNorm(c_s)` — 对循环序列状态进行归一化
+- `recycle_z_norm`: `LayerNorm(c_z)` — 对循环成对状态进行归一化
+- `recycle_disto`: `Embedding(15, c_z)` — 提供已学习的成对循环信号（索引 0 初始化为零）
+
+<CgxTip>`recycle_disto` 嵌入替换了 `FoldingTrunk` 中依赖几何的距离直方图桶。在 `FoldingTrunk` 中，来自 `StructureModule` 输出的实际 Cβ–Cβ 距离被分桶并反馈；而在这里，桶在所有循环中始终保持为零，因此 `recycle_disto` 嵌入充当了一个在循环迭代中不会改变的已学习偏置。这是一个深思熟虑的设计权衡：它消除了对 3D 坐标生成的依赖，同时仍为成对表征提供了一个可训练的通道，以整合位置循环信息。</CgxTip>
+
+来源: [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L40-L72), [trunk.py](esm/esmfold/v1/trunk.py#L75-L107)
+
+## 循环机制
+
+`forward` 方法实现了 Evoformer 范式中核心的迭代精炼过程。该循环运行 `no_recycles` 次（默认为 `max_recycles + 1`，因为第一次“循环”是使用零值循环信号的标准前向传播）。
+
+```mermaid
+flowchart TD
+    START["s_s₀, s_z₀ (输入特征)"] --> INIT["初始化: recycle_s = 0, recycle_z = 0, recycle_bins = 0"]
+    INIT --> LOOP{"for recycle_idx in range(no_recycles)"}
+    
+    LOOP --> GRAD{"最后一次循环?"}
+    GRAD -- "是" --> ENABLE_GRAD["启用梯度 (ExitStack)"]
+    GRAD -- "否" --> DISABLE_GRAD["禁用梯度 (torch.no_grad)"]
+    
+    ENABLE_GRAD --> NORM["recycle_s = LayerNorm(recycle_s.detach())<br/>recycle_z = LayerNorm(recycle_z.detach())<br/>recycle_z += Embedding(recycle_bins.detach())"]
+    DISABLE_GRAD --> NORM
+    
+    NORM --> ADD["s_input = s_s₀ + recycle_s<br/>z_input = s_z₀ + recycle_z"]
+    ADD --> POS["z_input += RelativePosition(residx)"]
+    POS --> BLOCKS["s, z = TriSelfAttnBlock₁(s, z)<br/>s, z = TriSelfAttnBlock₂(s, z)"]
+    BLOCKS --> UPDATE["recycle_s = s<br/>recycle_z = z"]
+    UPDATE --> LOOP
+    
+    LOOP -- "完成" --> RETURN["return {s_s, s_z}"]
+```
+
+### 逐步机制
+
+对于每次循环迭代 `recycle_idx`：
+
+1. **梯度控制**：除**最后一次**外的所有迭代都在 `torch.no_grad()` 下执行。只有最后一次循环计算梯度，这是一种优化策略，可避免在早期循环中为反向传播存储中间激活，同时仍能为实际流向损失的输出正确计算梯度。
+
+2. **循环信号归一化**：来自上一次迭代的循环表征与计算图分离并进行归一化：`recycle_s = LayerNorm(recycle_s.detach())` 和 `recycle_z = LayerNorm(recycle_z.detach())`。`.detach()` 调用至关重要——它确保循环信号被视为固定偏置而非可微路径，从而防止梯度流经之前的循环迭代。
+
+3. **距离直方图嵌入丰富**：成对循环信号通过 `recycle_disto(recycle_bins)` 得到增强。由于 `recycle_bins` 被初始化为零并始终保持全零（没有 `StructureModule` 来更新它），这实际上在每次迭代中为 `recycle_z` 添加了一个**恒定的已学习偏置**。
+
+4. **加性注入**：归一化后的循环信号被**相加**到原始输入中：`s_s_0 + recycle_s` 和 `s_z_0 + recycle_z`。这种类残差的注入意味着第一次迭代（循环信号为零时）处理原始特征，而后续迭代则在此基础上进行精炼。
+
+5. **Evoformer 块传递**：组合后的表征经过 `pairwise_positional_embedding` 的相加，然后依次通过所有 `TriangularSelfAttentionBlock` 实例。
+
+6. **循环状态更新**：输出 `s_s` 和 `s_z` 成为下一次迭代的循环信号。
+
+来源: [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L77-L122), [trunk.py](esm/esmfold/v1/trunk.py#L157-L217)
+
+## TriangularSelfAttentionBlock：Evoformer 核心
+
+每个 `TriangularSelfAttentionBlock` 实现了来自 AlphaFold2 的完整 Evoformer 更新模式，在序列状态 `s` 和成对状态 `z` 上联合操作：
+
+```mermaid
+flowchart LR
+    subgraph SeqUpdate["序列状态更新"]
+        BIAS["PairToSequence(z) → bias"] --> ATTN["GatedAttention(LN(s), bias)"]
+        ATTN --> SEQ_MLP["ResidueMLP(s)"]
+    end
+    
+    subgraph PairUpdate["成对状态更新"]
+        S2P["SequenceToPair(s) → Δz"] --> TRI_MUL["TriangleMultOut(z) + TriangleMultIn(z)"]
+        TRI_MUL --> TRI_ATT["TriAttStart(z) + TriAttEnd(z)"]
+        TRI_ATT --> PAIR_MLP["ResidueMLP(z)"]
+    end
+    
+    SeqUpdate --> PairUpdate
+```
+
+该块按顺序执行以下操作：
+
+| 步骤 | 操作 | 效果 |
+|---|---|---|
+| 1 | `bias = PairToSequence(z)` | 投影成对状态 → 序列注意力偏置 |
+| 2 | `s = s + Dropout(GatedAttention(LN(s), bias))` | 序列上的偏置自注意力 |
+| 3 | `s = ResidueMLP(s)` | 序列状态上的前馈网络 |
+| 4 | `z = z + SequenceToPair(s)` | 将更新后的序列信息注入成对状态 |
+| 5 | `z = z + TriMulOut(z)` | 出站三角乘法更新 |
+| 6 | `z = z + TriMulIn(z)` | 入站三角乘法更新 |
+| 7 | `z = z + TriAttStart(z)` | 起始节点三角注意力 (按行) |
+| 8 | `z = z + TriAttEnd(z)` | 终止节点三角注意力 (按列) |
+| 9 | `z = ResidueMLP(z)` | 成对状态上的前馈网络 |
+
+所有新的子层输出（注意力、乘法更新、三角注意力、MLP）均**初始化为零**，这意味着该块最初充当恒等映射，并逐渐学习作出贡献。这是 GPT-2 风格残差流设计中的标准技术，可稳定早期训练。
+
+<CgxTip>`DynamicModule` 仅使用 **2 个块**，而 `FoldingTrunk` 使用 **48 个**——减少了 24 倍。这是可行的，因为 `DynamicModule` 接收了来自冻结 ESMFold 骨干网络（通过 `DynamicHead` 的转换层）已经高度精炼的 `s_s` 和 `s_z`。此处的 Evoformer 块充当**轻量适配器**，将通用结构表征特化用于动态接触预测，而不是从头开始执行全新的表征学习。</CgxTip>
+
+来源: [tri_self_attn_block.py](esm/esmfold/v1/tri_self_attn_block.py#L25-L171), [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L51-L63)
+
+## 循环机制：DynamicModule 对比 FoldingTrunk
+
+两种循环机制共享相同的循环结构，但在一个关键方式上存在分歧，这揭示了设计理念：
+
+### 共享模式
+两个模块都：
+- 接受 `no_recycles` 参数（带有 `+1` 偏移量用于初始前向传播）
+- 使用 `LayerNorm` + `.detach()` 归一化循环状态
+- 将循环信号加性注入到原始输入中
+- 使用 `ExitStack` / `torch.no_grad()` 梯度控制（仅最后一次循环可微）
+- 维护 15 个用于成对嵌入的循环桶
+
+### 关键分歧：距离直方图桶来源
+
+在 `FoldingTrunk` 中，每次 Evoformer 块传递后，`StructureModule` 会生成 3D 坐标。根据这些坐标，通过将 Cβ–Cβ 距离分桶来计算距离直方图（使用从 N, Cα, C 原子推断出的 Cβ 位置）。这些分桶距离成为**下一次**迭代的 `recycle_bins`，提供依赖几何的反馈。
+
+在 `DynamicModule` 中，`recycle_bins` **初始化为零且从不更新**。因此，`recycle_disto` 嵌入始终索引到相同的已学习向量（索引 0，该向量初始化为零）。这意味着 `DynamicModule` 中的循环信号**仅**通过 `recycle_s_norm` 和 `recycle_z_norm` 路径流动——来自上一次迭代的 Evoformer 块输出，经归一化后作为偏置加回。该循环纯粹处于表征层面，没有几何反馈。
+
+```python
+# FoldingTrunk：依赖几何的循环
+recycle_bins = FoldingTrunk.distogram(
+    structure["positions"][-1][:, :, :3],  # 来自 StructureModule 的 3D 坐标
+    3.375, 21.375, self.recycle_bins,       # 桶边界
+)
+
+# DynamicModule：无几何信息，桶保持为零
+recycle_bins = torch.zeros(*s_z.shape[:-1], device=device, dtype=torch.int64)
+# (在循环中从不更新)
+```
+
+来源: [trunk.py](esm/esmfold/v1/trunk.py#L192-L217), [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L107-L122), [trunk.py](esm/esmfold/v1/trunk.py#L225-L243)
+
+## 与 DynamicHead 的集成
+
+`DynamicModule` 在每个 `DynamicHead` 内部实例化，后者充当冻结 ESMFold 输出和动态预测头之间的逐任务适配器。`DynamicHead.forward()` 方法：
+
+1. **构建偏置输入**，通过拼接 ESMFold 派生的信号（序列的 pLDDT logits + 语言模型 logits；成对的 pTM logits + 距离直方图 logits）并通过转换层投影它们
+2. 使用这些偏置输入**调用 `DynamicModule.forward()`**，接收 `{s_s, s_z}`
+3. **将 `prediction_linear`** 应用于 `s_z` 以产生任务特定输出（分类、回归、多类或动力学）
+
+每个 `DynamicHead` 拥有自己的 `DynamicModule` 实例及其自己的 `DynamicModuleConfig`，从而启用逐头循环配置。默认的 `ESMDynamicConfig` 创建三个独立配置：
+
+```python
+@dataclass
+class ESMDynamicConfig:
+    dynamic_module: T.Any = field(default_factory=DynamicModuleConfig)   # 接触分类
+    kinetic_module: T.Any = field(default_factory=DynamicModuleConfig)   # 动力学预测
+    frequency_module: T.Any = field(default_factory=DynamicModuleConfig) # 频率回归
+```
+
+这意味着每个预测任务（动态、动力学、频率）都运行其**独立的循环机制**，拥有自己的 Evoformer 块，既独立于 ESMFold 的循环，也彼此独立。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L24-L28), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L78-L79), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L119-L135)
+
+## 计算考量
+
+循环机制的计算特征由 `TriangularSelfAttentionBlock` 操作主导。对于长度为 L 的序列和 B 个批次元素：
+
+| 操作 | 复杂度 | 备注 |
+|---|---|---|
+| 序列注意力 | O(B · L² · c_s) | 标准多头自注意力 |
+| 三角乘法 | O(B · L² · c_z) | 成对状态更新 |
+| 三角注意力 | O(B · L³ · c_z / h) | 轴向注意力，h = 成对头数 |
+| 成对 MLP | O(B · L² · c_z) | 逐残基 MLP |
+
+使用 **2 个块**和 **4 次循环**（5 次有效传递），总成本大约是单块成本的 **10 倍**。`chunk_size` 参数通过分块处理来缓解 O(L³) 的三角注意力，将内存从 O(L²) 降低到 O(L · chunk_size)，代价是额外的顺序计算。
+
+梯度控制策略（除最后一次循环外禁用梯度）意味着 5 次传递中**只有 1 次**为反向传播贡献激活存储——与朴素地通过所有迭代进行微分相比，训练期间大约节省 5 倍内存。
+
+来源: [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L112-L114), [trunk.py](esm/esmfold/v1/trunk.py#L150-L155)
+
+## 推理时控制循环
+
+`no_recycles` 参数可以在调用栈的每个层级被覆盖：
+
+- **`DynamicModule.forward(no_recycles=...)`**：模块层级的直接控制
+- **`DynamicHead.forward(num_recycles=...)`**：传递给 `DynamicModule`
+- **`ESMDynamic.forward(num_recycles=...)`**：广播到所有头
+- **`ESMDynamic.predict_from_seqs(num_recycles=...)`**：顶层推理 API
+
+设置 `no_recycles=0` 将运行带有零值循环信号的单次前向传播（等同于不循环）。增加循环次数会以额外的计算为代价提高预测质量，遵循 AlphaFold2 超过 3-4 次循环后收益递减的模式。
+
+来源: [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L77-L96), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L334-L358), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L548-L595)
+
+## 下一步
+
+`DynamicModule` 的输出表征由多头预测设计消费，后者塑造了最终的任务特定输出。继续阅读 [多头预测设计](7-multi-head-prediction-design) 以了解 `{s_s, s_z}` 如何转换为分类、回归和动力学预测。有关完整的预测流水线上下文，请参见 [ESMDynamic 模型类](5-esmdynamic-model-class)。
+
+---
+
+- [深入探究/核心预测流水线/多头预测设计](https://zread.ai/ShuklaGroup/esmdynamic/7-multi-head-prediction-design)
+
+---
+slug:7-multi-head-prediction-design
+blog_type:normal
+---
+
+
+ESMDynamic的架构以其**多头预测框架**而独树一帜——这是一个由专职任务的`DynamicHead`模块构成的并行集成体，它们共享一个冻结的ESMFold主干网络，但维护独立的Evoformer风格处理路径。每个头解决一个独特的生物物理问题（二元接触存在性、动力学时间尺度分类、接触频率回归），同时以相同的结构表示为条件。这种设计在模块级别解耦了预测任务，实现了选择性加载、独立循环配置以及每个头的辅助输出，而不会产生学习表示的交叉污染。
+
+## DynamicHead 抽象
+
+`DynamicHead`类是多头预测的基本单元。它封装了从ESMFold中间表示经过其自身的`DynamicModule`（Evoformer循环）直至任务特定输出头的完整推理路径。关键是，每个`DynamicHead`实例都拥有自己的**转换层**、**DynamicModule**、**prediction linear**以及可选的**confidence/residual heads**——确保参数永远不会在头之间共享。
+
+构造函数签名揭示了设计空间：
+
+| 参数 | 类型 | 用途 |
+|---|---|---|
+| `name` | `str` | 头标识符；作为所有输出字典键的前缀 |
+| `task_type` | `str` | 取值为`"classification"`、`"regression"`、`"multiclass"`或`"kinetics"`之一 |
+| `seq_input_dim` | `int` | 序列转换的输入维度（源自ESMFold） |
+| `seq_state_dim` | `int` | 内部序列表示维度 (1024) |
+| `pair_input_dim` | `int` | 成对转换的输入维度（源自ESMFold） |
+| `pair_state_dim` | `int` | 内部成对表示维度 (128) |
+| `dynamic_cfg` | `DynamicModuleConfig` | 每个头的Evoformer循环配置 |
+| `n_conditions` | `int` | 温度条件数 (默认为 5) |
+| `n_classes` | `Optional[int]` | 离散类别数 (用于 multiclass/kinetics) |
+| `use_confidence_head` | `bool` | 启用逐残基、逐温度的置信度预测 |
+| `use_residual_head` | `bool` | 启用成对残差预测 (仅用于回归) |
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L32-L64)
+
+### 转换层：来自ESMFold的偏置注入
+
+每个`DynamicHead`首先构建**偏置项**，通过任务特定的学习偏移量来增强冻结的ESMFold表示。这是每个头将共享的结构先验适应到其自身预测领域的机制：
+
+```python
+# 序列转换: [lddt_logits || lm_logits] → s_s 的偏置
+seq_transition_input = torch.cat((lddt_logits, lm_logits), dim=2)
+s_s_0 = structure["s_s"] + self.seq_transition(seq_transition_input)
+
+# 成对转换: [ptm_logits || distogram_logits] → s_z 的偏置
+pair_transition_input = torch.cat((ptm_logits, distogram_logits), dim=3)
+s_z_0 = structure["s_z"] + self.pair_transition(pair_transition_input)
+```
+
+`seq_transition`是一个`LayerNorm → Linear → Linear`堆栈，将`seq_input_dim`（23个词元嵌入 + 37 × 50个lDDT分箱 = 1873）映射到`seq_state_dim`（1024）。`pair_transition`遵循相同的模式，将`pair_input_dim`（2 × 64个距离图分箱 = 128）映射到`pair_state_dim`（128）。这些偏置向量被**相加**到ESMFold表示中——它们并不替换原有表示，从而在允许任务特定偏移的同时保留了结构先验。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L66-L76), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L119-L130)
+
+## 任务特定输出架构
+
+`prediction_linear`的输出维度完全由`task_type`及其相关超参数决定：
+
+```
+┌─────────────────┬───────────────────────────────────┬──────────────────────────────┐
+│ task_type       │ out_dim 公式                       │ 规范输出形状                 │
+├─────────────────┼───────────────────────────────────┼──────────────────────────────┤
+│ classification  │ n_conditions                       │ [B, n_conditions, L, L]      │
+│ regression      │ n_conditions                       │ [B, n_conditions, L, L]      │
+│ multiclass      │ n_conditions × n_classes           │ [B, n_conditions, L, L, K]   │
+│ kinetics        │ n_conditions × n_classes × 2       │ [B, n_conditions, 2, L, L, K]│
+└─────────────────┴───────────────────────────────────┴──────────────────────────────┘
+```
+
+`prediction_linear`是一个单一的`nn.Linear(pair_state_dim, out_dim)`，直接从成对状态维度（128）映射到完整的多条件输出。然后，原始输出被**重塑和置换**为规范轴顺序，其中条件维度位于空间维度之前，从而实现下游处理期间对温度条件的干净迭代。
+
+<CgxTip>`prediction_linear`将128维的成对特征扩展为可能数百个输出通道（例如，kinetics: 5 × 6 × 2 = 60）。这是一种有意的设计——DynamicModule的Evoformer循环充分丰富了成对表示，使得单个线性投影无需中间MLP即可解耦多条件、多类结构。</CgxTip>
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L81-L94), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L141-L189)
+
+### 对称化：强制成对一致性
+
+所有任务类型在激活函数之后都会跨残基对轴应用**对称化**。对于分类和多分类，其形式为`probs = (probs + probs.transpose(L, L)) / 2`——将softmax概率与其转置对应物取平均。对于回归，对称化应用于sigmoid之前的logit空间平均：`pred_clipped = sigmoid((pred + pred.transpose(L, L)) / 2)`。这保证了对(i, j)的预测始终等于对(j, i)的预测，这是接触图和动力学时间尺度的物理要求。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L149-L189)
+
+## 三个默认头
+
+`ESMDynamic`实例化了三个默认的`DynamicHead`模块，每个模块具有不同的任务配置：
+
+```mermaid
+graph TD
+    ESMFold["ESMFold<br/>(冻结主干)"] --> SS["s_s: 序列状态<br/>[B, L, 1024]"]
+    ESMFold --> SZ["s_z: 成对状态<br/>[B, L, L, 128]"]
+    ESMFold --> LDDT["lddt_logits, lm_logits<br/>ptm_logits, distogram_logits"]
+
+    SS --> DynHead["DynamicHead<br/>task_type: classification<br/>n_conditions: 5"]
+    SZ --> DynHead
+    LDDT --> DynHead
+    DynHead --> DynOut["dynamic_prob: [B, 5, L, L]<br/>dynamic_pred: [B, 5, L, L]<br/>dynamic_confidence: [B, 5, L]"]
+
+    SS --> KinHead["DynamicHead<br/>task_type: kinetics<br/>n_conditions: 5, n_classes: 6"]
+    SZ --> KinHead
+    LDDT --> KinHead
+    KinHead --> KinOut["kinetic_prob: [B, 5, 2, L, L, 6]<br/>kinetic_pred_class: [B, 5, 2, L, L]<br/>kinetic_confidence: [B, 5, L]"]
+
+    SS --> FreqHead["DynamicHead<br/>task_type: regression<br/>n_conditions: 5"]
+    SZ --> FreqHead
+    LDDT --> FreqHead
+    FreqHead --> FreqOut["frequency_pred: [B, 5, L, L]<br/>frequency_residual_pred: [B, 5, L, L]"]
+
+    style DynHead fill:#4a90d9,stroke:#2c5f8a,color:white
+    style KinHead fill:#d94a4a,stroke:#8a2c2c,color:white
+    style FreqHead fill:#4ad97a,stroke:#2c8a4a,color:white
+    style ESMFold fill:#666,stroke:#333,color:white
+```
+
+| 头 | `task_type` | `n_conditions` | `n_classes` | `use_confidence_head` | `use_residual_head` | `dynamic_cfg` 键 |
+|---|---|---|---|---|---|---|
+| **dynamic** | `classification` | 5 | — | ✓ | ✗ | `dynamic_module` |
+| **kinetic** | `kinetics` | 5 | 6 | ✓ | ✗ | `kinetic_module` |
+| **frequency** | `regression` | 5 | — | ✗ | ✓ | `frequency_module` |
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L260-L288)
+
+### 动态头：二元接触存在性
+
+**dynamic**头回答了这个问题：*“残基对(i, j)在温度T下是否形成动态（非静态）接触？”*——这是一个跨5个温度条件（320K、348K、379K、413K、450K）的二元分类。输出流程为：
+
+1. `prediction_linear`产生`[B, L, L, 5]`原始logits
+2. 置换为`[B, 5, L, L]`规范形式
+3. Sigmoid激活 → 概率
+4. 对称化：`prob = (prob + prob.T) / 2`
+5. 硬决策：`pred = (prob > 0.5).long()`
+6. 置信度头：序列特征`[B, L, 1024]` → `LayerNorm → Linear → ReLU → Linear` → `[B, 5, L]`
+
+置信度头预测逐残基、逐温度的准确度——一个标量，指示模型认为其在每个残基位置和每个温度条件下的预测有多可靠。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L179-L185), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L192-L197)
+
+### 动力学头：带有开/关速率的时间尺度分类
+
+**kinetic**头在架构上最为复杂，产生了对**时间尺度分箱**和**速率方向**（开启速率与关闭速率）的联合分类。开启速率的6个动力学类别为：
+
+| 类别索引 | 开启速率名称 | 解释 |
+|---|---|---|
+| 0 | `always_on` | 接触始终存在（实际上是静态的） |
+| 1 | `1to10ns` | 开启速率时间尺度：1–10 ns |
+| 2 | `10to100ns` | 开启速率时间尺度：10–100 ns |
+| 3 | `100to300ns` | 开启速率时间尺度：100–300 ns |
+| 4 | `gt300ns` | 开启速率时间尺度：>300 ns |
+| 5 | `never_on` | 接触从未形成 |
+
+关闭速率类别遵循相同的分箱结构，但带有`always_off`/`never_off`的终端标签。`n_rates = 2`因子使输出维度加倍，产生`out_dim = 5 × 6 × 2 = 60`。在经过线性投影并重塑为`[B, L, L, 5, 6, 2]`后，规范置换将其重新排序为`[B, 5, 2, L, L, 6]`——温度、速率方向、空间、类别——匹配下游损失计算和可视化的预期索引模式。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L83-L86), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L144-L158), [predict.py](esm/esmdynamic/predict.py#L17-L33)
+
+### 频率头：带有残差校正的回归
+
+**frequency**头预测`[0, 1]`中的连续接触占有率——即残基对处于接触状态的时间比例。与分类和动力学头不同，它使用：
+
+- **Sigmoid有界回归**：`pred_clipped = sigmoid((pred + pred.T) / 2)`——对称化的logits通过sigmoid以强制`[0, 1]`范围，而不是先应用sigmoid然后再对称化。这是一个刻意的区别：在logit空间中进行对称化保留了sigmoid的概率校准。
+- **残差头**：一个辅助的成对预测`residual_head: [B, L, L, 128] → [B, 5, L, L]`，预测逐对、逐温度的误差校正。这使得训练损失可以分别惩罚主频率预测及其残差，允许模型以因式分解的方式学习粗略的占用模式和细粒度的校正。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L186-L189), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L107-L117), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L200-L205)
+
+## 辅助头：置信度与残差
+
+### 置信度头架构
+
+当`use_confidence_head=True`时，一个逐残基、逐温度的置信度预测器被附加到**序列特征**（而非成对特征）上：
+
+```
+s_s [B, L, 1024] → LayerNorm → Linear(1024, 512) → ReLU → Linear(512, 5) → permute → [B, 5, L]
+```
+
+这种架构选择意义重大：置信度是根据**单一序列表示**而非成对特征预测的，这反映了这样一种直觉：预测可靠性是局部残基环境（例如，无序倾向、二级结构）的属性，而不是特定对相互作用的属性。置信度头被`dynamic`和`kinetic`头共同使用。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L97-L105), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L192-L197)
+
+### 残差头架构
+
+当`use_residual_head=True`时（目前仅限`frequency`头），一个成对残差预测器被附加到**成对特征**上：
+
+```
+pair_feats [B, L, L, 128] → LayerNorm → Linear(128, 64) → ReLU → Linear(64, 5) → symmetrize → permute → [B, 5, L, L]
+```
+
+残差独立于主预测进行对称化，确保主频率估计及其校正项在物理上都是一致的。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L108-L116), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L200-L205)
+
+## 头选择与自定义配置
+
+`ESMDynamic`构造函数支持两种互斥的头选择模式：
+
+**通过`heads_to_load`进行预设选择**——选择三个默认头的一个子集：
+```python
+model = esmdynamic(heads_to_load=["dynamic", "kinetic"])  # 省略 frequency
+```
+
+**通过`head_definitions`进行完全自定义**——使用任意有效的`DynamicHead`配置定义任意头：
+```python
+custom_heads = [
+    dict(name="dynamic", task_type="classification", n_conditions=3,
+         dynamic_cfg=my_config, use_confidence_head=True, use_residual_head=False),
+    dict(name="custom_multiclass", task_type="multiclass", n_conditions=3, n_classes=4,
+         dynamic_cfg=my_config, use_confidence_head=False, use_residual_head=False),
+]
+model = ESMDynamic(head_definitions=custom_heads)
+```
+
+使用`head_definitions`时，调用者对任务类型、条件数、类别数以及启用哪些辅助头拥有完全控制权。唯一的约束是每个头的`dynamic_cfg`必须是有效的`DynamicModuleConfig`。实例化的头存储在`self.heads: nn.ModuleDict`中，以头名称作为键。
+
+<CgxTip>每个头通过`dynamic_cfg`字段接收其自身的`DynamicModuleConfig`。三个默认头使用来自`ESMDynamicConfig`的不同配置键（`dynamic_module`、`kinetic_module`、`frequency_module`），这意味着它们可以有不同的`num_blocks`、`max_recycles`、`dropout`和`chunk_size`值。这使得，例如，频率头可以使用比动态分类头更轻量的循环配置成为可能。</CgxTip>
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L252-L325), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L24-L28)
+
+## 每个头的 DynamicModule：独立的 Evoformer 循环
+
+多头设计的一个关键架构属性是**每个头拥有其自身的`DynamicModule`**，具有独立的Evoformer块和循环状态。每个头的前向传播遵循相同的结构模式：
+
+```mermaid
+flowchart LR
+    A["ESMFold 输出<br/>(s_s, s_z, lddt, lm,<br/>ptm, distogram)"] --> B["转换层<br/>(seq_transition +<br/>pair_transition)"]
+    B --> C["DynamicModule<br/>(Evoformer 块 ×<br/>循环)"]
+    C --> D["prediction_linear<br/>(pair_state_dim → out_dim)"]
+    D --> E["Reshape +<br/>Permute +<br/>Activate +<br/>Symmetrize"]
+    C --> F["confidence_head<br/>(来自 s_s)"]
+    C --> G["residual_head<br/>(来自 s_z)"]
+    E --> H["结构字典<br/>更新"]
+    F --> H
+    G --> H
+```
+
+每个头内的`DynamicModule`接收偏置增强的表示`s_s_0`和`s_z_0`，并通过`num_blocks`个TriangularSelfAttention块处理它们，在带有学习循环嵌入的`max_recycles`次循环中迭代。因为每个头都有自己的模块，循环状态（序列范数、成对范数、距离图分箱）独立演化——动力学头的循环不会影响动态头的表示，反之亦然。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L78-L79), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L132-L135), [dynamic_module.py](esm/esmdynamic/dynamic_module.py#L77-L122)
+
+## 输出字典：键命名约定
+
+每个头使用**名称前缀键约定**将其输出注入到共享的`structure`字典中。对于一个名为`"dynamic"`且`task_type="classification"`的头：
+
+| 键 | 形状 | 内容 |
+|---|---|---|
+| `dynamic_logits` | `[B, 5, L, L]` | 原始 sigmoid logits |
+| `dynamic_prob` | `[B, 5, L, L]` | 对称化的 sigmoid 概率 |
+| `dynamic_pred` | `[B, 5, L, L]` | 硬二元预测 (prob > 0.5) |
+| `dynamic_confidence` | `[B, 5, L]` | 逐残基逐温度的置信度 |
+| `dynamic_output` | `dict` | 原始 DynamicModule 输出 (s_s, s_z) |
+
+对于一个名为`"kinetic"`且`task_type="kinetics"`的头：
+
+| 键 | 形状 | 内容 |
+|---|---|---|
+| `kinetic_logits` | `[B, 5, 2, L, L, 6]` | 原始 softmax logits |
+| `kinetic_prob` | `[B, 5, 2, L, L, 6]` | 对称化的类别概率 |
+| `kinetic_pred_class` | `[B, 5, 2, L, L]` | argmax 类别预测 |
+| `kinetic_confidence` | `[B, 5, L]` | 逐残基逐温度的置信度 |
+
+对于一个名为`"frequency"`且`task_type="regression"`的头：
+
+| 键 | 形状 | 内容 |
+|---|---|---|
+| `frequency_value` | `[B, 5, L, L]` | 原始（未对称化）预测 |
+| `frequency_pred` | `[B, 5, L, L]` | 对称化的 sigmoid 有界预测 |
+| `frequency_residual_pred` | `[B, 5, L, L]` | 成对残差校正 |
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L149-L208), [predict.py](esm/esmdynamic/predict.py#L343-L451)
+
+## 天然接触比较
+
+当`dynamic`头处于活动状态时，`ESMDynamic.forward()`执行一个额外的后处理步骤：将ESMFold预测的结构重建为PDB，通过MDTraj计算**天然接触**（Cα距离 < 8Å），并导出两个比较图：
+
+- **`dynamic_nonnative_contacts`** `[B, 5, L, L]`——被预测为动态但在天然结构中不存在的接触（仅动态接触）
+- **`native_nondynamic_contacts`** `[B, 5, L, L]`——存在于天然结构中但未被预测为动态的接触（仅静态接触）
+
+这种集合论分解`dynamic = (dynamic ∩ native) ∪ (dynamic \ native)`能够直接对模型的动态预测与平衡结构的关系进行视觉和定量评估。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L361-L409), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L602-L636)
+
+## 损失函数映射到头
+
+`training/loss.py`中的模块化损失注册表直接映射到头输出键，在每个头的架构与其训练信号之间建立了清晰的对应关系：
+
+| 损失函数 | 头输出键 | 头 | 损失类型 |
+|---|---|---|---|
+| `loss_dynamic_logits` | `dynamic_logits` | dynamic | Sigmoid 焦点损失 (α=0.25, γ=2) |
+| `loss_dynamic_conf` | `dynamic_confidence` | dynamic | MSE |
+| `loss_kinetic_logits` | `kinetic_logits` | kinetic | 带类别权重的交叉熵 |
+| `loss_kinetic_conf` | `kinetic_confidence` | kinetic | MSE |
+| `loss_frequency` | `frequency_pred` | frequency | MSE |
+| `loss_frequency_residual` | `frequency_residual_pred` | frequency | MSE |
+
+`esmdynamic_loss`包装器遍历`active_heads`并分派到相应的损失函数，对活动项的数量取平均。这种设计意味着添加新头只需要：(1) 一个`DynamicHead`配置，(2) `LOSS_FUNCS`中的一个损失函数条目，以及(3) 训练数据中相应的目标键。
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L146-L184), [loss.py](esm/esmdynamic/training/loss.py#L38-L53), [loss.py](esm/esmdynamic/training/loss.py#L71-L103), [loss.py](esm/esmdynamic/training/loss.py#L122-L139)
+
+---
+
+理解多头预测设计为检查这些头如何被训练奠定了基础。有关训练编排，请参见[训练流水线与数据加载](8-training-pipeline-and-data-loading)；有关详细的损失公式，请参见[损失函数与指标](9-loss-functions-and-metrics)。有关所有头共享的Evoformer循环内部机制，请参见[DynamicModule与Evoformer循环](6-dynamicmodule-and-evoformer-recycling)。
+
+---
+
+## 训练框架
+
+- [深入探究/训练框架/训练流水线与数据加载](https://zread.ai/ShuklaGroup/esmdynamic/8-training-pipeline-and-data-loading)
+
+---
+slug:8-training-pipeline-and-data-loading
+blog_type:normal
+---
+
+
+ESMDynamic 训练流水线是一个仅训练头部的微调系统，它冻结 ESMFold 主干网络，并在预特征化的分子动力学数据上训练轻量级预测头。此设计使得模型能够针对动态接触预测、动力学分类和接触频率回归进行快速特化，而无需修改昂贵的蛋白质语言模型主干。该流水线涵盖了从逐蛋白质 torch 张量构建数据集、为序列长度平衡进行的加权采样、结合 bfloat16 自动类型转换的梯度累积，以及基于最佳验证损失的逐头检查点保存。
+
+## 数据架构：DynContactDataset
+
+`DynContactDataset` 类实现了 PyTorch 的 `Dataset`，它加载包含四种产物的逐标识符子目录：FASTA 序列、动态接触图、动力学标签和频率图。每个蛋白质标识符映射到 `data_dir` 下的一个目录，该目录具有固定的文件布局：
+
+| 文件 | 形状 | 描述 |
+|------|-------|-------------|
+| `consensus.fasta` | 2 行 FASTA | 头部 + 氨基酸序列 |
+| `dynamic_contacts.pt` | `(5, L, L)` | 5 个温度条件下的二值动态接触标签 |
+| `kinetics.pt` | `(5, 2, L, L)` | 动力学类别标签（5 个条件 × 2 个开启/关闭速率） |
+| `frequency.pt` | `(5, L, L)` | 5 个条件下的接触频率值 |
+
+**5 个条件**对应于多温度模拟副本。**2 个动力学速率**代表结合速率和解离速率分类。序列长度 `L` 因蛋白质而异，所有张量均是对称的接触图，具有残基对表示典型的对角线结构。
+
+### 裁剪策略
+
+变长蛋白质通过 `crop_length` 参数（默认为 256）进行处理。当 `L > crop_length` 时，会随机选择一个连续窗口 `[start, start + crop_length)`，并统一应用于序列和全部三个接触张量：
+
+```
+seq_crop   = seq[start:end]
+dyn_crop   = dyn[:,  start:end, start:end]    # [5, Lc, Lc]
+kin_crop   = kin[:, :, start:end, start:end]  # [5, 2, Lc, Lc]
+freq_crop  = freq[:, start:end, start:end]    # [5, Lc, Lc]
+```
+
+这种随机裁剪作为一种数据增强策略，使模型能够接触到长蛋白质内不同的结构上下文，同时保持 GPU 显存占用受限。短于 `crop_length` 的蛋白质将在 `__getitem__` 层级被完整使用，不进行填充。
+
+来源：[data_reader.py](esm/esmdynamic/training/data_reader.py#L8-L134)
+
+### 整合与填充
+
+`custom_collate_fn` 通过将批次中的所有张量填充至 `Lmax = max(len(s) for s in sequences)` 来处理变长批处理。每个接触张量均进行对称零填充：
+
+- **Dynamic**：`[B, 5, Lmax, Lmax]`
+- **Kinetics**：`[B, 5, 2, Lmax, Lmax]`
+- **Frequency**：`[B, 5, Lmax, Lmax]`
+
+实际长度作为单独的张量返回，用于损失计算中的下游掩码操作。这确保了填充位置贡献零梯度，并将其排除在指标计算之外。
+
+来源：[data_reader.py](esm/esmdynamic/training/data_reader.py#L44-L80)
+
+## 为序列长度平衡的加权采样
+
+不同长度的蛋白质生成的接触图，其有效条目数量（O(L²)）差异巨大。若不进行校正，短蛋白质在每个 epoch 中将被过度代表。`weighted_random_sampler` 方法通过计算与序列长度成正比的采样权重来解决此问题：
+
+```python
+weights[i] = len(sequence_i) / sum(len(sequence_j) for j)
+```
+
+这些权重也可以通过 `weights` 属性从外部覆盖，从而实现基于聚类的加权（例如，在 20% 截断值下进行序列同一性聚类时生成的 `train_weights.pt`）。采样器以 `replacement=True` 方式运行，独立抽取 `num_samples_per_epoch` 个样本——这解耦了 epoch 定义与数据集大小，并允许对训练预算进行细粒度控制。
+
+来源：[data_reader.py](esm/esmdynamic/training/data_reader.py#L83-L98), [train.py](esm/esmdynamic/training/train.py#L37-L55)
+
+## 数据预处理：CSV 到 Torch 的转换
+
+原始分子动力学数据以从 `rcsb.tar.gz` 或 `mdcath.tar.gz` 归档文件中提取的 CSV 文件形式存在。`convert_csv_to_torch` 脚本执行一次性预处理步骤：它递归发现根目录下的所有 `dynamic_contacts.csv` 文件，通过 `numpy.loadtxt` 将每个文件加载为一维整数数组，并使用 `torch.save` 将结果保存为 `.pt` 文件。此转换在训练前是必需的，因为数据集的 `_load_dynamic` 方法会对 `.pt` 文件调用 `torch.load`。
+
+来源：[convert_csv_to_torch.py](esm/esmdynamic/training/convert_csv_to_torch.py#L1-L52)
+
+## 训练流水线架构
+
+训练流水线遵循模块化初始化模式，其中每个组件——数据集、加载器、模型、优化器——均由专门的辅助函数构建。整体流程如下：
+
+```mermaid
+flowchart TD
+    A["CLI 参数<br/>(get_args)"] --> B["init_datasets()<br/>训练 + 验证集划分"]
+    B --> C["init_data_loaders()<br/>WeightedRandomSampler + DataLoader"]
+    A --> D["init_model()<br/>ESMDynamic(heads_to_load)"]
+    D --> E["冻结 ESMFold 主干<br/>model.esmfold.requires_grad_(False)"]
+    E --> F["init_optimizer_for_heads()<br/>仅针对头参数的 Adam"]
+    A --> G["选择 loss_heads<br/>→ 头前缀"]
+    G --> F
+    C --> H["训练循环"]
+    F --> H
+    D --> H
+    H --> I["train_one_epoch()"]
+    I --> J["compute_validation()"]
+    J --> K{"val_loss < best?"}
+    K -->|是| L["保存最佳头检查点"]
+    K -->|否| M["保存最新检查点"]
+    L --> N["下一个 epoch"]
+    M --> N
+```
+
+来源：[train.py](esm/esmdynamic/training/train.py#L58-L762)
+
+### 模型初始化与头选择
+
+`init_model` 函数创建一个 `ESMDynamic` 实例，其中 `load_esmfold=True`，并带有一个从请求的损失头派生出的受限 `heads_to_load` 列表。从损失头名称到模型头前缀的映射由 `select_prefixes_from_loss_heads` 处理：
+
+| 损失头名称 | 提取的前缀 | 模型头 |
+|---------------|-----------------|------------|
+| `dynamic_logits` | `dynamic` | `DynamicHead(task_type="classification")` |
+| `dynamic_confidence` | `dynamic` | *(相同的头，置信度子模块)* |
+| `kinetic_logits` | `kinetic` | `DynamicHead(task_type="kinetics")` |
+| `kinetic_confidence` | `kinetic` | *(相同的头，置信度子模块)* |
+| `frequency_pred` | `frequency` | `DynamicHead(task_type="regression")` |
+| `frequency_residual_pred` | `frequency` | *(相同的头，残差子模块)* |
+
+此前缀提取确保了从同一模型头请求多个损失项（例如 `dynamic_logits` + `dynamic_confidence`）时，该头仅加载一次。如果提供了 `--pretrained` 检查点路径，其状态字典将通过 `strict=False` 加载，允许部分恢复先前训练过的头。
+
+来源：[train.py](esm/esmdynamic/training/train.py#L77-L95)
+
+### 优化器与主干冻结
+
+一个关键的架构决策：**仅头参数接收梯度**。模型构建完成后，ESMFold 主干通过 `model.esmfold.requires_grad_(False)` 被显式冻结，优化器则仅由头参数构建：
+
+```python
+for h in head_prefixes:
+    params += list(model.heads[h].parameters())
+optimizer = torch.optim.Adam(params, lr=1e-4)
+```
+
+这确保了预训练的蛋白质语言模型和折叠主干保持静态，而轻量级的 DynamicModule + 预测头则适应动力学预测任务。
+
+<CgxTip>主干冻结 + 仅头优化器模式意味着训练期间的 VRAM 占用主要由 ESMFold 的前向传播（在 `torch.no_grad()` 下运行）主导，而非梯度存储。如果 ESMFold 的 VRAM 成为瓶颈，请离线预计算 ESMFold 输出，并将其作为 `precomputed` 字典传递给 `ESMDynamic.forward()`。</CgxTip>
+
+来源：[train.py](esm/esmdynamic/training/train.py#L96-L108), [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L330-L340)
+
+## 前向传播与目标构建
+
+### 训练前向路径
+
+训练循环使用 `model.forward_from_seq(sequences)`，它通过 `batch_encode_sequences` 将原始氨基酸字符串编码为 token 张量，然后委托给 `ESMDynamic.forward()`。与 `predict_from_seqs()`（封装在 `torch.no_grad()` 中）不同，`forward_from_seq` 保留计算图以进行反向传播。在 `forward()` 内部，ESMFold 主干在 `torch.no_grad()` 下运行，而头的计算启用梯度，从而实现上述选择性训练。
+
+来源：[esmdynamic.py](esm/esmdynamic/esmdynamic/esmdynamic.py#L415-L450)
+
+### 目标构建：`build_outputs_and_targets_for_loss`
+
+此函数是原始模型输出（`structure` 字典）与损失函数预期输入之间的桥梁。它执行三个关键转换：
+
+1. **直接映射**用于主要预测：`dynamic_logits` → 结构 logits，`kinetic_logits` → 结构 logits，`frequency_pred` → 结构值
+2. **派生置信度目标**：动态置信度目标通过测量逐残基的配对级预测与真实值的准确率来计算；动力学置信度目标则对 on/off 维度的逐速率准确率求平均
+3. **派生残差目标**：频率残差目标是绝对差值 `|freq_true - freq_pred|`，用于训练残差头预测主频率预测的误差
+
+<CgxTip>置信度和残差目标由**分离的**模型预测（`.detach()`）计算得出，从而阻止了梯度流经目标构建路径。这一点至关重要——若不分离，"目标"将依赖于模型参数，产生不稳定的训练信号，导致头在试图匹配随自身权重变化而改变的目标的同时进行学习。</CgxTip>
+
+来源：[train.py](esm/esmdynamic/training/train.py#L365-L497)
+
+## 训练循环机制
+
+### 梯度累积
+
+`batch_accum` 参数（默认为 8）实现了梯度累积：每个微批次调用一次 `loss.backward()`，但仅在每 `batch_accum` 步或 epoch 结束时触发 `optimizer.step()`。损失预先除以 `batch_accum`，因此累积梯度等效于单次大批量更新。这使得有效批量大小达到 `batch_size × batch_accum`（例如 4 × 8 = 32），而无需按比例增加 VRAM。
+
+来源：[train.py](esm/esmdynamic/training/train.py#L499-L585)
+
+### 混合精度
+
+当 `device == "cuda"` 时，训练和验证均将前向传播封装在 `torch.autocast(device_type="cuda", dtype=torch.bfloat16)` 中。这会将 ESMFold 主干和头的计算转换为 bfloat16，从而减少 VRAM 并加速 Ampere+ GPU 上的矩阵运算。对于 CPU 训练，自动类型转换上下文被禁用以避免开销。
+
+来源：[train.py](esm/esmdynamic/training/train.py#L508-L510), [train.py](esm/esmdynamic/training/train.py#L595-L597)
+
+### 检查点策略
+
+每个 epoch 通过 `save_head_state_dicts` 保存两种检查点类型：
+
+| 检查点 | 条件 | 命名模式 |
+|-----------|-----------|----------------|
+| **最佳验证** | `val_loss < best_vloss` | `{head}_head_best_vloss_{timestamp}.pt` |
+| **最新 epoch** | 始终 | `{head}_head_chkpt_{timestamp}.pt` |
+
+仅保存头状态字典，而非完整模型。每个检查点文件存储以 `heads.{head_name}.*` 为前缀的键，以便启用 `strict=False` 方式加载至全新的 `ESMDynamic` 实例中。此设计使检查点文件保持较小（头是轻量级的），并允许选择性恢复头。
+
+来源：[train.py](esm/esmdynamic/training/train.py#L109-L117), [train.py](esm/esmdynamic/training/train.py#L738-L745)
+
+## CLI 配置参考
+
+训练脚本通过 `python -m esm.esmdynamic.training.train` 调用，包含以下参数：
+
+| 参数 | 类型 | 默认值 | 描述 |
+|----------|------|---------|-------------|
+| `--train_identifiers_file` | str | *必填* | 包含训练蛋白质标识符的文本文件（每行一个） |
+| `--val_identifiers_file` | str | *必填* | 包含验证蛋白质标识符的文本文件 |
+| `--data_dir` | str | *必填* | 包含逐蛋白质子目录的根目录 |
+| `--outpath` | str | *必填* | 用于检查点和 TensorBoard 日志的输出目录 |
+| `--loss_heads` | list | *必填* | 要激活的损失头（例如 `dynamic_logits kinetic_logits frequency_pred`） |
+| `--batch_size` | int | 4 | 每 GPU 的微批量大小 |
+| `--batch_accum` | int | 8 | 梯度累积步数 |
+| `--epochs` | int | 1 | 训练 epoch 数 |
+| `--train_samples_per_epoch` | int | 10000 | 每个训练 epoch 抽取的样本数 |
+| `--val_samples_per_epoch` | int | 1000 | 每个验证 epoch 抽取的样本数 |
+| `--lr` | float | 1e-4 | 头参数的 Adam 学习率 |
+| `--pretrained` | str | None | 用于头热启动的预训练检查点路径 |
+| `--kin_class_weights` | str | None | 动力学类别权重张量 `[2, K]` 的路径 |
+| `--chunk_size` | int | 256 | 节省显存的注意力机制的块大小 |
+| `--alpha` | float | 0.25 | Focal 损失 alpha（动态接触） |
+| `--gamma` | float | 2.0 | Focal 损失 gamma（动态接触） |
+| `--device` | str | "cuda" | 计算设备 |
+
+来源：[train.py](esm/esmdynamic/training/train.py#L656-L690)
+
+## 监控与指标
+
+训练进度通过在 `{outpath}/runs/trainer_{timestamp}/` 下初始化的 `SummaryWriter` 记录至 **TensorBoard**。记录以下标量：
+
+| 标量 | 范围 | 头 |
+|--------|-------|-------|
+| `dynamic/accuracy/train` | 逐批次 | `dynamic_logits` |
+| `dynamic/precision/train`, `dynamic/recall/train`, `dynamic/f1/train` | 逐批次 | `dynamic_logits` |
+| `kinetic/accuracy/train`, `kinetic/macro_f1/train` | 逐批次 | `kinetic_logits` |
+| `frequency/rmse/train` | 逐批次 | `frequency_pred` |
+| `{head}/{metric}/val` | 逐 epoch | 所有活跃头 |
+| `Training vs. Validation Loss` | 逐 epoch | 组合 |
+
+此外，运行元数据（时间戳、脚本路径、所有 CLI 参数）被持久化到 `run_metadata_{timestamp}.txt` 以保证可复现性。
+
+来源：[train.py](esm/esmdynamic/training/train.py#L530-L575), [train.py](esm/esmdynamic/training/train.py#L617-L650)
+
+## 数据流总结
+
+从磁盘到梯度更新的完整数据路径遵循以下序列：
+
+```mermaid
+flowchart LR
+    A["磁盘：<br/>consensus.fasta<br/>dynamic_contacts.pt<br/>kinetics.pt<br/>frequency.pt"] -->|"_getitem_"| B["裁剪后的张量<br/>seq, dyn, kin, freq, L"]
+    C["批次化 + 填充<br/>[B,5,Lm,Lm] 等"] -->|"DataLoader"| D["训练循环"]
+    B -->|"custom_collate_fn"| C
+    D -->|"forward_from_seq"| E["ESMDynamic<br/>ESMFold→头"]
+    E -->|"build_outputs_and_targets"| F["损失字典<br/>(outputs, targets)"]
+    F -->|"esmdynamic_loss"| G["标量损失"]
+    G -->|".backward()"| H["累积梯度"]
+    H -->|"optimizer.step()"| I["更新的头参数"]
+```
+
+来源：[train.py](esm/esmdynamic/training/train.py#L1-L762), [data_reader.py](esm/esmdynamic/training/data_reader.py#L1-L134)
+
+---
+
+**下一步**：有关损失函数如何为每种头类型计算梯度的详细信息，请参见[损失函数与指标](9-loss-functions-and-metrics)。要了解生成训练期间所使用的结构字典的模型架构，请参见[ESMDynamic 模型类](5-esmdynamic-model-class)。
+
+---
+
+- [深入探究/训练框架/损失函数与评估指标](https://zread.ai/ShuklaGroup/esmdynamic/9-loss-functions-and-metrics)
+
+---
+slug:9-loss-functions-and-metrics
+blog_type:normal
+---
+
+
+ESMDynamic的训练框架实现了一个**多头损失架构**，其中每个预测头——动态接触、动力学和频率——都带有其专属的损失函数和评估指标体系。`loss.py`和`train.py`中的模块化设计确保了只有在训练时指定的预测头才会对组合损失产生影响，从而支持从单头特化到全联合优化的灵活微调机制。
+
+## 损失函数架构
+
+损失系统围绕中央调度器`esmdynamic_loss`组织，该调度器遍历**活跃头**，并委托给在`LOSS_FUNCS`查找表中注册的头特定损失函数。每个头可能会产生多个损失项（例如，主预测损失加上置信度或残差损失），但调度器通过简单的均匀平均来聚合它们——将损失总和除以活跃项的数量。
+
+```mermaid
+graph TD
+    A["esmdynamic_loss()"] --> B{"遍历 active_heads"}
+    B --> C["dynamic_logits"]
+    B --> D["dynamic_confidence"]
+    B --> E["kinetic_logits"]
+    B --> F["kinetic_confidence"]
+    B --> G["frequency_pred"]
+    B --> H["frequency_residual_pred"]
+    C --> I["sigmoid_focal_loss<br/>α=0.25, γ=2"]
+    D --> J["MSE (1D mask)"]
+    E --> K["加权交叉熵<br/>class_weights[2,K]"]
+    F --> L["MSE (1D mask)"]
+    G --> M["MSE (2D mask)"]
+    H --> N["MSE (2D mask)"]
+    I --> O["Σ / count"]
+    J --> O
+    K --> O
+    L --> O
+    M --> O
+    N --> O
+```
+
+`LOSS_FUNCS`注册表将六个规范头名称映射到其实现，在模型的输出字典键与损失计算之间建立了严格的契约：
+
+| 注册表键 | 函数 | 损失族 | 掩码维度 |
+|---|---|---|---|
+| `dynamic_logits` | `loss_dynamic_logits` | Sigmoid Focal Loss | 2D `(B, L, L)` |
+| `dynamic_confidence` | `loss_dynamic_conf` | MSE | 1D `(B, L)` |
+| `kinetic_logits` | `loss_kinetic_logits` | 加权交叉熵 | 2D `(B, L, L)` |
+| `kinetic_confidence` | `loss_kinetic_conf` | MSE | 1D `(B, L)` |
+| `frequency_pred` | `loss_frequency` | MSE | 2D `(B, L, L)` |
+| `frequency_residual_pred` | `loss_frequency_residual` | MSE | 2D `(B, L, L)` |
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L146-L153), [loss.py](esm/esmdynamic/training/loss.py#L155-L184)
+
+## 变长掩码
+
+所有损失函数都针对蛋白质长度不同的批处理输入进行操作。两个掩码工具确保**填充位置贡献零梯度**。`length_mask_2d`生成一个`(B, L, L)`布尔掩码，对于长度为`Li`的蛋白质`i`，`m[i, :Li, :Li] = True`，将所有涉及填充残基的成对条目置零。`length_mask_1d`为逐残基量（如置信度预测）生成一个`(B, L)`掩码。这些掩码在逐元素计算损失*之后*、求和*之前*通过逐元素乘法应用，确保损失景观（loss landscape）对于用于批处理的最大裁剪长度保持不变。
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L14-L31)
+
+## 动态接触损失
+
+**动态接触预测**头使用来自`torchvision.ops`的**sigmoid focal loss**（Sigmoid焦点损失），这是一种专为类别不平衡场景设计的二元交叉熵变体。对于每个条件（温度），模型输出形状为`[B, C, L, L]`的logits，其中`C = n_conditions = 5`。焦点损失通过因子`(1 − p_t)^γ`来调制标准BCE梯度，其中`p_t`是正确类别的预测概率。在默认`γ = 2`的情况下，简单（分类良好）的样本会被大幅降低梯度权重，迫使优化器将注意力集中在困难、模糊的残基对上。
+
+**平衡参数α = 0.25**将正类（存在动态接触）的权重设为0.25，负类（无接触）的权重设为0.75，这反映了接触图的稀疏性，其中大多数残基对是非接触的。2D长度掩码通过`mask[:, None]`在条件维度上广播，以将填充位置排除在损失求和之外。
+
+**动态置信度损失**是预测的逐残基置信度分数`[B, C, L]`与其目标之间的简单MSE，并使用1D掩码进行掩码处理。置信度目标*不是*静态标签——它们是在训练时根据模型自身的预测构建的（参见[置信度目标构建](#confidence-target-construction)）。
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L38-L64)
+
+## 动力学损失
+
+**动力学头**针对开速率和关速率，在`K = 6`个速率类别`{always observed, 1–10 ns, 10–100 ns, 100–300 ns, 300+ ns, never observed}`中执行多类分类，产生形状为`[B, C, 2, L, L, K]`的logits，其中`2`维度索引`{off, on}`速率。
+
+该损失分解为两个独立的**加权交叉熵**项——一个用于关速率，一个用于开速率——每一项都使用来自形状为`[2, K]`的`class_weights`张量的逐类权重向量。2D长度掩码被扩展为`[B, C, 2, L, L]`，并作为布尔索引应用，以在调用`F.cross_entropy`之前仅提取有效的`(logits, labels)`对。这种掩码索引方法（而非事后乘法）是必要的，因为`cross_entropy`要求匹配的logit-label维度，并且本身不支持逐元素掩码。
+
+**动力学置信度损失**遵循与动态置信度相同的MSE模式，其目标是在开/关速率维度上平均的逐残基准确率。
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L71-L115)
+
+## 频率回归损失
+
+**频率头**是一个回归任务，预测各条件下每个残基对的接触频率值（在`[0, 1]`范围内）。两个互补的损失在此头上运行：
+
+1. **`loss_frequency`** ——预测频率图与真实频率图之间的直接MSE，两者形状均为`[B, C, L, L]`，并使用2D长度掩码进行掩码处理。这驱动主频率预测向真实标签靠拢。
+
+2. **`loss_frequency_residual`** ——残差头的预测与**绝对差值**`|freq_true − freq_pred|`之间的MSE。残差头学习预测主频率预测的误差幅度，提供了一种自监督的不确定性估计。其目标是在训练时从（分离的）主预测中动态构建的。
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L122-L139)
+
+## 置信度目标构建
+
+置信度目标**不存储在数据集中**——它们是根据当前模型对真实标签的预测即时合成的。这创建了一个自参照的训练信号：置信度头学习预测*主头在每个残基位置上当前的准确度*。
+
+对于**动态置信度**，`build_confidence_targets_dynamic`通过`sigmoid`加上0.5的阈值将logits转换为二元预测，然后计算逐残基准确率作为正确预测的伴侣残基的比例：在有效长度`Lb`上`conf_target[b, c, i] = mean(pred[b, c, i, :] == true[b, c, i, :])`。这产生了一个在`[0, 1]`范围内的`[B, C, L]`目标。
+
+对于**动力学置信度**，`build_confidence_targets_kinetic`在`K`个类别上取logits的argmax，然后类似地计算逐速率逐残基准确率，产生`[B, C, R, L]`。在作为`[B, C, L]`置信度目标传递之前，它在速率维度（`R = 2`）上进行平均。
+
+对于**频率残差目标**，`build_frequency_residual_target`计算`|freq_true − freq_pred|`，提供残差头应学习重现的绝对误差图。在目标构建中使用的所有预测张量都经过`.detach()`处理，以防止梯度流经目标合成路径。
+
+来源: [train.py](esm/esmdynamic/training/train.py#L131-L190)
+
+## 评估指标
+
+每个预测头都有一个专属的指标函数，用于计算每个批次有效（掩码）位置的评估统计数据。这些指标在训练期间逐批次记录，并在epoch边界处聚合（批次平均值），用于TensorBoard和控制台输出。
+
+### 动态接触指标
+
+`metrics_dynamic_batch`从批次中所有有效残基对聚合的混淆矩阵计算五个分类统计数据：
+
+| 指标 | 公式 | 解释 |
+|---|---|---|
+| **准确率** | (TP + TN) / N | 总体正确率 |
+| **精确率** | TP / (TP + FP) | 预测为接触中真实接触的比例 |
+| **召回率** | TP / (TP + FN) | 真实接触中被检测到的比例 |
+| **F1** | 2·P·R / (P + R) | 精确率和召回率的调和平均值 |
+| **平衡准确率** | (TPR + TNR) / 2 | 灵敏度和特异度的平均值 |
+
+所有计数在计算比例之前都在批次和条件维度上累积，为每个指标提供单个标量，而不是逐蛋白质或逐条件的值。
+
+来源: [train.py](esm/esmdynamic/training/train.py#L198-L250)
+
+### 动力学指标
+
+`metrics_kinetic_batch`处理具有`K`个速率类别的多类设置。它累积所有有效位置的逐类真阳性、预测阳性和真阳性计数，然后计算：
+
+- **总体准确率** ——正确分类的(残基, 条件, 速率)三元组的比例
+- **宏精确率** ——逐类精确率的未加权平均值
+- **宏召回率** ——逐类召回率的未加权平均值（等同于**平衡准确率**）
+- **宏F1** ——逐类F1分数的未加权平均值
+
+宏平均平等对待所有`K = 6`个类别，无论其频率如何，这对于动力学领域至关重要，因为在动力学领域中，“always observed”和“never observed”等类别可能占主导地位，而具有科学意义的中间时间尺度却很罕见。
+
+来源: [train.py](esm/esmdynamic/training/train.py#L253-L316)
+
+### 频率指标
+
+`metrics_frequency_batch`计算批次中所有有效条目的单一**RMSE**（均方根误差）。这是回归任务的自然指标，并且在尺度上与`[0, 1]`的频率范围相匹配。该实现累积蛋白质的平方误差和及计数，然后计算`sqrt(SSE / count)`，以避免存储完整的差异张量。
+
+来源: [train.py](esm/esmdynamic/training/train.py#L319-L337)
+
+## 损失调度与训练集成
+
+`esmdynamic_loss`包装器接受模型的输出字典、目标字典、残基长度和活跃头名称集合。它遍历`active_heads`，在`LOSS_FUNCS`中查找每一项，并使用适当的额外参数进行调度：为动力学logits头提供`kin_class_weights`，为动态logits头提供`(alpha, gamma)`。总损失是所有活跃项的**均匀平均**：`total / count`。如果未找到有效头，则抛出`RuntimeError`——这可以防止在头名称指定错误时发生静默的零损失训练。
+
+<CgxTip>`esmdynamic_loss`中的`active_heads`列表必须与`LOSS_FUNCS`注册表中的键完全匹配（例如，`"dynamic_logits"`，而不是`"dynamic"`）。`train.py`中的`--loss_heads` CLI参数直接接受这些注册表键，而`select_prefixes_from_loss_heads`通过在第一个下划线处分割来推导模型头前缀（例如，`"dynamic"`）。</CgxTip>
+
+在训练期间，`build_outputs_and_targets_for_loss`在模型的原始输出字典（以头名称模式如`dynamic_logits`、`dynamic_confidence`、`frequency_pred`、`frequency_residual_pred`为键）和损失函数的预期输入之间执行关键桥接。当这些头处于活跃状态时，此函数还会调用置信度和残差目标构造器，确保自参照目标始终与当前模型状态同步。
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L155-L184), [train.py](esm/esmdynamic/training/train.py#L341-L441)
+
+## 焦点损失超参数
+
+Sigmoid焦点损失通过CLI参数`--alpha`和`--gamma`暴露了两个可调参数：
+
+| 参数 | 默认值 | 作用 | 增加的效果 |
+|---|---|---|---|
+| **α** (alpha) | 0.25 | 正类的类别平衡权重 | 将焦点转移到正（接触）样本上 |
+| **γ** (gamma) | 2.0 | 聚焦参数 | 更积极地降低简单样本的权重 |
+
+`α = 0.25, γ = 2`的组合遵循了原始焦点损失论文对类别不平衡检测任务的推荐。在动态接触设置中，这尤其合适，因为接触图本质上是稀疏的——通常在任何给定条件下，少于5%的残基对会形成接触。
+
+<CgxTip>在类别极度不平衡（动态接触非常少）的数据集上进行训练时，考虑将`γ`增加到3–5，而不是调整`α`，因为与线性类别加权相比，聚焦效应在不同不平衡比率下更稳定。</CgxTip>
+
+来源: [loss.py](esm/esmdynamic/training/loss.py#L38-L53), [train.py](esm/esmdynamic/training/train.py#L669-L670)
+
+## TensorBoard日志记录
+
+指标以两种粒度记录到TensorBoard。在训练期间，逐批次指标在每个优化器步骤中写入，带有如`dynamic/accuracy/train`、`kinetic/macro_f1/train`和`frequency/rmse/train`的前缀。在验证期间，epoch聚合的指标以`val`后缀写入。一个组合的`Training vs. Validation Loss`标量在同一图表上跟踪两种损失，以便进行早停诊断。批次损失也按头记录（例如，`dynamic/loss_train_batch`），但请注意，这是为每个头重复的*组合*损失值，而不是特定头的组件。
+
+来源: [train.py](esm/esmdynamic/training/train.py#L498-L533), [train.py](esm/esmdynamic/training/train.py#L612-L629)
+
+---
+
+**下一步**：了解这些损失函数如何集成到完整的训练循环中，请参见[训练流水线与数据加载](8-training-pipeline-and-data-loading)，或者探索生成输入这些损失的logits的多头预测架构，请参见[多头预测设计](7-multi-head-prediction-design)。
+
+---
+
+## 推理与可视化
+
+- [深入探究/推理与可视化/批量预测脚本](https://zread.ai/ShuklaGroup/esmdynamic/10-bulk-prediction-script)
+
+---
+slug:10-bulk-prediction-script
+blog_type:normal
+---
+
+
+批量预测脚本（`esm/esmdynamic/predict.py`）是大规模运行 ESMDynamic 推理的主要命令行接口。它接受来自三个互斥输入来源的蛋白质序列——内联字符串、FASTA 文件或 CSV 文件——并协调模型加载、批量推理和多格式输出生成，涵盖五个模拟温度下的所有三个预测头（动态接触、接触频率和动力学）。
+
+来源: [predict.py](esm/esmdynamic/predict.py#L1-L658)
+
+## 执行流程
+
+该脚本遵循从输入解析、批量推理到逐序列输出序列化的线性流水线。在给定相同输入和模型权重的情况下，每个阶段都是确定性的。
+
+```mermaid
+flowchart TD
+    A["CLI 参数<br/>(parse_args)"] --> B["加载序列<br/>(--sequence | --fasta | --csv)"]
+    B --> C["实例化模型<br/>esm.pretrained.esmdynamic()"]
+    C --> D["设置 chunk_size 并<br/>转移至设备"]
+    D --> E{"批次循环<br/>range(0, N, batch_size)"}
+    E --> F["model.predict_from_seqs()<br/>with torch.no_grad()"]
+    F --> G["逐序列输出<br/>save_outputs_for_sequence()"]
+    G --> H["裁剪连接肽位置<br/>从模型输出中"]
+    H --> I["保存动态图谱"]
+    H --> J["保存频率图谱"]
+    H --> K["保存动力学图谱"]
+    H --> L["保存天然接触"]
+    I --> M["写入 .txt / .png / .html / .pt"]
+    J --> M
+    K --> M
+    L --> M
+    M --> E
+```
+
+来源: [predict.py](esm/esmdynamic/predict.py#L616-L658)
+
+## 输入来源与序列加载
+
+该脚本使用**互斥组**来指定输入——必须且只能提供 `--sequence`、`--fasta` 或 `--csv` 中的一个。`load_sequences` 函数将这三种路径统一标准化为 `(id, sequence_string)` 元组列表。
+
+| 标志 | 格式 | ID 派生方式 | 示例 |
+|---|---|---|---|
+| `--sequence` | 单个内联字符串 | 硬编码为 `"output"` | `--sequence "MVLSPADKTN"` |
+| `--fasta` | 多记录 FASTA | 来自 BioPython SeqIO 的 `record.id` | `--fasta proteins.fasta` |
+| `--csv` | 双列 CSV (id, seq) | 第一列的值；跳过表头 | `--csv example.csv` |
+
+对于**多链蛋白质**，序列字符串中的各链由冒号分隔（例如 `"CHAIN_A:CHAIN_B"`）。在 notebook 工作流中，正斜杠（`/`）会在推理前被标准化为冒号。示例数据包含 HIV-1 蛋白酶同源二聚体，表示为由 `:` 连接的两个相同的 99 残基链。
+
+<CgxTip>使用 `--csv` 时，文件必须包含表头行（将通过 `next(reader, None)` 无条件跳过）。后续的每一行必须至少包含 2 列——仅前两列会被用作 ID 和序列。</CgxTip>
+
+来源: [predict.py](esm/esmdynamic/predict.py#L36-L127), [example.csv](examples/esmdynamic/example.csv#L1-L5), [example.fasta](examples/esmdynamic/example.fasta#L1-L8)
+
+## CLI 参数参考
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `--sequence` | str | *(必填组)* | 单个序列字符串 |
+| `--fasta` | str | *(必填组)* | FASTA 文件路径 |
+| `--csv` | str | *(必填组)* | CSV 文件路径（id, seq 列） |
+| `--batch_size` | int | `1` | 每个推理批次的序列数量 |
+| `--chunk_size` | int | `256` | 用于内存控制的注意力块大小 |
+| `--device` | {cpu, cuda} | `cuda` | 计算设备；自动回退至 CPU |
+| `--output_dir` | str | `"outputs"` | 所有输出的根目录 |
+| `--chain_ids` | str | `None` (A–Z) | 链标签字符（例如 `"ABCDEF"`） |
+| `--low_memory` | flag | `False` | 启用低内存推理模式 |
+| `--save_html` | flag | `True`* | 保存交互式 Plotly HTML 热图 |
+| `--save_png` | flag | `True`* | 保存 Matplotlib PNG 热图 |
+| `--save_txt` | flag | `True`* | 保存原始文本/CSV 矩阵 |
+| `--save_raw_pt` | flag | `True`* | 保存包含所有输出的 `.pt` 打包文件 |
+| `--num_recycles` | int | `None` | 覆盖 Evoformer 循环次数 |
+
+*\*如果未指定任何格式标志，则这四个标志默认均为 `True`。*
+
+来源: [predict.py](esm/esmdynamic/predict.py#L36-L110)
+
+## 模型初始化与批量推理
+
+`main()` 函数通过 `esm.pretrained.esmdynamic()` 加载预训练的 ESMDynamic 模型，该函数内部会调用来自 Illinois Data Bank 仓库的权重加载流水线。模型通过 `model.eval()` 被设置为评估模式，并且所有序列都在 `torch.no_grad()` 上下文中进行处理。
+
+```python
+model = esm.pretrained.esmdynamic()
+model.set_chunk_size(args.chunk_size)
+model = model.to(device)
+model.eval()
+
+for start in range(0, len(sequences), args.batch_size):
+    batch = sequences[start:start + args.batch_size]
+    ids, raw_seqs = zip(*batch)
+    with torch.no_grad():
+        prediction = model.predict_from_seqs(
+            list(raw_seqs),
+            low_memory=args.low_memory,
+            num_recycles=args.num_recycles,
+        )
+```
+
+`predict_from_seqs` 方法返回一个包含所有活跃预测头对应键的字典。在 `save_outputs_for_sequence` 中提取逐序列结果时，每个头的输出均通过批次位置（`seq_idx`）进行索引。
+
+来源: [predict.py](esm/esmdynamic/predict.py#L616-L654), [pretrained.py](esm/esmdynamic/pretrained.py#L1-L36)
+
+## 连接肽裁剪与标签生成
+
+ESMDynamic 在内部通过在链之间插入一个 **25 残基的连接肽**（由间隙 token 组成）来表示多链蛋白质。因此，模型的输出矩阵包含这些连接肽位置，在可视化或下游分析之前必须将其裁剪掉。`get_crop_mask_labels_and_boundaries` 函数产生三个产物：
+
+- **掩码 (mask)** — 布尔数组，其中 `True` 表示真实残基，`False` 表示连接肽位置
+- **标签 (labels)** — 人类可读的残基标签，如 `"A-M1"`、`"B-K99"`，使用链 ID 和从 1 开始的索引位置
+- **边界 (boundaries)** — 链边界所在的整数位置（位于裁剪后的坐标系中），用于在热图上绘制白色分隔线
+
+`crop_pair_matrix` 和 `crop_residue_vector` 函数使用此掩码，从模型的 L×L 成对输出或长度为 L 的逐残基输出中，仅提取真实残基的行和列。
+
+来源: [predict.py](esm/esmdynamic/predict.py#L134-L174)
+
+## 输出目录结构
+
+对于每个输入序列，脚本会在 `output_dir/` 下创建一个以经过净化的序列 ID 命名的专用子目录。在该目录中，输出按预测头和温度进行组织。
+
+```
+outputs/
+└── <sanitized_id>/
+    ├── <id>.pdb                          # ESMFold 结构（若动态头活跃）
+    ├── <id>_all_outputs.pt               # 包含所有张量的原始打包文件
+    ├── dynamic/
+    │   ├── <id>_dynamic_prob_<T>K.{txt,png,html}
+    │   ├── <id>_dynamic_pred_<T>K.{txt,png,html}
+    │   └── <id>_dynamic_confidence_<T>K.{csv,png}
+    ├── frequency/
+    │   ├── <id>_frequency_pred_<T>K.{txt,png,html}
+    │   └── <id>_frequency_error_<T>K.{txt,png,html}
+    ├── kinetics/
+    │   ├── <id>_kinetics_on_class_<T>K.{txt,png,html}
+    │   ├── <id>_kinetics_off_class_<T>K.{txt,png,html}
+    │   ├── <id>_kinetics_on_probabilities_<T>K.npz
+    │   ├── <id>_kinetics_off_probabilities_<T>K.npz
+    │   ├── <id>_kinetics_on_classes_<T>K.txt
+    │   ├── <id>_kinetics_off_classes_<T>K.txt
+    │   └── <id>_kinetics_confidence_<T>K.{csv,png}
+    ├── native/
+    │   └── <id>_native_contacts.{txt,png,html}
+    ├── dynamic_nonnative/
+    │   └── <id>_dynamic_nonnative_<T>K.{txt,png,html}
+    └── native_nondynamic/
+        └── <id>_native_nondynamic_<T>K.{txt,png,html}
+```
+
+温度值 `<T>` 取自常量 `TEMPERATURES = [320, 348, 379, 413, 450]`（单位为开尔文），每个预测头每个序列生成五组输出。
+
+来源: [predict.py](esm/esmdynamic/predict.py#L15-L16), [predict.py](esm/esmdynamic/predict.py#L323-L613)
+
+## 各头输出详情
+
+### 动态接触头
+
+动态头在每个温度下产生三种输出类型：**概率图**（连续的 [0, 1] 值）、**二值预测**（以 0.5 为阈值）和**逐残基置信度分数**。概率图和预测图是对称的 L×L 矩阵，保存为热图；置信度是长度为 L 的向量，保存为折线图。概率图使用范围为 [0, 1] 的 Viridis 色图，而预测图使用整数格式。
+
+| 预测字典中的键 | 形状 | 内容 |
+|---|---|---|
+| `dynamic_prob` | [B, T, L, L] | 每个温度的 Sigmoid 概率 |
+| `dynamic_pred` | [B, T, L, L] | 二值预测（概率 > 0.5） |
+| `dynamic_confidence` | [B, T, L] | 每个温度的逐残基置信度 |
+
+来源: [predict.py](esm/esmdynamic/predict.py#L343-L399)
+
+### 频率头
+
+频率头预测**接触占有率**（在 MD 系综中接触出现的频率）以及**残差/误差**图。两者均为连续值的 L×L 矩阵，占有率的范围为 [0, 1]，残差则无约束。
+
+| 预测字典中的键 | 形状 | 内容 |
+|---|---|---|
+| `frequency_pred` | [B, T, L, L] | 预测的接触频率 / 占有率 |
+| `frequency_residual_pred` | [B, T, L, L] | 残差误差预测 |
+
+来源: [predict.py](esm/esmdynamic/predict.py#L401-L443)
+
+### 动力学头
+
+动力学头预测开启时间和关闭时间的**离散速率类别**。每个速率方向（开/关）有 6 个具有不同命名约定的类别。输出包括预测的类别索引图、完整的逐类别概率堆栈（保存为 `.npz`）以及将类别索引映射到人类可读名称的图例文件。
+
+| 速率 | 类别 |
+|---|---|
+| **开启时间** | `always_on`, `1to10ns`, `10to100ns`, `100to300ns`, `gt300ns`, `never_on` |
+| **关闭时间** | `always_off`, `1to10ns`, `10to100ns`, `100to300ns`, `gt300ns`, `never_off` |
+
+| 预测字典中的键 | 形状 | 内容 |
+|---|---|---|
+| `kinetic_prob` | [B, T, 2, L, L, C] | Softmax 概率（C=6 个类别） |
+| `kinetic_pred_class` | [B, T, 2, L, L] | Argmax 预测类别索引 |
+| `kinetic_confidence` | [B, T, L] | 对开/关取平均的逐残基置信度 |
+
+`.npz` 文件将每个类别存储为一个命名数组（例如 `always_on`、`1to10ns` 等），无需索引映射即可直接访问。
+
+来源: [predict.py](esm/esmdynamic/predict.py#L15-L33), [predict.py](esm/esmdynamic/predict.py#L445-L531)
+
+### 天然与比较接触图
+
+当动态头活跃时，脚本还会根据预测结构计算 **ESMFold 天然接触**，并派生出两组比较集合：**动态但非天然**（被预测为动态但在静态结构中不存在的接触）和**天然但非动态**（在任何温度下均未被预测为动态的静态接触）。它们被保存为二值（0/1）热图，从而直观展示哪些接触是专属于动态的，哪些是专属于静态的。
+
+来源: [predict.py](esm/esmdynamic/predict.py#L533-L602)
+
+## 输出格式
+
+每个保存函数都由其对应的 CLI 标志控制。这四种输出格式各具用途：
+
+| 格式 | 扩展名 | 优势 | 最适用于 |
+|---|---|---|---|
+| **HTML** | `.html` | 交互式缩放、悬停值、平移 | 在浏览器中进行探索性分析 |
+| **PNG** | `.png` | 静态，200 DPI 下可直接用于发表 | 图像、演示文稿 |
+| **TXT/CSV** | `.txt` / `.csv` | 机器可读，无需渲染 | 下游流水线、自定义绘图 |
+| **PT 打包** | `.pt` | 单文件包含所有张量，保留形状 | 在 PyTorch 中进行程序化后处理 |
+
+HTML 热图使用 Plotly 和 Viridis 色阶，并为多链蛋白质包含白色链边界线。PNG 热图使用 Matplotlib 和相同的色图。原始的 `.pt` 打包文件包含已裁剪至真实残基位置的 NumPy 数组（而非张量），以头名称和输出类型作为键。
+
+<CgxTip>`.pt` 打包文件存储的是 NumPy 数组而非 PyTorch 张量，因此可以使用 `torch.load()` 加载，并立即在 NumPy 工作流中使用，而无需 `.numpy()` 转换。像 `bundle["dynamic_prob"][0]` 这样的访问模式即可给出第一个温度下裁剪后的概率图。</CgxTip>
+
+来源: [predict.py](esm/esmdynamic/predict.py#L193-L313), [predict.py](esm/esmdynamic/predict.py#L611-L613)
+
+## 使用示例
+
+**单序列内联：**
+```bash
+python -m esm.esmdynamic.predict \
+    --sequence "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSH" \
+    --output_dir results/
+```
+
+**基于 FASTA 的批量预测：**
+```bash
+python -m esm.esmdynamic.predict \
+    --fasta examples/esmdynamic/example.fasta \
+    --batch_size 2 \
+    --output_dir bulk_results/
+```
+
+**基于 CSV 的选择性输出批量预测：**
+```bash
+python -m esm.esmdynamic.predict \
+    --csv examples/esmdynamic/example.csv \
+    --device cpu \
+    --low_memory \
+    --save_txt \
+    --save_png \
+    --output_dir csv_results/
+```
+
+**带自定义循环次数的多链蛋白质（同源二聚体）：**
+```bash
+python -m esm.esmdynamic.predict \
+    --sequence "PQITLWQRPLVTIKIGGQLKEALLDTGADDTVLEEMSLPGRWKPKMIGGIGGFIKVRQYDQILIEICGHKAIGTVLVGPTPVNIIGRNLLTQIGCTLNF:PQITLWQRPLVTIKIGGQLKEALLDTGADDTVLEEMSLPGRWKPKMIGGIGGFIKVRQYDQILIEICGHKAIGTVLVGPTPVNIIGRNLLTQIGCTLNF" \
+    --num_recycles 3 \
+    --output_dir dimer_results/
+```
+
+来源: [predict.py](esm/esmdynamic/predict.py#L36-L110), [example.csv](examples/esmdynamic/example.csv#L1-L5), [example.fasta](examples/esmdynamic/example.fasta#L1-L8)
+
+## 编程式使用（Python API）
+
+为了集成到自定义流水线中，只需几行代码即可直接使用 ESMDynamic 模型复现该脚本的核心逻辑：
+
+```python
+import esm
+
+model = esm.pretrained.esmdynamic()
+model.eval()
+
+sequences = [("protein_A", "MVLSPADKTNVKAAWGKVGA")]
+with torch.no_grad():
+    prediction = model.predict_from_seqs([seq for _, seq in sequences])
+
+# 直接从预测字典中访问输出
+dynamic_prob = prediction["dynamic_prob"][0]     # [T, L, L]
+kinetic_prob = prediction["kinetic_prob"][0]      # [T, 2, L, L, C]
+frequency_pred = prediction["frequency_pred"][0]  # [T, L, L]
+```
+
+此方法可完全控制输出处理，而无需承担 CLI 脚本的文件系统开销。有关带有 3D 结构可视化的交互式 notebook 工作流，请参见 [Colab Notebook 工作流](11-colab-notebook-workflow)。
+
+来源: [esmdynamic.py](esm/esmdynamic/esmdynamic.py#L213-L219), [pretrained.py](esm/esmdynamic/pretrained.py#L32-L36)
+
+## 与其他组件的关系
+
+批量预测脚本位于 ESMDynamic 架构的**推理边界**——它消费来自[预训练模型与权重加载](12-pretrained-model-and-weight-loading)的训练模型，调用 `predict_from_seqs`（该函数内部通过 [ESMDynamic 模型类](5-esmdynamic-model-class)运行 [DynamicModule 与 Evoformer 循环](6-dynamicmodule-and-evoformer-recycling)），并产生[输出解释](3-output-interpretation)中记录的多头输出。`--low_memory` 标志委托给[低内存推理模式](13-low-memory-inference-mode)中描述的机制。如需进行带有 3D 分子可视化的交互式单序列分析，请改用 [Colab Notebook 工作流](11-colab-notebook-workflow)。
+
+---
+
+- [深入探究/推理与可视化/Colab 笔记本工作流](https://zread.ai/ShuklaGroup/esmdynamic/11-colab-notebook-workflow)
+
+---
+slug:11-colab-notebook-workflow
+blog_type:normal
+---
+
+
+ESMDynamic Colab 笔记本提供了一个零安装、基于浏览器的界面，用于运行动态接触预测、频率估计和动力学分类——所有这些都由提供 GPU 支持的 Google Colab 运行时驱动。它将完整的推理流程封装为四个顺序执行的单元格：**安装 → 加载 → 预测 → 可视化/下载**，无需配置本地环境即可使用该模型。
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L1-L1316)
+
+## 笔记本架构
+
+该笔记本遵循线性的四单元格工作流，每个单元格的执行均依赖于前一个单元格的成功完成。此设计将安装和模型加载产生的一次性高开销，与轻量级的推理和可视化步骤隔离开来。
+
+```mermaid
+flowchart TD
+    A["Cell 1: Install<br/>~3-5 min"] --> B["Cell 2: Load Model<br/>~48 sec"]
+    B --> C["Cell 3: Run Inference<br/>User-configurable"]
+    C --> D["Cell 4a: 3D Structure<br/>py3Dmol viewer"]
+    C --> E["Cell 4b: Browse Outputs<br/>Interactive PNG browser"]
+    C --> F["Cell 4c: Download<br/>ZIP archive"]
+
+    style A fill:#f9e79f,stroke:#b7950b
+    style B fill:#a9dfbf,stroke:#1e8449
+    style C fill:#85c1e9,stroke:#2471a3
+    style D fill:#d2b4de,stroke:#6c3483
+    style E fill:#d2b4de,stroke:#6c3483
+    style F fill:#d2b4de,stroke:#6c3483
+```
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L1-L1316)
+
+## 单元格 1 — 安装
+
+第一个单元格在单次执行中处理所有的依赖项解析和权重下载。它使用 `aria2c`（一种高速多协议下载器）并行获取 ESMFold 基础权重和 ESMDynamic 微调权重，同时 `pip` 按顺序安装所需的库。
+
+**安装内容：**
+
+| 依赖项 | 用途 |
+|---|---|
+| `mdtraj` | PDB 结构 I/O 与分析 |
+| `omegaconf` | 配置管理 |
+| `pytorch_lightning` | 训练框架依赖 |
+| `biopython` | FASTA/序列解析 |
+| `ml_collections` | 配置容器 |
+| `einops` | 张量重塑工具 |
+| `py3Dmol` | 交互式 3D 分子可视化 |
+| `modelcif` | ModelCIF 格式支持 |
+| `openfold` | OpenFold 注意力内核 |
+| `esmdynamic` | ESMDynamic 核心包 |
+
+**下载内容：**
+
+| 文件 | 来源 URL | 描述 |
+|---|---|---|
+| `esmfold.model` | `colabfold.steineggerlab.workers.dev` | ESMFold 基础模型权重 |
+| `esmdynamic.pt` | `databank.illinois.edu` | ESMDynamic 微调权重 |
+
+该单元格使用标记文件（`finished_install`）来在重新执行时跳过冗余的 pip 安装，并轮询 `aria2` 的完成状态，以确保权重在继续执行前已完全下载。实际耗时通常为 **3–5 分钟**。
+
+<CgxTip>在重新运行时，标记文件会阻止重新安装——仅运行权重下载检查，使得后续执行几乎瞬间完成。</CgxTip>
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L34-L74)
+
+## 单元格 2 — 模型加载
+
+第二个单元格将两个模型加载到 GPU 内存中。它执行**两阶段加载**：首先通过 `torch.load` 加载 ESMFold 基础模型，然后通过 `load_state_dict(..., strict=False)` 加载应用了微调状态字典的 ESMDynamic 包装器。
+
+```python
+# 阶段 1：ESMFold 基础模型
+model = torch.load(model_name, weights_only=False)
+model.cuda().eval().requires_grad_(False)
+
+# 阶段 2：ESMDynamic 包装器 + 微调权重
+esmdynamic_model = esmdynamic.ESMDynamic(load_esmfold=False)
+esmdynamic_model.esmfold = model
+esmdynamic_model.load_esmfold = True
+state_dict_esmd = torch.load("esmdynamic.pt")
+esmdynamic_model.load_state_dict(state_dict_esmd, strict=False)
+esmdynamic_model.cuda().eval().requires_grad_(False)
+```
+
+此加载模式中的关键设计决策：`load_esmfold=False` 推迟了 ESMFold 自身的初始化，因为权重已被单独加载；`strict=False` 允许状态字典仅包含 ESMDynamic 特有的键（`DynamicHead` 参数），而无需匹配每一个 ESMFold 参数。该单元格还处理**内存清理**——如果已存在先前的模型，它将删除旧引用，运行 `gc.collect()`，并在加载新模型前清空 CUDA 缓存。实际耗时通常为 **约 48 秒**。
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L76-L101)
+
+## 单元格 3 — 运行推理
+
+这是主要的交互单元格，以带有可配置参数的 Colab 表单形式呈现。它支持三种互斥的输入模式，并生成完整的 ESMDynamic 输出集合。
+
+### 输入参数
+
+| 参数 | 类型 | 默认值 | 描述 |
+|---|---|---|---|
+| `sequence` | string | HIV1P dimer | 直接输入氨基酸字符串；使用 `/` 表示链断裂 |
+| `sequence_id` | string | `"HIV1P"` | 序列标识符 |
+| `fasta_path` | string | `""` | FASTA 文件路径（`sequence` 的替代方案） |
+| `csv_path` | string | `""` | 包含 `id,seq` 列的 CSV 文件路径（替代方案） |
+| `batch_size` | integer | 1 | 每个推理批次的序列数量 |
+| `chunk_size` | integer | 256 | 用于内存管理的注意力块大小 |
+| `output_dir` | string | `"outputs"` | 保存输出的根目录 |
+| `chain_ids` | string | `""` | 自定义链 ID 标签（例如 `"ABC"`） |
+| `low_memory` | boolean | `False` | 启用[低内存推理模式](13-low-memory-inference-mode) |
+| `num_recycles` | integer | 3 | Evoformer 循环迭代次数（-1 表示默认值） |
+| `save_html` | boolean | `True` | 保存交互式 Plotly HTML 热图 |
+| `save_png` | boolean | `True` | 保存静态 PNG 热图/图表 |
+| `save_txt` | boolean | `True` | 保存纯文本矩阵/CSV 文件 |
+| `save_raw_pt` | boolean | `True` | 将所有输出保存为 `.pt` 打包文件 |
+
+### 序列输入模式
+
+笔记本会验证提供的输入源（`sequence`、`fasta_path` 或 `csv_path`）**有且仅有一个**。链断裂会被标准化：原始输入中的 `/` 会在内部转换为 `:`，并且序列会转换为大写，同时剔除非氨基酸字符。对于多链输入，在 ESMFold 推理期间会在链之间插入一个 25 残基的甘氨酸连接符（`X` × 25），然后从所有输出矩阵中裁剪掉该连接符。
+
+代码库中提供的示例数据文件展示了 FASTA 和 CSV 两种输入方式：
+
+- **FASTA** ([example.fasta](/examples/esmdynamic/example.fasta))：包含 ASCT2、SWEET2b、De_novo 和 HIV1P 的序列（最后一个使用 `:` 链断裂表示同源二聚体）
+- **CSV** ([example.csv](/examples/esmdynamic/example.csv))：相同序列，采用 `id,seq` 列格式
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L103-L300), [example.fasta](/examples/esmdynamic/example.fasta#L1-L8), [example.csv](/examples/esmdynamic/example.csv#L1-L5)
+
+### 推理执行与输出目录结构
+
+核心推理调用如下：
+
+```python
+prediction = esmdynamic_model.predict_from_seqs(
+    list(raw_seqs),
+    low_memory=low_memory,
+    num_recycles=num_recycles,
+)
+```
+
+此调用返回一个以预测头名称为键的字典（参见[多头预测设计](7-multi-head-prediction-design)）。然后，笔记本会遍历批次中的每个序列，从所有矩阵中裁剪掉连接符位置，并将各预测头的输出保存到结构化的目录树中：
+
+```
+outputs/
+└── {sequence_id}/
+    ├── dynamic/
+    │   ├── {id}_dynamic_prob_{T}K.{txt,png,html}
+    │   ├── {id}_dynamic_pred_{T}K.{txt,png,html}
+    │   └── {id}_dynamic_confidence_{T}K.{txt,png}
+    ├── frequency/
+    │   ├── {id}_frequency_pred_{T}K.{txt,png,html}
+    │   └── {id}_frequency_error_{T}K.{txt,png,html}
+    ├── kinetics/
+    │   ├── {id}_kinetics_on_class_{T}K.{txt,png,html}
+    │   ├── {id}_kinetics_off_class_{T}K.{txt,png,html}
+    │   ├── {id}_kinetics_on_probabilities_{T}K.npz
+    │   ├── {id}_kinetics_off_probabilities_{T}K.npz
+    │   ├── {id}_kinetics_on_classes_{T}K.txt
+    │   ├── {id}_kinetics_off_classes_{T}K.txt
+    │   └── {id}_kinetics_confidence_{T}K.{txt,png}
+    ├── native/
+    │   └── {id}_native_contacts.{txt,png,html}
+    ├── dynamic_nonnative/
+    │   └── {id}_dynamic_nonnative_{T}K.{txt,png,html}
+    ├── native_nondynamic/
+    │   └── {id}_native_nondynamic_{T}K.{txt,png,html}
+    └── {id}_all_outputs.pt
+```
+
+每个温度变体 `{T}` 的取值来自五个模拟温度：**320、348、379、413、450 K**。这些对应于笔记本和[批量预测脚本](10-bulk-prediction-script)中定义的 `TEMPERATURES` 常量。
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L200-L700), [predict.py](/esm/esmdynamic/predict.py#L30-L38)
+
+### 输出头与文件类型
+
+| 预测头 | 输出键 | 形状 | 文件变体 |
+|---|---|---|---|
+| **Dynamic** | `dynamic_prob` | `[T, L, L]` | 概率、预测 (prob, pred, 二值)、置信度 (confidence, 逐残基) |
+| **Frequency** | `frequency_pred` | `[T, L, L]` | 占据率/频率、残差/误差 |
+| **Kinetics** | `kinetic_prob` | `[T, 2, L, L, C]` | 开启类别 (on-class)、关闭类别 (off-class)、概率 (.npz)、置信度 |
+| **Native contacts** | `native_contacts` | `[L, L]` | 单一矩阵 (无温度维度) |
+| **Dynamic non-native** | `dynamic_nonnative_contacts` | `[T, L, L]` | 属于动态接触但不在静态结构中的接触 |
+| **Native non-dynamic** | `native_nondynamic_contacts` | `[T, L, L]` | 属于静态结构但未动态形成的接触 |
+
+动力学预测头对开启时间和关闭时间均产生**六类分类**。类别名称如下：
+
+| 索引 | 开启时间类别 | 关闭时间类别 |
+|---|---|---|
+| 0 | `always_on` | `always_off` |
+| 1 | `1to10ns` | `1to10ns` |
+| 2 | `10to100ns` | `10to100ns` |
+| 3 | `100to300ns` | `100to300ns` |
+| 4 | `gt300ns` | `gt300ns` |
+| 5 | `never_on` | `never_off` |
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L200-L700), [predict.py](/esm/esmdynamic/predict.py#L40-L57)
+
+## 单元格 4a — 3D 结构可视化
+
+此单元格使用 **py3Dmol** 直接在笔记本中渲染预测的蛋白质结构。它运行一次全新的 ESMFold 推理（通过 `esmdynamic_model.esmfold.infer()`）以获取原子坐标，将其转换为 PDB 字符串，并渲染交互式 3D 查看器。
+
+**可视化选项：**
+
+| 参数 | 选项 | 描述 |
+|---|---|---|
+| `color` | `confidence`, `rainbow`, `chain` | 配色方案——`confidence` 将 pLDDT 分数映射到蓝→红渐变色 |
+| `show_sidechains` | boolean | 将侧链原子渲染为棍状 |
+| `show_mainchains` | boolean | 将主链原子渲染为棍状 |
+
+块大小会根据序列总长度自动调整：对于超过 700 个残基的序列设为 **64**，否则设为 **128**。多链结构会显示链边界并支持动画。
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L860-L1000)
+
+## 单元格 4b — 浏览已保存的输出
+
+此单元格为已保存的 PNG 热图提供了一个笔记本内交互式浏览器。它暴露了三个下拉列表形式的参数：
+
+| 参数 | 选项 | 描述 |
+|---|---|---|
+| `sample_id` | string (例如 `"HIV1P"`) | 要展示哪个序列的输出 |
+| `output_type` | dropdown | 11 种输出类型之一 (dynamic_prob, frequency_pred, kinetics_on_class 等) |
+| `temperature` | `320`, `348`, `379`, `413`, `450` | 以开尔文为单位的温度变体 |
+
+如果请求的文件不存在，则回退为列出该样本所有可用的 PNG 文件。此单元格专为**迭代探索**而设计——更改任何参数并重新运行即可检查不同的输出，而无需重新运行推理。
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L1000-L1200)
+
+## 单元格 4c — 下载预测结果
+
+最后一个单元格将整个输出目录打包为 ZIP 存档，并通过 `google.colab.files.download()` 触发浏览器下载。存档名称派生自 `sequence_id`（例如 `HIV1P.zip`），并递归包含所有子文件夹——保留 `dynamic/`、`frequency/`、`kinetics/`、`native/`、`dynamic_nonnative/` 和 `native_nondynamic/` 目录结构。
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L1200-L1260)
+
+## Colab 限制与 GPU 约束
+
+| 约束 | 详情 |
+|---|---|
+| **最大序列长度** | 在 Tesla T4 (免费 Colab GPU) 上约 900 个残基 |
+| **GPU 类型** | 通常为 T4 (16 GB VRAM)；Colab Pro 可能分配 V100 或 A100 |
+| **块大小自动调整** | 笔记本根据蛋白质长度调整块大小以适应 VRAM |
+| **安装时间** | 首次运行约 3–5 分钟；重新运行几乎瞬间完成 |
+| **会话超时** | 免费 Colab 会话在闲置约 12 小时后超时 |
+
+对于超出 T4 内存限制的序列，请考虑在本地 GPU 上使用[低内存推理模式](13-low-memory-inference-mode)或[批量预测脚本](10-bulk-prediction-script)。
+
+来源：[esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb#L22-L29)
+
+## CV 选择流程（配套笔记本）
+
+第二个笔记本 `cv_selection_pipeline.ipynb` 演示了一个**后处理工作流**，用于从 ESMDynamic 接触图中选择分子动力学模拟的集体变量（CVs）。这是一个三步流程：
+
+```mermaid
+flowchart LR
+    A["Load .npy<br/>contact map"] --> B["Filter:<br/>|i - j| > 40"]
+    B --> C["Cluster:<br/>single linkage<br/>(cityblock)"]
+    C --> D["Select:<br/>highest prob<br/>per cluster"]
+
+    style A fill:#a9dfbf,stroke:#1e8449
+    style B fill:#f9e79f,stroke:#b7950b
+    style C fill:#85c1e9,stroke:#2471a3
+    style D fill:#d2b4de,stroke:#6c3483
+```
+
+**步骤 1 — 过滤：**提取满足 `|i - j| > 40` 且接触概率超过 0.5 的接触对 `(i, j)`。距离阈值消除了对于 CV 选择无意义的局部/序列接触。
+
+**步骤 2 — 聚类：**在过滤后的接触坐标上，应用带有 cityblock（曼哈顿）距离度量的单链接层次聚类。用户需指定 `n_clusters`（例如 9，与文献基线匹配）。
+
+**步骤 3 — 选择：**从每个聚类中挑选在 ESMDynamic 图中具有**最高预测概率**的接触对。这些选出的接触对将作为增强采样模拟的集体变量。
+
+该笔记本作用于预先保存的 `.npy` 接触图文件（例如 `OsSWEET2b_esmdynamic_contact_map.npy`），这是先前 ESMDynamic 预测运行的输出。
+
+来源：[cv_selection_pipeline.ipynb](/examples/esmdynamic/cv_selection_pipeline.ipynb#L1-L248)
+
+## 快速入门清单
+
+从零开始运行 ESMDynamic Colab 笔记本：
+
+1. 通过 [esmdynamic.ipynb](/examples/esmdynamic/esmdynamic.ipynb) 顶部的 "Open in Colab" 徽章**打开**笔记本
+2. 将运行时**设置**为 GPU：`运行时 → 更改运行时类型 → T4 GPU`
+3. **运行单元格 1**（安装）——等待约 3–5 分钟完成
+4. **运行单元格 2**（加载模型）——等待约 48 秒
+5. **配置单元格 3**——设置你的序列、输出格式标志和参数
+6. **运行单元格 3**（推理）——输出将保存到 `outputs/` 目录
+7. **运行单元格 4a** 以查看 3D 结构，**单元格 4b** 以浏览热图，或**单元格 4c** 以下载 ZIP 包
+
+若要深入了解这些输出背后的模型内部机制，请参阅 [ESMDynamic 模型类](5-esmdynamic-model-class) 和[多头预测设计](7-multi-head-prediction-design)。若要在本地不使用 Colab 运行相同流程，请参阅[批量预测脚本](10-bulk-prediction-script)。
+
+---

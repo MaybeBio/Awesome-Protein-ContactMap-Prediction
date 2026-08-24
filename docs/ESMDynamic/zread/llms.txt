@@ -1,0 +1,32 @@
+# ShuklaGroup/esmdynamic
+
+Source: https://zread.ai/ShuklaGroup/esmdynamic
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速上手](2-quick-start.md)
+- [入门/输出解读](3-output-interpretation.md)
+
+## 深入探究
+
+- [深入探究/架构概述](4-architecture-overview.md)
+- [深入探究/预训练模型与权重加载](12-pretrained-model-and-weight-loading.md)
+- [深入探究/低内存推理模式](13-low-memory-inference-mode.md)
+- [深入探究/逆折叠与 ESM-IF](14-inverse-folding-and-esm-if.md)
+### 核心预测流水线
+
+- [深入探究/核心预测流水线/ESMDynamic 模型类](5-esmdynamic-model-class.md)
+- [深入探究/核心预测流水线/DynamicModule 与 Evoformer 循环](6-dynamicmodule-and-evoformer-recycling.md)
+- [深入探究/核心预测流水线/多头预测设计](7-multi-head-prediction-design.md)
+
+### 训练框架
+
+- [深入探究/训练框架/训练流水线与数据加载](8-training-pipeline-and-data-loading.md)
+- [深入探究/训练框架/损失函数与评估指标](9-loss-functions-and-metrics.md)
+
+### 推理与可视化
+
+- [深入探究/推理与可视化/批量预测脚本](10-bulk-prediction-script.md)
+- [深入探究/推理与可视化/Colab 笔记本工作流](11-colab-notebook-workflow.md)
+
