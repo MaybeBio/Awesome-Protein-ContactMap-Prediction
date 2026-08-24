@@ -721,7 +721,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ### C. IDR-specific
 
-> ⚠️ Binding-site predictors (`fIDPnn / flDPnn`, MoRF) output one scalar per residue — usable only as an outer-product baseline, not the main track.
+> ⚠️ 
 
 
 <!-- More IDR-specific placeholders can be added here -->
