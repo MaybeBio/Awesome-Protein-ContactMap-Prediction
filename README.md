@@ -619,10 +619,31 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
+<details>
+<summary>DeepHomo</summary>
 
-DeepHomo，DeepHomo2
+- **Paper:** [Accurate prediction of inter-protein residue–residue contacts for homo-oligomeric protein complexes](https://academic.oup.com/bib/article/22/5/bbab038/6159364) (Briefings in Bioinformatics, 2021)
+- **Docs:** [Read more →](docs/DeepHomo/) *to be written*
+- **Code:** N/A
+- **Web server:** http://huanglab.phys.hust.edu.cn/DeepHomo/
+- **Approach:** DL
+</details>
 
----
+
+--- 
+
+<details>
+<summary>DeepHomo2/DeepHomoSeq</summary>
+
+- **Paper:** [DeepHomo2.0: improved protein–protein contact prediction of homodimers by transformer-enhanced deep learning](https://academic.oup.com/bib/article/24/1/bbac499/6849483) (Briefings in Bioinformatics, 2022)
+- **Docs:** [Read more →](docs/DeepHomo2/) *to be written*
+- **Code:** N/A
+- **Web server:** http://huanglab.phys.hust.edu.cn/deephomo2/
+- **Approach:** DL
+</details>
+
+
+--- 
 
 ESMDynamic
 
