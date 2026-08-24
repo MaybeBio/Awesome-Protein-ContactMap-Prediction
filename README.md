@@ -820,7 +820,7 @@ https://www.nature.com/articles/s41467-026-69172-y
 
 ## Contributing 
 
-### Entry template for `Models & Tools` part
+### 1. Entry template for `Models & Tools` part
 
 Each tool uses a collapsible `<details>` block with consistent fields: 
 
