@@ -875,7 +875,7 @@ as for `docs/<Tool name>/` file folder for each tool:
 Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to flag "known but not yet filled" entries and "empty niches to be added".
 
 - [ ] Add TIMELINE graph for each category so we can see the trend
-- [ ] Update the wiki in docs/, and manually refresh it in sync with the original repository commit date
+- [ ] Update the wiki in docs/ (NOW include deepwiki/zread/google code wiki/readmex), and manually refresh it in sync with the original repository commit date, and remember to check and correct the code fromatting in the code chunk of the wiki page
 - [ ] extract the model architecture for those tools tagged `Approach: DL`, e.g., attention, GNN, flow-matching 
 - [ ] extract DATASET part in these models README
 - [ ] Open another MD file to store the key lab information for each tool, e.g., lab name, PI, email, website, etc.
