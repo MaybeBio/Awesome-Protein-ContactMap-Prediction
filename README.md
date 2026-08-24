@@ -588,6 +588,8 @@ A curated collection of computational tools for `intermolecular interaction pred
 <details>
 <summary>ComplexContact</summary>
 
+> ⚠️ Related to RaptorX-Contact (seen below)
+
 - **Paper:** [ComplexContact: a web server for inter-protein contact prediction using deep learning](https://academic.oup.com/nar/article/46/W1/W432/5001161) (Nucleic Acids Research, 2018)
 - **Docs:** [Read more →](docs/ComplexContact/) *to be written*
 - **Code:** N/A
@@ -653,7 +655,37 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Approach:** DL
 </details>
 
---- 
+---
+
+<details>
+<summary>RaptorX-Contact</summary>
+
+> ⚠️ Jinbo Xu, a pioneer computational biologist who developed the first reliable deep learning algorithms (such as RaptorX-Contact) for protein structure prediction, laying the crucial groundwork that later enabled systems like AlphaFold.
+>
+> The papers listed below are worth reading to understand the evolution of deep learning in protein contact prediction, leading up to AlphaFold.
+
+- **Paper:** 
+  - [Analysis of distance-based protein structure prediction by deep learning in CASP13](https://onlinelibrary.wiley.com/doi/10.1002/prot.25810) (PROTEINS, 2019)
+  - [Distance-based protein folding powered by deep learning](https://www.pnas.org/doi/10.1073/pnas.1821309116) (PNAS, 2019)
+  - [Protein threading using residue co-variation and deep learning](https://academic.oup.com/bioinformatics/article/34/13/i263/5045746) (Bioinformatics, 2018)
+  - [ComplexContact: a web server for inter-protein contact prediction using deep learning](https://academic.oup.com/nar/article/46/W1/W432/5001161) (Nucleic Acids Research, 2018)
+  - [Analysis of deep learning methods for blind protein contact prediction in CASP12](https://onlinelibrary.wiley.com/doi/10.1002/prot.25377) (PROTEINS, 2017)
+  - [Folding Membrane Proteins by Deep Transfer Learning](https://www.cell.com/cell-systems/fulltext/S2405-4712(17)30389-7) (Cell Systems, 2017)
+  - [Accurate De Novo Prediction of Protein Contact Map by Ultra-Deep Learning Model](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005324) (PLOS Computational Biology, 2017)
+- **Docs:** 
+  - [Read more 1 →](docs/RaptorX-Contact/) *to be written*
+  - [Read more 2 →](docs/RaptorX-3DModeling/) *to be written*
+  - [Read more 3 →](docs/nd-hung_DL4DistancePrediction2/) *to be written*
+- **Code:** 
+  - https://github.com/j3xugit/RaptorX-Contact
+  - https://github.com/j3xugit/RaptorX-3DModeling (newer version)
+  - https://github.com/nd-hung/DL4DistancePrediction2 (python3 implementation)
+- **Approach:** DL
+</details>
+
+
+---
+
 
 ESMDynamic
 
@@ -663,11 +695,6 @@ https://www.nature.com/articles/s41467-026-69172-y
 ---
 https://deepwiki.com/j3xugit/RaptorX-3DModeling/1-overview
 
---- 
-
-CDPred
-
-https://github.com/BioinfoMachineLearning/CDPred
 
 --- 
 
