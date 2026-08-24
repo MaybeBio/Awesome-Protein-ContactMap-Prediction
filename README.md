@@ -719,10 +719,41 @@ https://www.nature.com/articles/s41467-026-69172-y
 <summary>Protein Ensemble Database, PED</summary>
 
 - Description: The Protein Ensemble Database (PED) is an open access database for the deposition of structural ensembles, including intrinsically disordered proteins (IDPs). Manually curated data of structural ensembles measured with nuclear magnetic resonance spectroscopy, small-angle X-ray scattering, fluorescence resonance energy transfer are annotated in PED. The deposition of structural coordinates can be used for the evaluation of the ensembles, thus supporting the evolution of new modeling methods leading to much improved skills of connecting the characteristic "lack of structure" of IDPs with function. Each entry in PED corresponds to the primary experimental data and to the structural ensembles associated with these data.
+- Paper: [PED in 2024: improving the community deposition of structural ensembles for intrinsically disordered proteins](https://academic.oup.com/nar/article/52/D1/D536/7334090) (Nucleic Acids Research, 2023)
 - Url: https://proteinensemble.org/
 - API: https://proteinensemble.org/api
 
 </details>
+
+---
+
+<details>
+<summary>DisProt</summary>
+
+- Description: DisProt is the major manually curated repository of Intrinsically Disordered Proteins, both for structural and functional aspects. Expert curators are involved in collecting experimentally confirmed biological data, valuable for the scientific community, and for updating and maintaining DisProt over time. Learn more DisProt and visit the browse section to explore the data collected in DisProt.
+- Paper: [DisProt in 2026: enhancing intrinsically disordered proteins accessibility, deposition, and annotation](https://academic.oup.com/nar/article/54/D1/D383/8325584) (Nucleic Acids Research, 2025)
+- Url: https://disprot.org/
+  - IDPO(Intrinsically Disordered Proteins Ontology): https://disprot.org/ontology
+- API: https://proteinensemble.org/api
+- Download: https://disprot.org/download
+
+</details>
+
+---
+
+<details>
+<summary>MobiDB</summary>
+
+- Description: MobiDB is a valuable resource for researchers and scientists studying intrinsically disordered proteins (IDPs). This database provides comprehensive information, analysis, and tools related to IDPs, aiding in the understanding of their structure, function, and dynamics.
+
+  Here is an overview of the key features and functionalities of MobiDB: https://mobidb.org/help#introduction.
+
+- Paper: [MOBIDB in 2025: integrating ensemble properties and function annotations for intrinsically disordered proteins](https://academic.oup.com/nar/article/53/D1/D495/7848843) (Nucleic Acids Research, 2024)
+- Url: https://mobidb.org/
+- API: https://mobidb.org/help#swagger
+
+</details>
+
 
 ---
 
@@ -746,9 +777,11 @@ https://www.nature.com/articles/s41467-026-69172-y
 > CASP-CAPRI collaboration
 
 - Description: Recent progress in determining and predicting the structures of proteins and protein assemblies calls for closer integration of the different computational approaches for modeling assemblies and their building blocks. To enhance the integration between the different modeling techniques and between the distinct scientific communities that develop these techniques, CAPRI joint forces with CASP (Critical Assessment of Structure Prediction), whose traditional focus has been on the prediction of the 3D structure of individual proteins. Since 2014, CASP and CAPRI have conducted joint assembly prediction experiments during the regular CASP prediction season, organized every two years. For on-going or upcoming joint CASP-CAPRI assembly prediction challenges, see CAPRI Round announcements.
+  
+  CAPRI (Critical Assessment of PRedicted Interactions) is a community wide initiative for testing computational algorithms in blind predictions of experimentally determined 3D structures of protein complexes, the “targets”, provided to CAPRI prior to publication.
 - Paper: N/A
 - Code: N/A
-- Url: https://www.ebi.ac.uk/pdbe/complex-pred/capri/casp-capri/
+- Url: https://www.ebi.ac.uk/pdbe/complex-pred/capri/casp-capri/ | https://www.capri-docking.org/
 
 </details>
 
@@ -760,7 +793,12 @@ https://www.nature.com/articles/s41467-026-69172-y
 - Description: The the Critical Assessment of Intrinsic protein Disorder (CAID) experiment was established in 2018 as a community-based blind test to determine the state of the art in prediction of intrinsically disordered regions and the subset of residues involved in binding.
 
   Given a protein sequence, the task of an ID predictor is to assign a score to each residue for its propensity of being intrinsically disordered at any stage of the protein’s life. In CAID, we evaluated the accuracy of the prediction methods as well as software runtimes, which directly impact their suitability for large-scale analyses.
-- Paper: [CAID prediction portal: a comprehensive service for predicting intrinsic disorder and binding regions in proteins](https://academic.oup.com/nar/article/51/W1/W62/7184153) (Nucleic Acids Research, 2023)
+- Paper: 
+  - [Critical Assessment of Protein Intrinsic Disorder (CAID) Round 3 - Predicting Disorder in the Era of Protein Language Models](https://doi.org/10.1002/prot.70045) (PROTEINS: Structure, Function, and Bioinformatics, 2025)
+  - [Critical assessment of protein intrinsic disorder prediction (CAID) - Results of round 2](https://onlinelibrary.wiley.com/doi/10.1002/prot.26582) (PROTEINS: Structure, Function, and Bioinformatics, 2023)
+  - [Critical assessment of protein intrinsic disorder prediction](https://www.nature.com/articles/s41592-021-01117-3) (Nature Methods, 2021)
+  - [CAID prediction portal: a comprehensive service for predicting intrinsic disorder and binding regions in proteins](https://academic.oup.com/nar/article/51/W1/W62/7184153) (Nucleic Acids Research, 2023)
+  - 
 - Url: https://caid.idpcentral.org/
 
 </details>
