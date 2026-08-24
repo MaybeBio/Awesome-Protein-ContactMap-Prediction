@@ -1,0 +1,3569 @@
+# j3xugit/RaptorX-Contact
+
+Source: https://zread.ai/j3xugit/RaptorX-Contact
+
+# 入门
+
+- [入门/概述](https://zread.ai/j3xugit/RaptorX-Contact/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**RaptorX-Contact** 是一个开源软件包，由深度卷积残差神经网络驱动，用于**蛋白质接触和距离预测**。该软件包由芝加哥大学的 Jinbo Xu 及其合作者开发，实现了一种开创性的方法，该方法首次证明了超深残差网络可以在预测残基间距离方面达到业界领先的准确率——并且这些预测出的距离比仅使用传统的接触图能产生显著更好的 3D 结构折叠效果。该项目基于 **GNU GPL v3** 许可证发布，并在 **Theano** 深度学习框架和 Python 2.7 环境下构建。
+
+来源: [README.md](/README.md#L1-L38), [LICENSE](/LICENSE#L1-L5)
+
+## RaptorX-Contact 的功能
+
+蛋白质结构预测的关键在于理解氨基酸残基之间的空间关系。RaptorX-Contact 从两种粒度解决这个问题：**接触预测**（二分类：两个残基间距是否在约 8Å 以内？）和**距离预测**（多分类回归：残基对属于哪个距离区间？）。PNAS 2019 论文所展示的核心洞见是，**由深度 ResNet 预测的距离分布比来自同一网络的二元接触能产生更好的 3D 折叠效果**。该软件包支持预测多种原子对（Cβ–Cβ、Cα–Cα、Cγ–Cγ、Cα–Cγ）之间的距离、氢键以及 β-配对——所有这些均仅从序列衍生特征中进行预测。
+
+来源: [README.md](/README.md#L1-L12)
+
+## 架构一览
+
+该系统遵循经典的深度学习流程：**特征提取 → 嵌入 → 深度 ResNet 骨干网络 → 输出头 → 评估**。下图展示了端到端的数据流和主要模块间的交互。
+
+```mermaid
+graph TB
+    subgraph Input["输入特征"]
+        SEQ["一级序列<br/>(独热编码 L×20)"]
+        PSSM["PSSM / HHM 谱<br/>(L×20)"]
+        SS["二级结构<br/>(L×3)"]
+        ACC["溶剂可及度<br/>(L×3)"]
+        CCM["CCMpred 矩阵<br/>(L×L)"]
+        PAIR["MetaPSICOV 对统计<br/>(3 × L×L)"]
+    end
+
+    subgraph Embedding["嵌入与对表示"]
+        E1["1D 卷积 → 外部拼接<br/>(Conv1D2Matrix)"]
+        E2["嵌入层<br/>(学习的对嵌入)"]
+        E3["中点特征<br/>(位置编码)"]
+    end
+
+    subgraph Backbone["深度 ResNet 骨干网络"]
+        R1["距离预测 ResNet<br/>(ResConv2D 块 + BN)"]
+        R2["空洞距离预测 ResNet<br/>(空洞卷积块)"]
+    end
+
+    subgraph Output["输出头"]
+        LR["对数回归神经网络<br/>(离散距离区间)"]
+        NM["正态神经网络<br/>(正态 / 对数正态)"]
+    end
+
+    subgraph Eval["评估与指标"]
+        CA["接触准确率<br/>(top-L/k 精度)"]
+        DA["距离准确率<br/>(ε-边界评估)"]
+        MC["MCC 与 F1 指标"]
+        CASP["CASP RR 格式输出"]
+    end
+
+    Input --> Embedding
+    Embedding --> Backbone
+    Backbone --> Output
+    Output --> Eval
+```
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L1-L50), [config.py](/DL4DistancePrediction2/config.py#L1-L50)
+
+## 项目结构
+
+```
+RaptorX-Contact/
+├── Common/
+│   └── LoadHHM.py                  # HHM → PSSM/PSFM 解析器
+├── DL4DistancePrediction2/
+│   ├── config.py                    # 核心配置与距离区间
+│   ├── Model4DistancePrediction.py  # 模型组装与训练循环
+│   ├── RunDistancePredictor2.py     # 推理流水线入口
+│   ├── ResNet4Distance.py           # 标准 2D ResNet 骨干网络
+│   ├── DilatedResNet4Distance.py    # 空洞卷积 ResNet 变体
+│   ├── EmbeddingLayer.py           # 序列与谱嵌入层
+│   ├── Conv1d.py                    # 一维卷积原语
+│   ├── DataProcessor.py            # 特征加载、批处理与增强
+│   ├── ReadProteinFeatures.py      # 多蛋白质特征读取器
+│   ├── ReadOneProteinFeatures.py   # 单蛋白质特征读取器
+│   ├── NN4LogReg.py                # 逻辑回归输出头
+│   ├── NN4Normal.py                # 正态分布输出头
+│   ├── Optimizers.py               # AdaDelta, SGD-Momentum, AdaGrad
+│   ├── Adams.py                    # Adam, AdamW, AMSGrad 优化器
+│   ├── DistanceUtils.py            # 距离矩阵 I/O 与转换
+│   ├── ContactUtils.py             # 接触矩阵 I/O 与 CASP 格式
+│   ├── Metrics.py                  # F1 和 MCC 计算
+│   ├── BatchEvaluateContactAccuracy.py
+│   ├── BatchEvaluateDistanceAccuracy.py
+│   ├── CalcContactPredAccuracy.py
+│   ├── CalcMCCF1.py
+│   ├── BatchCalcMCCF1.py
+│   ├── CalcCASPContactPredAccuracy.py
+│   ├── EvaluateDistanceAccuracy.py
+│   ├── LogReg.py                   # 独立逻辑回归
+│   ├── mlLogReg.py                 # 多标签逻辑回归
+│   ├── resnet.py                   # 备选 ResNet 工具
+│   ├── SGD_Nestrov.py              # Nesterov SGD 实现
+│   └── utils.py                    # 外部拼接、中点特征等
+├── LICENSE                          # GNU GPL v3
+└── README.md
+```
+
+来源: [README.md](/README.md#L1-L38)
+
+## 核心架构组件
+
+下表总结了主要模块、它们的作用以及它们在预测流水线中如何相互连接。
+
+| 模块 | 作用 | 关键类 / 函数 |
+|---|---|---|
+| **config.py** | 核心配置中心 | 距离区间定义 (`distCutoffs`)，权重调度 (`weight4range`, `weight43C`)，网络/算法注册表，`InitializeModelSpecs()` |
+| **Model4DistancePrediction.py** | 模型组装与训练 | `Conv1D2Matrix`, `Conv2D4DistMatrix`, `BuildModel()`, `TrainModel()` |
+| **RunDistancePredictor2.py** | 推理协调器 | `PredictDistMatrix()` — 加载模型，运行预测，平均集成结果，保存结果 |
+| **ResNet4Distance.py** | 标准 ResNet 骨干网络 | `ResConv1DLayer`, `ResConv2DLayer`, `batch_norm()`, `ResNet` |
+| **DilatedResNet4Distance.py** | 空洞 ResNet 骨干网络 | `ResConv1DLayer`, `ResConv2DLayer` (带空洞)，`DilatedResNet` |
+| **EmbeddingLayer.py** | 学习的对嵌入 | `EmbeddingLayer`, `MetaEmbeddingLayer` (范围感知)，`ProfileEmbeddingLayer` |
+| **DataProcessor.py** | 特征工程与批处理 | `LoadDistanceFeatures()`, `SplitData2Batches()`, `PriorDistancePotential()`, `LocationFeature()` |
+| **NN4LogReg.py** | 分类输出头 | `HiddenLayer`, `LogRegLayer`, `NN4LogReg` |
+| **NN4Normal.py** | 回归输出头 | `HiddenLayer`, `NN4Normal` (预测正态/对数正态分布的 μ, σ) |
+| **Adams.py** | Adam 族优化器 | `Adam()`, `AdamW()`, `AMSGrad()` |
+| **LoadHHM.py** | HHM 谱解析 | `ReadHHM()` — 将 HHblits `.hhm` 文件转换为 PSSM/PSFM 矩阵 |
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L1-L200), [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L1-L50), [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L1-L60)
+
+## 输入特征
+
+RaptorX-Contact 消耗六类基于序列衍生的特征——输入时无需 3D 结构。特征按蛋白质存储为 Python `dict()`，且具有 `DataProcessor.LoadDistanceFeatures()` 所期望的特定键。
+
+| 特征 | 形状 | 来源工具 | 描述 |
+|---|---|---|---|
+| **一级序列** | 单字母代码字符串 | — | 内部独热编码为 L×20 |
+| **PSSM** | L × 20 | PSI-BLAST / HHblits | 位置特异性评分矩阵；通过 `LoadHHM.py` 从 `.hhm` 生成 |
+| **二级结构** | L × 3 | DeepCNF_SS_Con | 3 状态置信度分数（螺旋、折叠、环） |
+| **溶剂可及度** | L × 3 | AcconPred | 3 状态可及性置信度分数 |
+| **CCMpred** | L × L | CCMpred (使用 `-R -d GPU`) | 归一化协同变异矩阵 |
+| **MetaPSICOV 对统计** | 3 × L × L | alnstats (MetaPSICOV) | 三个两两关系矩阵 |
+
+<CgxTip>在准备自己的数据时，请确保螺旋/折叠/环和可及性标签的顺序与示例测试数据完全匹配——顺序不匹配会导致预测准确率悄然下降。</CgxTip>
+
+来源: [README.md](/README.md#L24-L36), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L111-L200), [LoadHHM.py](/Common/LoadHHM.py#L1-L30)
+
+## 距离离散化区间
+
+一个核心设计选择是如何将连续的残基间距离离散化为分类目标。`config.py` 模块定义了 **16 种分箱方案**，范围从粗粒度（2 个区间：接触与非接触）到细粒度（52 个区间，跨越 4.0–16.5Å）。命名约定遵循 `Discrete{N}C`（N 个区间，无效距离合并至最后一个区间）和 `Discrete{N}CPlus`（无效距离分离至专用区间）的模式。
+
+| 方案 | 区间数 | 范围 | 间距 | 典型用途 |
+|---|---|---|---|---|
+| `Discrete52C` | 52 | 4.0–16.5 Å | ~0.25 Å | 高分辨率距离图 |
+| `Discrete25C` | 25 | 4.5–16.0 Å | ~0.48 Å | Cβ–Cβ 预测的默认方案 |
+| `Discrete12C` | 12 | 5–15 Å | 1.0 Å | 平衡速度/准确率 |
+| `Discrete3C` | 3 | 0–8, 8–15, >15 Å | — | 粗粒度类接触区间 |
+| `Discrete2C` | 2 | 0–8, >8 Å | — | 二元接触分类 |
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L50-L120)
+
+## 范围感知损失加权
+
+并非所有残基对都提供同等的信息量。该系统应用**范围感知加权**，为长距离对（序列间隔 ≥ 24）分配较高的损失权重，并逐渐降低中距离（≥12）、短距离（≥6）和近距离对的权重。此外，在每个范围内，**距离感知权重**进一步强调近距离区间（0–8Å）而非远距离区间。这种双层加权方案对于长距离接触的训练稳定性和预测质量至关重要——长距离接触是结构信息最丰富的残基对。
+
+| 范围 | 间隔 | 范围权重 | 近距离权重 (0–8Å) | 中距离权重 (8–15Å) | 远距离权重 (>15Å) |
+|---|---|---|---|---|---|
+| 长 | ≥ 24 | 3.0 | 17 | 4 | 1 |
+| 中 | ≥ 12 | 2.5 | 5 | 2 | 1 |
+| 短 | ≥ 6 | 1.0 | 2.5 | 0.6 | 1 |
+| 近 | ≥ 2 | 0.5 | 0.2 | 0.3 | 1 |
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L145-L175)
+
+## 神经网络变体
+
+提供两种 ResNet 架构，均在带有批归一化和 ReLU 激活的 2D L×L 特征图上运行：
+
+- **ResNet2D** (`ResNet4Distance.py`)：标准空洞无关残差块，包含 1D 和 2D 卷积层、批归一化，以及用于可变长度序列的可选掩码。
+- **DilatedResNet2D** (`DilatedResNet4Distance.py`)：使用**空洞卷积**扩展标准 ResNet，在不增加参数量的情况下指数级扩大感受野——这对于捕获大型距离矩阵中的长距离依赖关系至关重要。
+
+两种变体均通过填充与掩码策略支持可变长度输入：较短序列在右侧/底部用零填充，二进制掩码在每次卷积和批归一化步骤后重置填充位置，以防止噪声传播。
+
+来源: [ResNet4Distance.py](/DL4DistancePrediction2/ResNet4Distance.py#L1-L146), [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L1-L80)
+
+## 预测流水线
+
+推理过程由 `RunDistancePredictor2.py` 协调。`PredictDistMatrix()` 函数支持**模型集成**：加载多个模型文件（可能使用不同的分箱方案或随机种子进行训练），并将其预测的概率矩阵按响应进行平均。该流水线：
+
+1. 从 `.pkl` 文件加载模型规格和参数值
+2. 通过 `Model4DistancePrediction.BuildModel()` 构建 Theano 计算图
+3. 通过 `DataProcessor.LoadDistanceFeatures()` 加载和批处理预测数据
+4. 对每批数据运行前向传播，跨模型累积预测结果
+5. 平均集成预测结果，并为对称原子对（Cβ–Cβ、Cα–Cα、Cγ–Cγ）对称化输出
+6. 将距离概率矩阵转换为接触矩阵并保存结果
+
+<CgxTip>在集成中使用多个模型时，所有模型必须在每种原子对类型的标签类型（例如 `Discrete25C`）上保持一致——配置不匹配会导致推理时发生致命错误。</CgxTip>
+
+来源: [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L30-L120)
+
+## 研究基础
+
+该软件包实现了来自七篇主要出版物的方法，勾勒出从接触预测到基于距离的折叠的演进历程：
+
+| 年份 | 发表载体 | 贡献 |
+|---|---|---|
+| 2017 | PLoS CB | 首个用于接触图预测的超深度学习模型 |
+| 2017 | Cell Systems | 用于膜蛋白折叠的深度迁移学习 |
+| 2018 | PROTEINS (CASP12) | 盲测接触预测深度学习方法的分析 |
+| 2018 | NAR | ComplexContact：基于深度学习的蛋白质间接触预测 |
+| 2018 | ISMB/Bioinformatics | 应用于蛋白质穿线/比对的距离预测 |
+| 2019 | PNAS | **由深度学习驱动的基于距离的折叠**（关键成果） |
+| 2019 | PROTEINS (CASP13) | CASP13 中基于距离的结构预测分析 |
+
+来源: [README.md](/README.md#L7-L30)
+
+## 技术栈
+
+| 组件 | 技术 | 备注 |
+|---|---|---|
+| 深度学习框架 | **Theano** | 支持 GPU 的符号张量计算 |
+| 编程语言 | **Python 2.7** | 推荐使用 Anaconda 发行版 |
+| 序列化 | **cPickle** | 模型和特征文件使用 `.pkl` 格式 |
+| 外部依赖 | **BioPython** (可选) | 用于序列/结构工具 |
+| 谱生成 | **HHblits / HHpred** | 生成由 `LoadHHM.py` 解析的 `.hhm` 文件 |
+| 协同变异 | **CCMpred** | 使用 `-R -d GPU` 标志进行 GPU 加速 |
+| 两两统计 | **MetaPSICOV alnstats** | 生成 3 个补充 L×L 矩阵 |
+
+来源: [README.md](/README.md#L5-L6), [Adams.py](/DL4DistancePrediction2/Adams.py#L1-L30)
+
+## 后续阅读
+
+现在你已经对 RaptorX-Contact 有了宏观的认识，请按照以下阅读顺序加深你的理解：
+
+1. **[快速开始](2-quick-start)** — 使用你自己的蛋白质序列运行该软件包
+2. **[架构概览](3-architecture-overview)** — 模型组装与数据流的详细拆解
+3. **[输入特征规范](7-input-feature-specification)** — 按模型期望的准确格式准备输入数据
+4. **[用于距离预测的深度 ResNet](4-deep-resnet-for-distance)** — 理解核心网络骨干
+5. **[距离预测流水线](12-distance-prediction-pipeline)** — 逐步推理与输出解释
+6. **[接触准确率评估](13-contact-accuracy-evaluation)** — 衡量并解释预测质量
+
+---
+
+- [入门/快速上手](https://zread.ai/j3xugit/RaptorX-Contact/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+让 RaptorX-Contact 端到端运行起来：从环境配置到完成首次蛋白质距离预测。本指南将引导你完成从零开始到预测出接触图所需的每一个前置条件、数据准备步骤和执行命令。
+
+## 前置条件与环境配置
+
+RaptorX-Contact 基于 **Python 2.7** 构建，并使用 **Theano** 作为其深度学习后端。在接触代码之前，请确保你的环境满足下表中的每一项依赖。项目还要求环境变量 `ModelingHome` 指向仓库根目录，以便跨模块导入（例如 `Common/LoadHHM.py`）能够正确解析。
+
+| 依赖 | 版本 | 用途 |
+|---|---|---|
+| Python | 2.7 | 运行时环境（推荐使用 Anaconda） |
+| Theano | 最新兼容版 | 张量计算与 GPU 后端 |
+| NumPy | ≥ 1.x | 数组操作，矩阵运算 |
+| SciPy | ≥ 0.19 | 用于接触转换的统计分布 |
+| cPickle | stdlib | 模型与特征序列化（PKL 格式） |
+| BioPython | 可选 | 附加序列工具 |
+
+使用 Anaconda 安装核心依赖栈：
+
+```bash
+# 创建 Python 2.7 环境
+conda create -n raptorx python=2.7 numpy scipy
+conda activate raptorx
+
+# 安装 Theano（CPU 或 GPU 版本）
+pip install theano
+
+# 设置仓库根目录环境变量
+export ModelingHome=/path/to/RaptorX-Contact
+```
+
+<CgxTip>必须通过 `~/.theanorc` 为 Theano 配置 CPU 或 GPU 模式。如需 GPU 加速，请确保已安装 CUDA 工具包，并在 Theano 配置文件的 `[global]` 部分设置 `device = gpu`。</CgxTip>
+
+来源: [README.md](/README.md#L1-L38), [config.py](/DL4DistancePrediction2/config.py#L1-L10), [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L1-L15)
+
+## 获取预训练模型与测试数据
+
+RaptorX-Contact 需要**预训练的深度 ResNet 模型**以及格式正确的输入特征文件。两者均从 RaptorX 下载服务器分发。在 `http://raptorx.uchicago.edu/download/` 登录后，请查阅以下两个关键 README 文件：
+
+- **`0README.data4contactPrediction.txt`** — 描述测试数据集和多重序列比对
+- **`0README.models4ContactDistancePrediction.txt`** — 描述可用的预训练模型文件（PKL 格式）
+
+每个模型文件都是一个 Python `cPickle` 导出文件，包含一个具有完整模型规格的字典：网络架构、参数值（`paramValues`）、响应类型、标签分布（`labelRefProbs`）以及权重配置（`weight4labels`）。预测流水线会通过 `cPickle.load()` 直接加载这些内容。
+
+来源: [README.md](/README.md#L23-L28), [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L35-L42)
+
+## 准备输入特征
+
+每个蛋白质的输入特征都存储为一个**序列化为 PKL 格式的 Python `dict()`**。该字典必须包含与 `DataProcessor.LoadDistanceFeatures()` 期望相匹配的特定键。下表总结了每个必需和可选的特征、其形状以及生成方法。
+
+| 特征键 | 形状 | 是否必需 | 生成方法 |
+|---|---|---|---|
+| `name` | 字符串 | 是 | 蛋白质标识符 |
+| `sequence` | 字符串（大写） | 是 | 来自 FASTA 的主序列 |
+| `PSSM` | L × 20 | 是 | 通过 `LoadHHM.py` 从 HHM 文件获取，或使用 PSI-BLAST/HHblits |
+| `SS3` | L × 3 | 是 | DeepCNF_SS_Con 预测器 |
+| `ACC` | L × 3 | 是 | AcconPred 溶剂可及性 |
+| `ccmpredZ` | L × L | 是 | 添加 `-R -d GPU` 标志的 CCMpred，随后进行 Z-score 归一化 |
+| `OtherPairs` | L × L × 3 | 是 | 来自 MetaPSICOV 的 `alnstats` |
+| `DISO` | L × ? | 否 | 无序预测 |
+| `psicovZ` | L × L | 否 | PSICOV Z-score 矩阵 |
+
+**关键约束**：`SS3` 中 3 列的顺序必须为 **Helix, Beta, Loop**（索引分别为 0, 1, 2），并且 `ACC` 的标签顺序必须与示例数据保持一致。此处的不匹配将隐式降低预测准确率。
+
+### 从 HHM 文件生成 PSSM
+
+如果你使用 HHblits/HHpred 生成多重序列比对，可以使用 `LoadHHM.py` 工具将生成的 `.hhm` 文件同时转换为 PSSM 和 PSFM：
+
+```python
+import sys
+sys.path.append('/path/to/RaptorX-Contact/Common')
+import LoadHHM
+
+# 读取 HHM 文件 — 填充 'PSFM' 和 'PSSM' 键
+protein = LoadHHM.ReadHHM(lines, start_position, length, one_protein)
+pssm = protein['PSSM']   # 位置特定得分矩阵 (L x 20)
+psfm = protein['PSFM']   # 位置特定频率矩阵 (L x 20)
+```
+
+`ReadHHM` 函数在内部处理伪计数添加、重归一化以及基于 Gonnet 矩阵的平滑，从而从原始 HHM 发射分数生成可用于生产的 PSSM/PSFM 矩阵。
+
+来源: [README.md](/README.md#L28-L36), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L112-L195), [LoadHHM.py](/Common/LoadHHM.py#L1-L30), [LoadHHM.py](/Common/LoadHHM.py#L100-L200)
+
+## 运行距离预测
+
+主入口点是 `RunDistancePredictor2.py`，它负责加载一个或多个预训练模型，处理输入特征文件，并输出预测的距离概率矩阵。以下流程图展示了完整的预测流水线：
+
+```mermaid
+flowchart TD
+    A[开始: 准备 PKL 特征文件] --> B[下载预训练模型 .pkl 文件]
+    B --> C[运行 RunDistancePredictor2.py]
+    C --> D{通过 cPickle 加载模型}
+    D --> E[构建 Theano 推理图]
+    E --> F[加载并批处理蛋白质特征]
+    F --> G[逐批执行前向传播]
+    G --> H{还有更多模型需要集成?}
+    H -->|是| D
+    H -->|否| I[跨模型平均预测结果]
+    I --> J[将距离概率转换为接触矩阵]
+    J --> K[将结果保存为 .predictedDistMatrix.pkl]
+    K --> L{是否提供了真实值?}
+    L -->|是| M[评估接触准确率]
+    L -->|否| N[完成]
+    M --> N
+```
+
+### 命令行调用
+
+```bash
+cd $ModelingHome/DL4DistancePrediction2
+
+python RunDistancePredictor2.py \
+  -m model1.pkl;model2.pkl;model3.pkl \
+  -p proteinFeatures1.pkl;proteinFeatures2.pkl \
+  -d /path/to/output_folder \
+  -g /path/to/native_distance_matrices
+```
+
+| 标志 | 参数 | 描述 |
+|---|---|---|
+| `-m` | 以分号分隔的 PKL 路径 | 一个或多个预训练模型文件 |
+| `-p` | 以分号分隔的 PKL 路径 | 一个或多个蛋白质特征文件 |
+| `-d` | 目录路径 | 预测输出的保存路径 |
+| `-g` | 目录路径 | 真实值文件夹（可选；指定后将触发准确率评估） |
+
+### 理解输出结果
+
+每个蛋白质会生成一个名为 `{proteinName}.predictedDistMatrix.pkl` 的文件，其中包含一个 5 元素元组：
+
+| 元组索引 | 内容 | 形状/类型 |
+|---|---|---|
+| 0 | 蛋白质名称 | 字符串 |
+| 1 | 主序列 | 字符串 |
+| 2 | 预测的距离概率矩阵 | 字典: 响应 → L × L × numBins |
+| 3 | 预测的接触概率矩阵 | 字典: 原子对类型 → L × L |
+| 4 | 标签权重矩阵 | 字典 |
+| 5 | 标签分布（参考概率） | 字典 |
+
+预测的接触矩阵（元组索引 3）是通过将距离概率区间累加至**接触定义阈值 8.001 Å** 得出的，该阈值可通过 `config.ContactDefinition` 配置。
+
+来源: [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L17-L30), [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L35-L65), [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L200-L270), [config.py](/DL4DistancePrediction2/config.py#L148-L150)
+
+## 评估预测准确率
+
+生成预测结果后，使用 `BatchEvaluateContactAccuracy.py` 计算蛋白质列表的准确率指标：
+
+```bash
+python BatchEvaluateContactAccuracy.py \
+  proteinList.txt \
+  /path/to/output_folder \
+  /path/to/native_distance_matrices
+```
+
+该脚本加载每个 `{proteinName}.predictedDistMatrix.pkl`，提取预测的接触矩阵（元组索引 3），并与原生距离矩阵进行比对。它会输出长程、中程和短程接触的 top-L/k 精度——这是 CASP 竞赛中的标准基准。
+
+来源: [BatchEvaluateContactAccuracy.py](/DL4DistancePrediction2/BatchEvaluateContactAccuracy.py#L21-L50), [BatchEvaluateContactAccuracy.py](/DL4DistancePrediction2/BatchEvaluateContactAccuracy.py#L60-L95)
+
+## 默认配置参考
+
+`config.InitializeModelSpecs()` 函数定义了默认的模型规格。在修改任何训练或推理行为之前，理解这些默认值至关重要。最具影响力的设置总结如下：
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `network` | `ResNet2D` | 网络架构（还包括：`DilatedResNet2D`、`ResNet2DV23`） |
+| `responseStr` | `CbCb:25C` | 将 Cβ-Cβ 距离预测为 25 个离散区间 |
+| `algorithm` | `Adam` | 优化器（`Adam`、`SGDM`、`AMSGrad` 等） |
+| `numEpochs` | `[19, 2]` | 每个学习率调度阶段的轮次 |
+| `lrs` | `[0.0002, 0.00002]` | 每个阶段的学习率 |
+| `conv1d_hiddens` | `[30, 35, 40, 45]` | 1D 卷积层中的隐藏单元数 |
+| `conv2d_hiddens` | `[50, 55, 60, 65, 70, 75]` | 2D 残差块中的隐藏单元数 |
+| `conv2d_repeats` | `[4, 4, 4, 4, 4, 4]` | 每个 2D 层组的残差块数量 |
+| `batchNorm` | `True` | 启用批归一化 |
+| `ContactDefinition` | `8.001` | 接触的 Cβ-Cβ 距离阈值 (Å) |
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L130-L195), [config.py](/DL4DistancePrediction2/config.py#L148-L150)
+
+## 常见问题排查
+
+| 问题 | 原因 | 解决方案 |
+|---|---|---|
+| `FATAL ERROR: the model type or network architecture is not compatible` | 模型 PKL 是由不同版本的 `config.py` 保存的 | 重新下载与你的代码版本匹配的模型文件 |
+| `unsupported network architecture` | 网络名称不在 `config.allNetworks` 中 | 使用以下之一：`ResNet2D`、`ResNet2DV21`、`ResNet2DV22`、`ResNet2DV23`、`DilatedResNet2D` |
+| `inconsistent primary sequence for the same protein` | 输入 PKL 中存在具有不同序列的重复蛋白质名称 | 验证特征文件中的序列一致性 |
+| 特征维度断言不匹配 | 输入特征与模型的 `n_in_seq` / `n_in_matrix` 不匹配 | 使用与训练时相同的工具版本重新生成特征 |
+| `please set the environment variable ModelingHome` | 缺少环境变量 | `export ModelingHome=/path/to/RaptorX-Contact` |
+
+来源: [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L35-L75), [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L80-L100), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L112-L195)
+
+## 接下来去哪
+
+现在你已经能够运行预测了，以下页面将加深你对系统内部机制的理解：
+
+1. **[架构概述](3-architecture-overview)** — 了解 1D 卷积、2D ResNet 和嵌入层如何组合成完整的预测流水线
+2. **[输入特征规格](7-input-feature-specification)** — 蛋白质字典中每个特征键的详细格式规范
+3. **[HHM 谱解析](9-hhm-profile-parsing)** — 深入探讨 `LoadHHM.py` 内部机制、伪计数处理以及 PSSM 推导
+4. **[用于距离预测的深度 ResNet](4-deep-resnet-for-distance)** — 了解驱动预测准确率的残差块架构
+5. **[配置与距离区间](16-configuration-and-distance-bins)** — 探索离散区间划分方案（`25C`、`12CPlus` 等）及其权衡
+
+---
+
+# 深入探究
+
+- [深入探究/架构概述](https://zread.ai/j3xugit/RaptorX-Contact/3-architecture-overview)
+
+---
+slug:3-architecture-overview
+blog_type:normal
+---
+
+
+RaptorX-Contact 是一个深度学习系统，它使用深度卷积残差神经网络来预测蛋白质中的**残基间距离**和**接触**。该系统没有直接预测二值的接触，而是将实值的原子间距离离散化到多个区间中，并预测这些区间上的概率分布——这一策略已被证明能够产生比单纯二值接触预测好得多的 3D 结构折叠效果。整个代码库在 Python 2.7 和 **Theano** 符号计算框架上实现，并被组织成一个主软件包 `DL4DistancePrediction2/` 以及一个共享工具模块 `Common/`。
+
+## 项目结构
+
+```
+RaptorX-Contact/
+├── Common/
+│   └── LoadHHM.py                  # HHM 特征解析器 (PSSM 提取)
+├── DL4DistancePrediction2/
+│   ├── config.py                    # 核心配置：区间、权重、标签类型
+│   ├── RunDistancePredictor2.py     # 顶层推理管道入口点
+│   ├── Model4DistancePrediction.py  # 模型组装：BuildModel() + ResNet4DistMatrix
+│   ├── ResNet4Distance.py           # 带有批量归一化残差块的标准 2D ResNet
+│   ├── DilatedResNet4Distance.py    # 空洞 ResNet 变体 (扩大感受野)
+│   ├── EmbeddingLayer.py           # 残基对嵌入 (MetaEmbeddingLayer)
+│   ├── Conv1d.py                    # 用于序列特征的 1D 卷积层
+│   ├── DataProcessor.py            # 特征加载、组装和批次分割
+│   ├── ReadProteinFeatures.py       # 单蛋白质特征文件读取器 (SS, ACC, PSSM…)
+│   ├── DistanceUtils.py            # 距离 ↔ 接触转换，区间离散化
+│   ├── ContactUtils.py             # 接触精度评估，CASP 格式 I/O
+│   ├── NN4LogReg.py                # 输出头：离散距离区间上的 softmax
+│   ├── NN4Normal.py                # 输出头：正态/对数正态分布
+│   ├── Optimizers.py               # SGD-Momentum, AdaDelta, AdaGrad, Adam, Nesterov
+│   ├── Metrics.py                   # MCC, F1, 精确率/召回率计算
+│   └── ... (批量评估脚本)
+└── README.md
+```
+
+来源: [README.md](/README.md#L1-L38), [config.py](/DL4DistancePrediction2/config.py#L1-L200)
+
+## 系统架构图
+
+下图展示了从原始蛋白质特征经过神经网络到预测距离和接触矩阵的端到端数据流。每个彩色区域对应一个独立的架构关注点。
+
+```mermaid
+flowchart TB
+    subgraph INPUT["📥 输入层"]
+        SEQ["序列特征<br/>(独热编码, PSSM, SS3, ACC)"]
+        PAIR["两两特征<br/>(CCMpred, PSICOV, 位置)"]
+        EMB["嵌入输入<br/>(独热编码 或 独热编码 ⊗ SS3)"]
+    end
+
+    subgraph ENCODE["🔀 1D 序列编码器"]
+        C1D["1D ResNet / 空洞 ResNet<br/>(conv1d_hiddens × conv1d_repeats)"]
+    end
+
+    subgraph TRANSFORM["🔄 1D → 2D 转换"]
+        OC["外部拼接<br/>(中点特征)"]
+        ML["元嵌入层<br/>(LR / MR / SR 特定范围)"]
+        CAT["拼接<br/>(两两特征 + 外部拼接 + 嵌入)"]
+    end
+
+    subgraph CORE["🧠 2D 残差网络"]
+        R2D["2D ResNet / 空洞 ResNet<br/>(conv2d_hiddens × conv2d_repeats)"]
+    end
+
+    subgraph OUTPUT["📤 预测头"]
+        LR["NN4LogReg<br/>(softmax → 离散区间)"]
+        NM["NN4Normal<br/>(μ, σ → 连续分布)"]
+    end
+
+    subgraph POST["📊 后处理"]
+        D2C["距离 → 接触<br/>(求和区间 ≤ 8Å)"]
+        CASP["CASP RR 格式"]
+        EVAL["精度评估<br/>(Top-L/X, MCC, F1)"]
+    end
+
+    SEQ --> C1D
+    C1D --> OC
+    EMB --> ML
+    PAIR --> CAT
+    OC --> CAT
+    ML --> CAT
+    CAT --> R2D
+    R2D --> LR
+    R2D --> NM
+    LR --> D2C
+    NM --> D2C
+    D2C --> CASP
+    D2C --> EVAL
+```
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L246-L398), [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L1-L200)
+
+## 核心管道阶段
+
+### 阶段 1 — 特征加载与组装
+
+原始蛋白质数据从 PKL 格式文件中加载，并分解为两个互补的特征流。**序列特征**（形状为 `L × n_in_seq`）拼接了独热编码、位置特异性评分矩阵 (PSSM)、预测的 3 状态二级结构 (SS3) 以及预测的溶剂可及性 (ACC)。**两两特征**（形状为 `L × L × n_in_matrix`）拼接了归一化的 CCMpred 共变矩阵、三个 MetaPSICOV alnstats 矩阵、位置特征 `min(1, |i−j|/30)` 以及立方根分离特征 `∛|i−j|`。可选的**嵌入输入**（形状为 `L × n_in_embed`）为残基对嵌入层做准备。所有组装逻辑位于 `DataProcessor.LoadDistanceFeatures()` 中，该函数读取模型规格以确定要包含的特征。
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L83-L200), [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L1-L200)
+
+### 阶段 2 — 1D 序列编码
+
+序列特征矩阵通过由重复残差块组成的 **1D ResNet**（或空洞 ResNet）。每个块包含：1D 卷积 → 批量归一化 → ReLU → 1D 卷积 → 批量归一化 → ReLU → 跳跃连接。隐藏通道数和块重复次数由模型规格中的 `conv1d_hiddens` 和 `conv1d_repeats` 控制。每次卷积后都会应用掩码，以抑制变长批次处理中来自零填充位置的噪声。
+
+来源: [ResNet4Distance.py](/DL4DistancePrediction2/ResNet4Distance.py#L1-L200), [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L1-L200)
+
+### 阶段 3 — 1D 到 2D 转换
+
+这是将每个残基的表示转换为残基对表示的架构桥梁。两种机制并行运作：
+
+| 机制 | 操作 | 输出形状 | 配置键 |
+|-----------|-----------|-------------|------------|
+| **外部拼接** | 对 1D 输出执行 `MidpointFeature` → 2D 压缩卷积 | `(B, L, L, OuterCat)` | `seq2matrixMode['OuterCat']` |
+| **元嵌入** | 特定范围的 `EmbeddingLayer` (LR/MR/SR) | `(B, L, L, n_out_embed)` | `seq2matrixMode['SeqOnly']` 或 `['Seq+SS']` |
+
+`MetaEmbeddingLayer` 值得注意：它实例化了**三个独立的嵌入层**——一个用于长程对 (|i−j| ≥ 24)，一个用于中程对 (12 ≤ |i−j| < 24)，一个用于短程对 (6 ≤ |i−j| < 12)——使模型能够学习依赖于范围的残基对相互作用。在进入 2D ResNet 之前，所有 2D 特征通道都与原始两两特征拼接在一起。
+
+来源: [EmbeddingLayer.py](/DL4DistancePrediction2/EmbeddingLayer.py#L56-L131), [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L280-L340)
+
+### 阶段 4 — 2D 残差网络 (核心预测器)
+
+拼接后的 2D 特征张量进入深度的 **2D ResNet** 或 **空洞 ResNet**，这是核心预测引擎。每个残差块执行：2D 卷积（带有可配置的半窗口大小）→ 批量归一化 → ReLU → 2D 卷积 → 批量归一化 → ReLU → 跳跃加法。空洞 ResNet 变体引入了 `filter_dilation=(d, d)`，以在不增加参数量的情况下指数级扩大感受野，这对于捕获蛋白质距离矩阵中的长程相互作用至关重要。
+
+| 变体 | 感受野增长 | 关键配置 |
+|---------|----------------------|------------|
+| **ResNet2D** | 随深度 × 窗口大小线性增长 | `halfWinSize_matrix` |
+| **DilatedResNet2D** | 随空洞调度指数级增长 | `conv2d_hwszs`, `conv2d_dilations` |
+
+来源: [ResNet4Distance.py](/DL4DistancePrediction2/ResNet4Distance.py#L100-L200), [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L100-L200)
+
+### 阶段 5 — 多响应预测头
+
+2D ResNet 的输出被展平并输入到**每个响应变量**的一个预测头中。响应变量的格式为 `{AtomPairType}_{LabelType}`（例如，`CbCb_Discrete25C`）。支持两种头类型：
+
+- **NN4LogReg** — 用于离散距离区间。一个小型全连接网络后接 softmax，生成 `N` 个距离区间（例如，`Discrete25C` 的 25 个区间）上的概率分布。
+- **NN4Normal** — 用于连续距离。预测正态或对数正态分布的参数 (μ, σ)。
+
+可以通过单次前向传播同时预测多个响应（例如，CbCb 距离 + 氢键 + β 配对），它们的输出概率张量沿最后一个维度拼接。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L340-L398)
+
+### 阶段 6 — 距离到接触的转换与输出
+
+预测后，系统通过将上限 ≤ 8.0 Å（接触定义阈值）的所有区间的概率求和，将距离概率矩阵转换为接触概率矩阵。对于正态/对数正态响应，则计算 8.0 Å 处的 CDF。然后，预测的接触矩阵针对对称原子对类型 (CbCb, CaCa, CgCg) 进行对称化。结果保存为包含 `(name, sequence, distProb, contactProb, labelWeights, labelDistributions)` 的 PKL 文件，并可选择以 **CASP RR 格式** 导出用于社区评估。
+
+来源: [RunDistancePredictor2.py](/DL4DistancePrediction2/RunDistancePredictor2.py#L200-L290), [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L90-L200)
+
+## 距离离散化方案
+
+系统支持丰富的距离区间配置集合，每种配置都在粒度与预测难度之间进行权衡。配置集中在 `config.py` 中：
+
+| 标签类型 | 区间数 | 范围 | 区间宽度 | 备注 |
+|-----------|--------|-------|-----------|-------|
+| `Discrete52C` | 52 | 4.0 – 16.5 Å | ~0.25 Å | 最细粒度 |
+| `Discrete36C` | 35 | 4.15 – 16.4 Å | ~0.35 Å | |
+| `Discrete25C` | 24 | 4.5 – 16.0 Å | ~0.48 Å | 常见默认值 |
+| `Discrete14C` | 13 | 4 – 16 Å | 1 Å | 粗粒度 |
+| `Discrete12C` | 11 | 5 – 15 Å | 1 Å | |
+| `Discrete3C` | 2 | 8, 15 Å | — | 接触 / 中程 / 远程 |
+| `Normal` / `LogNormal` | — | 连续 | — | 参数化 (μ, σ) |
+
+`Plus` 后缀（例如，`25CPlus`）表示无效距离标记 (−1) 被分离到其自己的区间中，而不是与最大距离区间合并。
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L33-L105)
+
+## 范围加权损失函数
+
+该架构的一个显著特点是它的**依赖范围的、标签加权的交叉熵损失**。残基对按序列分离度划分为四个范围，每个范围在距离标签上接收不同的权重向量：
+
+| 范围 | 分离度 | 权重配置 (3C 的示例) | 依据 |
+|-------|-----------|--------------------------------|-----------|
+| 长程 | \|i−j\| ≥ 24 | `[17, 4, 1]` — 极大的接触权重 | 长程接触对折叠最具信息量 |
+| 中程 | 12 ≤ \|i−j\| < 24 | `[5, 2, 1]` | |
+| 短程 | 6 ≤ \|i−j\| < 12 | `[2.5, 0.6, 1]` | |
+| 近程 | 2 ≤ \|i−j\| < 6 | `[0.2, 0.3, 1]` | 近程对大多是平凡的接触 |
+
+这种加权方案确保网络优先学习**长程接触**，这些接触既更难预测，又对 3D 结构确定更有价值。
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L135-L175)
+
+## 模型规格模式
+
+系统没有使用单独的配置文件格式，而是将**完整的模型规格序列化为 Python 字典**并通过 `cPickle` 保存。`config.py` 中的 `InitializeModelSpecs()` 函数定义了规范模式，`Model4DistancePrediction.BuildModel()` 读取此字典以构建 Theano 计算图。关键规格字段包括：
+
+```
+modelSpecs = {
+    'network':           'ResNet2DV23' | 'DilatedResNet2D',
+    'responses':         ['CbCb_Discrete25C', ...],
+    'n_in_seq':          # 序列特征维度,
+    'n_in_matrix':       # 两两特征维度,
+    'conv1d_hiddens':    [N1, N2, ...],    # 1D ResNet 通道宽度
+    'conv1d_repeats':    R,                 # 1D 块重复次数
+    'conv2d_hiddens':    [M1, M2, ...],    # 2D ResNet 通道宽度
+    'conv2d_repeats':    S,                 # 2D 块重复次数
+    'algorithm':         'Adam' | 'SGDM' | ...,
+    'paramValues':       [W1, b1, W2, ...] # 学习到的参数值
+}
+```
+
+这种自包含的模型文件模式支持**集成预测**——推理管道加载多个模型文件，独立运行每个模型，并平均预测的概率矩阵，从而显著提高准确性。
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L180-L220), [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L246-L280)
+
+## 掩码与变长批次处理
+
+蛋白质的长度差异很大，但 Theano 要求批次内的张量形状固定。系统通过**在批次内右对齐所有序列**并在左侧零填充较短序列来解决此问题。一个二值掩码张量跟踪哪些位置是真实的，哪些是填充的。在每次卷积和批量归一化操作后，重新应用掩码将填充位置重置为零，防止填充噪声污染预测。`DataProcessor.SplitData2Batches()` 函数将长度相近的蛋白质分组到批次中（每批最多 624 个蛋白质），以最小化计算浪费。
+
+<CgxTip>在扩展代码库时，理解掩码约定至关重要：掩码抑制 1D 张量的左侧填充和 2D 张量的左上填充。任何新层都必须在其操作后传播并重新应用掩码以保持正确性。</CgxTip>
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L1-L200), [ResNet4Distance.py](/DL4DistancePrediction2/ResNet4Distance.py#L40-L99)
+
+## 优化器目录
+
+系统实现了多种优化算法，可通过 `algorithm` 字段按模型选择：
+
+| 优化器 | 键 | 参考 |
+|-----------|-----|-----------|
+| 带动量的 SGD | `SGDM` | 经典，动量=0.95 |
+| 带动量的 SGD (替代形式) | `SGDM2` | 更流行的实现 |
+| Nesterov SGD | `SGNA` | Nesterov 加速梯度 |
+| Adam | `Adam` | 默认；自适应的逐参数学习率 |
+| 带解耦权重衰减的 Adam | `AdamW` | L2 正则化的 Adam 变体 |
+| AMSGrad | `AMSGrad` | 保证收敛的 Adam 变体 |
+| AdaDelta | — | 自适应，无学习率 |
+| AdaGrad | — | 历史梯度累积 |
+
+两阶段学习率调度是标准的：在第一组周期使用较高的学习率，然后降低 10 倍用于微调（通过 `numEpochs` 和 `lrs` 数组配置）。
+
+来源: [Optimizers.py](/DL4DistancePrediction2/Optimizers.py#L1-L200), [config.py](/DL4DistancePrediction2/config.py#L42-L48)
+
+## 接下来去哪
+
+上面的架构概述提供了结构图。要深入了解特定子系统，请遵循此推荐阅读顺序：
+
+1. **[用于距离预测的深度 ResNet](4-deep-resnet-for-distance)** — 2D 残差块、批量归一化和跳跃连接的内部结构
+2. **[空洞 ResNet 变体](5-dilated-resnet-variants)** — 空洞调度如何为长程相互作用扩大感受野
+3. **[嵌入与配对表示](6-embedding-and-pair-representation)** — MetaEmbeddingLayer 和外部拼接机制
+4. **[输入特征规格](7-input-feature-specification)** — 所有输入特征的精确格式与来源
+5. **[距离预测管道](12-distance-prediction-pipeline)** — 逐步推理演练
+6. **[配置与距离区间](16-configuration-and-distance-bins)** — 所有可配置参数的完整参考
+
+---
+
+- [深入探究/配置与距离分箱](https://zread.ai/j3xugit/RaptorX-Contact/16-configuration-and-distance-bins)
+
+---
+slug:16-configuration-and-distance-bins
+blog_type:normal
+---
+
+
+RaptorX-Contact 将所有可配置常量、距离离散化方案和标签权重矩阵集中在一个模块中 —— `config.py` —— 并由 `DistanceUtils.py` 提供运行时逻辑支持。它们共同定义了**连续的原子间距离如何量化为离散区间**、**训练期间每个区间分配的权重**，以及**推理过程中如何解析预测的概率张量**。对于任何希望修改预测粒度、重平衡损失函数或将模型扩展至新原子对类型的人来说，理解该子系统至关重要。
+
+## 全局物理常量
+
+三个物理阈值构成了整个区间划分与权重系统的基石。`ContactDefinition`（8.001 Å）定义了将距离概率矩阵转换为二值接触图时使用的 Cβ–Cβ 接触边界。`InteractionLimit`（15.001 Å）标记了假定两个残基不再存在物理相互作用的距离界限；它将“中距”区间（8–15 Å）与“远距”尾部（>15 Å）分隔开来。`MaxBetaDistance`（8.0 Å）和 `MaxHBDistance`（9.5 Å）在 β-配对和氢键矩阵中发挥着类似的作用，超出这些阈值的矩阵元素将按照 `100 + real_distance` 的惯例对非键合距离进行编码。
+
+| 常量 | 值 (Å) | 用途 |
+|---|---|---|
+| `ContactDefinition` | 8.001 | Cβ–Cβ 接触截断值 |
+| `InteractionLimit` | 15.001 | 超过此距离假定无物理相互作用 |
+| `MaxBetaDistance` | 8.0 | β-配对距离截断值 |
+| `MaxHBDistance` | 9.5 | 氢键距离截断值 |
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L55-L56), [config.py](/DL4DistancePrediction2/config.py#L175-L179)
+
+## 距离区间方案 (`distCutoffs`)
+
+核心抽象是一个**距离截断数组** —— 一个以 0 起始的单调递增边界值序列。原始距离 `d` 会被分配到满足 `cutoffs[k] ≤ d < cutoffs[k+1]` 的区间 `k` 中。区间数量等于 `len(cutoffs)`，每种方案通过一个短字符串后缀（如 `25C`、`12CPlus`）进行标识。
+
+### 命名约定
+
+每种标签类型遵循 `Discrete{N}C` 或 `Discrete{N}CPlus` 的格式，其中 **N** 表示距离区间的数量，可选的 **Plus** 后缀控制如何处理无效距离（在原始矩阵中表示为 −1）：
+
+- **不含 Plus**：无效距离 (−1) 被**合并**至最大距离区间。总输出标签数 = N。
+- **含 Plus**：无效距离被**分离**到独立的专属区间。总输出标签数 = N + 1。
+
+这一区别会传递至 `responseProbDims`，从而决定每个响应在神经网络 softmax 层的输出维度。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L58-L60), [config.py](/DL4DistancePrediction2/config.py#L116-L138)
+
+### 所有已定义的区间方案
+
+下表列出了每个截断数组、其区间数量、范围和间隔策略：
+
+| 方案 | 区间数 (N) | 范围 (Å) | 间隔 | 截断数组 |
+|---|---|---|---|---|
+| `52C` | 52 | 4.0–16.5 | 线性（linspace，51 个间隔） | `[0, 4.0, 4.25, …, 16.5]` |
+| `36C` | 36 | 4.15–16.4 | 线性（linspace，35 个间隔） | `[0, 4.15, …, 16.4]` |
+| `34CPlus` / `34C` | 34 | 4.0–20.0 | 线性（linspace，33 个间隔） | `[0, 4.0, …, 20.0]` |
+| `25CPlus` / `25C` | 25 | 4.5–16.0 | 线性（linspace，24 个间隔） | `[0, 4.5, …, 16.0]` |
+| `14CPlus` / `14C` | 14 | 4–16 | 整数步长 | `[0, 4, 5, 6, …, 16]` |
+| `13CPlus` / `13C` | 13 | 5–16 | 整数步长 | `[0, 5, 6, 7, …, 16]` |
+| `12CPlus` / `12C` | 12 | 5–15 | 整数步长 | `[0, 5, 6, 7, …, 15]` |
+| `3CPlus` / `3C` | 3 | 0–8–15 | 粗粒度（接触 / 相互作用 / 远距） | `[0, 8, 15]` |
+| `2CPlus` / `2C` | 2 | 0–8 | 二值（接触 / 非接触） | `[0, 8]` |
+
+没有显式 `Plus` 变体的方案（例如 `34C`）直接作为其 `Plus` 对应方截断数组的别名 —— 它们之间的差异化发生在离散化阶段，通过 `invalidDistanceSeparated` 标志进行控制。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L62-L86)
+
+### 专用氢键距离区间
+
+氢键响应使用独立的字典 `distCutoffs_HB`，其中包含单个 `2C` 条目：`[0, MaxHBDistance]` = `[0, 9.5]`。这反映了氢键接触距离略远于 Cβ–Cβ 接触距离的事实。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L88-L90)
+
+## 离散化流程
+
+`DistanceUtils.py` 中的 `DiscretizeDistMatrix` 函数利用 `np.digitize` 将连续距离矩阵转换为整数标签矩阵：
+
+```python
+result = np.digitize(distm, bins) - 1
+```
+
+当 `invalidDistanceSeparated=True`（即 **Plus** 情况）时，`digitize` 返回 −1 的条目会被重新映射至 `len(bins)`，从而创建一个专用的无效距离区间。否则，它们会被合并至索引为 `len(bins) - 1` 的最后一个有效区间。该函数在 `DataProcessor.LoadDistanceFeatures` 的数据加载过程中被调用，标签类型字符串同时决定了截断数组和分离标志：
+
+```python
+labelMatrix, _, _ = DistanceUtils.DiscretizeDistMatrix(
+    distm, config.distCutoffs[subType], subType.endswith('Plus')
+)
+```
+
+逆向操作 —— **将细粒度区间合并为粗粒度区间** —— 由 `MergeDistanceBins` 执行，它在源截断数组中定位每个目标边界，并对相应的概率切片求和。这使得可以将 52 区间的预测结果事后粗化为 25 区间的表示，而无需重新运行推理。
+
+来源：[DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L156-L170), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L298-L308), [DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L133-L152)
+
+## 响应规范系统
+
+**响应** 是预测的原子单位 —— 它通过 `{LabelName}_{LabelType}` 格式将原子对类型与标签类型配对。例如，`CbCb_Discrete25C` 意为“预测离散化为 25 个区间的 Cβ–Cβ 距离”。
+
+### 原子对类型
+
+共定义了五种原子对类型，其中四种是对称的（`d(i,j) = d(j,i)`）：
+
+| 类型 | 原子 | 对称 |
+|---|---|---|
+| `CbCb` | Cβ–Cβ（甘氨酸为 Cα） | 是 |
+| `CaCa` | Cα–Cα | 是 |
+| `CgCg` | Cγ–Cγ（依赖于上下文） | 是 |
+| `CaCg` | Cα–Cγ | 否 |
+| `NO` | N–O | 否 |
+
+另外两种标签名 —— `HB`（氢键）和 `Beta`（β-配对） —— 使用二值（2C）方案，并携带特殊的权重矩阵。`SelectAtomPair` 函数根据残基解析实际的 PDB 原子名称，处理 `CbCb` 中甘氨酸的 Cβ→Cα 替换，以及通过 `SelectCG` 进行的依赖侧链的 Cγ 分配。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L22-L24), [config.py](/DL4DistancePrediction2/config.py#L278-L301)
+
+### 响应维度账目
+
+两个字典控制着流经网络的张量形状：
+
+- **`responseValueDims`**：预测*值*的维度（标量距离为 1，二维正态分布为 2）。
+- **`responseProbDims`**：预测*概率参数*的维度（对于 `Discrete{N}C` 等于 N，对于 `Discrete{N}CPlus` 等于 N+1，一维正态/对数正态为 2，二维正态最高可达 5）。
+
+这些值通过编程方式计算：对于 `Discrete{N}C`，`responseProbDims = N`；对于 `Discrete{N}CPlus`，`responseProbDims = N + 1`。在推理期间，`RunDistancePredictor2` 利用这些维度将拼接的输出张量切片为各响应的概率图。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L105-L138), [RunDistancePredictor2.py](/DL4DistancePredictor2.py#L124-L129)
+
+## 基于范围的权重系统
+
+训练损失在所有残基对之间并非均匀分布 —— 它根据**序列间隔**被划分为四个范围，每个范围接收不同的权重。
+
+### 范围边界
+
+| 范围 | 序列间隔 | 权重 (`weight4range`) |
+|---|---|---|
+| 长距 | ≥ 24 | 3.0 |
+| 中距 | 12–23 | 2.5 |
+| 短距 | 6–11 | 1.0 |
+| 近距 | 2–5 | 0.5 |
+
+`GetRangeIndex` 将序列偏移量映射至其范围索引；小于 2 的偏移量返回 −1（默认不参与训练）。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L141-L156)
+
+### 三区间权重矩阵 (`weight43C`)
+
+最粗的离散方案 `3C` 将距离划分为三个区间：**0–8 Å**（接触）、**8–15 Å**（中距）和 **>15 Å 或无效**（远距）。一个 4×3 的权重矩阵为每个（范围 × 距离区间）组合分配权重。共有五种预设矩阵可供选择，通过 `LRbias` 模型规范键进行选定：
+
+| 预设 | 长距/接触 | 长距/中距 | 长距/远距 | 中距/接触 | 中距/中距 |
+|---|---|---|---|---|---|
+| `low` | 17 | 4 | 1 | 5 | 2 |
+| `mid` | 20.5 | 5.4 | 1 | 5.4 | 1.89 |
+| `high` | 23 | 6 | 1 | 6 | 2.5 |
+| `veryhigh` | 25 | 6 | 1 | 7 | 2.5 |
+| `exhigh` | 28 | 6 | 1 | 8 | 2.5 |
+
+任何方案的**有效权重**为 `weight43C[preset] × weight4range`，生成一个 4×3 矩阵，随后通过 `CalcLabelWeight` 将其**扩展**至完整的区间数。此扩展过程利用参考概率分布：在三个粗粒度区间的每一个内，细粒度区间的权重与其参考频率成反比，同时保持粗粒度区间的平均值不变。这确保了难以预测的稀有距离区间能够获得更高的权重。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L162-L167), [DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L246-L261)
+
+### 氢键与 β-配对的二值权重矩阵
+
+氢键和 β-配对使用二区间（接触 / 非接触）方案，并对正类施加了激进的权重：
+
+- **`weight4Beta2C`**：在长距/中距/短距/近距范围内的值为 `[360, 1], [70, 1], [50, 1], [120, 1]`
+- **`weight4HB2C`**：在长距/中距/短距/近距范围内的值为 `[600, 1], [120, 1], [90, 1], [5, 1]`
+
+这些极端的比率反映了严重的类别不平衡：仅有极少部分残基对会形成氢键或 β-配对。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L170-L173)
+
+## 权重扩展：从 3C 到细粒度区间
+
+`DistanceUtils.py` 中的 `CalcLabelWeight` 是连接人类可读的 3C 权重预设与细粒度方案（如 25C 或 52C）所需的逐区间权重的桥梁。它分三步执行：
+
+1. **识别边界区间**：`labelOf8 = LabelsOfOneDistance(ContactDefinition, distCutoffs)` 和 `labelOf15 = LabelsOfOneDistance(InteractionLimit, distCutoffs)` 将细粒度区间划分为与 0–8 / 8–15 / >15 区间相对应的三组。
+2. **计算逐区间权重**：对于每个范围和每个粗粒度区间，分配给细粒度区间 `k` 的权重为 `w3C[coarse] × avg_ref_prob[coarse] / ref_prob[k]`，其中 `avg_ref_prob` 是该粗粒度区间内所有区间的平均参考频率。参考频率较低的区间将获得更高的权重。
+3. **应用范围乘数**：通过在 `CalcLabelDistributionAndWeight` 中进行的预乘 `weight43C × weight4range`，生成的 4×N 矩阵已经按 `weight4range` 进行了缩放。
+
+<CgxTip>权重扩展公式确保了每个粗粒度区间的**期望单样本损失贡献**与 3C 预设意图相符，无论该区间包含多少个细粒度区间。在不重新推导 `labelRefProbs` 的情况下更改 `distCutoffs` 将隐式破坏此不变性。</CgxTip>
+
+来源：[DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L246-L261), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L345-L433)
+
+## 模型规范默认值
+
+`InitializeModelSpecs` 构建了贯穿训练和推理过程的默认配置字典。控制距离区间和权重的关键条目如下：
+
+| 键 | 默认值 | 描述 |
+|---|---|---|
+| `responseStr` | `'CbCb:25C'` | 人类可读的响应描述符 |
+| `responses` | `['CbCb_Discrete25C']` | 机器可读的响应列表 |
+| `w4responses` | `[1.]` | 各响应的损失乘数 |
+| `topRatios` | `[0.5]` | 用于准确率评估的 top-L 比例 |
+| `LRbias` | `'mid'` | 3C 权重预设选择 |
+| `rangeMode` | `'All'` | 在训练中包含近距残基对 |
+| `UseSampleWeight` | `True` | 启用基于范围的标签加权 |
+| `batchNorm` | `True` | ResNet 模块中的批归一化 |
+| `L2reg` | `0.0001` | L2 正则化系数 |
+
+`algorithm`、`numEpochs` 和 `lrs` 条目定义了两阶段学习率调度：19 个 epoch 采用 0.0002，随后 2 个 epoch 采用 0.00002（10 倍衰减）。
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L181-L259)
+
+## 距离到接触的转换
+
+在推理期间，预测的距离概率张量通过将低于接触阈值的所有区间的概率求和，坍缩为二值接触矩阵。在 `RunDistancePredictor2.PredictDistMatrix` 中：
+
+```python
+labelOf8 = DistanceUtils.LabelsOfOneDistance(
+    config.ContactDefinition, config.distCutoffs[subType]
+)
+contactProb = np.sum(distProb[:, :, :labelOf8], axis=2)
+```
+
+对于正态分布预测，转换使用 CDF 计算：`normDistribution.cdf(ContactDefinition)`。对于对数正态分布，则使用 `normDistribution.cdf(log(ContactDefinition))`。当以 CASP `.rr` 格式保存时，生成的接触矩阵可以进一步通过 `ProbScaleFactor`（默认：`log(0.5)/log(0.4) ≈ 1.096`）进行缩放，这将在以 0.5 作为二分类阈值时最大化 MCC/F1 值。
+
+来源：[RunDistancePredictor2.py](/DL4DistancePredictor2.py#L210-L225), [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L106-L111), [config.py](/DL4DistancePrediction2/config.py#L4-L9)
+
+## 概率校正 (`FixDistProb`)
+
+`FixDistProb` 对原始预测概率施加参考频率校正。它通过参考概率与经过标签权重调整的参考概率的比值，对每个预测分布重新加权：
+
+```
+fixedProb[i,j] = (originalProb[i,j] × refProb[rangeIndex]) / newRefProb[rangeIndex]
+```
+
+随后进行重归一化。这补偿了训练期间由非均匀标签权重引入的失真，将预测分布恢复为校准后的概率估计。
+
+来源：[DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L110-L129)
+
+## 配置系统架构
+
+下图展示了配置实体之间如何相互关联并在系统中流转：
+
+```mermaid
+graph TD
+    A["distCutoffs<br/>(区间边界数组)"] -->|"区间参数"| B["DiscretizeDistMatrix<br/>(连续 → 整数标签)"]
+    C["allDistLabelTypes<br/>(Discrete52C … Discrete2CPlus)"] -->|"生成"| D["responseProbDims<br/>(输出张量维度)"]
+    C -->|"生成"| E["responseValueDims<br/>(值维度)"]
+    F["weight43C<br/>(4×3 粗权重)"] -->|"× weight4range"| G["有效 4×3 矩阵"]
+    G -->|"CalcLabelWeight<br/>+ refProb"| H["weight4labels<br/>(4×N 细粒度权重)"]
+    A -->|"边界位置"| H
+    I["InitializeModelSpecs<br/>(默认配置字典)"] -->|"responses, LRbias"| J["CalcLabelDistributionAndWeight"]
+    J -->|"计算"| K["labelRefProbs<br/>(各范围频率)"]
+    J -->|"计算"| H
+    K -->|"输入至"| H
+    B -->|"标签矩阵"| K
+    L["ContactDefinition = 8.001Å"] -->|"LabelsOfOneDistance"| M["距离 → 接触<br/>转换"]
+    A -->|"截断数组"| M
+    N["ProbScaleFactor"] -->|"CASP 输出缩放"| O["SaveContactMatrixInCASPFormat"]
+```
+
+来源：[config.py](/DL4DistancePrediction2/config.py#L1-L329), [DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L1-L285), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L345-L433)
+
+<CgxTip>当添加新的距离区间方案时，你**必须**更新 `config.py` 中的**四个**位置：`distCutoffs` 字典、`allDistLabelTypes` 列表（它会自动生成 `Discrete` 前缀的条目），以及相应的 `responseProbDims` / `responseValueDims` 条目（`Discrete` 类型会自动计算，但 `Normal`/`LogNormal` 变体必须手动添加）。遗漏其中任何一项都会导致模型构建时出现形状不匹配错误。</CgxTip>
+
+## 推荐阅读
+
+- 关于这些区间如何馈入神经网络输出层：[模型构建与损失](10-model-building-and-loss)
+- 关于训练期间离散化标签的加载与批处理：[数据加载与处理](8-data-loading-and-processing)
+- 关于距离概率与真实值的评估方式：[距离准确率与 MCC](14-distance-accuracy-and-mcc)
+
+---
+
+## 神经网络模型
+
+- [深入探究/神经网络模型/用于距离预测的深度 ResNet](https://zread.ai/j3xugit/RaptorX-Contact/4-deep-resnet-for-distance)
+
+---
+slug:4-deep-resnet-for-distance
+blog_type:normal
+---
+
+
+**用于距离预测的深度 ResNet** 是 RaptorX-Contact 中的核心神经网络架构，专为从蛋白质序列特征预测残基间距离（以及派生属性，如接触、氢键和 beta 配对）而设计。它实现了一个**双分支 ResNet**——一个从序列谱中提取残基表征的 1D ResNet，随后接一个细化成对距离图的 2D ResNet——两者通过一种新颖的 **MidpointFeature** 变换进行连接。整个架构使用 Theano 实现，支持多种残差块变体、支持掩码的批归一化，以及可配置的快捷连接维度增加策略。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L1-L1008), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L1-L399), [config.py](DL4DistancePrediction2/config.py#L1-L329)
+
+## 架构概述
+
+完整的预测模型——封装在 `ResNet4DistMatrix` 中——遵循三阶段流水线：**1D 序列卷积 → 序列到矩阵的变换 → 2D 矩阵卷积 → 逐响应预测头**。1D 和 2D 阶段均使用 `ResNet` 类（或配置时的 `DilatedResNet`），但输入维度和通道调度不同。
+
+```mermaid
+flowchart TB
+    subgraph Inputs
+        SEQ["seqInput<br/>(batchSize, seqLen, n_in_seq)"]
+        MAT["matrixInput<br/>(batchSize, seqLen, seqLen, n_in_matrix)"]
+        EMB["embedInput<br/>(batchSize, seqLen, n_in_embed)"]
+    end
+
+    subgraph "1D ResNet Branch"
+        R1D["ResNet 1D<br/>Conv1D blocks on sequence"]
+    end
+
+    subgraph "Sequence → Matrix Transform"
+        MP["MidpointFeature<br/>f(i), f((i+j)/2), f(j)"]
+        OC["OuterConcatenate<br/>concat(f(i), f(j))"]
+        COMP["Conv2D4DistMatrix<br/>1×1 compression"]
+        EMBL["MetaEmbeddingLayer<br/>(if embedInput present)"]
+    end
+
+    subgraph "2D ResNet Branch"
+        R2D["ResNet 2D<br/>Conv2D blocks on distance map"]
+    end
+
+    subgraph "Prediction Heads"
+        LOGREG["NN4LogReg<br/>(Discrete labels)"]
+        NORMAL["NN4Normal<br/>(Normal/LogNormal)"]
+    end
+
+    SEQ --> R1D
+    R1D --> MP
+    R1D --> OC
+    MP --> COMP
+    OC --> COMP
+    EMB --> EMBL
+    MAT --> CAT["Concatenate along feature axis"]
+    COMP --> CAT
+    EMBL --> CAT
+    CAT --> R2D
+    R2D --> LOGREG
+    R2D --> NORMAL
+```
+
+1D 分支处理逐残基特征（PSSM、二级结构、溶剂可及性），生成增强的序列表征。序列到矩阵的变换通过 **MidpointFeature** 将此 1D 信号转换为成对特征——它为每个残基对 (i, j) 编码三元组 `(f(i), f(⌊(i+j)/2⌋), f(j))`——并可选地通过嵌入层进行转换。这些成对特征与原始矩阵输入（如 CCM 等共进化特征）拼接，随后由 2D ResNet 进行细化。最后，特定任务的头将每个空间位置映射到距离区间概率或实值距离分布。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L219-L399), [utils.py](DL4DistancePrediction2/utils.py#L23-L73)
+
+## 卷积层
+
+ResNet 架构依赖于两个自定义卷积层类，它们通过右对齐填充和基于掩码的噪声抑制来处理**变长输入**。
+
+### ResConv1DLayer
+
+通过具有奇数大小卷积核（由 `halfWinSize` 决定：`windowSize = 2 * halfWinSize + 1`）的 1D 卷积，处理形状为 `(batchSize, n_in, seqLen)` 的 3D 输入张量。在内部，输入被重塑为 4D `(batchSize, n_in, 1, seqLen)`，以利用 Theano 的 `conv2d` 并设置 `border_mode='half'` 来实现 same-padding 输出。关键实现细节如下：
+
+- 针对ReLU激活的 **He-normal 初始化**：`scale = √(2 / (n_in × windowSize + n_out))`
+- 针对其他激活的 **Xavier-uniform 初始化**，对 sigmoid 有 ×4 的缩放
+- **偏置默认初始化为零**
+- **掩码应用**：卷积后，使用形状为 `(batchSize, #positions_to_be_masked)` 的二值掩码将零填充位置重置为零，以防止卷积从填充区域泄漏信息
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L6-L71)
+
+### ResConv2DLayer
+
+通过具有大小为 `(wSize, wSize)` 的方形卷积核的 2D 卷积，处理形状为 `(batchSize, n_in, nRows, nCols)` 的 4D 输入张量。其掩码处理更为复杂：掩码的形状为 `(batchSize, #rows_to_be_masked, nCols)`，并且**双向**应用——首先沿水平（行）方向，然后沿垂直（列）方向——以正确地将每个右下对齐距离矩阵左上角 L 形填充区域置零。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L74-L146)
+
+## 支持掩码的批归一化
+
+`batch_norm` 函数及其包装器 `BatchNormLayer` 实现了**从统计计算中排除填充位置**的批归一化。这一点至关重要，因为批次中的蛋白质具有不同的长度，对整个填充张量直接计算均值/方差会引入系统性偏差。
+
+对于带掩码的 4D 输入，有效元素数计算如下：
+
+```
+x_num = mask.sum() × 2 + batchSize × (nRows − maskRows) × (nCols − maskCols) − overlap_adjustment
+```
+
+重叠调整项减去了水平掩码区域和垂直掩码区域相交处被重复计算的位置。归一化后，填充位置再次被重置为零。可学习参数为 `gamma`（缩放）和 `bias`（偏移），形状均为 `(n_in,)`。一个小的 epsilon（`1e-6`）用于防止标准差计算中出现除零错误。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L148-L235)
+
+## 残差块变体
+
+代码库提供了**四种不同的残差块实现**，每种对应一个不同的网络版本字符串。块类型的选择由传递给 `ResNet` 类的 `version` 参数决定。
+
+| 块类 | 版本后缀 | 结构 | 每个块的 BN 层数 | 激活放置位置 |
+|---|---|---|---|---|
+| **ResBlockV1** | (默认) | Conv→Act→Conv + shortcut | 0 或 2 (卷积后) | 卷积后 (原始) |
+| **ResBlockV2** | `ResNet2D`, `ResNet2DV21` | Act→Conv→Act→Conv + shortcut | 0 或 1 (卷积间) | 预激活 |
+| **ResBlockV23** | `ResNet2DV23` | Act→Conv→BN→Act→Conv + shortcut | 0 或 1 | 预激活 (精简) |
+| **ResBlockV22** | `ResNet2DV22` | BN→Act→Conv→BN→Act→Conv + shortcut | 0 或 2 (全预激活) | 预激活 (全 BN) |
+| **BottleneckBlock** | — | 1×1→3×3→1×1 + shortcut | 0 或 3 | 卷积后 (瓶颈) |
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L342-L817), [config.py](DL4DistancePrediction2/config.py#L11-L16)
+
+### ResBlockV2 和 ResBlockV23 (推荐)
+
+`ResBlockV23` 是**推荐的变体**——它与 `ResBlockV2` 几乎相同，但移除了块输入上未使用的 `BatchNormLayer`（及其参数），在不牺牲精度的情况下减小了模型尺寸。两者均实现了**预激活残差单元**模式：
+
+```
+output = Conv2D( activation( BatchNorm( Conv2D( activation(input) ) ) ) ) + shortcut(input)
+```
+
+当禁用批归一化时，结构简化为：
+
+```
+output = Conv2D( activation( Conv2D( activation(input) ) ) ) + shortcut(input)
+```
+
+每个块通过动态选择 `ResConv1DLayer` 或 `ResConv2DLayer` 作为卷积类，同时支持 1D（`ndim=3`）和 2D（`ndim=4`）输入。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L442-L535), [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L537-L631)
+
+### BottleneckBlock
+
+`BottleneckBlock` 实现了经典的 1×1 → 3×3 → 1×1 瓶颈设计，以提高参数效率。瓶颈宽度由 `n_bottleneck` 控制（默认为 `n_in / 2`）。启用批归一化时，三个卷积中的每一个后都跟有自己的 `BatchNormLayer`，从而在每个块中产生三个 BN 层——这是最重的归一化配置。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L342-L441)
+
+## 快捷连接策略
+
+当 `n_out > n_in` 时，所有块变体都支持三种方法来处理输入和残差路径之间的**维度不匹配**：
+
+| 策略 | 行为 | 新增参数 |
+|---|---|---|
+| **`partial_projection`** | 将恒等映射的输入通道与针对额外通道的学习到的 1×1 投影拼接：`output + concat(input, LinearProjection(input))` | 1 个大小为 `(n_out − n_in, n_in, 1, 1)` 的卷积层 |
+| **`full_projection`** | 学习从输入到输出维度的完整 1×1 投影：`output + LinearProjection(input)` | 1 个大小为 `(n_out, n_in, 1, 1)` 的卷积层 |
+| **`identity`** | 直接恒等映射（仅在 `n_out == n_in` 时有效） | 0 |
+
+当 `n_out == n_in` 时，`partial_projection` 和 `full_projection` 都退化为简单的恒等快捷连接：`output + input`。**`partial_projection`** 策略是默认策略，对于渐进式通道扩展而言参数效率最高，因为它原样保留原始输入通道，仅学习额外的通道。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L391-L424), [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L494-L522)
+
+## ResNet 类
+
+`ResNet` 类是顶层容器，用于从上述构建块组装**多堆栈残差网络**。其架构由两个并行列表定义：
+
+- **`n_hiddens`**：每个堆栈的通道宽度（必须单调递增）
+- **`n_repeats`**：每个堆栈内额外残差块的数量（不包括处理维度增加的第一个块）
+
+```mermaid
+flowchart LR
+    subgraph "Stack 0: n_hiddens[0] channels"
+        S0["StartLayer<br/>Conv: n_in → n_hiddens[0]"]
+        R0["ResBlock × n_repeats[0]<br/>(same dimensions)"]
+    end
+
+    subgraph "Stack 1: n_hiddens[1] channels"
+        D1["DimInc Block<br/>n_hiddens[0] → n_hiddens[1]"]
+        R1["ResBlock × n_repeats[1]"]
+    end
+
+    subgraph "Stack N: n_hiddens[N] channels"
+        DN["DimInc Block<br/>n_hiddens[N-1] → n_hiddens[N]"]
+        RN["ResBlock × n_repeats[N]"]
+    end
+
+    S0 --> R0 --> D1 --> R1 --> DN --> RN
+```
+
+**构造逻辑**：第一个堆栈以一个 `ConvLayer` 开始，将维度从 `n_in` 投影到 `n_hiddens[0]`，随后是 `n_repeats[0]` 个维持该通道宽度的块。每个后续堆栈以一个**维度增加块**开始（使用 `partial_projection` 从 `n_hiddens[i-1]` 增长到 `n_hiddens[i]`），然后追加 `n_repeats[i]` 个相同维度的块。块类型由 `version` 参数选择——`ResNet2D`/`ResNet2DV21` 对应 `ResBlockV2`，`ResNet2DV23` 对应 `ResBlockV23`，`ResNet2DV22` 对应 `ResBlockV22`。
+
+输入/输出形状约定随维度而异：对于 1D 输入 `(batchSize, seqLen, n_in)`，内部表征转置为 `(batchSize, n_in, seqLen)` 以进行卷积，并在输出时转置回去；对于 2D 输入 `(batchSize, nRows, nCols, n_in)`，内部格式为 `(batchSize, n_in, nRows, nCols)`。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction2/ResNet4Distance.py#L819-L908)
+
+## 默认配置
+
+`config.py` 中的 `InitializeModelSpecs()` 函数定义了完整距离预测模型的默认超参数。下表总结了与 ResNet 相关设置：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `network` | `ResNet2D` | 网络变体（选择块类型） |
+| `conv1d_hiddens` | `[30, 35, 40, 45]` | 1D ResNet 每个堆栈的通道宽度 |
+| `conv1d_repeats` | `[0, 0, 0, 0]` | 1D ResNet 每个堆栈的重复次数（仅维度增加） |
+| `conv1d_hwsz` | `7` | 1D 卷积半窗口大小 (kernel=15) |
+| `conv2d_hiddens` | `[50, 55, 60, 65, 70, 75]` | 2D ResNet 每个堆栈的通道宽度 |
+| `conv2d_repeats` | `[4, 4, 4, 4, 4, 4]` | 2D ResNet 每个堆栈的重复次数 |
+| `halfWinSize_matrix` | `2` | 2D 卷积半窗口大小 (kernel=5) |
+| `logreg_hiddens` | `[80]` | 最终预测头中的隐藏单元数 |
+| `activation` | `relu` | 全局激活函数 |
+| `batchNorm` | `True` | 启用批归一化 |
+| `L2reg` | `0.0001` | L2 正则化系数 |
+
+使用这些默认值，**1D 分支**有 4 个堆栈且无重复（共 4 个块，每个块增加维度），**2D 分支**有 6 个堆栈且每个堆栈重复 4 次（共 30 个块），从而形成一个从 50 到 75 个通道逐步扩展的深层 2D ResNet。
+
+来源: [config.py](DL4DistancePrediction2/config.py#L181-L259), [config.py](DL4DistancePrediction2/config.py#L11-L16)
+
+## 序列到矩阵的变换
+
+1D 和 2D 分支之间的桥接依赖于 `utils.py` 中定义的两个操作：
+
+**MidpointFeature** 接收形状为 `(batchSize, seqLen, n_in)` 的 1D 特征图 `f`，并生成形状为 `(batchSize, seqLen, seqLen, 3 × n_in)` 的 4D 成对张量，其中每个位置 `(i, j)` 包含拼接 `[f(i), f(⌊(i+j)/2⌋), f(j)]`。中点特征捕获了残基对几何中心的局部结构上下文，这对于预测残基间距离特别有信息量。
+
+**OuterConcatenate** 执行更简单的成对扩展：对于每个对 `(i, j)`，它拼接 `[f(i), f(j)]`，产生形状为 `(batchSize, seqLen, seqLen, 2 × n_in)` 的张量。
+
+在 MidpointFeature 扩展之后，结果通过带有 `halfWinSize=0`（即 1×1 卷积）的 `Conv2D4DistMatrix` 层进行压缩，以在与其他成对输入拼接之前将 `3 × n_in` 通道维度减小到可管理的大小。
+
+来源: [utils.py](DL4DistancePrediction2/utils.py#L23-L73), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L278-L293)
+
+## ResNet4DistMatrix：完整模型
+
+`Model4DistancePrediction.py` 中的 `ResNet4DistMatrix` 类是编排完整流水线的**顶层模型**。其构造函数接受：
+
+- `seqInput`：序列特征（PSSM, SS, ACC）——形状 `(batchSize, seqLen, n_in_seq)`
+- `matrixInput`：成对特征（CCM，互信息，接触势）——形状 `(batchSize, seqLen, seqLen, n_in_matrix)`
+- `embedInput`：可选的嵌入输入（主序列 + SS）——形状 `(batchSize, seqLen, n_in_embed)`
+- `mask_seq` / `mask_matrix`：变长蛋白质的填充掩码
+- `modelSpecs`：配置字典
+
+前向传播过程如下：(1) 在 `seqInput` 上运行 1D ResNet，(2) 通过 MidpointFeature + 压缩以及可选的 MetaEmbeddingLayer 生成成对特征，(3) 沿特征轴拼接所有成对输入，(4) 运行 2D ResNet（或 DilatedResNet），(5) 对于 `modelSpecs['responses']` 中的每个响应，实例化 `NN4LogReg`（用于离散距离区间）或 `NN4Normal`（用于连续距离分布），(6) 将所有预测收集到拼接的输出张量中。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L219-L399)
+
+<CgxTip>`ResNet` 类是**维度无关的**——它会自动检测输入是 3D（1D 模式）还是 4D（2D 模式），并相应地选择 `ResConv1DLayer` 或 `ResConv2DLayer`。同一个类驱动序列和距离图分支，仅在 `n_hiddens`、`n_repeats` 和 `halfWinSize` 上有所不同。</CgxTip>
+
+<CgxTip>当 `batchNorm=True` 且存在掩码时，批归一化统计量（均值、方差）**仅在有效（非填充）位置上计算**。这对于批次中蛋白质序列长度不同的距离预测至关重要——朴素的 BN 会被填充的零值污染统计量。</CgxTip>
+
+## 接下来阅读什么
+
+用于距离预测的深度 ResNet 是更大系统的一部分。要了解扩张卷积如何扩展此架构，请参见 [Dilated ResNet Variants](5-dilated-resnet-variants)。有关输入特征在进入 ResNet 之前如何组装的详细信息，请参见 [Embedding and Pair Representation](6-embedding-and-pair-representation) 和 [Input Feature Specification](7-input-feature-specification)。要了解模型如何训练以及如何在预测头上计算损失，请参见 [Model Building and Loss](10-model-building-and-loss)。有关端到端推理工作流，请参见 [Distance Prediction Pipeline](12-distance-prediction-pipeline)。
+
+---
+
+- [深入探究/神经网络模型/膨胀 ResNet 变体](https://zread.ai/j3xugit/RaptorX-Contact/5-dilated-resnet-variants)
+
+---
+slug:5-dilated-resnet-variants
+blog_type:normal
+---
+
+
+**DilatedResNet4Distance** 模块通过引入**空洞（膨胀）卷积**对标准 ResNet 架构进行了扩展，在不增加参数量或计算成本的前提下，实现了指数级扩大的感受野。作为 RaptorX-Contact 神经网络家族中架构截然不同的变体，它是专为捕捉蛋白质距离矩阵预测中的长程残基-残基依赖关系而量身定制的。
+
+## 架构基础：感知膨胀的卷积层
+
+该模块的核心创新在于向 1D 和 2D 卷积层引入了 `dilation` 参数。标准 ResNet 模块（`ResNet4Distance`）始终在膨胀率为 1 的情况下应用卷积，这意味着每个滤波器元素仅在空间上相邻的位置进行运算。而膨胀变体则在**卷积核元素之间插入了间隔**，因此窗口大小为 `k`、膨胀率为 `d` 的滤波器，其有效覆盖的感受野范围将扩展至 `k + (k-1)(d-1)` 个位置。
+
+`ResConv1DLayer` 类接受一个 `dilation` 参数（出于向后兼容性默认值为 1）。当 `dilation > 1` 时，它会调用 Theano 的 `conv2d` 函数并传入 `filter_dilation=(1, dilation)`，将输入数据路由至空洞卷积路径；当 `dilation == 1` 时，则回退至标准卷积——这使得该层成为基础层的严格泛化。2D 变体 `ResConv2DLayer` 则通过 `filter_dilation=(dilation, dilation)` 应用对称膨胀，从而保持距离矩阵的结构对称性。
+
+```python
+# ResConv1DLayer 中的关键分支逻辑 (第 45-48 行)
+if dilation > 1:
+    conv_out = T.nnet.conv2d(in4conv2D, self.W, filter_shape=w_shp,
+                             border_mode='half', filter_dilation=(1, dilation))
+else:
+    conv_out = T.nnet.conv2d(in4conv2D, self.W, filter_shape=w_shp,
+                             border_mode='half')
+```
+
+权重初始化策略会根据激活函数进行适配：针对 ReLU 采用 **He 初始化**（正态分布，`scale = sqrt(2 / fan_in)`），针对其他激活函数则采用 **Xavier 初始化**（均匀分布，`bounds = sqrt(6 / fan_in)`），其中 1D 卷积的 `fan_in = n_in * windowSize`，2D 卷积的 `fan_in = n_in * wSize * wSize`。所有偏置项均初始化为零。
+
+来源: [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L6-L75), [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L78-L154)
+
+## 对比：标准卷积与空洞卷积
+
+下表在卷积层级别精确隔离了两种模块变体之间的架构差异：
+
+| 方面 | ResNet4Distance (标准) | DilatedResNet4Distance (空洞) |
+|---|---|---|
+| **ResConv1DLayer 签名** | `(rng, input, n_in, n_out, halfWinSize, activation, mask)` | `(rng, input, n_in, n_out, halfWinSize, dilation, activation, mask)` |
+| **ResConv2DLayer 签名** | `(rng, input, n_in, n_out, halfWinSize, mask, activation)` | `(rng, input, n_in, n_out, halfWinSize, dilation, activation, mask)` |
+| **conv2d 调用** | `T.nnet.conv2d(..., border_mode='half')` | `T.nnet.conv2d(..., border_mode='half', filter_dilation=(d, d))` |
+| **感受野 (1D)** | `2 * halfWinSize + 1` | `(2 * halfWinSize + 1) + (2 * halfWinSize) * (d - 1)` |
+| **感受野 (2D)** | `k × k` 其中 `k = 2*hws+1` | `k_eff × k_eff` 其中 `k_eff = k + (k-1)(d-1)` |
+| **参数量** | 相同 | 相同 (膨胀不引入额外参数) |
+| **网络级 halfWinSize** | 标量 (在所有堆栈间共享) | 列表 (每个堆栈一个值) |
+| **网络级 dilation** | 不适用 | 列表 (每个堆栈一个膨胀率) |
+
+<CgxTip>膨胀是一个纯粹的结构参数——它改变的是滤波器从输入中采样的*位置*，而非滤波器包含的*参数数量*。这就是为什么 dilation=2 的 3×3 滤波器与 dilation=1 的 3×3 滤波器具有相同的参数量，却能覆盖与标准 5×5 滤波器相同的区域。</CgxTip>
+
+来源: [ResNet4Distance.py](/DL4DistancePrediction2/ResNet4Distance.py#L6-L71), [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L6-L75)
+
+## DilatedResBlock：启用膨胀的残差单元
+
+`DilatedResBlock` 类是膨胀变体独有的核心构建块。它仿照了 `ResBlockV23` 的结构（带有单个 BatchNorm 的预激活 ResNet），但会将 `dilation` 参数贯穿传递至块内的两个卷积层：
+
+```
+Input → ReLU → Conv(dilation) → [BatchNorm → ReLU → Conv(dilation)] + Shortcut → Output
+```
+
+具体而言，该块依次应用：(1) 对输入进行 ReLU 激活（预激活风格），(2) 以指定 `dilation` 率进行卷积，(3) 可选的批归一化与 ReLU 激活，(4) 以相同的 `dilation` 率进行第二次卷积，以及 (5) 加上快捷连接。当 `batchNorm=True` 时，会在两次卷积之间插入一个 `BatchNormLayer`。当 `n_out > n_in` 时，快捷路径会使用三种维度增加方法之一——**partial_projection**（默认）、**full_projection** 或 **identity**——来对齐通道维度。
+
+与标准 `ResBlockV2`/`ResBlockV23` 的关键区别在于，`l1` 和 `l2` 卷积层均接收了 `dilation` 关键字参数，而标准块从不传递膨胀率（隐式使用率为 1）。
+
+来源: [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L826-L920)
+
+## DilatedResNet：多堆栈网络架构
+
+`DilatedResNet` 类由 `DilatedResBlock` 单元组装成完整的网络，并被组织为**多堆栈架构**，其中每个堆栈都可以拥有独立的膨胀率和窗口大小。这种逐堆栈配置是关键的设计决策——不同的网络深度可以捕捉不同的空间尺度。
+
+### 堆栈结构
+
+该网络由三个等长的并行列表进行参数化：`n_hiddens`（每个堆栈的通道宽度）、`n_repeats`（每个堆栈的块重复次数）和 `dilation`（每个堆栈的膨胀率），以及 `halfWinSize`（每个堆栈的窗口大小）。架构遵循以下模式：
+
+```mermaid
+graph TD
+    IN["Input<br/>(batchSize, nRows, nCols, n_in)"] --> RC["Reshape to<br/>(batchSize, n_in, nRows, nCols)"]
+    RC --> SL["StartLayer<br/>Conv: n_in → n_hiddens[0]<br/>dilation[0], halfWinSize[0]"]
+    SL --> S1["Stack 0: n_repeats[0] × DilatedResBlock<br/>dilation[0], n_hiddens[0]"]
+    S1 --> DS1["Dim-Increase Block<br/>n_hiddens[0] → n_hiddens[1]<br/>dilation[1], halfWinSize[1]"]
+    DS1 --> S2["Stack 1: n_repeats[1] × DilatedResBlock<br/>dilation[1], n_hiddens[1]"]
+    S2 --> DOTS["... (more stacks) ..."]
+    DOTS --> OUT["Reshape to<br/>(batchSize, nRows, nCols, n_hiddens[-1])"]
+    
+    style SL fill:#e8f4e8,stroke:#2d7d2d
+    style S1 fill:#e8e8f4,stroke:#2d2d7d
+    style S2 fill:#e8e8f4,stroke:#2d2d7d
+    style DS1 fill:#f4e8e8,stroke:#7d2d2d
+```
+
+每个堆栈以一个**维度增加块**开始（当 `i > 0` 时），将通道数从 `n_hiddens[i-1]` 转换为 `n_hiddens[i]`，随后是 `n_repeats[i]` 个保持恒定通道宽度的重复块。起始层是一个从 `n_in` 到 `n_hiddens[0]` 的单次卷积。堆栈 `i` 中的所有块共享相同的 `dilation[i]` 和 `halfWinSize[i]`。
+
+### 断言约束
+
+构造函数强制执行严格的不变量：`len(n_hiddens) == len(n_repeats) == len(halfWinSize) == len(dilation)`，所有列表必须非空，且 `version` 必须以 `'DilatedResNet'` 开头。这些保证确保了每个堆栈都有一个明确定义的膨胀调度。
+
+来源: [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L922-L1007)
+
+## 共享基础设施：感知掩码的批归一化
+
+标准模块和膨胀模块共享完全相同的 `batch_norm` 函数和 `BatchNormLayer` 类，它们实现了**感知掩码的批归一化**。这对于蛋白质结构预测至关重要，因为批次内的序列长度各异，较短的序列会被零填充至最大长度。若不使用掩码，填充的零将会破坏均值和方差统计量。
+
+感知掩码的归一化过程：(1) 使用 `mask.sum()` 计算所有非填充元素的总和以得出有效元素数量，(2) 调整 2D 情况下双重计算的位置（即行掩码和列掩码同时生效的重叠区域），以及 (3) 在归一化后将零填充位置重置为零。对于 4D 张量（2D 卷积），掩码会同时应用于水平和垂直维度；对于 3D 张量（1D 卷积），则仅应用于列维度。
+
+来源: [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L156-L243)
+
+## 膨胀策略与感受野分析
+
+膨胀架构的强大之处在于**层级膨胀调度**——为更深的堆栈分配逐渐增大的膨胀率。考虑一个具体示例，设定 `dilation=[1, 2, 4, 8]` 且 `halfWinSize=[1, 1, 1, 1]`（均为 3×3 滤波器）：
+
+| 堆栈 | 膨胀率 | 滤波器大小 | 有效感受野 | 累积感受野 (近似) |
+|---|---|---|---|---|
+| 0 | 1 | 3×3 | 3×3 | 3 |
+| 1 | 2 | 3×3 (空洞) | 5×5 | 7 |
+| 2 | 4 | 3×3 (空洞) | 9×9 | 15 |
+| 3 | 8 | 3×3 (空洞) | 17×17 | 31 |
+
+指数级增长的膨胀调度在每个堆栈中将感受野翻倍，同时保持参数量与同等深度的标准 ResNet 完全一致。这对于蛋白质距离预测极具价值，因为在序列上相隔数百个位置的残基对可能在空间上非常接近——网络必须整合跨越广泛序列间隔的信息，而无需诉诸于不切实际的大型滤波器或激进的池化操作。
+
+<CgxTip>`DilatedResNet` 中的 `halfWinSize` 列表允许将窗口大小变化与膨胀相结合。一个 `halfWinSize=2`（5×5 滤波器）且 `dilation=2` 的堆栈，能够实现与 `dilation=1` 的标准 9×9 滤波器相同的感受野，但其参数量仅为 25 对 81——减少了 69%。</CgxTip>
+
+来源: [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L922-L984)
+
+## 与距离预测模型的集成
+
+`DilatedResNet` 在 [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L17) 中被导入，并与标准 `ResNet` 配合使用，使模型构建者在构建网络时可以在两种架构之间进行选择。共享的接口（相同的 `output` 张量形状，`params`、`paramL1`、`paramL2` 属性）使它们成为可直接替换的组件——唯一的配置差异是增加了 `dilation` 列表参数，以及将 `halfWinSize` 从标量切换为列表。
+
+`version` 参数充当判别器：`DilatedResNet` 要求 `version.startswith('DilatedResNet')`，而标准 `ResNet` 则使用 `version` 在 `ResBlockV2`、`ResBlockV22` 和 `ResBlockV23` 变体之间进行选择。这种基于版本的派发模式，使得 `Model4DistancePrediction` 中的网络构建代码能够在两种模块类型之间保持清晰的分支结构。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L1-L19), [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L922-L944)
+
+## 类清单
+
+`DilatedResNet4Distance.py` 中的完整类集合，按架构角色组织：
+
+| 类 | 行数 | 角色 | 膨胀变体独有 |
+|---|---|---|---|
+| `ResConv1DLayer` | 6–75 | 支持膨胀的 1D 卷积 | ✗ (共享结构, ✓ 膨胀参数) |
+| `ResConv2DLayer` | 78–154 | 支持膨胀的 2D 卷积 | ✗ (共享结构, ✓ 膨胀参数) |
+| `batch_norm` / `BatchNormLayer` | 156–243 | 感知掩码的批归一化 | ✗ (完全相同) |
+| `BottleneckBlock` | 350–449 | 1×1 → 3×3 → 1×1 瓶颈单元 | ✗ (从 ConvLayer 继承膨胀) |
+| `ResBlockV2` | 450–543 | 预激活残差块 (2 个 BN) | ✗ (从 ConvLayer 继承膨胀) |
+| `ResBlockV23` | 546–638 | 预激活残差块 (1 个 BN) | ✗ (从 ConvLayer 继承膨胀) |
+| `ResBlockV22` | 641–733 | 预激活残差块 (2 个 BN, 变体) | ✗ (从 ConvLayer 继承膨胀) |
+| `ResBlockV1` | 735–824 | 原始残差块 (卷积后 BN) | ✗ (从 ConvLayer 继承膨胀) |
+| **`DilatedResBlock`** | **826–920** | **贯穿膨胀的残差块** | **✓** |
+| **`DilatedResNet`** | **922–1007** | **带有逐堆栈膨胀的多堆栈网络** | **✓** |
+
+来源: [DilatedResNet4Distance.py](/DL4DistancePrediction2/DilatedResNet4Distance.py#L1-L1007)
+
+## 接下来去哪
+
+膨胀架构是完整预测流水线的一部分。要了解它如何与更广泛的系统相连接：
+
+- **[用于距离预测的深度 ResNet](4-deep-resnet-for-distance)** — 标准（非膨胀）的对应模块，有助于比较架构选择
+- **[嵌入与配对表示](6-embedding-and-pair-representation)** — 输入特征在进入 ResNet 前是如何转换的
+- **[模型构建与损失](10-model-building-and-loss)** — `DilatedResNet` 如何在完整模型中被实例化，以及损失函数如何驱动训练
+- **[距离预测流水线](12-distance-prediction-pipeline)** — 从原始蛋白质特征到预测距离矩阵的端到端执行流程
+
+---
+
+- [深入探究/神经网络模型/嵌入与配对表示](https://zread.ai/j3xugit/RaptorX-Contact/6-embedding-and-pair-representation)
+
+---
+slug:6-embedding-and-pair-representation
+blog_type:normal
+---
+
+
+RaptorX-Contact 采用**双通道对表示**策略，将逐残基（1D）特征转换为适用于残基间距离预测的逐残基对（2D）特征。第一个通道——**双线性嵌入**——学习一个可训练张量，通过双线性外积运算将独热残基编码映射为稠密的对表示，并为长、中、短程残基分离距离设置独立的通道。第二个通道——**带中点的外部拼接**——对残基 *i*、*j* 及其中点 *(i+j)/2* 的 1D 卷积输出进行确定性拼接，生成显式的对特征，随后通过 2D 卷积进行压缩。在进入 2D ResNet 骨干网络之前，这两个通道都会与预计算的对特征（共进化矩阵、接触势）进行融合。本页将剖析每一层的数学公式、张量形状代数、范围分区选择逻辑，以及它们在全模型中的集成方式。
+
+来源: [EmbeddingLayer.py](DL4DistancePrediction2/EmbeddingLayer.py#L1-L169), [utils.py](DL4DistancePrediction2/utils.py#L1-L200), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L219-L324)
+
+## 架构概述
+
+嵌入与对表示子系统位于 1D 序列卷积骨干网络和 2D 矩阵卷积骨干网络之间。它的职责是弥合维度差距：将形状为 `(batchSize, seqLen, n_in)` 的逐残基特征转换为形状为 `(batchSize, seqLen, seqLen, n_out)` 的逐对特征。该系统实现了两种互补的策略，在与原始对输入特征拼接后，一同输入到 2D ResNet 中。
+
+```mermaid
+flowchart TB
+    subgraph Input
+        seqInput["seqInput<br/>(B, L, n_in_seq)"]
+        embedInput["embedInput<br/>(B, L, n_in_embed)"]
+        matrixInput["matrixInput<br/>(B, L, L, n_in_matrix)"]
+    end
+
+    subgraph "1D Convolution Backbone"
+        seqConv["1D ResNet / DilatedResNet<br/>output: (B, L, n_conv_out)"]
+    end
+
+    subgraph "Pathway 1: Outer Concatenation"
+        MF["MidpointFeature<br/>→ (B, L, L, 3·n_conv_out)"]
+        Compress["Conv2D Compress<br/>halfWinSize=0<br/>→ (B, L, L, n_OuterCat)"]
+    end
+
+    subgraph "Pathway 2: Bilinear Embedding"
+        MetaEmb["MetaEmbeddingLayer<br/>→ (B, L, L, n_out_max)"]
+        subgraph "Range-Partitioned Channels"
+            LR["LRembedLayer<br/>|i−j| ≥ 24"]
+            MR["MRembedLayer<br/>12 ≤ |i−j| < 24"]
+            SR["SRembedLayer<br/>6 ≤ |i−j| < 12"]
+        end
+    end
+
+    subgraph "Fusion"
+        Concat["Concatenate along axis=3<br/>matrixInput ⊕ OuterCat ⊕ Embedding"]
+    end
+
+    subgraph "2D Convolution Backbone"
+        matrixConv["2D ResNet / DilatedResNet"]
+    end
+
+    seqInput --> seqConv
+    seqConv --> MF --> Compress
+    embedInput --> MetaEmb
+    LR --> MetaEmb
+    MR --> MetaEmb
+    SR --> MetaEmb
+    Compress --> Concat
+    MetaEmb --> Concat
+    matrixInput --> Concat
+    Concat --> matrixConv
+```
+
+`ResNet4DistMatrix` 类负责统筹此组装过程。在 1D 序列卷积产生输出后，两个对表示通道会根据 `modelSpecs` 中的 `seq2matrixMode` 字典被条件性地激活。最终的 2D 输入是 `[matrixInput, OuterCat_output, Embedding_output]` 沿特征轴的拼接。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L269-L324), [config.py](DL4DistancePrediction2/config.py#L226-L228)
+
+## EmbeddingLayer: 双线性对表示
+
+`EmbeddingLayer` 是双线性嵌入通道的基础构建模块。它实现了一个**可学习的双线性形式**，通过形状为 `(n_in, n_in, n_out)` 的 3D 权重张量 **W**，将两个残基特征向量映射为稠密的对表示。
+
+### 数学公式
+
+给定形状为 `(B, L, n_in)` 的输入张量 **X**，其中每行对应一个残基位置的特征向量（通常是独热编码或独热×SS3 外积编码），该层计算如下：
+
+1. **首次投影** — 通过 `tensordot(X, W, axes=1)` 计算 `out1 = X ⊙₁ W`，生成形状 `(B, L, n_in, n_out)`。此操作将 X 的最后一轴与 W 的第一轴进行缩并。
+2. **为批量点积转置** — `out2 = out1.dimshuffle(0, 3, 1, 2)` → 形状 `(B, n_out, L, n_in)`。
+3. **输入转置** — `input2 = X.dimshuffle(0, 2, 1)` → 形状 `(B, n_in, L)`。
+4. **批量双线性乘积** — `out3 = batched_tensordot(out2, input2, axes=1)` → 形状 `(B, n_out, L, L)`。此操作缩并了 `n_in` 维度，有效地在每一对残基特征向量之间计算双线性形式。
+5. **最终重塑** — `output = out3.dimshuffle(0, 2, 3, 1)` → 形状 `(B, L, L, n_out)`。
+
+对于批次 b 中的单个残基对 (i, j)，输出为：**output[b, i, j, :] = X[b,i,:]ᵀ · W · X[b,j,:]**，这是一个由学习张量 W 参数化的双线性形式。这在结构上类似于计算残基嵌入之间的广义外积，但其交互权重是显式学习的，而非固定的。
+
+### 权重初始化
+
+权重张量 W 在 `[-√(6/(n_in² + n_out)), √(6/(n_in² + n_out))]` 范围内进行均匀采样初始化，这是一种适配 3D 张量结构的类 Xavier 方案。分母中的 `n_in` 平方项反映了该操作的双线性本质——有效的扇入包含了来自两个残基向量的贡献。
+
+### 正则化
+
+该层暴露出三个正则化量：`paramL1 = |W|.sum()`，`paramL2 = (W²).sum()`，以及 `pcenters = (mean(W, axis=[0,1])²).sum()`。`pcenters` 项对沿输出维度的所有嵌入向量的平方均值进行惩罚，促使学习到的嵌入以零为中心——不过该正则化项目前在主模型组装代码中已被注释掉。
+
+来源: [EmbeddingLayer.py](DL4DistancePrediction2/EmbeddingLayer.py#L8-L42)
+
+## MetaEmbeddingLayer: 范围分区多通道嵌入
+
+`MetaEmbeddingLayer` 是一个组合包装器，它实例化**三个独立的 `EmbeddingLayer` 实例**——每个对应一个残基间分离距离范围——并使用二值选择掩码组合它们的输出。这种范围分区设计认识到，残基-残基相互作用的统计特性会因其序列分离距离的不同而产生显著差异。
+
+### 范围边界与选择掩码
+
+这三个范围由分离距离 6、12 和 24 的边界定义，产生四个区域（尽管近程 |i−j| < 6 被排除在嵌入之外）：
+
+| 通道 | 范围名称 | 序列分离距离 | 选择矩阵 |
+|---------|-----------|-------------------|-----------------|
+| `LRembedLayer` | 长程 | \|i−j\| ≥ 24 | `Sep24Mat = triu(M, 24) + tril(M, −24)` |
+| `MRembedLayer` | 中程 | 12 ≤ \|i−j\| < 24 | `Sep12Mat − Sep24Mat` |
+| `SRembedLayer` | 短程 | 6 ≤ \|i−j\| < 12 | `Sep6Mat − Sep12Mat` |
+
+选择矩阵由 `triu`（从偏移量 *k* 开始的严格上三角）和 `tril`（从偏移量 *−k* 开始的严格下三角）构建，以确保对称性：当 |i−j| 落在指定范围内时，掩码对于 (i,j) 和 (j,i) 均为 1。然后每个掩码通过 `dimshuffle('x', 0, 1, 'x')` 变为广播兼容的，以匹配 4D 输出张量。
+
+### 可变输出维度
+
+当 `n_out` 是一个序列（例如 `[4, 6, 12]`）时，每个通道接收不同的输出维度：`SRembedLayer` 获得 `n_out[0]=4`，`MRembedLayer` 获得 `n_out[1]=6`，`LRembedLayer` 获得 `n_out[2]=12`。这反映了一个设计洞察：**长程相互作用受益于更丰富的表示**，而短程相互作用则需要更少的参数。最终输出张量在所有通道上的宽度为 `n_out_max = max(n_out)`；具有较小 `n_out` 的通道在未使用的特征维度上进行零填充。
+
+### 输出组装
+
+输出是增量累加的：对于每个（层，选择）对，层的输出与其选择掩码进行逐元素相乘（将范围外的位置置零），然后通过 `T.inc_subtensor` 累加到输出张量的前 `l_n_out` 个特征通道中。这确保了在 |i−j| = 30 的位置 (i, j) 处，只有 `LRembedLayer` 的输出是活跃的；在 |i−j| = 15 处，只有 `MRembedLayer` 活跃；在 |i−j| = 8 处，只有 `SRembedLayer` 活跃。
+
+<CgxTip>具有非对称输出维度 `[4, 6, 12]` 的范围分区嵌入是一个关键的架构归纳偏置：它为长程对（最难预测但结构信息最丰富）分配了 12 个通道，中程分配了 6 个，短程仅分配了 4 个。这与默认配置 `seq2matrixMode['SeqOnly'] = [4, 6, 12]` 相匹配。</CgxTip>
+
+来源: [EmbeddingLayer.py](DL4DistancePrediction2/EmbeddingLayer.py#L44-L88), [config.py](DL4DistancePrediction2/config.py#L227)
+
+## ProfileEmbeddingLayer: Softmax 归一化谱嵌入
+
+`ProfileEmbeddingLayer` 封装了一个 `MetaEmbeddingLayer`，并附加了一个可学习的**缩放因子**和对输入谱在嵌入前应用的 **softmax 归一化**。该层专为嵌入连续值进化谱（PSSM）而非独热编码而设计。
+
+### 处理流程
+
+1. **缩放** — 输入乘以一个共享的标量权重 `W`（初始化为 1.0）。
+2. **为 softmax 重塑** — 将形状为 `(B, L, n_in)` 的缩放后输入转置为 `(n_in, B, L)`，展平为 `(n_in, B·L)`，然后再转置为 `(B·L, n_in)`，以便 softmax 在每个残基位置的特征维度上独立操作。
+3. **Softmax** — 应用 `T.nnet.softmax`，将原始谱值转换为每个位置上 `n_in` 个特征类别的概率分布。
+4. **重塑回原状** — softmax 的输出被重塑为 `(B, L, n_in)`。
+5. **MetaEmbeddingLayer** — 归一化后的输入被传递给 `MetaEmbeddingLayer` 进行实际的双线性对表示。
+
+softmax 归一化确保了双线性嵌入的输入是一个有效的概率分布，这稳定了双线性计算并防止了由巨大 PSSM 值引起的梯度爆炸。然而，该层目前在模型中**已被弃用**——`ResNet4DistMatrix` 中的代码将其放在一个被注释掉的块中，并附有注释 "we do not use this profile embedding any more."。
+
+来源: [EmbeddingLayer.py](DL4DistancePrediction2/EmbeddingLayer.py#L90-L112), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L311-L319)
+
+## OuterConcatenate 和 MidpointFeature: 确定性对特征
+
+虽然双线性嵌入学习对交互权重，**外部拼接**通道则提供了从 1D 特征到 2D 对特征的显式、确定性变换。该通道由 `seq2matrixMode` 中的 `OuterCat` 键控制。
+
+### OuterConcatenate
+
+`OuterConcatenate` 函数通过拼接位置 *i* 和 *j* 处的特征向量，将形状为 `(B, L, n_in)` 的 1D 特征张量转换为形状为 `(B, L, L, 2·n_in)` 的对张量：
+
+**output[b, i, j, :] = [conv_out[b, i, :], conv_out[b, j, :]]**
+
+这使用 `T.mgrid` 创建索引数组，然后对转置后的输入进行索引来实现。与双线性嵌入不同，此操作是**无参数的**——它仅复制并拼接现有特征。其优势在于保留了来自两个残基表示的完整信息，而无需通过学习的权重张量进行压缩。
+
+### MidpointFeature
+
+`MidpointFeature` 函数扩展了外部拼接，还包含了**中点位置** `(i+j)/2` 处的特征向量：
+
+**output[b, i, j, :] = [conv_out[b, i, :], conv_out[b, (i+j)/2, :], conv_out[b, j, :]]**
+
+这生成了一个形状为 `(B, L, L, 3·n_in)` 的张量。中点特征对距离预测特别具有信息量，因为序列空间中两个位置的中点处的残基通常在空间上与两者都很邻近，特别是在 β-折叠和环区。中点索引使用整数除法 `(i+j)//2`。
+
+### 通过 2D 卷积压缩
+
+中点特征随后通过一个 `halfWinSize=0`（即 1×1 逐点卷积）的 `Conv2D4DistMatrix` 层进行压缩，将特征维度从 `3·n_conv_out` 降低到 `seq2matrixMode['OuterCat']` 中指定的值（默认为 `[70, 35]`，意味着两个 1×1 卷积层分别输出 70 和 35 个通道）。在压缩之前，中点特征会使用 `mask_matrix` 进行掩码处理，将填充位置置零，以防止零填充区域产生噪声。
+
+来源: [utils.py](DL4DistancePrediction2/utils.py#L19-L73), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L279-L293)
+
+## 嵌入输入构建
+
+嵌入通道接收一个专用的输入张量 `embedInput`，它在数据加载阶段由 `DataProcessor.LoadDistanceFeatures` 准备。其构建取决于嵌入模式：
+
+| 模式 | 配置键 | 嵌入输入 | 每残基形状 |
+|------|-----------|----------------|-------------------|
+| 仅序列 | `SeqOnly` | 氨基酸的独热编码 | `(20,)` |
+| 序列 + 二级结构 | `Seq+SS` | 独热 AA × SS3 的逐行外积 | `(20×3,)` = `(60,)` |
+
+### SeqOnly 模式
+
+当指定 `SeqOnly` 时，嵌入输入仅为 `config.SeqOneHotEncoding(sequence)` 生成的独热氨基酸编码，该函数使用 `AAVectors` 查找表将每个残基映射为一个 20 维的二进制向量。参数 `n_in_embed` 被设置为 20。
+
+### Seq+SS 模式
+
+当指定 `Seq+SS` 时，嵌入输入是独热编码（维度 20）和预测的 3 态二级结构概率（维度 3）的**逐行外积**，为每个残基生成一个 60 维的特征向量。这通过 `RowWiseOuterProduct(oneHotEncoding, d['SS3'])` 计算，该函数重塑这两个向量以创建它们的外积并将其展平：`(A[:, :, newaxis] * B[:, newaxis, :]).reshape(n, A.shape[1] * B.shape[1])`。
+
+`Seq+SS` 编码为双线性嵌入提供了更丰富的输入，该输入已经编码了氨基酸-二级结构的相关性，使得学习到的张量 **W** 能够捕获更细微的交互模式（例如，位置 *i* 处的螺旋形成残基如何与位置 *j* 处的折叠形成残基相互作用）。
+
+<CgxTip>`Seq+SS` 外积输入意味着 `EmbeddingLayer` 的有效 `n_in` 为 60，使得权重张量 W 的形状为 (60, 60, n_out)——这是一个庞大的参数量。而 `SeqOnly` 模式下 n_in=20 生成的 W 形状为 (20, 20, n_out)，参数量小了 9 倍。当训练数据或 GPU 内存受限时，请选择 `SeqOnly`。</CgxTip>
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L130-L140), [config.py](DL4DistancePrediction2/config.py#L304-L326)
+
+## 在 ResNet4DistMatrix 中的集成
+
+`ResNet4DistMatrix` 类在其构造函数中集成了两个对表示通道。下表总结了条件激活逻辑及其对 2D 输入特征维度的贡献：
+
+| 条件 | 通道 | 配置键 | 输出形状 | 对 `n_input2d` 的贡献 |
+|-----------|---------|-----------|-------------|---------------------------|
+| `'OuterCat' in seq2matrixMode` 且 `useSequentialFeatures` | MidpointFeature → Conv2D 压缩 | `OuterCat: [70, 35]` | `(B, L, L, 35)` | 35 |
+| `embedInput is not None` 且 `'Seq+SS' in seq2matrixMode` | MetaEmbeddingLayer | `Seq+SS: [4, 6, 12]` | `(B, L, L, 12)` | 12 |
+| `embedInput is not None` 且 `'SeqOnly' in seq2matrixMode` | MetaEmbeddingLayer | `SeqOnly: [4, 6, 12]` | `(B, L, L, 12)` | 12 |
+
+最终的 2D 输入通过沿特征轴的拼接进行组装：
+
+```python
+input_2d = T.concatenate([matrixInput] + [layer.output for layer in seq2matrixLayers], axis=3)
+n_input2d = n_in_matrix + sum([layer.n_out for layer in seq2matrixLayers])
+```
+
+`matrixInput` 已包含预计算的对特征（位置特征、立方根特征、CCMpred Z 分数、接触势），因此嵌入和外部拼接的输出会被追加到这些特征之后。组合后的张量随后进入 2D ResNet 或 DilatedResNet 骨干网络进行进一步处理。
+
+### 参数收集
+
+嵌入层的所有参数都被收集到模型的全局参数列表中。L1 和 L2 正则化项被累加。`pcenters` 正则化（促使嵌入中心趋向于零）目前在主模型中**已被注释掉**，正如源代码中所述：`"we do not use it temporarily"`。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L296-L324), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L384-L398)
+
+## 对比: 双线性嵌入 vs. 外部拼接
+
+| 方面 | 双线性嵌入 | 外部拼接 + 中点 |
+|--------|-------------------|-------------------------------|
+| **可训练参数** | 有 — 每个范围通道一个 3D 权重张量 W | 无（确定性）+ 用于压缩的逐点卷积 |
+| **输入类型** | 独热编码 或 独热×SS3 (Seq+SS) | 1D ResNet 卷积输出（连续值） |
+| **范围特化** | 每个范围 (LR/MR/SR) 有独立的 W 张量 | 单一统一表示 |
+| **信息压缩** | 高 — 双线性形式将 (n_in, n_in) 压缩为 n_out | 低 — 拼接保留了完整向量 |
+| **中点感知** | 无 — 仅考虑残基 i 和 j | 有 — 包含位置 (i+j)/2 的特征 |
+| **输出维度 (默认)** | [SR, MR, LR] 为 [4, 6, 12] → 最大 12 | [70, 35] 压缩 → 35 |
+| **计算开销** | tensordot 操作为 O(L² · n_in² · n_out) | 拼接为 O(L² · n_in) + 卷积为 O(L² · K) |
+| **激活条件** | `embedInput is not None` | `useSequentialFeatures is True` |
+
+这两个通道在**设计上是互补的**：双线性嵌入通过范围相关的参数化学习任务特定的交互模式，而外部拼接则保留了来自 1D 卷积骨干网络（包括进化谱特征）的完整信息，并添加了几何中点上下文。它们的组合为 2D ResNet 同时提供了学习到的和确定性的对信号。
+
+来源: [EmbeddingLayer.py](DL4DistancePrediction2/EmbeddingLayer.py#L8-L88), [utils.py](DL4DistancePrediction2/utils.py#L19-L73), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L269-L324)
+
+## 默认配置
+
+默认的 `modelSpecs` 配置（来自 `config.InitializeModelSpecs`）如下设置嵌入和对表示：
+
+```python
+modelSpecs['seq2matrixMode'] = {}
+modelSpecs['seq2matrixMode']['SeqOnly'] = [4, 6, 12]    # SR=4, MR=6, LR=12
+modelSpecs['seq2matrixMode']['OuterCat'] = [70, 35]      # 两个 1×1 卷积层
+modelSpecs['UseSequentialFeatures'] = True                # 激活 OuterCat 通道
+modelSpecs['UseSS'] = True                                # 在序列特征中启用 SS3
+```
+
+当指定 `SeqOnly`（且不存在 `Seq+SS`）时，嵌入输入为 20 维的独热编码，分别为短、中、长程通道生成三个形状为 (20, 20, 4)、(20, 20, 6) 和 (20, 20, 12) 的权重张量。`OuterCat` 通道在经过两层 1×1 压缩后贡献 35 个特征。`config.py` 中的 `EmbeddingUsed()` 辅助函数在 `seq2matrixMode` 中存在 `SeqOnly` 或 `Seq+SS` 时返回 `True`。
+
+来源: [config.py](DL4DistancePrediction2/config.py#L226-L258), [config.py](DL4DistancePrediction2/config.py#L304-L307)
+
+## 后续步骤
+
+嵌入和对表示层生成输入到矩阵卷积骨干网络的 2D 输入特征张量。要了解从原始蛋白质特征到嵌入输入的完整数据流，请参阅[输入特征规范](7-input-feature-specification)和[数据加载与处理](8-data-loading-and-processing)。有关处理这些输出的 1D 和 2D 卷积架构，请参阅[距离预测深度 ResNet](4-deep-resnet-for-distance)和[膨胀 ResNet 变体](5-dilated-resnet-variants)。有关模型如何端到端组装和训练的更多信息，请参阅[模型构建与损失](10-model-building-and-loss)。
+
+---
+
+## 数据与特征
+
+- [深入探究/数据与特征/输入特征规范](https://zread.ai/j3xugit/RaptorX-Contact/7-input-feature-specification)
+
+---
+slug:7-input-feature-specification
+blog_type:normal
+---
+
+
+RaptorX-Contact 从丰富的**序列**和**成对**输入特征中预测残基间距离（和接触）。理解有哪些可用特征、如何从磁盘加载它们，以及它们如何流入神经网络，对于任何使用此代码库的人来说都至关重要。本页编录了每个输入特征、其源文件格式、张量形状、控制它的配置标志，以及将它们组装成最终模型输入的装配逻辑。
+
+## 特征架构一览
+
+模型消耗两类输入——**序列特征**（每个残基一个向量）和**成对特征**（每个残基对一个向量）。序列特征沿特征轴拼接成单一的 `L × D_seq` 矩阵。成对特征沿深度堆叠成 `L × L × D_pair` 张量。可选地，**嵌入层**在序列特征与成对通道合并前，将其转换为成对表示。
+
+```mermaid
+flowchart TB
+    subgraph Seq["Sequential Features (L × D_seq)"]
+        A1["One-Hot Encoding<br/>L × 20"]
+        A2["SS3 Probabilities<br/>L × 3"]
+        A3["ACC Probabilities<br/>L × 3"]
+        A4["PSSM Scores<br/>L × 20"]
+        A5["Disorder<br/>L × D"]
+        A6["MemAcc / MemTopo<br/>(optional)"]
+        A7["Template SimScore<br/>L × 11"]
+    end
+
+    subgraph Pair["Pairwise Features (L × L × D_pair)"]
+        B1["Location Feature<br/>min(1, |i−j|/30)"]
+        B2["Cube-Root Feature<br/>∛|i−j|"]
+        B3["CCMpred Z-score<br/>co-evolution"]
+        B4["PSICOV Z-score<br/>(optional)"]
+        B5["Other Pairs<br/>MI + contact pot."]
+        B6["Template Distance<br/>(optional)"]
+    end
+
+    A1 & A2 & A3 & A4 & A5 & A6 & A7 --> CAT["np.concatenate<br/>along axis=1"]
+    CAT --> SEQ_OUT["seqFeatures<br/>L × D_seq"]
+
+    B1 & B2 & B3 & B4 & B5 & B6 --> DSTK["np.dstack<br/>depth stack"]
+    DSTK --> PAIR_OUT["matrixFeatures<br/>L × L × D_pair"]
+
+    SEQ_OUT --> EMB{"Embedding<br/>Used?"}
+    EMB -->|Yes| EMOUT["embedFeatures<br/>L × D_emb"]
+    EMB -->|No| SEQ_OUT
+```
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L111-L281), [config.py](/DL4DistancePrediction2/config.py#L236-L248)
+
+## 序列特征（按残基）
+
+序列特征描述了蛋白质链上单个残基的属性。每个特征都是形状为 `L × d` 的矩阵，其中 `L` 是序列长度，`d` 是特征维度。它们按列拼接以生成最终的 `seqFeatures` 矩阵。
+
+### 特征清单
+
+| # | 特征 | 字典中的键 | 维度 | 源文件 | 配置标志 | 默认值 |
+|---|---------|-------------|-----------|-------------|-------------|---------|
+| 1 | **One-Hot 氨基酸** | — (内联计算) | L × 20 | `.seq` | `UseSequentialFeatures` | `True` |
+| 2 | **3-状态二级结构** | `SS3` | L × 3 | `.ss3` | `UseSS` | `True` |
+| 3 | **溶剂可及性** | `ACC` | L × 3 | `.acc` | `UseACC` | `True` |
+| 4 | **PSSM (位置特异性评分矩阵)** | `PSSM` | L × 20 | `.tgt` | `UsePSSM` | `True` |
+| 5 | **无序概率** | `DISO` | L × D | `.diso` | `UseDisorder` | `False` |
+| 6 | **膜可及性** | `MemAcc` | L × D | — | `UseMPSpecificFeatures` | off |
+| 7 | **膜拓扑** | `MemTopo` | L × D | — | `UseMPSpecificFeatures` | off |
+| 8 | **模板相似度得分** | `tplSimScore` | L × 11 | — | `UseTemplate` | off |
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L129-L187), [config.py](/DL4DistancePrediction2/config.py#L236-L248)
+
+### One-Hot 氨基酸编码
+
+主序列通过 `SeqOneHotEncoding()` 被编码为二进制的 `L × 20` 矩阵。每个残基被映射到 20 种标准氨基酸之一（按单字母码的字母顺序排列：A, R, N, D, C, Q, E, G, H, I, L, K, M, F, P, S, T, W, Y, V）。此编码**始终**作为第一个序列特征包含——它构成了嵌入层的基础，且永远不会被关闭。
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L314-L326)
+
+### 3-状态二级结构 (SS3)
+
+通过 `LoadSS3()` 从 `.ss3` 文件加载。该文件有 3 行头部；随后的每行包含残基名称和螺旋 (H)、折叠 (E) 和卷曲 (C) 的三个概率值。在每个位置上这些概率之和为 1。在序列特征拼接中，**SS3 始终紧接在 one-hot 编码之后**——此顺序很重要，因为嵌入层的 `Seq+SS` 模式会计算 one-hot 与 SS3 的外积。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L15-L38)
+
+### 溶剂可及性 (ACC)
+
+通过 `LoadACC()` 从 `.acc` 文件加载。该文件有 5 行头部；每个数据行提供三个概率值（通常对应埋藏、中间和暴露状态）。仅提取前 3 列 (`line.split()[3:6]`)。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L40-L62)
+
+### 来自 HHM Profile 的 PSSM 和 PSFM
+
+**位置特异性评分矩阵**（PSSM，L × 20）和**位置特异性频率矩阵**（PSFM，L × 20）源自存储在 `.tgt` 文件中的 HHpred/HHblits profile HMM。`LoadTPLTGT.load_tgt()` 函数解析此文件并返回包含键 `PSFM`、`PSSM` 和 `SS8` 的字典。在内部，HMM 发射分数通过 `2^(score)` 转换为概率，然后使用 Gonnet 替换矩阵添加伪计数，并将结果重新归一化。PSSM 计算为 `log2(PSFM) + HMMNull/1000`。只有 **PSSM** 被用作序列特征；PSFM 在数据字典中可用，但默认不追加到 `seqFeatures`。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L267-L274), [LoadHHM.py](/Common/LoadHHM.py#L148-L190)
+
+### 无序概率 (DISO)
+
+通过 `LoadDISO()` 从 `.diso` 文件加载。该文件有 4 行头部；每行提供每个位置的无序概率值。**默认禁用** (`UseDisorder: False`)，但对于内在无序性有信息量的蛋白质可以启用。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L64-L86), [config.py](/DL4DistancePrediction2/config.py#L240)
+
+### 膜特异性与模板特征
+
+**MemAcc** 和 **MemTopo** 是跨膜蛋白质的专用特征，由 `UseMPSpecificFeatures` 激活。**模板相似度得分**（`tplSimScore`，每个位置恰好 11 个特征）由 `UseTemplate` 激活，适用于有序列-模板比对可用时的同源建模场景。两者默认均关闭。
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L159-L185)
+
+## 成对特征（按残基对）
+
+成对特征捕获残基对之间的关系，并表示为 `L × L × d` 张量（每个特征一个通道）。它们通过 `np.dstack()` 沿深度堆叠成最终的 `matrixFeatures` 张量。
+
+### 特征清单
+
+| # | 特征 | 字典中的键 | 通道数 | 源文件 | 配置标志 | 默认值 |
+|---|---------|-------------|----------|-------------|-------------|---------|
+| 1 | **位置特征** | 从 `ccmpredZ` 形状计算 | 1 | — | 始终开启 | `True` |
+| 2 | **立方根特征** | 从序列长度计算 | 1 | — | 始终开启 | `True` |
+| 3 | **CCMpred Z-score** | `ccmpredZ` | 1 | `.ccmpred_zscore` | `UseCCM` | `True` |
+| 4 | **PSICOV Z-score** | `psicovZ` | 1 | `.psicov_zscore` | `UsePSICOV` | `False` |
+| 5 | **其他成对特征** | `OtherPairs` | D | `.pot` | `UseOtherPairs` | `True` |
+| 6 | **模板距离** | `tplDistMatrix` | 可变 | — | `UseTemplate` | off |
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L190-L276), [config.py](/DL4DistancePrediction2/config.py#L241-L247)
+
+### 位置特征
+
+单通道 `L × L` 矩阵，编码归一化的序列间隔：`posFeature[i, j] = min(1, |i−j| / 30)`。间隔等于或超过 30 个残基的残基对饱和值为 1.0。此特征**始终包含**，并且是添加的第一个成对特征。它仅利用 `ccmpredZ` 矩阵来确定序列长度——其计算过程中不使用任何实际的共进化数据。
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L60-L76), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L193-L195)
+
+### 立方根特征
+
+单通道 `L × L` 矩阵：`cbrtFeature[i, j] = ∛|i − j|`。立方根变换源于物理直觉，即蛋白质的半径与残基数量的立方根成正比，使得此特征成为残基间距离的几何先验。**始终包含**。
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L78-L86), [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L197-L198)
+
+### CCMpred Z-score (共进化)
+
+通过 `LoadECMatrix()` 从 `.ccmpred_zscore` 文件加载。这是**主要的共进化信号**——一个来自 CCMpred 直接耦合分析的 z-归一化接触分数对称 `L × L` 矩阵。为了内存效率，值存储为 `np.float16`。**默认启用** (`UseCCM: True`)。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L140-L159), [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L276-L277)
+
+### PSICOV Z-score (共进化, 可选)
+
+使用相同的 `LoadECMatrix()` 解析器从 `.psicov_zscore` 加载的次要共进化矩阵。与 CCMpred（伪似然最大化）相比，PSICOV 使用不同的统计估计方法（稀疏逆协方差）。**默认禁用** (`UsePSICOV: False`)——仅当文件存在于磁盘且标志被设置时才加载。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L279-L281), [config.py](/DL4DistancePrediction2/config.py#L247)
+
+### 其他成对特征 (互信息 + 接触势)
+
+通过 `LoadOtherPairFeatures()` 从 `.pot` 文件加载。此文件使用稀疏格式——每行包含两个从 1 开始的残基索引，后跟浮点特征值。该函数构造一个密集的 `L × L × D` 张量（对称），其中 `D` 是每行的值列数。这通常编码**互信息**和**接触势**项。**默认启用** (`UseOtherPairs: True`)。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L161-L194), [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L283-L284)
+
+### 基于模板的距离特征
+
+当 `UseTemplate` 启用时，模板派生的距离矩阵被处理为成对特征。对于每种原子对类型 (CbCb, CgCg, CaCg, CaCa, NO)，计算一个**强度矩阵**：`strength = 3.5 / max(tplDist, 3.5)`，空缺编码为 `3.5/50`。强度及其平方均被追加（除非激活了 `TPLMemorySave` 模式，该模式省略平方）。此外，还从 CaCa 模板中添加一个**空缺标志矩阵**（无效条目的二进制指示器）。
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L225-L269)
+
+## 嵌入层：序列到成对的转换
+
+在 2D ResNet 处理成对特征之前，可选的**嵌入层**将序列特征转换为成对表示，然后与原始成对通道合并。
+
+### 嵌入模式
+
+| 模式 | 配置键 | 嵌入输入 | 转换 | 输出形状 |
+|------|-----------|----------------|----------|-------------|
+| **SeqOnly** | `seq2matrixMode['SeqOnly']` | One-hot 编码 (L × 20) | `MetaEmbeddingLayer` (学习到的 W) | L × L × [4,6,12] |
+| **Seq+SS** | `seq2matrixMode['Seq+SS']` | RowWiseOuterProduct(oneHot, SS3) | `MetaEmbeddingLayer` (学习到的 W) | L × L × D |
+| **OuterCat** | `seq2matrixMode['OuterCat']` | One-hot 编码 | `OuterConcatenate` (无参数) | L × L × 2×20 |
+
+当 `Seq+SS` 模式激活时，one-hot 编码和 SS3 概率通过**行向外积**组合：对于每个残基 `i`，20 维的 one-hot 向量和 3 维的 SS3 向量产生一个 60 维向量 (`20 × 3 = 60`)。这种丰富的表示捕获了氨基酸/结构的相关性。
+
+`MetaEmbeddingLayer` 应用**范围特异性嵌入**——为长程 (|i−j| ≥ 24)、中程 (12 ≤ |i−j| < 24) 和短程 (6 ≤ |i−j| < 12) 残基对提供独立的学习权重张量，通过上/下三角掩码进行选择。
+
+来源: [DataProcessor.py](/DL4DistancePrediction2/DataProcessor.py#L134-L140), [EmbeddingLayer.py](/DL4DistancePrediction2/EmbeddingLayer.py#L8-L88), [utils.py](/DL4DistancePrediction2/utils.py#L63-L73), [utils.py](/DL4DistancePrediction2/utils.py#L93-L97)
+
+## 特征加载流水线
+
+下图展示了磁盘上的原始文件如何被解析到特征字典中，然后组装成模型就绪的张量：
+
+```mermaid
+flowchart LR
+    subgraph Raw["Raw Files on Disk"]
+        F1[".seq"]
+        F2[".ss3"]
+        F3[".acc"]
+        F4[".diso"]
+        F5[".tgt"]
+        F6[".ccmpred_zscore"]
+        F7[".psicov_zscore"]
+        F8[".pot"]
+    end
+
+    subgraph Parse["ReadFeatures()"]
+        P1["LoadSS3()"]
+        P2["LoadACC()"]
+        P3["LoadDISO()"]
+        P4["LoadTPLTGT.load_tgt()"]
+        P5["LoadECMatrix()"]
+        P6["LoadOtherPairFeatures()"]
+    end
+
+    subgraph Dict["OneProtein Dict"]
+        D1["'sequence'"]
+        D2["'SS3'"]
+        D3["'ACC'"]
+        D4["'DISO'"]
+        D5["'PSSM', 'PSFM', 'SS8'"]
+        D6["'ccmpredZ'"]
+        D7["'psicovZ'"]
+        D8["'OtherPairs'"]
+    end
+
+    F1 --> D1
+    F2 --> P1 --> D2
+    F3 --> P2 --> D3
+    F4 --> P3 --> D4
+    F5 --> P4 --> D5
+    F6 --> P5 --> D6
+    F7 --> P5 --> D7
+    F8 --> P6 --> D8
+
+    Dict --> ASM["LoadDistanceFeatures()<br/>DataProcessor.py"]
+    ASM --> OUT["seqFeatures + matrixFeatures"]
+```
+
+`ReadProteinFeatures.py` 中的 `ReadFeatures()` 函数是核心 I/O 例程。它从特征目录读取单个蛋白质的所有文件，验证跨文件的序列一致性，并返回包含所有原始特征的字典。对于批处理，`ReadOneProteinFeatures.py` 封装此函数以加载多个特征集并将它们序列化为 PKL 文件。
+
+来源: [ReadProteinFeatures.py](/DL4DistancePrediction2/ReadProteinFeatures.py#L197-L286), [ReadOneProteinFeatures.py](/DL4DistancePrediction2/ReadOneProteinFeatures.py#L18-L39)
+
+## 默认特征配置
+
+`config.py` 中的 `InitializeModelSpecs()` 函数建立默认的特征选择。下表展示了开箱即用的配置：
+
+| 标志 | 值 | 效果 |
+|------|-------|--------|
+| `UseSequentialFeatures` | `True` | 包含 one-hot 编码 |
+| `UseSS` | `True` | 追加 SS3 (L × 3) |
+| `UseACC` | `True` | 追加 ACC (L × 3) |
+| `UsePSSM` | `True` | 追加 PSSM (L × 20) |
+| `UseDisorder` | `False` | 省略 DISO |
+| `UseCCM` | `True` | 包含 CCMpred Z-score |
+| `UseOtherPairs` | `True` | 包含 MI + 接触势 |
+| `UsePSICOV` | `False` | 省略 PSICOV Z-score |
+| `UsePriorDistancePotential` | `False` | 省略先验距离势 |
+| `UseMPSpecificFeatures` | off | 省略膜特征 |
+| `UseTemplate` | off | 省略模板特征 |
+
+在默认配置下，**序列特征维度**为 `20 (oneHot) + 3 (SS3) + 3 (ACC) + 20 (PSSM) = 46`，**成对特征通道**为 `2 (location + cbrt) + 1 (ccmpred) + D (OtherPairs)`。
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L236-L257)
+
+<CgxTip>添加新的序列特征时，你必须 (1) 在 `ReadProteinFeatures.py` 中添加加载器，(2) 将其存储在 `OneProtein` 字典中的唯一键下，(3) 在 `InitializeModelSpecs()` 中添加 `Use*` 标志，以及 (4) 在 `LoadDistanceFeatures()` 中将其追加到 `seqMatrices`。缺少任何步骤都将默认跳过该特征或在运行时导致崩溃。</CgxTip>
+
+<CgxTip>成对特征 `OtherPairs`（`.pot` 文件）在磁盘上使用稀疏格式，但在内存中会扩展为密集的 L×L×D 张量。对于长序列，这可能会主导内存使用——如果遇到内存不足错误，请检查 `D`（每行的值列数）。</CgxTip>
+
+## 接下来去哪
+
+- 要全面详细了解数据加载流水线，请参阅[数据加载与处理](8-data-loading-and-processing)。
+- 有关 HHM profile 解析内部机制（PSFM、PSSM 计算），请参阅 [HHM Profile 解析](9-hhm-profile-parsing)。
+- 要查看这些特征如何输入神经网络架构，请参阅[嵌入与成对表示](6-embedding-and-pair-representation)和[用于距离预测的深度 ResNet](4-deep-resnet-for-distance)。
+
+---
+
+- [深入探究/数据与特征/数据加载与处理](https://zread.ai/j3xugit/RaptorX-Contact/8-data-loading-and-processing)
+
+---
+slug:8-data-loading-and-processing
+blog_type:normal
+---
+
+
+RaptorX-Contact 实现了一个三阶段的数据流水线，将磁盘上的原始单蛋白特征文件转换为经过填充和批处理的 NumPy 张量，以供基于 Theano 的神经网络使用。该流水线涵盖**原始特征 I/O**（[ReadProteinFeatures.py](DL4DistancePrediction2/ReadProteinFeatures.py)）、**特征组装与标签离散化**（[DataProcessor.py](DL4DistancePrediction2/DataProcessor.py)）以及**带掩码的批处理构建**（[DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L558-L667)）。配置层（[config.py](DL4DistancePrediction2/config.py)）控制着哪些特征处于激活状态、距离如何离散化为区间，以及基于范围的样本权重如何分配。
+
+来源: [ReadProteinFeatures.py](DL4DistancePrediction2/ReadProteinFeatures.py#L1-L339), [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L1-L337), [config.py](DL4DistancePrediction2/config.py#L1-L329)
+
+## 流水线架构
+
+端到端的数据流经过三个边界清晰的阶段，每个阶段都会生成结构化程度逐步提升的蛋白质输入数据表示：
+
+```mermaid
+flowchart TD
+    subgraph Stage1["阶段 1: 原始特征 I/O"]
+        A1[".seq (FASTA)"] --> R
+        A2[".ss3 (二级结构)"] --> R
+        A3[".acc (溶剂可及性)"] --> R
+        A4[".diso (无序性)"] --> R
+        A5[".tgt (PSFM/PSSM/SS8)"] --> R
+        A6[".ccmpred_zscore (共进化)"] --> R
+        A7[".psicov_zscore (PSICOV)"] --> R
+        A8[".pot (其他成对特征)"] --> R
+        R["ReadFeatures()"] --> RD["原始特征字典"]
+    end
+
+    subgraph Stage2["阶段 2: 特征组装与标签离散化"]
+        RD --> LDF["LoadDistanceFeatures()"]
+        LDF --> |"modelSpecs 标志"| SEQ["seqFeatures (L × C_seq)"]
+        LDF --> |"modelSpecs 标志"| PAIR["matrixFeatures (L × L × C_pair)"]
+        LDF --> |"modelSpecs 标志"| EMB["embedFeatures (L × C_emb)"]
+        LDF --> |"responses 配置"| LBL["atomLabelMatrix (L × L)"]
+    end
+
+    subgraph Stage3["阶段 3: 批处理与掩码"]
+        SEQ --> S2B["SplitData2Batches()"]
+        PAIR --> S2B
+        EMB --> S2B
+        LBL --> S2B
+        S2B --> AOB["AssembleOneBatch()"]
+        AOB --> TENSORS["X1d, X2d, M1d, M2d, [X1dem], Y, W"]
+    end
+```
+
+**阶段 1** 从单蛋白特征目录中读取各个平面文件，验证跨文件的序列一致性，并检查 NaN 污染。**阶段 2** 将选定的序列特征和成对特征拼接为统一矩阵，应用距离离散化以生成分类标签，并计算派生的位置特征。**阶段 3** 按序列长度将蛋白质分组为对 GPU 友好的批次，对较短的序列进行零填充至批次最大长度，并构建二进制掩码张量，以便网络能忽略填充位置。
+
+来源: [ReadProteinFeatures.py](DL4DistancePrediction2/ReadProteinFeatures.py#L197-L286), [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L111-L337), [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L558-L667)
+
+## 阶段 1: 原始特征文件读取器
+
+`ReadProteinFeatures` 模块为每种输入模态提供了专用的解析器。所有解析器共享一个通用契约：它们接受一个文件路径和可选的序列验证参数，返回一个 NumPy 数组，并在遇到 NaN 污染时中止执行。
+
+### 文件格式解析器
+
+| 解析器函数 | 文件后缀 | 输出形状 | 描述 |
+|---|---|---|---|
+| `LoadSS3` | `.ss3` | (L, 3) | 3 状态二级结构概率（螺旋、折叠、卷曲） |
+| `LoadACC` | `.acc` | (L, 3) | 溶剂可及性概率（来自行字段的 3 列） |
+| `LoadDISO` | `.diso` | (L, variable) | 无序性预测概率 |
+| `LoadProfile` | `.tgt` (通过 `LoadTPLTGT`) | PSFM (L,20), PSSM (L,20), SS8 (L,8) | 位置特异性频率/评分矩阵 + 8 状态 SS |
+| `LoadECMatrix` | `.ccmpred_zscore` / `.psicov_zscore` | (L, L) | Z-score 标准化的共进化耦合矩阵 |
+| `LoadOtherPairFeatures` | `.pot` | (L, L, K) | 稀疏成对特征（互信息 + 接触势），加载时进行对称化 |
+
+每个解析器会跳过固定数量的头部行（SS3 为 3 行，ACC 为 5 行，DISO 为 4 行），按残基解析数值字段，并在提供参考序列时断言序列长度的一致性。`LoadECMatrix` 解析器为节省内存使用 `np.float16` 读取密集的 L×L 矩阵，然后向上转型为 `np.float32` 后验证是否存在 NaN。`LoadOtherPairFeatures` 解析器读取稀疏的索引-值格式，并将其具体化为密集的 L×L×K 张量，通过赋值 `allPairs[j,i] = allPairs[i,j]` 进行显式对称化。
+
+来源: [ReadProteinFeatures.py](DL4DistancePrediction2/ReadProteinFeatures.py#L15-L194)
+
+### ReadFeatures 协调器
+
+`ReadFeatures(p, DataSourceDir)` 是核心协调器，从目录 `DataSourceDir` 中读取单个蛋白质 `p` 的**所有**特征文件。它构建一个字典，包含键 `name`、`sequence`、`SS3`、`ACC`、`DISO`、`PSFM`、`PSSM`、`SS8`、`ccmpredZ`，以及可选的 `psicovZ` 和 `OtherPairs`。序列首先从 `.seq` FASTA 文件中读取，然后传递给每个后续解析器进行验证。PSFM/PSSM/SS8 通过 `LoadTPLTGT.load_tgt()` 从 `.tgt` 文件加载，随后对所有三个矩阵进行 NaN 检查。
+
+来源: [ReadProteinFeatures.py](DL4DistancePrediction2/ReadProteinFeatures.py#L197-L286)
+
+### 批量读取: ReadOneProteinFeatures 与 main
+
+批量特征读取存在两个入口点。`ReadProteinFeatures.py` 中的 `main()` 函数读取蛋白质列表文件，遍历名称并按 `featureMetaDir + 'feat_' + proteinName + '_contact/'` 构建单蛋白目录，对每个蛋白调用 `ReadFeatures()`，并将完整列表序列化为单个 PKL 文件。`ReadOneProteinFeatures.py` 提供了一个更简单的 CLI，从多个特征目录中读取单个蛋白质，并将特征字典列表（每个目录一个）保存到 `<proteinName>.distanceFeatures.pkl`。
+
+来源: [ReadOneProteinFeatures.py](DL4DistancePrediction2/ReadOneProteinFeatures.py#L1-L45), [ReadProteinFeatures.py](DL4DistancePrediction2/ReadProteinFeatures.py#L295-L338)
+
+## 阶段 2: 特征组装与标签离散化
+
+`LoadDistanceFeatures(files, modelSpecs, forTrainValidation)` 是关键函数，将原始特征 PKL 文件列表转换为已处理的蛋白质字典，以备批处理使用。它对每个蛋白质分三个阶段操作：**序列特征拼接**、**成对特征堆叠**和**标签矩阵生成**。
+
+### 序列特征组装
+
+序列特征是沿通道轴拼接的 1D 单残基向量。组装顺序是固定且重要的：
+
+1. 主序列的 **独热编码** (L × 20)，始终通过 `config.SeqOneHotEncoding()` 包含
+2. **SS3** (L × 3) — 若 `modelSpecs['UseSS']` 为 True
+3. **ACC** (L × 3) — 若 `modelSpecs['UseACC']` 为 True
+4. **PSSM** (L × 20) — 若 `modelSpecs['UsePSSM']` 为 True
+5. **DISO** (L × variable) — 若 `modelSpecs['UseDisorder']` 为 True
+6. **MemAcc / MemTopo** — 若 `modelSpecs['UseMPSpecificFeatures']` 为 True（膜蛋白特征）
+7. **模板相似度得分** (L × 11) — 若 `modelSpecs['UseTemplate']` 为 True
+
+结果为 `seqFeature = np.concatenate(seqMatrices, axis=1)`，其数据类型为 `np.float32`，存储在键 `seqFeatures` 下。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L111-L187)
+
+### 成对特征组装
+
+成对特征是沿通道轴使用 `np.dstack()` 堆叠的 2D 单残基对矩阵。始终包含两个**派生位置特征**：
+
+- **LocationFeature**: `posFeature[i,j] = min(1, |i−j| / 30.0)` — 归一化并截断至 1.0 的序列分离度，通过对角偏移迭代而非双重循环高效实现
+- **CubeRootFeature**: `cbrtFeature[i,j] = ∛|i−j|` — 残基分离距离的立方根，与蛋白质的物理半径相关
+
+额外的成对特征根据 `modelSpecs` 标志有条件地追加：
+
+| 特征 | 键 | 标志 | 每通道形状 |
+|---|---|---|---|
+| CCMpred Z-score | `ccmpredZ` | `UseCCM` | (L, L, 1) |
+| PSICOV Z-score | `psicovZ` | `UsePSICOV` | (L, L, 1) |
+| 互信息 + 接触势 | `OtherPairs` | `UseOtherPairs` | (L, L, K) |
+| 模板距离矩阵 | `tplDistMatrix` | `UseTemplate` | (L, L, 2) 每原子对 |
+
+使用模板信息时，每种原子对类型（CbCb, CgCg, CaCg, CaCa, NO）会贡献一个**强度矩阵**，计算方式为 `3.5 / max(tplDist, 3.5)`（无效条目映射为 `3.5/50 ≈ 0.07`），并在 `TPLMemorySaveMode` 未激活时加上其逐元素平方。来自 CaCa 通道的二进制**标志矩阵**指示哪些条目因空位或无序性而无效。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L190-L276), [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L60-L86)
+
+### 嵌入特征
+
+若 `config.EmbeddingUsed(modelSpecs)` 返回 True，则会为嵌入层准备一个额外的 `embedFeatures` 矩阵。存在两种模式：
+
+- **SeqOnly**: `embedFeatures = oneHotEncoding` (L × 20)
+- **Seq+SS**: `embedFeatures = RowWiseOuterProduct(oneHotEncoding, SS3)` (L × 60) — 逐行外积将序列和二级结构信息组合成更丰富的单残基表示
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L134-L140), [utils.py](DL4DistancePrediction2/utils.py#L93-L97)
+
+### 标签离散化
+
+在训练和验证阶段，原生 `atomDistMatrix` 会根据 `modelSpecs['responses']` 中的每个响应规范转换为标签矩阵。响应字符串的格式为 `<LabelName>_<LabelType>`（例如 `CbCb_Discrete25C`）。支持三种标签类型族：
+
+| 标签类型 | 处理方式 | 输出 |
+|---|---|---|
+| `Discrete{N}C` / `Discrete{N}CPlus` | 使用 `config.distCutoffs[subType]` 的 `DistanceUtils.DiscretizeDistMatrix()` | 整数区间索引 (L × L) |
+| `LogNormal` | `DistanceUtils.LogDistMatrix()` | log(distance)，截断至 −1 (L × L) |
+| `Normal` | 直接使用原始距离矩阵 | 浮点距离 (L × L) |
+
+`DiscretizeDistMatrix` 函数使用 `np.digitize()` 对距离进行分箱。当子类型以 `Plus` 结尾时，无效距离（表示为 −1）会被分配到超出最大距离区间的**独立区间**；否则，它们将与最大距离区间**合并**。HB 和 Beta 配对响应作为二进制矩阵处理，完全绕过离散化。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L283-L322), [DistanceUtils.py](DL4DistancePrediction2/DistanceUtils.py#L156-L170)
+
+## 标签分布与权重计算
+
+在特征和标签组装完成后，`CalcLabelDistributionAndWeight(data, modelSpecs)` 计算经验标签分布并推导出每个标签、每个范围的权重。这对于处理距离预测中严重的类别不平衡（大多数残基对相距较远）至关重要。
+
+### 基于范围的加权
+
+残基对按序列分离度 |i−j| 划分为四个范围，边界阈值定义在 `config.RangeBoundaries = [24, 12, 6, 2]` 中：
+
+| 范围 | 分离度 | 默认权重 | 依据 |
+|---|---|---|---|
+| 长程 | ≥ 24 | 3.0 | 对 3D 结构最有价值；最难预测 |
+| 中程 | 12–23 | 2.5 | 包含中等信息量 |
+| 短程 | 6–11 | 1.0 | 从局部序列较易预测 |
+| 近程 | 2–5 | 0.5 | 主要由骨架几何决定 |
+
+这些基础范围权重进一步受距离区间权重调节。对于 3 区间情况（0–8Å 接触，8–15Å 中距，>15Å 或无效），`weight43C` 表提供了五种偏置预设（`low`、`mid`、`high`、`veryhigh`、`exhigh`），逐步提高接触的权重。例如，当 `LRbias='mid'` 时，长程接触接收权重 20.5，而长程非接触接收权重 1.0——比例为 20:1。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L345-L433), [config.py](DL4DistancePrediction2/config.py#L140-L167)
+
+### 标签权重矩阵计算
+
+`CalcLabelWeightMatrix(LabelMatrix, modelSpecs)` 为单个蛋白质的标签矩阵生成逐条目权重矩阵。它使用带有对角偏移的 `np.triu`/`np.tril` 构建四个布尔范围掩码（LRmask, MRmask, SRmask, NRmask），然后组合它们：
+
+```
+labelWeightMatrix = LRmask * LRw + MRmask * MRw + SRmask * SRw + NRmask * NRw
+```
+
+对于离散标签，`LRw = wMatrix[0][LabelMatrix[response]]` — 每个条目的权重通过其标签索引从权重表中查找。对于连续标签，权重是每个范围的标量，且无效距离（标签 < 0）的条目被置零以从损失中排除。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L440-L487)
+
+## 阶段 3: 批处理与掩码
+
+### SplitData2Batches
+
+`SplitData2Batches(data, numDataPoints, modelSpecs)` 将蛋白质分组为能适应 GPU 内存限制的批次。它首先**按序列长度降序排列蛋白质**，然后贪婪地将连续的蛋白质分配到同一批次。每批次的序列数计算如下：
+
+```
+numSeqs = min(remaining_proteins, max(1, numDataPoints / currentSeqLen²))
+```
+
+这确保每批次的残基对数据点总数（约 `numSeqs × seqLen²`）保持在 `numDataPoints` 附近，从而平衡不同大小蛋白质对 GPU 的利用率。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L635-L667)
+
+### AssembleOneBatch
+
+`AssembleOneBatch(data, modelSpecs)` 将蛋白质字典列表转换为填充后的 NumPy 数组元组。填充策略为**右/底部对齐**：较短的序列在张量的起始处（左上方）进行零填充，因此有效数据占据右下方区域。
+
+输出元组包含：
+
+| 索引 | 变量 | 形状 | 描述 |
+|---|---|---|---|
+| 0 | `X1d` | (N, maxL, C_seq) | 填充后的序列特征 |
+| 1 | `X2d` | (N, maxL, maxL, C_pair) | 填充后的成对特征 |
+| 2 | `M1d` | (N, maxL − minL) | 1D 掩码：有效位置为 1，填充位置为 0 |
+| 3 | `M2d` | (N, maxL − minL, maxL) | 2D 掩码：有效对位置为 1 |
+| 4 | `X1dem` | (N, maxL, C_emb) | 填充后的嵌入特征（若存在） |
+| 5+ | `Y[k]` | (N, maxL, maxL) | 填充后的标签矩阵（每个响应一个） |
+| 5+len(Y)+ | `W[k]` | (N, maxL, maxL) | 填充后的权重矩阵（每个响应一个） |
+
+1D 掩码 `M1d` 是一个扁平向量，标记 `maxL − minL` 个填充位置中哪些是有效的。2D 掩码 `M2d` 将其扩展到成对域。标签和权重矩阵被放置在各自填充张量的右下方区域，与特征对齐方式相呼应。
+
+<CgxTip>右对齐填充约定（有效数据在右下方）对正确的掩码构建至关重要：`M1d[j, maxSeqLen-seqLen:].fill(1)` 从实际数据起始的偏移处开始设置有效标志。所有下游网络操作必须遵守这些掩码，以避免通过零填充位置传播信号。</CgxTip>
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L558-L632)
+
+### 批次权重归一化
+
+`CalcAvgWeightPerBatch(batches, modelSpecs)` 从每个批次的权重矩阵中采样一个边界框（使用 `SampleBoundingBox`），并计算跨批次每个响应的平均总权重。该平均值存储为 `modelSpecs['batchWeightBase']`，用于归一化不同大小批次的权重幅度，防止因损失缩放不均导致的训练不稳定。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L669-L694)
+
+## 原生距离矩阵加载
+
+两个函数支持加载用于评估的真实距离矩阵：`LoadNativeDistMatrixFromFile(filename)` 从显式路径加载，而 `LoadNativeDistMatrix(name, location)` 将路径构建为 `location + name + '.atomDistMatrix.pkl'`。两者均使用 `cPickle` 反序列化，若基于名称的变体缺少文件则返回 `None`（并发出警告），若显式路径变体缺少文件则中止执行。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L88-L109)
+
+## 通过模型规格控制特征
+
+由 `config.InitializeModelSpecs()` 初始化的 `modelSpecs` 字典充当核心特征开关。默认配置启用：
+
+| 标志 | 默认值 | 控制的特征 |
+|---|---|---|
+| `UseSequentialFeatures` | True | 1D 特征的主开关 |
+| `UseSS` | True | 3 状态二级结构 |
+| `UseACC` | True | 溶剂可及性 |
+| `UsePSSM` | True | 位置特异性评分矩阵 |
+| `UseDisorder` | False | 无序性预测 |
+| `UseCCM` | True | CCMpred 共进化矩阵 |
+| `UseOtherPairs` | True | 互信息 + 接触势 |
+| `UsePSICOV` | False | PSICOV 共进化矩阵 |
+| `UsePriorDistancePotential` | False | 先验距离势（已弃用） |
+| `UseTemplate` | 缺失 | 基于模板的距离特征 |
+| `UseMPSpecificFeatures` | 缺失 | 膜蛋白特征（MemAcc, MemTopo） |
+
+`seq2matrixMode` 子字典控制嵌入：若包含键 `'SeqOnly'` 或 `'Seq+SS'`，则 `EmbeddingUsed()` 返回 True 并生成 `embedFeatures`。`'OuterCat'` 模式控制网络中一条独立的外部拼接路径。
+
+来源: [config.py](DL4DistancePrediction2/config.py#L181-L259), [config.py](DL4DistancePrediction2/config.py#L304-L312)
+
+## 预测流水线中的数据流
+
+在推理模式下，`RunDistancePredictor2.PredictDistMatrix()` 演示了完整的流水线集成：它加载模型 PKL 文件，调用 `DataProcessor.LoadDistanceFeatures()` 并设 `forTrainValidation=False`（跳过标签生成），通过随机抽查验证特征维度是否符合模型预期，调用 `DataProcessor.SplitData2Batches()` 构建预测批次，将每个批次送入 Theano 编译的预测函数，并通过求和与平均跨模型累积概率矩阵。对于对称的原子对类型（CbCb, CaCa, CgCg, Beta），最终预测概率矩阵通过与其转置取平均进行对称化。
+
+来源: [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L37-L199)
+
+---
+
+**下一步阅读**: 本页的原始文件解析器直接连接到 [HHM Profile Parsing](9-hhm-profile-parsing) 中记录的 HHM 概况格式。由 `AssembleOneBatch` 生成的特征张量流入 [Deep ResNet for Distance](4-deep-resnet-for-distance) 和 [Embedding and Pair Representation](6-embedding-and-pair-representation) 中描述的模型。标签离散化区间在 [Configuration and Distance Bins](16-configuration-and-distance-bins) 中配置，此处计算的权重矩阵由 [Model Building and Loss](10-model-building-and-loss) 中的损失函数消费。
+
+---
+
+- [深入探究/数据与特征/HHM 特征解析](https://zread.ai/j3xugit/RaptorX-Contact/9-hhm-profile-parsing)
+
+---
+slug:9-hhm-profile-parsing
+blog_type:normal
+---
+
+
+**HHM 配置文件解析器**（`Common/LoadHHM.py`）是 RaptorX-Contact 摄取由 HHpred/HHblits 生成的 `.hhm` 文件中进化信息的唯一入口。它通过 Gonnet 替换矩阵应用伪计数校正后，将原始 HMM 发射分数和转移概率转换为两个可供下游使用的矩阵——**PSFM**（位置特异性频率矩阵）和 **PSSM**（位置特异性得分矩阵）。在生成的矩阵中，每个残基位置均按单字母码的字母顺序编码 20 个氨基酸通道，使得输出结果能够直接与神经网络流水线中的其他序列特征进行堆叠。
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L1-L15)
+
+## HHM 文件格式与段落
+
+由 HHpred/HHblits 软件包生成的 `.hhm` 文件是一个纯文本的 profile HMM 文件，具有明确定义的段落结构。`load_hmm()` 函数执行单趟线性扫描，基于前缀匹配将每一行分派给相应的段落处理器。文件首行必须以 `HHsearch` 开头；否则解析器将立即拒绝该文件。下表总结了所有被解析的段落及其填充的字典键：
+
+| 段落前缀 | 字典键 | 数据类型 | 描述 |
+|---|---|---|---|
+| `NAME ` | `name` | `str` | 蛋白质标识符 |
+| `DATE ` | `DateCreated` | `str` | 文件创建时间戳 |
+| `NEFF ` | `NEFF` | `np.float32` | 有效序列同源物数量 |
+| `LENG ` | `length` | `np.int32` | 序列长度 |
+| `>ss_pred` | `SSEseq` | `str` | 预测的 8 状态二级结构（C→L 重映射） |
+| `>ss_conf` | `SSEconf` | `list[np.int16]` | 各位置的 SS 置信度得分 |
+| `><name>` | `sequence` | `str` | 完整的氨基酸序列 |
+| `#` + `NULL` + `HMM` | `hmm1`, `hmm2`, `hmm1_prob`, `hmm1_score`, `PSFM`, `PSSM` | `np.ndarray` | 发射与转移 HMM 数据（见下文） |
+
+解析完成后，该函数会验证所有**必需段落**——`name`、`length`、`sequence`、`NEFF`、`hmm1`、`hmm2`、`hmm1_prob`、`hmm1_score`、`PSFM`、`PSSM`、`DateCreated`——是否均存在，若缺失任何一项则报错退出。这种严格验证可防止静默损坏或格式不兼容的输入文件混入。
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L207-L317)
+
+## 氨基酸字母表与排序
+
+一个关键的架构细节是氨基酸的**双重排序系统**。HHM 文件的发射分数按单字母码的字母顺序排列，而 Gonnet 替换矩阵则采用三字母码的字母顺序。解析器维护了显式映射表来弥合这一差异：
+
+- **`AAOrderBy1Letter`** — 从单字母字母表位置映射到标准的 20 氨基酸索引，稀有残基 B 和 Z 映射到索引 20（排除在 20 个有效列之外）。
+- **`AAOrderBy3Letter`** — 从三字母字母表位置映射到标准索引。
+- **`AA1LetterOrder23LetterOrder`** / **`AA3LetterOrder21LetterOrder`** — 双向交叉排序映射，在伪计数计算期间用于正确索引 Gonnet 矩阵。
+
+**有效氨基酸**集合定义为 20 种标准残基：`{A, R, N, D, C, E, Q, G, H, I, L, K, M, F, P, S, T, W, Y, V}`。在一致性检查期间，序列中遇到的任何非标准残基均被视为 `X`。
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L22-L61)
+
+## ReadHHM 核心算法
+
+`ReadHHM()` 函数是解析器的计算核心。给定行数组、起始位置和蛋白质长度，它读取包含 4 行头部及随后每个残基位置 **3 行**（发射分数、转移分数 + Neff、一致性行）的 HMM 块。对于每个位置 `l`，算法依次执行以下五个阶段：
+
+```mermaid
+flowchart TD
+    A["读取每个位置的 3 行<br/>l × 3 + {0,1,2}"] --> B["阶段 1：解析发射分数<br/>hmm1[l] = −fields / 1000"]
+    B --> C["阶段 2：解析转移概率<br/>hmm2[l][0:7] = exp(−score × 0.6931)<br/>hmm2[l][7:10] = Neff 值"]
+    C --> D["阶段 3：Neff 加权<br/>转移正则化<br/>M_M, M_I, M_D, I_I, I_M, D_D, D_M"]
+    D --> E["阶段 4：概率转换<br/>与通过 Gonnet 矩阵<br/>添加伪计数"]
+    E --> F["阶段 5：最终矩阵推导<br/>PSFM = hmm1_prob<br/>PSSM = hmm1_score"]
+    F --> G{更多位置?}
+    G -->|是| A
+    G -->|否| H["序列一致性检查<br/>返回更新后的位置"]
+```
+
+### 阶段 1 — 发射分数解析
+
+每个残基的首行 HMM 包含 23 个由空格分隔的字段：氨基酸字母、残基索引、20 个发射分数和一个末尾字段。分数以负整数存储，单位为 1/1000 比特，因此解析器将其取负并除以 1000 以获得以 log₂ 为标度的分数：`hmm1[l] = −int32(fields[2:22]) / 1000.0`。星号通配符 `*`（代表无穷大）在解析前被替换为 `99999`。
+
+### 阶段 2 — 转移概率解析
+
+每个残基的第二行编码了 7 个转移分数（M→M, M→I, M→D, I→M, I→I, D→M, D→D），随后是 3 个 Neff 值（匹配、插入、删除）。转移分数通过 `exp(−score/1000 × 0.6931)` 转换为概率，其中 `0.6931 ≈ ln(2)` 用于将 log₂ 空间转换为自然对数空间。Neff 值直接按 `int32/1000.0` 解析。
+
+### 阶段 3 — Neff 加权转移正则化
+
+原始转移概率使用带有类狄利克雷伪计数的 Neff 加权平均进行正则化。对于匹配状态转移，正则化强度 `rm = 0.1` 与先验 `{0.6, 0.2, 0.2}`（对应 {M_M, M_I, M_D}）配合使用。对于插入和删除状态，`ri = rd = 0.1`，先验分别为 `{0.75, 0.25}` 和 `{0.75, 0.25}`：
+
+```
+hmm2[l][M_M] = (Neff_M × raw_M_M + rm × 0.6) / (rm + Neff_M)
+```
+
+这防止了在具有少量同源物的位置出现零概率转移，同时在充分采样的位置保留观测到的分布。
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L99-L146)
+
+## 伪计数校正与矩阵推导
+
+### 阶段 4 — 伪计数添加
+
+原始发射概率（通过 `2^(hmm1[l])` 计算并重新归一化至总和为 1）使用 **Gonnet 250 替换矩阵**进行校正，以解释未观测到的氨基酸替换。对于每个位置 `l` 和目标氨基酸 `j`：
+
+1. 计算 Gonnet 加权背景：`g[j] = Σ_k hmm1_prob[l,k] × gonnet[3letterOrder(k), 3letterOrder(j)] × 2^(−HMMNull[j]/1000)`
+2. 将 `g` 重新归一化至总和精确为 1。
+3. 使用 Neff 相关加权进行混合：`hmm1[l] = ((Neff−1) × hmm1_prob[l] + g × 10) / (Neff−1 + 10)`
+
+`HMMNull` 数组提供背景氨基酸频率（以 1/1000 log₂ 为单位），因子 10 作为伪计数强度，控制观测分布与背景分布之间的混合比例。
+
+### 阶段 5 — 最终 PSFM 和 PSSM
+
+添加伪计数后，推导出两个输出矩阵：
+
+| 矩阵 | 键 | 公式 | 形状 | 解释 |
+|---|---|---|---|---|
+| **PSFM** | `hmm1_prob` | `hmm1[l]`（伪计数后） | `(L, 20)` | 位置特异性氨基酸频率 |
+| **PSSM** | `hmm1_score` | `log₂(hmm1_prob[l]) + HMMNull[:20]/1000` | `(L, 20)` | 相对于背景的对数似然得分 |
+
+PSFM 值是真正的概率（每个位置的总和约为 1），而 PSSM 值表示对数似然得分，可直接用作神经网络的输入特征。
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L148-L191)
+
+## 序列一致性验证
+
+遍历所有位置后，解析器在从 HMM 块重建的序列（`seqStr`）与存储在蛋白质字典中的序列之间执行两级一致性检查：
+
+1. **长度检查** — 序列必须具有相同的长度；任何不匹配都会导致立即退出。
+2. **字符检查** — 每个位置必须完全匹配，但任一序列中的 `X` 残基可作为通配符被接受。这适应了 HMM 与原始 FASTA 序列仅在模糊位置存在差异的情况。
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L193-L202)
+
+## 下游集成：从 PSFM/PSSM 到神经网络特征
+
+HHM 衍生矩阵通过两条路径流入预测流水线。在**特征组装阶段**（`DataProcessor.LoadDistanceFeatures`），当 `modelSpecs['UsePSSM']` 为 `True`（根据 `config.InitializeModelSpecs` 的默认设置）时，PSSM 会被有条件地追加到序列特征栈中。PSSM 的 20 个通道与独热序列编码（20 通道）、3 状态二级结构（3 通道）和溶剂可及性（3 通道）拼接，形成每个位置的序列特征向量。
+
+PSFM 虽然被解析和存储，但在当前默认的流水线配置中**并未直接使用**作为序列特征。然而，它仍然保留在蛋白质字典中，供替代模型配置或事后分析潜在使用。
+
+<CgxTip>当 PSSM 被输入到 `ProfileEmbeddingLayer` 时，它首先经过 softmax 归一化（`T.nnet.softmax`），然后再进行外积嵌入。这意味着原始的对数似然得分在嵌入阶段被有效地重新转换为类似概率的表示，尽管在概念上与 PSFM 值相似，但这是一种截然不同的变换。</CgxTip>
+
+来源：[DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L143-L153), [config.py](DL4DistancePrediction2/config.py#L236-L239)
+
+## 数据流总结
+
+```mermaid
+flowchart LR
+    subgraph Input
+        HHM[".hhm file<br/>(HHpred/HHblits)"]
+    end
+    subgraph Parser["Common/LoadHHM.py"]
+        LH["load_hmm()"]
+        RH["ReadHHM()"]
+    end
+    subgraph Output["Protein Dictionary"]
+        PSFM["PSFM<br/>(L × 20)"]
+        PSSM["PSSM<br/>(L × 20)"]
+        SSE["SSEseq, SSEconf"]
+        SEQ["sequence, length, NEFF"]
+    end
+    subgraph Pipeline["DL4DistancePrediction2/"]
+        DP["DataProcessor<br/>seqMatrices.append(PSSM)"]
+        EL["ProfileEmbeddingLayer<br/>softmax → outer product"]
+    end
+
+    HHM --> LH --> RH
+    RH --> PSFM
+    RH --> PSSM
+    RH --> SSE
+    RH --> SEQ
+    PSSM --> DP --> EL
+```
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L188-L191), [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L143-L153)
+
+## 独立使用与序列化
+
+该模块支持直接通过命令行执行以进行测试和预处理。当作为 `python LoadHHM.py <file>.hhm` 运行时，它会解析 HHM 文件，并使用最高可用协议将生成的蛋白质字典序列化为 Python pickle 文件（`<basename>.hhm.pkl`）。这种序列化格式使下游工具能够加载预解析的配置文件，而无需重新运行解析器。
+
+<CgxTip>此处使用的 `cPickle` 模块是 Python 2 中经 C 优化的 pickle 实现。Python 3 用户必须将 `import cPickle` 替换为 `import pickle`（纯 Python 的 `pickle` 模块在 Python 3 中默认已获得 C 加速）。</CgxTip>
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L322-L339)
+
+## 关键设计常量参考
+
+| 常量 | 值 | 用途 |
+|---|---|---|
+| `M_M, M_I, M_D, I_M, I_I, D_M, D_D` | 0–6 | `hmm2` 转移概率列的索引 |
+| `_NEFF, I_NEFF, D_NEFF` | 7, 8, 9 | `hmm2` Neff 列的索引 |
+| `rm`（匹配正则化） | 0.1 | 匹配转移的伪计数强度 |
+| `ri`, `rd`（插入/删除正则化） | 0.1 | 插入/删除转移的伪计数强度 |
+| Gonnet 伪计数乘数 | 10 | Neff 混合公式中背景分布的权重 |
+| `99999` | — | 替换 HHM 分数字段中的 `*`（无穷大） |
+| `0.6931` | ≈ ln(2) | 对数底数转换因子（log₂ → 自然对数） |
+
+来源：[LoadHHM.py](Common/LoadHHM.py#L90-L90), [LoadHHM.py](Common/LoadHHM.py#L115-L115), [LoadHHM.py](Common/LoadHHM.py#L128-L145)
+
+## 后续步骤
+
+在理解了 HHM 配置文件解析机制之后，下一步顺理成章是了解这些 PSFM/PSSM 矩阵如何与其他特征组装在一起，构成神经网络消耗的完整输入张量：
+
+- [输入特征规范](7-input-feature-specification) — 记录了包括 PSSM 在内的所有序列和成对特征通道
+- [数据加载与处理](8-data-loading-and-processing) — 涵盖了 `DataProcessor` 中的完整特征组装流水线
+- [嵌入与配对表示](6-embedding-and-pair-representation) — 解释了 PSSM 如何输入到 `ProfileEmbeddingLayer`
+
+---
+
+## 训练与推理
+
+- [深入探究/训练与推理/模型构建与损失](https://zread.ai/j3xugit/RaptorX-Contact/10-model-building-and-loss)
+
+---
+slug:10-model-building-and-loss
+blog_type:normal
+---
+
+
+RaptorX-Contact 模型构建框架在 Theano 中组装了一个多阶段深度学习计算图，将 1D 序列特征和 2D 成对特征转换为预测的残基间距离分布。损失系统在用于离散（分箱）距离标签的**交叉熵**和用于连续距离回归的**高斯负对数似然**之间进行分派，两者均通过范围感知和距离区间感知的样本加权来应对严重的类别不平衡。
+
+## 架构组成：ResNet4DistMatrix
+
+核心类 `ResNet4DistMatrix` 负责编排完整的计算图。它接收三个输入流——序列特征（`seqInput`）、成对矩阵特征（`matrixInput`）和可选的嵌入特征（`embedInput`）——并将它们通过四个不同的处理阶段，最后分派到特定响应的预测头。
+
+```mermaid
+flowchart TB
+    subgraph Inputs
+        SEQ["seqInput<br/>(batchSize, seqLen, n_in_seq)"]
+        MAT["matrixInput<br/>(batchSize, seqLen, seqLen, n_in_matrix)"]
+        EMB["embedInput<br/>(batchSize, seqLen, n_in_embed)"]
+    end
+
+    subgraph Stage1["1. 1D ResNet / DilatedResNet"]
+        S1["ResNet or DilatedResNet<br/>conv1d_hiddens + conv1d_repeats"]
+    end
+
+    subgraph Stage2["2. Sequence-to-Matrix Transform"]
+        S2A["OuterConcatenate → MidpointFeature<br/>→ Conv2D4DistMatrix"]
+        S2B["MetaEmbeddingLayer<br/>(Seq+SS or SeqOnly)"]
+    end
+
+    subgraph Stage3["3. 2D ResNet / DilatedResNet"]
+        S3["Concatenate all 2D streams<br/>→ ResNet or DilatedResNet<br/>conv2d_hiddens + conv2d_repeats"]
+    end
+
+    subgraph Stage4["4. Response-Specific Heads"]
+        S4A["NN4LogReg<br/>(Discrete labels)"]
+        S4B["NN4Normal<br/>(Normal / LogNormal)"]
+    end
+
+    SEQ --> S1
+    S1 --> S2A
+    EMB --> S2B
+    MAT --> S3
+    S2A --> S3
+    S2B --> S3
+    S3 --> S4A
+    S3 --> S4B
+```
+
+**阶段 1** 将 1D ResNet（或 DilatedResNet）应用于序列输入，生成逐位置的隐藏表示。网络变体由 `modelSpecs['network']` 选择——可以是 `ResNet2D`/`ResNet2DV2x` 或 `DilatedResNet2D`。**阶段 2** 通过两条互补路径将 1D 输出提升到 2D 成对空间：一条是 `OuterConcatenate → MidpointFeature` 路径，通过设置 `halfWinSize=0` 的 `Conv2D4DistMatrix` 进行压缩；另一条是可选的 `MetaEmbeddingLayer`，将主序列（以及可选的预测二级结构）嵌入到成对表示中。**阶段 3** 沿特征轴将原始矩阵特征与所有阶段 2 的输出拼接，并将结果馈入 2D ResNet 或 DilatedResNet。**阶段 4** 将每个位置对的 2D 卷积输出展平，并将其路由到每个响应对应的预测头。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L219-L399), [config.py](/DL4DistancePrediction2/config.py#L181-L259)
+
+## 响应分派：离散 vs. 正态
+
+`ResNet4DistMatrix` 构造函数遍历 `modelSpecs['responses']`，并根据 `Response2LabelType()` 解析的标签类型实例化不同的预测器类：
+
+| 标签类型模式 | 预测器类 | 输出语义 |
+|---|---|---|
+| `Discrete*`（如 `Discrete25C`, `Discrete12C`） | `NN4LogReg` | 距离分箱上的 Softmax 概率 |
+| `Normal` 或 `LogNormal` | `NN4Normal` | 高斯分布的均值 ± 方差（± 相关系数） |
+
+对于离散标签，输出类的数量等于 `responseProbDims[labelType]`，该值源自标签名称中编码的分箱数（例如 `Discrete25C` → 25 个类）。对于连续标签，`n_variables` 和 `n_out` 决定了网络是仅预测均值，还是预测均值 + 方差，亦或预测均值 + 方差 + 相关系数（针对 2D 相关高斯分布）。
+
+```python
+if labelType.startswith('Discrete'):
+    predictor = NN4LogReg(rng=rng, input=selected, n_in=n_in4logreg,
+                          n_out=config.responseProbDims[labelType],
+                          n_hiddens=n_hiddens_logreg)
+elif labelType.startswith('LogNormal') or labelType.startswith('Normal'):
+    predictor = NN4Normal(rng=rng, input=selected, n_in=n_in4logreg,
+                          n_variables=config.responseValueDims[labelType],
+                          n_out=config.responseProbDims[labelType],
+                          n_hiddens=n_hiddens_logreg)
+```
+
+每个预测器的输出被重新塑形为 `(batchSize, seqLen, seqLen, valueDims)`，并在所有响应上进行拼接，形成模型最终的 `output` 和 `output_prob` 张量。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L350-L382), [config.py](/DL4DistancePrediction2/config.py#L93-L138)
+
+## 损失函数
+
+### 离散标签的交叉熵 (NN4LogReg)
+
+`NN4LogReg` 类堆叠了 `HiddenLayer` 块，其后连接一个 `LogRegLayer`。`LogRegLayer` 计算 `p_y_given_x = softmax(W·x + b)` 以及**负对数似然**损失：
+
+$$\mathcal{L}_{\text{NLL}} = -\frac{1}{N}\sum_{i=1}^{N} \log\, p(y_i \mid x_i)$$
+
+当提供 `sampleWeight` 时，损失变为**加权平均**：
+
+$$\mathcal{L}_{\text{NLL}} = -\frac{\sum_i w_i \cdot \log\, p(y_i \mid x_i)}{\sum_i w_i}$$
+
+这种加权机制对距离预测至关重要：由于近程残基对的数量远超长程接触，权重向量会上调长程接触的权重（权重 3.0–28.0）并下调近程对的权重（权重 0.2–0.5），正如 `config.weight4range` 和 `config.weight43C` 中所定义的那样。
+
+来源: [NN4LogReg.py](/DL4DistancePrediction2/NN4LogReg.py#L55-L111), [NN4LogReg.py](/DL4DistancePrediction2/NN4LogReg.py#L173-L203)
+
+### 连续标签的高斯 NLL (NN4Normal)
+
+`NN4Normal` 类将响应变量的条件分布建模为高斯分布（或二元高斯分布）。它最多输出五个参数：均值、方差和相关系数。该架构通过激活函数的选择来强制执行物理约束：
+
+| 参数 | 激活函数 | 约束 |
+|---|---|---|
+| 均值 (μ) | 无（线性） | 无约束 |
+| 方差 (σ²) | ReLU + σ²_min | 严格正数 (≥ 0.0001) |
+| 相关系数 (ρ) | tanh × ρ_max | 有界于 [−0.99, 0.99] |
+
+**一元 NLL**（`n_variables=1`）：
+
+$$\mathcal{L} = \frac{1}{2}\log(2\pi) + \frac{1}{2}\log\sigma^2 + \frac{(y - \mu)^2}{2\sigma^2}$$
+
+当 `useMeanOnly=True` 或不估计方差时，损失退化为平方误差加一个常数。
+
+**二元 NLL**（`n_variables=2`）：
+
+$$\mathcal{L} = \frac{1}{2}\sum_{k}\left(\log\sigma_k^2 + \log 2\pi\right) + \frac{1}{2}\log(1-\rho^2) + \frac{1}{2(1-\rho^2)}\left[\sum_k\frac{(y_k - \mu_k)^2}{\sigma_k^2} - 2\rho\prod_k\frac{y_k - \mu_k}{\sigma_k}\right]$$
+
+二元公式允许模型捕获来自同一残基对的两个距离相关变量（例如 Cβ–Cβ 距离和 N–O 距离）之间的相关性。
+
+来源: [NN4Normal.py](/DL4DistancePrediction2/NN4Normal.py#L78-L190), [NN4Normal.py](/DL4DistancePrediction2/NN4Normal.py#L194-L241)
+
+### ResNet4DistMatrix 中的复合损失
+
+顶层 `ResNet4DistMatrix.loss()` 方法计算一个**各响应损失向量**，每个响应对应一个标量。每个真值张量 `z` 被展平为 `(N_pairs, valueDims)`，每个权重张量 `w` 被展平为 `(N_pairs, 1)`，然后分派到相应预测器的 `.loss()` 方法：
+
+```python
+def loss(self, zList, weightList=None, useMeanOnly=False):
+    losses = []
+    for predictor, z, w in zip(self.predictors, zList, weightList):
+        zflat = flatten(z)   # (N_pairs, valueDims)
+        wflat = flatten(w)   # (N_pairs, 1)
+        losses.append( predictor.loss(zflat, useMeanOnly=useMeanOnly, sampleWeight=wflat) )
+    return T.stack(losses)   # vector of scalars
+```
+
+调用该方法的训练循环（参见[距离预测流水线](12-distance-prediction-pipeline)）使用 `modelSpecs` 中的 `w4responses` 系数组合这些各响应损失，并添加 L2 正则化：`cost = Σ w_r · loss_r + L2reg · paramL2`。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L401-L435)
+
+## 样本加权策略
+
+加权系统同时解决类别不平衡的两个轴：**序列分离范围**和**距离区间**。
+
+### 基于范围的权重
+
+残基对根据序列分离距离 |i − j| 被划分为四个范围：
+
+| 范围 | 分离距离 | 默认权重 |
+|---|---|---|
+| 长程 (LR) | ≥ 24 | 3.0 |
+| 中程 (MR) | 12 ≤ sep < 24 | 2.5 |
+| 短程 (SR) | 6 ≤ sep < 12 | 1.0 |
+| 近程 (NR) | 2 ≤ sep < 6 | 0.5 |
+
+### 距离区间权重（3 类）
+
+在每个范围内，残基对还会根据其距离类别（接触 < 8Å，中等 8–15Å，无相互作用 > 15Å）进一步加权。共有五个预设级别：
+
+| 预设 | LR 接触 | LR 中等 | LR 无相互作用 | MR 接触 | MR 中等 |
+|---|---|---|---|---|---|
+| `low` | 17 | 4 | 1 | 5 | 2 |
+| `mid` | 20.5 | 5.4 | 1 | 5.4 | 1.89 |
+| `high` | 23 | 6 | 1 | 6 | 2.5 |
+| `veryhigh` | 25 | 6 | 1 | 7 | 2.5 |
+| `exhigh` | 28 | 6 | 1 | 8 | 2.5 |
+
+预设由 `modelSpecs['LRbias']` 选择。较高的预设会放大长程对中的接触信号，这是对 3D 结构确定最具生物学意义的类别。
+
+### 针对 HB 和 Beta 的专用权重
+
+氢键和 β-配对使用专用的 2 类权重矩阵，具有极高的正类权重（例如，HB：长程接触为 600，而负类为 1），以应对这些相互作用类型的极度稀疏性。
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L140-L173)
+
+## 模型工厂：BuildModel
+
+`BuildModel()` 函数是构建完整 Theano 计算图的入口点。它创建符号输入变量，实例化 `ResNet4DistMatrix`，并可选择为训练定义标签和权重张量：
+
+```mermaid
+flowchart LR
+    A["BuildModel(modelSpecs, forTrain)"] --> B["Create symbolic inputs:<br/>x, y, xmask, ymask, xem"]
+    B --> C{"EmbeddingUsed?"}
+    C -->|Yes| D["ResNet4DistMatrix<br/>(with embedInput)"]
+    C -->|No| E["ResNet4DistMatrix<br/>(without embedInput)"]
+    D --> F1{"forTrain?"}
+    E --> F1
+    F1 -->|Yes| G["Create labelList + weightList<br/>tensors per response"]
+    F1 -->|No| H["Return empty labelList, weightList"]
+    G --> I["Return (distancePredictor,<br/>x, y, xmask, ymask, xem,<br/>labelList, weightList)"]
+    H --> I
+```
+
+标签张量的数据类型根据标签类型选择：`Discrete` 标签使用整数张量（`wtensor3`/`wtensor4`），而 `Normal`/`LogNormal` 标签使用浮点张量（`tensor3`/`tensor4`）。维度数量取决于 `responseValueDims[labelType]`——标量值为 3D 张量，向量值为 4D 张量。仅当 `modelSpecs['UseSampleWeight']` 为 `True` 时，才会创建权重张量。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L728-L774)
+
+## 误差指标与 Top 准确率
+
+除训练损失外，`ResNet4DistMatrix` 还提供了两个评估接口：
+
+- **`errors()`**：计算各响应的 0-1 错误率（离散）或 RMSE（连续），可选择使用样本加权。对于细粒度的离散标签（如 12C、25C），预测结果在计算误差前会被折叠为 3 类系统（接触 / 中等 / 无相互作用），使结果更易于解释。
+- **`TopAccuracyByRange()`**：评估排在前 L/2 个预测接触（其中 L 为蛋白质长度）的接触预测准确率，并按长程、中程和短程进行细分。它使用 `theano.scan` 独立处理批次中的每个蛋白质，然后取平均值。对于离散多类响应，将接触分箱和非接触分箱的预测概率分别求和，以生成用于排序的 2 类得分。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L437-L725)
+
+## 正则化
+
+所有层类都跟踪 `paramL1` 和 `paramL2`（其参数的 L1 和 L2 范数）。`ResNet4DistMatrix` 跨所有子层聚合这些值。训练代价函数将加权损失与 L2 正则化项结合：
+
+$$\text{cost} = \sum_r w_r \cdot \mathcal{L}_r + \lambda_{L2} \cdot \|\theta\|_2^2$$
+
+默认的 `L2reg` 系数为 `0.0001`。此外，方差特定参数通过 `params4var`、`paramL14var` 和 `paramL24var` 单独跟踪，允许在[优化器实现](11-optimizer-implementations)中描述的两阶段训练过程中，对均值和方差估计采用独立的正则化计划。
+
+<CgxTip>`Conv2D4DistMatrix` 在每次 2D 卷积后应用基于掩码的噪声抑制：使用 `T.set_subtensor` 结合二进制 `mask_matrix` 显式地将填充位置置零，防止零填充区域的梯度污染。此操作沿行和列独立应用。</CgxTip>
+
+<CgxTip>当向 `NN4Normal.loss()` 传入 `useMeanOnly=True` 时，高斯 NLL 退化为 MSE（所有方差和相关系数项均被丢弃）。这用于两阶段训练的第一阶段，即在微调方差/相关系数头之前，单独训练均值预测头。</CgxTip>
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction2/Model4DistancePrediction.py#L384-L399), [NN4Normal.py](/DL4DistancePrediction2/NN4Normal.py#L260-L264), [config.py](/DL4DistancePrediction2/config.py#L230)
+
+## 后续步骤
+
+- **[优化器实现](11-optimizer-implementations)** — 了解 Adam、AMSGrad 以及两阶段训练计划如何与此处定义的损失和正则化项相互作用。
+- **[距离预测流水线](12-distance-prediction-pipeline)** — 查看 `BuildModel()` 如何与数据加载、检查点保存及完整训练循环相集成。
+- **[配置与距离分箱](16-configuration-and-distance-bins)** — 探索定义 `NN4LogReg` 分类目标的距离分箱离散化方案（从 2C 到 52C）。
+
+---
+
+- [深入探究/训练与推理/优化器实现](https://zread.ai/j3xugit/RaptorX-Contact/11-optimizer-implementations)
+
+---
+slug:11-optimizer-implementations
+blog_type:normal
+---
+
+
+RaptorX-Contact 实现了一套完整的基于梯度的优化器，这些优化器构建在 **Theano** 符号计算框架之上。这些优化器分布在三个模块中 — `Optimizers.py`、`Adams.py` 和 `SGD_Nestrov.py` — 提供了从原始梯度下降到带有权重衰减和 Nesterov 加速的高级自适应方法的所有功能。每个优化器都会生成 **Theano 更新列表**（由共享变量及其新符号表达式组成的元组），这些列表在训练期间被 `theano.function` 直接消费，这使得它们成为计算图中不可或缺的组成部分，而非事后的参数修改器。
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L1-L291), [Adams.py](DL4DistancePrediction2/Adams.py#L1-L177), [SGD_Nestrov.py](DL4DistancePrediction2/SGD_Nestrov.py#L1-L16)
+
+## 架构：更新列表模式
+
+此代码库中的所有优化器都遵循统一的架构约定：它们接受模型参数及其符号梯度，然后返回一个 **`(shared_variable, new_value)` 元组列表**，Theano 在每次前向-反向传播后使用该列表来原子地更新状态。这是标准的 Theano 优化接口。下图展示了优化器的输出如何流入训练函数的组装过程：
+
+```mermaid
+flowchart LR
+    A["Model Parameters<br/>(theano.shared)"] --> B["Symbolic Cost<br/>(loss + regularization)"]
+    B --> C["T.grad(cost, params)<br/>Gradient Computation"]
+    C --> D["Optimizer Function<br/>(e.g., Adam, AdaDelta)"]
+    A --> D
+    D --> E["Update List<br/>[(var, new_val), ...]"]
+    E --> F["theano.function<br/>(updates=updates)"]
+    F --> G["Training Loop<br/>f() → param updates"]
+```
+
+其核心含义是，**优化器状态**（动量缓冲区、梯度平方的移动平均值、时间步计数器）本身被存储为在优化器函数内部创建的 Theano 共享变量。这些变量在训练迭代之间持久存在，而无需任何显式的 Python 端簿记 — Theano 在编译后的函数中自动管理其生命周期。
+
+<CgxTip>在训练中途切换优化器时，所有先前创建的内部共享变量（动量、方差、时间步）都会变为孤立状态。新的优化器调用会创建初始化为零的新状态变量，这实际上重置了自适应学习率的历史。这就是为什么模型检查点文件必须同时保存 `params` 和优化器的 `other_params` 或 `param_updates`，以实现真正的训练恢复。</CgxTip>
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L11-L18), [Adams.py](DL4DistancePrediction2/Adams.py#L30-L58)
+
+## 自适应学习率优化器 (Optimizers.py)
+
+`Optimizers.py` 模块提供了四个优化器，外加两个 SGD 动量变体和一个 Nesterov 实现。自适应方法 — **AdaDelta** 和 **AdaGrad** — 利用历史梯度信息自动调整每个参数的学习率，使其非常适合蛋白质距离预测中典型的稀疏、高维特征场景。
+
+### AdaDelta
+
+AdaDelta 通过维护两个指数衰减累加器来消除手动调整全局学习率的需求：一个用于平方梯度 (`Eg`)，另一个用于平方参数更新 (`Ex`)。每个参数的更新规则为：
+
+$$\Delta x_t = -\frac{\sqrt{E_{x,t-1} + \epsilon}}{\sqrt{E_{g,t} + \epsilon}} \cdot g_t$$
+
+其中 `Eg` 和 `Ex` 以衰减率 `rho`（默认为 0.95）进行更新。`epsilon`（默认为 1e-5）用于防止除以零。该函数创建两个共享变量列表 — `egs` 和 `exs` — 与输入参数的形状相匹配，并返回所有拼接的更新：梯度累加器更新、参数更新累加器更新以及参数更新本身。
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `rho` | 0.95 | 运行平均值的指数衰减率 |
+| `epsilon` | 1e-5 | 数值稳定性常量 |
+| `params` | — | 待优化的 Theano 共享变量列表 |
+| `param_shapes` | — | 每个参数对应的形状 |
+| `param_grads` | — | 每个参数的符号梯度表达式 |
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L40-L81)
+
+### AdaGrad
+
+AdaGrad 累加**平方梯度之和**（而非指数移动平均），并按照该累加和的平方根的倒数来缩放每个参数的学习率。这为不常出现的特征产生了更大的更新 — 这对于蛋白质结构预测至关重要，因为某些残基对模式很少出现但携带强烈信号。每个参数的更新为：
+
+$$\Delta x_t = -\frac{\gamma}{\sqrt{\sum_{\tau=1}^{t} g_\tau^2 + \epsilon}} \cdot g_t$$
+
+与 AdaDelta 不同，AdaGrad 保留了一个全局缩放因子 `gamma`（默认为 0.1），作为基础学习率。该函数返回更新列表和 `grad_hists` 共享变量，从而允许外部检查或持久化梯度历史。
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `gamma` | 0.1 | 基础学习率标量 |
+| `epsilon` | 1e-4 | 数值稳定性常量 |
+
+<CgxTip>AdaGrad 单调累加的分母导致学习率只会不断减小，这可能会在具有数百层的深度 ResNet 上过早地使训练停滞。AdaDelta 的指数窗口避免了这一点 — 对于像 `DilatedResNet` 这样的极深架构，推荐使用 AdaDelta。</CgxTip>
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L88-L116)
+
+## 带动量的 SGD 变体 (Optimizers.py)
+
+### GD — 原始梯度下降
+
+最简单的优化器：`param -= const_lr * param_grad`。以固定的标量学习率均匀应用于所有参数。可作为基线使用，或用于在接近收敛时的微调，因为此时自适应方法在学习率上的噪声可能会导致越过极小值。
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L123-L128)
+
+### SGDM — 动量（衰减梯度形式）
+
+SGDM 实现了**梯度的指数加权移动平均**公式，其中速度更新为 `v_t = momentum * v_{t-1} + (1 - momentum) * g_t`，参数更新为 `param -= lr * v_t`。当 `momentum=0.95`（默认值）时，这能极大地平滑梯度噪声 — 这对于在可变长度蛋白质序列上训练时遇到的噪声损失场景非常有益。`(1 - momentum)` 归一化确保了无论动量值如何，速度的幅度都与原始梯度幅度相当。
+
+该函数返回更新列表和 `param_updates` 共享变量（速度缓冲区），从而支持检查点持久化。
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `momentum` | 0.95 | 速度衰减系数；必须在 [0, 1) 范围内 |
+| `lr` | 0.01 | 学习率 |
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L130-L161)
+
+### SGDM2 — 动量（经典形式）
+
+SGDM2 使用**经典动量公式**：`v_t = momentum * v_{t-1} - lr * g_t`，并执行 `param += v_t`。这是深度学习文献中更广泛使用的变体。与 SGDM 的关键区别在于，学习率是在原始梯度进入速度缓冲区之前应用于它的，而不是在参数更新步骤中缩放速度。这改变了有效的步长动态：在收敛时，SGDM2 的有效学习率按 `lr / (1 - momentum)` 缩放，而 SGDM 的缩放比例为 `lr`。
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L163-L195)
+
+### Nesterov — Nesterov 加速梯度
+
+Nesterov 变体在**前瞻位置**计算梯度 — 实际上是在评估如果当前速度继续，参数*将会到达*的位置的梯度。该实现使用了避免显式前瞻步骤的高效重新公式化：
+
+```
+update  = momentum * v_{t-1} - lr * g_t
+update2 = momentum² * v_{t-1} - (1 + momentum) * lr * g_t
+param  += update2
+```
+
+这种“在前瞻位置评估梯度”的特性使得 Nesterov 动量在凸问题上具有理论上更优的收敛速率（对于标准 SGD 为 O(1/k²) 对比 O(1/k)），并且在经验上能更快地逃离鞍点 — 这是距离预测网络中富含鞍点的损失曲面上一种常见的失败模式。
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L198-L213)
+
+## Nesterov SGD — 面向对象变体 (SGD_Nestrov.py)
+
+`sgd_nesterov` 类为 `Optimizers.py` 中的函数式 Nesterov 实现提供了一种**面向对象**的替代方案。它将速度记忆 (`self.memory_`) 封装为实例状态，初始化为与每个参数形状相匹配的零填充 Theano 共享变量。`updates()` 方法通过显式的类接口计算相同的 Nesterov 加速逻辑：
+
+```
+update  = momentum * memory - learning_rate * grad
+update2 = momentum² * memory - (1 + momentum) * learning_rate * grad
+```
+
+当优化器需要**独立序列化**（例如，保存到模型检查点）或当多个参数组需要独立的动量状态时，基于类的设计更具优势。`Optimizers.py` 中的函数式变体会创建匿名的共享变量，这些变量很难从外部引用。
+
+| 方法 | 签名 | 返回值 |
+|--------|-----------|---------|
+| `__init__` | `(self, params)` | 初始化 `self.memory_` 列表 |
+| `updates` | `(self, params, grads, learning_rate, momentum)` | Theano 更新列表 |
+
+来源: [SGD_Nestrov.py](DL4DistancePrediction2/SGD_Nestrov.py#L1-L16)
+
+## Adam 家族优化器 (Adams.py)
+
+`Adams.py` 模块实现了 Adam 优化器的四种变体，均采用 MIT 许可证（原作者 Alec Radford，2015 年）。这些是**生产训练流程中使用的主要优化器** — `NN4LogReg.py` 直接从此模块导入 `Adam`。Adam 结合了动量（一阶矩）与自适应的逐参数学习率（二阶矩），并针对早期训练步骤包含了**偏差校正**，因为此时指数移动平均值会偏向于零。
+
+### 核心 Adam 更新机制
+
+这四种变体共享相同的基础更新结构，仅在二阶矩的处理方式以及是否应用权重衰减上有所不同：
+
+```mermaid
+flowchart TD
+    A["Input: params, grads"] --> B["i_t = i + 1<br/>(timestep increment)"]
+    B --> C["Bias Correction:<br/>lr_t = lr × √(1-β₂ᵢ) / (1-β₁ᵢ)"]
+    C --> D["First Moment:<br/>m_t = β₁·g + (1-β₁)·m"]
+    D --> E{"Variant?"}
+    E -->|"Adam / AdamW"| F["Second Moment:<br/>v_t = β₂·g² + (1-β₂)·v"]
+    E -->|"AMSGrad / AdamWAMS"| G["Second Moment + v̂:<br/>v_t = β₂·g² + (1-β₂)·v<br/>v̂_t = max(v̂, v_t)"]
+    F --> H["g_t = m_t / (√v_t + ε)"]
+    G --> I["g_t = m_t / (√v̂_t + ε)"]
+    H --> J{"Weight Decay?"}
+    I --> J
+    J -->|"No"| K["p_t = p - lr_t · g_t"]
+    J -->|"Yes"| L["p_t = p - lr_t · g_t - lr·λ·d"]
+```
+
+### Adam
+
+带有偏差校正学习率的标准 Adam 优化器。其默认超参数（`lr=0.0002`、`b1=0.1`、`b2=0.001`）与常见的 Kingma 默认值（`b1=0.9`、`b2=0.999`）显著不同：较小的 `b1` 和 `b2` 值为**当前梯度赋予更多权重**，而不是历史平均值，从而以更嘈杂的更新为代价产生了更快的适应性。这符合距离预测的需求，因为当不同蛋白质长度主导不同的迷你批次时，梯度统计信息会发生变化。
+
+该函数返回 `(updates, other_params)`，其中 `other_params` 包含时间步计数器 `i`，以及每个参数的一阶矩 (`m`) 和二阶矩 (`v`) 共享变量 — 这些都是模型检查点持久化所必需的。
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `lr` | 0.0002 | 步长 |
+| `b1` | 0.1 | 一阶矩衰减率（梯度动量） |
+| `b2` | 0.001 | 二阶矩衰减率（平方梯度） |
+| `e` | 1e-8 | 数值稳定性常量 |
+
+来源: [Adams.py](DL4DistancePrediction2/Adams.py#L30-L58)
+
+### AMSGrad
+
+AMSGrad 通过维护一个 `v_hat` 变量来解决 Adam 的**非收敛问题**，该变量是所有历史二阶矩估计的逐元素最大值：`v_hat_t = max(v_hat_{t-1}, v_t)`。这保证了自适应学习率是单调非递增的，恢复了标准 Adam 可能违反的收敛保证。`v_hat` 共享变量被初始化为零，并通过 `T.maximum(v_hat, v_t)` 进行更新。现在，每个参数携带三个状态变量：`m`、`v` 和 `v_hat`。
+
+来源: [Adams.py](DL4DistancePrediction2/Adams.py#L60-L93)
+
+### AdamW — 带有解耦权重衰减的 Adam
+
+AdamW 将**L2 正则化作为解耦的权重衰减**实现，而不是将其添加到梯度中。参数更新变为 `p_t = p - lr_t * g_t - lr * l2reg * d`，其中 `d` 是参数本身（当 `pdecay` 为 `None` 时）或自定义衰减掩码。与将 L2 添加到损失中的关键区别在于，解耦的权重衰减**均匀应用，不受自适应学习率的影响**，避免了有充分记录的交互作用，即 Adam 的自适应缩放会削弱对具有大梯度的参数的有效正则化。
+
+`pdecay` 参数允许选择性权重衰减：当提供该参数时，每个元素为 `0`（对该参数无衰减，例如偏置项）或参数本身（对权重完全衰减）。当 `pdecay` 为 `None` 时，所有参数均同等衰减。
+
+| 参数 | 默认值 | 作用 |
+|-----------|---------|------|
+| `pdecay` | None | 逐参数衰减掩码（0 = 无衰减，param = 完全衰减） |
+| `l2reg` | 0.1 | 权重衰减系数 |
+
+来源: [Adams.py](DL4DistancePrediction2/Adams.py#L96-L132)
+
+### AdamWAMS — AdamW + AMSGrad
+
+功能最完备的变体，结合了**AMSGrad 的收敛保证**（最大二阶矩跟踪）与**AdamW 的解耦权重衰减**。这是理论上最强的选择：它避免了 Adam 的非收敛病态，同时保持了适当的正则化缩放。每个参数跟踪四个状态变量：`m`、`v`、`v_hat` 以及全局时间步 `i`。代价是与标准 Adam 相比，每个参数的内存增加约 33%（四个共享变量对比三个），这对于 RaptorX-Contact 中可能包含数百万参数的大型 ResNet 模型来说意义重大。
+
+来源: [Adams.py](DL4DistancePrediction2/Adams.py#L135-L175)
+
+## 优化器对比矩阵
+
+| 优化器 | 模块 | 自适应 LR | 动量 | 偏差校正 | 权重衰减 | 收敛保证 | 返回类型 |
+|-----------|--------|-------------|----------|-----------------|--------------|----------------------|-------------|
+| **GD** | Optimizers | ✗ | ✗ | — | ✗ | ✗ (凸) | `updates` |
+| **SGDM** | Optimizers | ✗ | ✓ (0.95) | — | ✗ | ✗ (凸) | `updates, param_updates` |
+| **SGDM2** | Optimizers | ✗ | ✓ (0.90) | — | ✗ | ✗ (凸) | `updates, param_updates` |
+| **Nesterov** | Optimizers | ✗ | ✓ (Nesterov) | — | ✗ | ✓ O(1/k²) 凸 | `updates, param_updates` |
+| **sgd_nesterov** | SGD_Nestrov | ✗ | ✓ (Nesterov) | — | ✗ | ✓ O(1/k²) 凸 | `updates` |
+| **AdaGrad** | Optimizers | ✓ (累加) | ✗ | — | ✗ | ✗ | `updates, grad_hists` |
+| **AdaDelta** | Optimizers | ✓ (窗口化) | ✗ | — | ✗ | — | `updates` |
+| **Adam** | Adams | ✓ (EMA) | ✓ | ✓ | ✗ | ✗ | `updates, other_params` |
+| **AMSGrad** | Adams | ✓ (EMA+max) | ✓ | ✓ | ✗ | ✓ | `updates, other_params` |
+| **AdamW** | Adams | ✓ (EMA) | ✓ | ✓ | ✓ (解耦) | ✗ | `updates, other_params` |
+| **AdamWAMS** | Adams | ✓ (EMA+max) | ✓ | ✓ | ✓ (解耦) | ✓ | `updates, other_params` |
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L1-L291), [Adams.py](DL4DistancePrediction2/Adams.py#L1-L177), [SGD_Nestrov.py](DL4DistancePrediction2/SGD_Nestrov.py#L1-L16)
+
+## 与训练流程的集成
+
+在 RaptorX-Contact 训练架构中，优化器在两个不同层级被消费。在**高层模型组装**阶段，`mlLogReg.py` 从 `Optimizers.py` 导入 `AdaGrad`、`AdaDelta`、`SGDMomentum`（引用为 `SGDM`）和 `GD`，用于其多层逻辑回归训练函数。在**生产级距离预测层**，`NN4LogReg.py` 从 `Adams.py` 导入 `Adam` — 这是在训练驱动最终距离矩阵预测的深度 ResNet 和 DilatedResNet 架构时使用的优化器。
+
+集成模式遵循以下顺序：(1) `Model4DistancePrediction.BuildModel()` 构建符号计算图并返回带有 `params` 属性的模型对象；(2) 由模型的损失加上 L1/L2 正则化构成代价表达式；(3) `T.grad(cost, params)` 计算符号梯度；(4) 选定的优化器函数将 `(params, grads)` 转换为更新列表；(5) `theano.function(inputs, outputs, updates=updates)` 编译训练函数。这在第一节的架构图中已说明。
+
+来源: [mlLogReg.py](DL4DistancePrediction2/mlLogReg.py#L14-L14), [NN4LogReg.py](DL4DistancePrediction2/NN4LogReg.py#L15-L15), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L728-L774)
+
+## 模拟与可视化工具
+
+`Optimizers.py` 包含内置的模拟工具，用于经验性地比较优化器行为。`make_func()` 辅助函数编译一个 Theano 函数，在给定参数、代价和更新的情况下执行一步优化。`simulate()` 函数运行此编译后的函数 `n_epoch_max` 次迭代（默认为 100），收集参数轨迹。`testGDVariants()` 函数展示了完整的比较工作流：它定义了**鞍点函数** `y² - x²`，在其上运行 AdaDelta、AdaGrad 和恒定学习率的 GD，并使用 matplotlib 并排绘制结果轨迹。选择鞍点曲面的原因是，它暴露了不同优化器如何沿一个轴在梯度指向远离极小值的区域中导航 — 这是深度网络训练挑战的一个缩影。
+
+来源: [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L11-L33), [Optimizers.py](DL4DistancePrediction2/Optimizers.py#L216-L291)
+
+## 为距离预测选择优化器
+
+对于深度 ResNet 或 DilatedResNet 距离模型的**初始训练**，带有默认 `b1=0.1, b2=0.001` 的 **Adam**（来自 `Adams.py`）是经过验证的主力 — 这正是 `NN4LogReg.py` 直接导入并使用的优化器。对于收敛保证至关重要的**长时训练运行**，请升级到 **AdamWAMS**，它结合了 AMSGrad 单调学习率的安全性与适当的解耦权重衰减。对于**微调**或在过拟合风险较高的小数据集上训练时，带有非平凡 `l2reg` 的 **AdamW** 提供了比将 L2 添加到损失中更好的正则化控制。SGD 动量变体（`SGDM2`、`Nesterov`）最好保留用于基于 Adam 预训练后的**最终收敛精炼**，此时它们更简单的动态可以找到更尖锐的极小值。
+
+要了解优化器选择如何与损失函数和模型架构交互，请参阅[模型构建与损失](10-model-building-and-loss)和[用于距离预测的深度 ResNet](4-deep-resnet-for-distance)。有关端到端的训练工作流，请参阅[距离预测流程](12-distance-prediction-pipeline)。
+
+---
+
+- [深入探究/训练与推理/距离预测流水线](https://zread.ai/j3xugit/RaptorX-Contact/12-distance-prediction-pipeline)
+
+---
+slug:12-distance-prediction-pipeline
+blog_type:normal
+---
+
+
+距离预测流水线是生产推理路径，它将原始蛋白质特征文件转换为预测的残基间距离概率矩阵和接触图。该流水线由 `RunDistancePredictor2.py` 编排，集成了模型反序列化、Theano 计算图编译、逐批次预测、多模型集成平均以及距离到接触概率的转换，形成了一个内存高效的工作流。此流水线是在新蛋白质序列上部署已训练的 RaptorX-Contact 模型的主要入口点。
+
+## 流水线架构概述
+
+该流水线遵循从特征文件经编译的 Theano 函数到每个蛋白质结果文件的线性数据流。关键的架构决策是**模型优先迭代**：每个模型被加载、编译并执行完毕后，再处理下一个模型，以确保在任一时刻内存中仅驻留一个模型的权重和计算图。来自多个模型的预测结果以累加和的形式收集，并在最后进行平均，使得该方法能够扩展到大型模型集成，而不会导致内存成比例增长。
+
+```mermaid
+flowchart TD
+    A["CLI: 模型文件 + 特征文件"] --> B["从 PKL 加载并验证所有模型"]
+    B --> C{"对于每个模型"}
+    C --> D["BuildModel: 编译 Theano 预测函数"]
+    D --> E["LoadDistanceFeatures: 解析蛋白质数据"]
+    E --> F["验证特征维度与模型规格"]
+    F --> G["SplitData2Batches: 按长度排序、填充、分批"]
+    G --> H{"对于每个批次"}
+    H --> I["运行 Theano 预测函数"]
+    I --> J["从输出张量中切片响应通道"]
+    J --> K["Unpad: 移除掩码位置"]
+    K --> L["将累加和存入 allresults 字典"]
+    L --> H
+    H --> M["删除模型 + 数据, gc.collect"]
+    M --> C
+    C --> N["对跨模型的累加和求平均"]
+    N --> O["对对称原子对强制对称"]
+    O --> P["转换距离概率 → 接触概率"]
+    P --> Q["保存逐蛋白质的 .predictedDistMatrix.pkl"]
+    Q --> R{"提供了真实值?"}
+    R -->|Yes| S["EvaluateContactPredictions"]
+    R -->|No| T["返回结果"]
+    S --> T
+```
+
+来源: [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L1-L323), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L728-L774)
+
+## 命令行界面
+
+该流水线作为独立脚本调用，带有四个标志。模型文件和预测特征文件是必需的；保存文件夹和真实值文件夹是可选的。
+
+| 标志 | 长格式 | 是否必需 | 描述 |
+|------|-----------|----------|-------------|
+| `-m` | `--model` | 是 | 一个或多个模型 PKL 文件，用分号分隔 |
+| `-p` | `--predictfile` | 是 | 一个或多个蛋白质特征 PKL 文件，用分号分隔 |
+| `-d` | `--savefolder` | 否 | 输出文件的目录（默认：当前工作目录） |
+| `-g` | `--nativefolder` | 否 | 用于精度评估的天然距离矩阵目录 |
+
+**调用示例:**
+```bash
+python RunDistancePredictor2.py \
+  -m model1.pkl;model2.pkl;model3.pkl \
+  -p features.pkl \
+  -d ./results \
+  -g ./native_distances
+```
+
+多个模型文件实现了一种**集成策略**，而无需所有模型共享相同的响应集——不同的模型可以预测不同的原子对类型或距离标签类型，流水线通过响应键将它们合并。
+
+来源: [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L26-L35), [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L250-L321)
+
+## 阶段 1: 模型加载与验证
+
+`PredictDistMatrix` 函数首先通过 `cPickle` 反序列化所有模型文件。每个模型文件是一个字典，包含网络架构规格 (`model['network']`)、响应变量列表 (`model['responses']`)、已学习的参数值 (`model['paramValues']`)、标签参考概率 (`model['labelRefProbs']`) 和标签权重 (`model['weight4labels']`)。
+
+**跨模型一致性检查**验证所有模型是否将相同的标签类型分配给相同的原子对类型。例如，如果一个模型对 Cβ–Cβ 对预测 `CbCb_Discrete25C`，而另一个模型预测 `CbCb_Discrete12C`，流水线将发出警告并退出——对同一响应混合标签类型会使平均无定义。
+
+来源: [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L37-L56)
+
+## 阶段 2: 模型编译与推理
+
+对于每个模型，流水线执行一个五步序列：
+
+1. **构建计算图** — `Model4DistancePrediction.BuildModel(model, forTrain=False)` 构造一个 `ResNet4DistMatrix` 实例并返回符号 Theano 变量 `(distancePredictor, x, y, xmask, ymask, xem, labelList, weightList)`。当 `forTrain=False` 时，标签和权重列表为空，从而生成一个纯推理图。
+
+2. **编译预测函数** — `theano.function(inputVariables, pred_prob)` 编译该图。输入变量为 `[x, y, xmask, ymask]` 加上可选的 `xem`（嵌入输入）。输出 `pred_prob` 是所有响应的拼接预测概率参数。
+
+3. **加载参数值** — 通过 `utils.Compatible()` 进行兼容性检查，确保模型的参数形状与网络架构匹配，然后 `[p.set_value(v) for p, v in zip(distancePredictor.params, model['paramValues'])]` 注入已学习的权重。
+
+4. **加载并验证特征** — `DataProcessor.LoadDistanceFeatures()` 根据模型的规格解析蛋白质特征 PKL 文件。随机抽查验证 `model['n_in_seq']` 是否与序列特征维度匹配，`model['n_in_matrix']` 是否与成对特征维度匹配，以及 `model['n_in_embed']` 是否与嵌入维度匹配。
+
+5. **分批与预测** — `DataProcessor.SplitData2Batches()` 按序列长度（降序）对蛋白质排序，将它们分组成批次，其中每个批次的总数据点（`batchSize × seqLen²`）保持在阈值（默认 624）以下，并在每个批次内以右下对齐方式填充较短的序列。编译好的 Theano 函数按批次调用。
+
+来源: [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L67-L159), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L728-L774)
+
+### 响应通道切片
+
+Theano 预测函数返回一个形状为 `(batchSize, seqLen, seqLen, sum_of_prob_dims)` 的 4D 张量，其中最后一个维度拼接了所有响应的概率参数。流水线基于 `config.responseProbDims[Response2LabelType(res)]` 计算每个响应的累积起始和结束位置，并据此对输出张量进行切片：
+
+```python
+dims = [ config.responseProbDims[ Response2LabelType(res) ] for res in model['responses'] ]
+endPositions = np.cumsum(dims)
+startPositions = endPositions - dims
+batchres = result[:, :, :, start:end ]
+```
+
+此设计允许单次前向传播同时预测多种原子对类型（例如 CbCb, CaCa, CgCg），而无需单独调用模型。
+
+来源: [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L123-L153)
+
+### 掩码移除与累加
+
+切片后，通过索引未掩码区域 `probMatrix[maxSeqLen-seqLen:, maxSeqLen-seqLen:, :]` 移除填充位置。每个蛋白质的清理结果作为**运行总和**累加到 `allresults[name][response]` 中，而不是以列表形式存储——这是关键的内存优化，允许许多深度模型的集成实现扩展。并行计数器 `numModels[name][response]` 跟踪对每个总和贡献的模型数量。
+
+来源: [RunDistancePredictor2.py](DL4DistancePredictor2/RunDistancePredictor2.py#L143-L153)
+
+### 垃圾回收
+
+在一个模型的所有批次处理完毕后，预测函数、特征数据和批次数据将被显式删除，并调用 `gc.collect()`。这确保在加载下一个模型之前释放 Theano 函数图及相关的 GPU/CPU 内存，使该流水线适合在 GPU 内存有限的情况下进行大规模批量预测。
+
+来源: [RunDistancePredictor2.py](DL4DistancePredictor2/RunDistancePredictor2.py#L156-L159)
+
+## 阶段 3: 集成平均与对称化
+
+所有模型迭代完毕后，累加和除以其模型计数，生成最终的平均概率矩阵：
+
+```python
+finalresults[name][response] = allresults[name][response] / numModels[name][response]
+```
+
+对于对称原子对类型（`CbCb`, `CaCa`, `CgCg`, `Beta`），流水线通过与转置矩阵平均来强制矩阵对称：
+
+```python
+if config.IsSymmetricAPT(apt):
+    finalresults[name][response] = (
+        finalresults[name][response] + 
+        np.transpose(finalresults[name][response], (1, 0, 2))
+    ) / 2.
+```
+
+这种事后对称化通过调和位置 (i, j) 和 (j, i) 处的独立预测，略微提高了预测精度。
+
+来源: [RunDistancePredictor2.py](DL4DistancePredictor2/RunDistancePredictor2.py#L162-L176), [config.py](DL4DistancePrediction2/config.py#L34-L35)
+
+## 阶段 4: 距离到接触的转换
+
+流水线将预测的距离概率矩阵转换为二值接触概率矩阵。转换策略取决于每个响应的标签类型：
+
+| 标签类型 | 转换方法 | 公式 |
+|------------|-------------------|---------|
+| `Discrete*` (例如 25C, 12C) | 对接触阈值以下的区间求和 | `∑ prob[:, :, :labelOf8]` |
+| `Normal*` | 拟合正态分布的 CDF | `norm(μ, σ).cdf(8.0)` |
+| `LogNormal*` | 拟合对数正态分布的 CDF | `norm(μ, σ).cdf(ln(8.0))` |
+| `HB` / `Beta` | 直接概率 | `prob[:, :, 0]` |
+
+对于离散标签，`DistanceUtils.LabelsOfOneDistance(config.ContactDefinition, config.distCutoffs[subType])` 确定哪些区间对应于接触截断值（8.0 Å）以下的距离。接触概率即为这些区间中概率的总和。对于连续分布，`scipy.stats.norm.cdf()` 提供累积概率。
+
+来源: [RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L200-L231), [DistanceUtils.py](DL4DistancePrediction2/DistanceUtils.py#L237-L239)
+
+## 阶段 5: 结果序列化
+
+对于每个蛋白质，流水线写入一个名为 `{proteinName}.predictedDistMatrix.pkl` 的 PKL 文件，包含一个 6 元组：
+
+| 索引 | 内容 | 类型 | 描述 |
+|-------|---------|------|-------------|
+| 0 | `name` | str | 蛋白质标识符 |
+| 1 | `sequence` | str | 主氨基酸序列 |
+| 2 | `results` | dict | `{response: L×L×numProbDims ndarray}` 平均距离概率 |
+| 3 | `contactMatrices` | dict | `{apt: L×L ndarray}` 预测的接触概率 |
+| 4 | `finalLabelWeights` | dict | `{apt: weight_array}` 平均标签权重 |
+| 5 | `finalLabelDistributions` | dict | `{apt: prob_array}` 平均参考标签分布 |
+
+标签权重和分布是在预测每个响应的所有模型中求平均的，提供了下游距离势能生成或 CASP 格式输出所需的校准信息。
+
+来源: [RunDistancePredictor2.py](DL4DistancePredictor2/RunDistancePredictor2.py#L178-L247)
+
+## 阶段 6: 可选的接触评估
+
+当 `-g` 标志提供真实值文件夹时，流水线调用 `ContactUtils.EvaluateContactPredictions()` 将预测的接触矩阵与天然距离矩阵进行比较。这计算了每个范围（长、中、短）的 top-L/k 精度指标，提供了对预测质量的即时反馈，而无需单独的评估步骤。
+
+来源: [RunDistancePredictor2.py](DL4DistancePredictor2/RunDistancePredictor2.py#L310-L317), [ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L1-L200)
+
+## 流水线内的数据处理
+
+### 特征组装
+
+`DataProcessor.LoadDistanceFeatures()` 将原始特征字典转换为模型可使用的格式。组装过程为每个蛋白质构建两类特征：
+
+**序列特征**沿特征轴拼接：独热编码 → SS3（如果 `UseSS`）→ ACC（如果 `UseACC`）→ PSSM（如果 `UsePSSM`）→ DISO（如果 `UseDisorder`）→ 膜特异性特征（如果 `UseMPSpecificFeatures`）→ 模板相似性得分（如果 `UseTemplate`）。
+
+**成对特征**沿通道轴堆叠：位置特征 (`min(1, |i−j|/30)`) → 立方根特征 (`∛|i−j|`) → CCMpred Z-得分（如果 `UseCCM`）→ PSICOV Z-得分（如果 `UsePSICOV`）→ 其他成对特征 → 模板距离矩阵（如果 `UseTemplate`）。
+
+当 `config.EmbeddingUsed()` 为真时，嵌入特征将单独准备，可以是单独的独热编码（`SeqOnly` 模式），也可以是通过逐行外积与二级结构组合（`Seq+SS` 模式）。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L111-L337)
+
+### 批处理策略
+
+`SplitData2Batches()` 实现了**按长度排序的打包**策略。蛋白质按序列长度从大到小排序，然后被分组成批次，其中 `batchSize = min(remaining, numDataPoints / seqLen²)`。这确保每个批次的总元素大致保持恒定，在不同长度蛋白质的批次间平衡 GPU 利用率。
+
+在每个批次内，`AssembleOneBatch()` 将所有矩阵以最大序列长度进行右下对齐，左/上填充用零填充。二值掩码矩阵 `M1d` 和 `M2d` 指示哪些位置包含真实数据，哪些是填充，从而允许网络的卷积层抑制来自填充位置的噪声。
+
+来源: [DataProcessor.py](DL4DistancePrediction2/DataProcessor.py#L558-L667)
+
+## 推理时的模型构建
+
+`BuildModel(modelSpecs, forTrain=False)` 构造 `ResNet4DistMatrix` 类，该类将完整的网络架构连接在一起：
+
+1. **1D 序列 ResNet** — 根据 `model['network']` 类型，通过 `ResNet` 或 `DilatedResNet` 处理序列特征
+2. **序列到矩阵的转换** — 通过 `MidpointFeature` + `OuterCat` 压缩和/或用于序列/二级结构嵌入的 `MetaEmbeddingLayer`，将 1D 特征转换为 2D 成对特征
+3. **2D 矩阵 ResNet** — 通过深度 2D 残差块处理拼接的成对特征（输入成对 + 转换后的序列）
+4. **逐响应预测头** — 每个响应都有自己的头：离散标签使用 `NN4LogReg`（距离区间的 softmax 分类），连续标签使用 `NN4Normal`（高斯/对数高斯参数预测）
+
+输出概率张量沿最后一个维度拼接所有响应头，使单次前向传播能够同时预测所有响应。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L219-L399), [Model4DistancePrediction.py](DL4DistancePrediction2/Model4DistancePrediction.py#L728-L774)
+
+<CgxTip>流水线以运行总和的形式累加预测结果（`allresults[name][response] += res4one`），而不是追加到列表中。在大型蛋白质集上集成多个模型时，这会将峰值内存从 O(models × proteins × L²) 降低到 O(proteins × L²)，这是生产级推理的关键优化。</CgxTip>
+
+<CgxTip>`SplitData2Batches` 函数按长度降序对蛋白质排序，并计算 `batchSize = numDataPoints / seqLen²`。由于第一个（最长的）蛋白质决定了批次大小，后续较短的蛋白质可能允许每个批次容纳更多序列。如果你的蛋白质集长度变化很大，考虑将其拆分为按长度分层的组，以提高 GPU 利用率。</CgxTip>
+
+## 流水线数据流摘要
+
+下表追踪了单个蛋白质的数据流经所有流水线阶段的过程：
+
+| 阶段 | 输入形状 | 输出形状 | 操作 |
+|-------|-------------|--------------|-----------|
+| 特征加载 | PKL 字典 | `seqFeatures: (L, F_seq)`, `matrixFeatures: (L, L, F_mat)` | 拼接原始特征 |
+| 批次组装 | 变长蛋白质 | `X1d: (B, L_max, F_seq)`, `X2d: (B, L_max, L_max, F_mat)` | 填充 + 掩码 |
+| Theano 预测 | 批处理张量 | `result: (B, L_max, L_max, ΣprobDims)` | 完整前向传播 |
+| 通道切片 | 拼接的输出 | `batchres: (B, L_max, L_max, probDims_r)` | 逐响应切片 |
+| 掩码移除 | 填充结果 | `res4one: (L, L, probDims_r)` | 索引有效区域 |
+| 模型平均 | 预测列表 | `final: (L, L, probDims_r)` | 总和 ÷ 计数 |
+| 对称化 | 非对称矩阵 | `symmetric: (L, L, probDims_r)` | (M + Mᵀ) / 2 |
+| 接触转换 | 距离概率 | `contact: (L, L)` | 区间求和 / CDF |
+
+## 相关页面
+
+关于流水线实例化的神经网络架构，请参阅 [Deep ResNet for Distance](4-deep-resnet-for-distance) 和 [Dilated ResNet Variants](5-dilated-resnet-variants)。有关输入特征如何构建的详细信息，请参阅 [Input Feature Specification](7-input-feature-specification) 和 [Data Loading and Processing](8-data-loading-and-processing)。关于模型构建和损失函数设计，请参阅 [Model Building and Loss](10-model-building-and-loss)。有关预测后的精度评估，请参阅 [Contact Accuracy Evaluation](13-contact-accuracy-evaluation) 和 [Distance Accuracy and MCC](14-distance-accuracy-and-mcc)。
+
+---
+
+## 评估与指标
+
+- [深入探究/评估与指标/接触精度评估](https://zread.ai/j3xugit/RaptorX-Contact/13-contact-accuracy-evaluation)
+
+---
+slug:13-contact-accuracy-evaluation
+blog_type:normal
+---
+
+
+RaptorX-Contact 为接触预测准确性实现了一个**双指标评估框架**：**Top-L 精度**（CASP 和 CAMEO 基准测试中的主要指标）和 **MCC/F1 二分类**指标。两者均基于预测接触概率矩阵与真实距离矩阵之间的基本比较，但它们回答了不同的问题——Top-L 问的是“*在你最自信的预测中，有多少是正确的？*”，而 MCC/F1 问的是“*在所有残基对中，你的二分类在给定阈值下的表现如何？*”。整个评估流程由 `ContactUtils.py` 编排，核心指标计算委托给 `Metrics.py`。
+
+## 接触定义与序列间距范围
+
+**接触**被定义为一对 Cβ–Cβ 距离低于 **8.0 Å** 的残基（在配置中设定为 `ContactDefinition = 8.001`）。对于氢键（HB）预测，截断距离扩展至 `MaxHBDistance = 9.5` Å，对于 β-配对预测扩展至 `MaxBetaDistance = 8.0` Å。真实距离矩阵使用 **−1** 标记无效条目（缺乏 3D 坐标的残基），任何低于截断值的正值均被视为真实接触。
+
+残基对被划分为四种**序列间距范围**，这至关重要，因为长程接触对 3D 结构确定的信息量最大，但也最难预测：
+
+| 范围 | 分隔符 | 偏移边界 | CASP 惯例 |
+|-------|-----------|----------------|-----------------|
+| **超长** | `mask_ER` | \|i − j\| ≥ 48 | 非标准 CASP 范围 |
+| **长** | `mask_LR` | \|i − j\| ≥ 24 | 长程 |
+| **中** | `mask_MR` | 12 ≤ \|i − j\| < 24 | 中程 |
+| **短** | `mask_SR` | 6 ≤ \|i − j\| < 12 | 短程 |
+
+\|i − j\| < 6 的残基对（**近程**）被完全排除在评估之外，因为这些简单共定位的残基不具有结构信息量。这些边界与训练和评估中使用的 `RangeBoundaries = [24, 12, 6, 2]` 配置保持一致。
+
+来源：[ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L221-L250), [config.py](/DL4DistancePrediction2/config.py#L137-L142)
+
+## Top-L 精度：核心准确性指标
+
+**`TopAccuracy`** 函数是主要的评估方法，用于计算所有间距范围下多个 Top-L 分数的精度。给定预测接触概率矩阵 `pred` (L × L) 和真实距离矩阵 `truth` (L × L)，算法步骤如下：
+
+1. 通过 `np.dstack((pred, truth))` 将预测值和真实值**堆叠**成配对数组
+2. 使用带有适当对角线偏移量的 `np.triu`，为每个间距范围（ER, LR, MR, MLR, SR）**构建二进制掩码**
+3. 对于每个掩码，**提取**配对值，然后按预测概率降序**排序**
+4. 对于每个比率 *r* ∈ {1, 0.5, 0.2, 0.1}，取前 ⌊L × r⌋ 个预测并计算**精度** = (真实接触数) / (顶部预测数)
+
+这会生成一个 **20 元素精度数组**——5 个范围 × 4 个比率——编码了预测质量的丰富多分辨率视图。默认评估顺序为：超长 → 长 → 中 → 长+中 → 短，每个均在 Top-L/1、Top-L/2、Top-L/5 和 Top-L/10 下评估。
+
+```mermaid
+flowchart TD
+    A["pred (L×L prob matrix)"] --> C["np.dstack((pred, truth))"]
+    B["truth (L×L dist matrix)"] --> C
+    C --> D{"For each range mask"}
+    D --> E["Extract paired values"]
+    E --> F["Sort by descending pred prob"]
+    F --> G{"For each ratio r"}
+    G --> H["Take top ⌊L × r⌋ pairs"]
+    H --> I["Count true contacts<br/>(0 < dist < 8Å)"]
+    I --> J["Precision = correct / top"]
+    J --> K["20-element accuracy array<br/>(5 ranges × 4 ratios)"]
+```
+
+实际的调用模式非常简单：`CalcContactPredAccuracy.py` 加载两个文本格式的矩阵（预测和真实值），调用 `TopAccuracy`，并打印包含目标名称、序列长度和所有 20 个精度值的格式化结果字符串。
+
+来源：[ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L248-L290), [CalcContactPredAccuracy.py](/DL4DistancePrediction2/CalcContactPredAccuracy.py#L1-L44)
+
+## MCC 和 F1：二分类指标
+
+**`CalcMCCF1`** 函数在给定的概率截断值下，将接触预测作为二分类问题进行评估。它计算 **Matthews 相关系数（MCC）** 和 **F1 分数**，以及它们的组件统计量（TP、FP、TN、FN、精度、召回率），针对三种间距范围：长（≥24）、长+中（≥12）和 短+中+长（≥6）。
+
+分类逻辑使用了一种巧妙的编码技巧：计算 `pred_truth = pred_binary * 2 + truth_binary`，产生四个不同的整数值（0=TN, 1=FN, 2=FP, 3=TP），可以通过 `np.bincount` 高效计数。这避免了显式基于循环的列联表构建。
+
+**`Metrics.py`** 中的原始指标计算遵循标准公式，并在分母中添加了一个小常数 ε = 0.000001 以保证数值稳定性：
+
+| 指标 | 公式 |
+|--------|---------|
+| **MCC** | (TP·TN − FP·FN) / √((TP+FP)(TP+FN)(TN+FP)(TN+FN) + ε) |
+| **精度** | TP / (TP + FP + ε) |
+| **召回率** | TP / (TP + FN + ε) |
+| **F1** | 2·精度·召回率 / (精度 + 召回率 + ε) |
+
+`CalcMCCF1` 函数返回一个 **24 元素数组**：对于 3 个范围中的每一个，输出 [MCC, TP, FP, TN, FN, F1, 精度, 召回率]。批处理变体（`BatchCalcMCCF1.py`）以 0.01 的步长将概率截断值从 0.20 扫描至 0.59，同时计算**逐目标平均**（跨蛋白质的平均 MCC/F1）和**逐对平均**（由平均的 TP/FP/TN/FN 计数计算出的 MCC/F1）——这两种聚合策略可能会产生不同的排名。
+
+来源：[ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L203-L246), [Metrics.py](/DL4DistancePrediction2/Metrics.py#L1-L17), [BatchCalcMCCF1.py](/DL4DistancePrediction2/BatchCalcMCCF1.py#L1-L63)
+
+## 距离到接触概率的转换
+
+接触概率矩阵不是直接训练的——它们是**从预测的距离概率分布中推导出来的**。`Distance2Contact` 函数通过对所有对应于接触的距离区间求和概率质量来执行此转换：
+
+```python
+contactProb = np.sum(distProb[:, :, :labelOf8], axis=2)
+```
+
+此处 `labelOf8` 默认为 **1**，意味着只有第一个距离区间（代表距离 < 8 Å）对接触概率有贡献。距离概率矩阵 `distProb` 的形状为 (L, L, numBins)，生成的 `contactProb` 形状为 (L, L)。此转换在批处理评估流程读取 `.predictedDistMatrix.pkl` 文件时自动应用，提取 `pred[3]`（预测元组的第 4 个元素，即预计算的接触概率矩阵）。
+
+来源：[ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L157-L163), [BatchEvaluateContactAccuracy.py](/DL4DistancePrediction2/BatchEvaluateContactAccuracy.py#L62-L69)
+
+## 批处理评估流程
+
+**`BatchEvaluateContactAccuracy`** 脚本编排了整个蛋白质列表的评估。其工作流分为三个阶段进行：
+
+```mermaid
+flowchart LR
+    A["proteinListFile"] --> B["Load protein names"]
+    C["predFolder"] --> D["Load PKL predictions<br/>per protein"]
+    E["nativefolder"] --> F["EvaluateContactPredictions()"]
+    D --> F
+    B --> D
+    F --> G["avgacc: average<br/>across all proteins"]
+    F --> H["allacc: per-protein<br/>detailed results"]
+    G --> I["Print summary"]
+    H --> I
+```
+
+该脚本通过 `fileSuffix` 参数支持两种预测文件格式：
+
+| 文件后缀 | 格式 | 接触矩阵提取 |
+|-------------|--------|--------------------------|
+| `.predictedDistMatrix.pkl`（默认） | 包含 6 个项目的元组 | `pred[3]` — 元组的第 4 个元素 |
+| `.predictedContactMatrix.pkl` | 字典 | `pred['predContactMatrix']` — 键值访问 |
+
+核心 `EvaluateContactPredictions` 函数通过 `DataProcessor.LoadNativeDistMatrix` 加载原生距离矩阵，然后遍历预测中的所有**原子对类型**（CbCb, CaCa, CgCg, CaCg, NO, HB, Beta），使用适当的接触截断值（标准对为 8.0 Å，HB 为 9.5 Å）应用 `TopAccuracy`。它返回**逐蛋白质精度**和数据集上的**平均精度**，平均值通过对每种原子对类型的所有蛋白质精度数组执行 `np.average` 计算得出。
+
+来源：[BatchEvaluateContactAccuracy.py](/DL4DistancePrediction2/BatchEvaluateContactAccuracy.py#L1-L100), [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L292-L383)
+
+## CASP 格式评估
+
+**CASP RR 格式**是社区评估中接触预测的标准交换格式。`CalcCASPContactPredAccuracy.py` 提供了专用的评估路径：它使用 `LoadContactMatrixInCASPFormat` 解析 CASP 格式的预测文件，从 (i, j, prob) 三元组重建对称接触矩阵，然后使用 `EvaluateSingleCbCbContactPrediction` 进行评估。
+
+CASP 解析器严格验证文件结构——检查 `PFRMAT RR` 标头、`TARGET` 行、`MODEL 1` 约束，以及所有置信度分数是否在 [0, 1] 范围内。残基索引根据序列长度进行验证，解析器强制执行 i < j 的顺序。重建的矩阵通过赋值 `contactMatrix[i,j] = contactMatrix[j,i] = prob` 变为对称矩阵。
+
+相反，`SaveContactMatrixInCASPFormat` 以 CASP RR 格式写入预测，应用**概率缩放因子**（`ProbScaleFactor = log(0.5)/log(0.4) ≈ 1.16`）来提升原始概率，以改善 0.5 截断值下的 MCC/F1。输出上限为 300,000 个残基对，并保证至少有 3×L 个长程对，在写入 160,000 个对之后，低于 0.05 阈值的对将被排除。
+
+来源：[CalcCASPContactPredAccuracy.py](/DL4DistancePrediction2/CalcCASPContactPredAccuracy.py#L1-L26), [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L30-L155), [config.py](/DL4DistancePrediction2/config.py#L7-L11)
+
+## CLI 入口点总结
+
+| 脚本 | 输入 | 指标 | 输出 |
+|--------|-------|--------|--------|
+| `CalcContactPredAccuracy.py` | 预测矩阵 + 真实矩阵 (文本) | Top-L 精度 | 20 个精度值 |
+| `BatchEvaluateContactAccuracy.py` | 蛋白质列表 + PKL 文件夹 + 原生文件夹 | Top-L 精度 | 逐蛋白质 + 平均值 |
+| `CalcCASPContactPredAccuracy.py` | CASP RR 文件 + 原生 PKL | Top-L 精度 | 20 个精度值 |
+| `CalcMCCF1.py` | 预测矩阵 + 真实矩阵 (文本) | 截断值 0.20–0.58 下的 MCC/F1 | 每个截断值 24 个指标 |
+| `BatchCalcMCCF1.py` | 蛋白质列表 + 预测目录 + 真实目录 | 截断值 0.20–0.59 下的 MCC/F1 | 逐目标 + 逐对平均值 |
+
+<CgxTip>在评估接触精度时，请务必检查你正在评估哪种**原子对类型**——CbCb 是默认且最常报告的，但 CaCa、CgCg 和 NO 各自有不同的物理意义。HB 和 Beta 使用不同的距离截断值（分别为 9.5 Å 和 8.0 Å），并在评估代码中需要特殊处理。</CgxTip>
+
+<CgxTip>`TopAccuracy` 函数评估**五**种间距范围（ER, LR, MR, MLR, SR），但标准 CASP 报告惯例仅使用**三**种（LR, MR, SR）。超长（≥48）和组合的长+中（≥12）范围是 RaptorX 特定的扩展，为最具结构信息量的预测提供了更细粒度的评估。</CgxTip>
+
+来源：[CalcContactPredAccuracy.py](/DL4DistancePrediction2/CalcContactPredAccuracy.py#L1-L44), [BatchEvaluateContactAccuracy.py](/DL4DistancePrediction2/BatchEvaluateContactAccuracy.py#L1-L100), [CalcCASPContactPredAccuracy.py](/DL4DistancePrediction2/CalcCASPContactPredAccuracy.py#L1-L26), [CalcMCCF1.py](/DL4DistancePrediction2/CalcMCCF1.py#L1-L38), [BatchCalcMCCF1.py](/DL4DistancePrediction2/BatchCalcMCCF1.py#L1-L63)
+
+## 与更广泛流程的关系
+
+接触精度评估位于预测流程的**终端**。它所消耗的预测接触概率矩阵由[距离预测流程](12-distance-prediction-pipeline)生成，该流程生成距离概率分布，然后通过 `Distance2Contact` 转换将其折叠为接触概率。[距离精度与 MCC](14-distance-accuracy-and-mcc) 页面涵盖了距离预测本身的互补评估（绝对误差、相对误差、类 GDT 分数），而 [CASP 格式输出](15-casp-format-output) 详细说明了用于社区基准测试提交的序列化格式。[配置与距离区间](16-configuration-and-distance-bins) 中的距离区间配置决定了在距离到接触转换期间求和多少个概率区间，这直接影响生成的接触概率值，进而影响所有下游的精度指标。
+
+---
+
+- [深入探究/评估与指标/距离精度与 MCC](https://zread.ai/j3xugit/RaptorX-Contact/14-distance-accuracy-and-mcc)
+
+---
+slug:14-distance-accuracy-and-mcc
+blog_type:normal
+---
+
+
+RaptorX-Contact 实现了一个双度量评估框架，从两个互补的角度评估预测的残基间距：**连续距离精度**（绝对误差、相对误差、类 GDT 相似度）和**离散分类质量**（MCC、F1、精确率、召回率）。这些度量指标作用于相同的 L×L 距离矩阵，但回答了截然不同的问题——*预测距离与真实值有多接近？* 对比 *模型将残基对分类为接触与非接触的能力有多强？* 该框架包含四个执行模块（每个度量族各有单蛋白和批量变体）以及三个核心计算库，构成了从原始数学运算到 CLI 入口点的分层架构。
+
+来源: [EvaluateDistanceAccuracy.py](/DL4DistancePrediction2/EvaluateDistanceAccuracy.py#L1-L65), [DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L1-L101), [Metrics.py](/DL4DistancePrediction2/Metrics.py#L1-L17), [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L204-L261)
+
+## 度量架构概述
+
+评估子系统被组织为三个层级：`Metrics.py` 中的**基础公式**，`DistanceUtils.py` 和 `ContactUtils.py` 中的**领域特定聚合器**，以及处理文件 I/O 和批量平均的 **CLI 编排器**。下图展示了数据流和委托关系：
+
+```mermaid
+graph TD
+    subgraph CLI Layer
+        EDA["EvaluateDistanceAccuracy.py<br/>(single protein)"]
+        BEDA["BatchEvaluateDistanceAccuracy.py<br/>(batch proteins)"]
+        CMF["CalcMCCF1.py<br/>(single protein)"]
+        BCMF["BatchCalcMCCF1.py<br/>(batch proteins)"]
+    end
+
+    subgraph Computation Layer
+        DUA["DistanceUtils.EvaluateDistanceBoundAccuracy()<br/>abs_error · rel_error · precision · recall · F1 · GDT"]
+        CUA["ContactUtils.CalcMCCF1()<br/>MCC · F1 at 3 range scales"]
+    end
+
+    subgraph Primitive Layer
+        M_MCC["Metrics.MCC(TP,FP,TN,FN)"]
+        M_F1["Metrics.F1(TP,FP,TN,FN)"]
+    end
+
+    EDA --> DUA
+    BEDA --> DUA
+    CMF --> CUA
+    BCMF --> CUA
+    BCMF --> M_MCC
+    BCMF --> M_F1
+    CUA --> M_MCC
+    CUA --> M_F1
+```
+
+关键的架构洞察是，`ContactUtils.CalcMCCF1()` 将其各范围计算委托给 `Metrics.MCC()` 和 `Metrics.F1()`，而 `DistanceUtils.EvaluateDistanceBoundAccuracy()` 则内联计算精确率/召回率/F1，不调用 `Metrics.py`——这两个度量族独立演进，并使用了略有不同的 epsilon 保护约定（内联的 `0.000001` 与 `Metrics.py` 中的 `0.000001`）。
+
+来源: [Metrics.py](/DL4DistancePrediction2/Metrics.py#L1-L17), [DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L27-L101), [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L204-L261)
+
+## 基础度量：MCC 和 F1
+
+`Metrics` 模块提供了整个评估流程中使用的基础二元分类公式。这两个函数都接受四个混淆矩阵计数值，并应用 epsilon 保护（`ε = 0.000001`）以防止除以零。
+
+**马修斯相关系数 (MCC)** 产生一个 [-1, 1] 范围内的值，它平衡了混淆矩阵的所有四个象限，使其对类别不平衡具有鲁棒性——这是接触预测的一个关键属性，因为在接触预测中非接触数量远多于接触数量：
+
+```
+MCC = (TP·TN − FP·FN) / √(ε + (TP+FP)(TP+FN)(TN+FP)(TN+FN))
+```
+
+**F1 分数** 是精确率和召回率的调和平均值，强调了模型正确识别接触而不产生过多假阳性的能力：
+
+```
+precision = TP / (TP + FP + ε)
+recall    = TP / (TP + FN + ε)
+F1        = 2·precision·recall / (precision + recall + ε)
+```
+
+| 度量 | 范围 | 类别不平衡敏感度 | 在 RaptorX 中的主要用途 |
+|--------|-------|---------------------------|----------------------|
+| MCC | [-1, 1] | **低** — 四个象限权重相等 | 二元接触分类质量 |
+| F1 | [0, 1] | 中等 — 忽略 TN | 强调接触检测 |
+
+<CgxTip>epsilon 常量 `0.000001` 同时出现在 `Metrics.py` 和 `DistanceUtils.EvaluateDistanceBoundAccuracy()` 中。如果你扩展此评估框架，请集中定义此值以避免两个模块之间产生分歧。</CgxTip>
+
+来源: [Metrics.py](/DL4DistancePrediction2/Metrics.py#L1-L17)
+
+## 距离边界精度：每个原子对的六个度量
+
+`DistanceUtils.EvaluateDistanceBoundAccuracy()` 是用于连续距离评估的核心函数。它操作**预测距离边界**（一个以原子对类型为键的字典，例如 `CbCb`、`CaCa`）和**真实距离矩阵**。对于每种原子对类型，它生成一个 6 元素向量：`[abs_error, rel_error, precision, recall, F1, GDT]`。
+
+### 序列比对和有效性掩码
+
+该函数首先在真实序列中定位查询序列（由于 PDB 链选择，真实序列可能是一个超集）。然后它构建两个二进制有效性掩码：
+
+- **`truth_valid`**：将真实距离 ≥ 0.1 标记为有效（负值表示 PDB 文件中缺少坐标）
+- **`pred_valid`**：将预测距离在 (0, 15] 内标记为有效——预测 ≤ 0 或 > 15Å 被认为是不可靠的
+
+然后通过**将序列间隔 < `minSeqSep`（默认为 12）的短程对置零**来精炼这两个掩码。这是通过在两个方向上填充偏移量 0 到 `minSeqSep−1` 的对角线来完成的：
+
+```python
+for offset in range(0, minSeqSep):
+    np.fill_diagonal(truth_valid[:-offset, offset:], 0)
+    np.fill_diagonal(pred_valid[:-offset, offset:], 0)
+```
+
+来源: [DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L27-L68)
+
+### 六个精度度量
+
+给定 `diff = |pred − truth|` 和 `diff_valid = truth_valid × pred_valid`，六个度量的计算方式如下：
+
+| 索引 | 度量 | 公式 | 解释 |
+|-------|--------|---------|---------------|
+| 0 | **绝对误差** | Σ(diff × diff_valid) / (ε + Σ diff_valid) | 有效对的平均 Å 偏差 |
+| 1 | **相对误差** | Σ( diff / ((|pred+truth|/2)+ε) × diff_valid ) / (ε + Σ diff_valid) | 尺寸归一化的平均偏差 |
+| 2 | **精确率** | TP / (ε + Σ(pred_valid × truth_valid)) | 真实距离 < 15Å 的有效预测所占比例 |
+| 3 | **召回率** | TP / (ε + Σ truth_valid_15) | 具有有效预测的真实接触 (< 15Å) 所占比例 |
+| 4 | **F1** | 2·precision·recall / (precision + recall + ε) | 精确率和召回率的调和平均值 |
+| 5 | **GDT** | Σ(sim × diff_valid) / (ε + Σ diff_valid) | 多阈值相似度得分 |
+
+**类 GDT 得分** 对绝对差值使用分段相似度函数，为较小的偏差分配较高的分数：
+
+| diff 阈值 | 相似度贡献 |
+|---------------|----------------------|
+| < 1Å | 1.0 |
+| < 2Å | 0.5 |
+| < 4Å | 0.25 |
+| < 8Å | 0.125 |
+
+这类似于结构预测中的 GDT-TS 得分，奖励在多个容差水平上同时接近的预测。请注意，此处的精确率/召回率/F1 使用 **15Å 相互作用极限** 作为接触边界（来自 `config.InteractionLimit`），这不同于基于 MCC 评估中使用的 8Å 阈值。
+
+<CgxTip>距离边界精确率/召回率的 15Å 边界（来自 `config.InteractionLimit = 15.001`）不同于 `CalcMCCF1()` 中使用的 8Å 接触定义（`config.ContactDefinition = 8.001`）。这意味着 `EvaluateDistanceBoundAccuracy` 的 F1 和 `CalcMCCF1` 的 F1 衡量的是不同的事物——请根据你的评估上下文选择合适的一个。</CgxTip>
+
+来源: [DistanceUtils.py](/DL4DistancePrediction2/DistanceUtils.py#L69-L101), [config.py](/DL4DistancePrediction2/config.py#L175-L179)
+
+## MCC-F1 评估：三种范围尺度
+
+`ContactUtils.CalcMCCF1()` 使用 MCC 和 F1 基础方法评估接触预测质量，但关键是它基于序列间隔将残基对划分为**三个范围类别**。这会为每个蛋白质生成一个 13 元素的结果向量。
+
+### 二值化和范围划分
+
+该函数首先对预测矩阵和真实矩阵进行二值化：
+
+- `pred_binary = (pred > probCutoff)` — 默认截断值为 0.5，在批量模式下进行扫描
+- `truth_binary = (0 < truth) & (truth < contactCutoff)` — 默认 `contactCutoff = 8.0Å`
+
+然后计算 `pred_truth = pred_binary × 2 + truth_binary`，将所有四种混淆矩阵情况编码为整数值 {0, 1, 2, 3} = {TN, FN, FP, TP}。三个三角掩码选择不同序列间隔的残基对：
+
+| 范围 | 掩码 | 序列间隔 | 生物学意义 |
+|-------|------|--------------------|--------------------|
+| **长程 (LR)** | `triu(seqLen, 24)` | ≥ 24 个残基 | 三级结构约束 |
+| **中程+长程 (MLR)** | `triu(seqLen, 12)` | ≥ 12 个残基 | 二级/三级边界 |
+| **短程+中程+长程 (SMLR)** | `triu(seqLen, 6)` | ≥ 6 个残基 | 所有非平凡接触 |
+
+对于每个范围掩码，该函数通过 `np.bincount` 提取混淆矩阵计数，然后委托给 `Metrics.MCC()` 和 `Metrics.F1()`，每个范围生成 8 个值：`[MCC, TP, FP, TN, FN, F1, precision, recall]`。因此，完整的输出向量为 3 × 8 = **24 个元素**，尽管记录的接口通常只引用每个范围的 MCC 和 F1。
+
+来源: [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L206-L261)
+
+### 距离到接触的转换
+
+当使用 MCC/F1 评估距离预测时，必须首先通过 `ContactUtils.Distance2Contact()` 将预测的距离概率矩阵转换为接触概率矩阵：
+
+```python
+contactProb = np.sum(distProb[:, :, :labelOf8], axis=2)
+```
+
+这会对接触阈值 (8Å) 以下的所有距离 bin 的预测概率质量求和，产生一个适合 `CalcMCCF1()` 使用的单一 L×L 接触概率矩阵。
+
+来源: [ContactUtils.py](/DL4DistancePrediction2/ContactUtils.py#L192-L202)
+
+## 批量评估：按目标和按对平均
+
+批量评估脚本引入了两种不同的平均策略，产生有意义的不同结果：
+
+### 按目标平均（距离精度）
+
+`BatchEvaluateDistanceAccuracy.py` 计算每个蛋白质的精度，然后使用 `np.average(v, axis=0)` 对各蛋白质进行平均。这给予**每个蛋白质相等的权重**，而不管序列长度如何——一个 50 个残基的小蛋白质与一个 500 个残基的蛋白质贡献相同。它同时输出每个蛋白质的详细结果和跨蛋白质的平均值。
+
+来源: [BatchEvaluateDistanceAccuracy.py](/DL4DistancePrediction2/BatchEvaluateDistanceAccuracy.py#L70-L108)
+
+### MCC-F1 的双重平均
+
+`BatchCalcMCCF1.py` 通过将概率截断值从 0.20 扫描到 0.59（步长 0.01），实现了一种更复杂的双重平均方案：
+
+1. **按目标平均**：首先对跨蛋白质的混淆矩阵计数 (TP, FP, TN, FN) 求平均，然后从平均计数计算 MCC 和 F1。这直接从通过 `np.average(accs, axis=0)` 平均的 `CalcMCCF1` 返回值中打印。
+
+2. **按对平均**：使用 `Metrics.MCC()` 和 `Metrics.F1()` 从按目标平均的混淆计数中显式计算 MCC 和 F1。这将公式重新应用于已经平均的 TP/FP/TN/FN，产生不同的结果，因为 MCC 在其输入中是**非线性的**——先平均 TP/FP/TN/FN 再应用 MCC 公式，并不等同于平均每个蛋白质的 MCC 值。
+
+| 平均方法 | 计算顺序 | 属性 |
+|-----------------|-------------------|-----------|
+| 按目标 | 每个蛋白质的 avg(TP,FP,TN,FN) → 从平均计数计算 MCC/F1 | 对每个蛋白质加权相等 |
+| 按对 | avg(TP,FP,TN,FN) → `Metrics.MCC/F1(avg_counts)` | 合并所有残基对；较大的蛋白质占主导 |
+
+这种区别对基准测试很重要：按目标平均是 CASP 中的标准，而按对平均反映了整体的对级别分类质量。
+
+来源: [BatchCalcMCCF1.py](/DL4DistancePrediction2/BatchCalcMCCF1.py#L45-L61)
+
+## CLI 入口点
+
+四个 CLI 脚本形成两个并行流水线，每个流水线都有一个单蛋白和批量变体：
+
+### 距离精度流水线
+
+**单蛋白** — `EvaluateDistanceAccuracy.py` 接收一个预测的 `.bound.pkl` 文件和一个真实的 `.atomDistMatrix.pkl` 文件，通过 `cPickle` 加载两者，并打印每种原子对类型的精度。预测文件包含一个 3 元组 `(bound_dict, name, sequence)`，其中 `bound_dict` 将原子对类型映射到 L×L×10 矩阵（第一个切片是预测距离，其余 9 个是偏差估计）。
+
+```
+python EvaluateDistanceAccuracy.py <bound_PKL> <ground_truth_PKL>
+# 输出: <target> <atomPairType> <abs_error> <rel_error> <precision> <recall> <F1> <GDT>
+```
+
+**批量** — `BatchEvaluateDistanceAccuracy.py` 接收一个蛋白质列表文件和两个文件夹，遍历所有蛋白质，并打印每个蛋白质的结果和平均结果。它支持可选的 `minSeqSep` 参数（默认为 12）。
+
+```
+python BatchEvaluateDistanceAccuracy.py <proteinList> <bound_folder> <ground_truth_folder> [minSeqSep]
+# 输出: average <atomPairType> <6 metrics>  (随后是每个蛋白质的详情)
+```
+
+来源: [EvaluateDistanceAccuracy.py](/DL4DistancePrediction2/EvaluateDistanceAccuracy.py#L14-L59), [BatchEvaluateDistanceAccuracy.py](/DL4DistancePrediction2/BatchEvaluateDistanceAccuracy.py#L14-L108)
+
+### MCC-F1 流水线
+
+**单蛋白** — `CalcMCCF1.py` 接收文本格式的预测和真实接触矩阵（L 行 × L 列），将概率截断值从 0.20 扫描到 0.58（步长 0.02），并打印每个截断值下的 MCC/F1。
+
+```
+python CalcMCCF1.py <pred_matrix_file> <distcb_matrix_file> <target>
+# 输出: <target> <L> cutoff=<prob> <MCC> <TP> <FP> <TN> <FN> <F1> <precision> <recall> (×3 范围)
+```
+
+**批量** — `BatchCalcMCCF1.py` 接收一个蛋白质列表和两个目录（预测的 `.gcnn` 文件，真实的 `.distcb` 文件），将截断值从 0.20 扫描到 0.59（步长 0.01），并打印每个截断值下的按目标和按对平均结果。
+
+```
+python BatchCalcMCCF1.py <proteinListFile> <pred_dir> <truth_dir>
+# 输出: per-target avgMCCF1 at cutoff=<prob>: <values>
+#         per-pair avgMCCF1 at cutoff=<prob>: <MCC_LR> <F1_LR> <prec_LR> <rec_LR> <MCC_MR> <F1_MR> <prec_MR> <rec_MR>
+```
+
+来源: [CalcMCCF1.py](/DL4DistancePrediction2/CalcMCCF1.py#L18-L37), [BatchCalcMCCF1.py](/DL4DistancePrediction2/BatchCalcMCCF1.py#L19-L61)
+
+## 控制评估的配置常量
+
+`config.py` 中的几个常量直接控制评估行为：
+
+| 常量 | 值 | 使用者 | 效果 |
+|----------|-------|---------|--------|
+| `ContactDefinition` | 8.001Å | `CalcMCCF1` (通过 `contactCutoff` 默认值) | 接触与非接触之间的边界 |
+| `InteractionLimit` | 15.001Å | `EvaluateDistanceBoundAccuracy` (pred_valid > 15 → 无效) | 被认为是有意义相互作用的最大距离 |
+| `RangeBoundaries` | [24, 12, 6, 2] | `CalcMCCF1`, `CalcLabelProb` | 范围分类的序列间隔阈值 |
+| `ProbScaleFactor` | ln(0.5)/ln(0.4) ≈ 0.753 | `SaveContactMatrixInCASPFormat` | 缩放预测概率以进行 CASP 提交的指数 |
+| `MaxHBDistance` | 9.5Å | `TopAccuracy` | 氢键评估的接触截断值 |
+| `MaxBetaDistance` | 8.0Å | `TopAccuracy` | β 配对评估的接触截断值 |
+
+`ProbScaleFactor` 常量特别值得注意：它的引入是因为来自神经网络的原始预测概率倾向于聚集在 0.5 以下，当使用 0.5 截断值进行二值化时，这会压低 MCC/F1。缩放 `p → p^ProbScaleFactor` 将 0.4 → 0.5 映射，在不改变预测排名顺序的情况下，改善了标准阈值下的分类度量。
+
+来源: [config.py](/DL4DistancePrediction2/config.py#L1-L179)
+
+## 与接触精度评估的关系
+
+本文档记录的距离精度和 MCC 评估与接触精度评估系统（[接触精度评估](13-contact-accuracy-evaluation)）并行运行。关键区别在于**输入格式和度量重点**：距离精度处理预测距离边界矩阵（`.bound.pkl`），产生连续误差度量；而接触精度处理预测距离/接触概率矩阵（`.predictedDistMatrix.pkl`），产生 top-L/比例精确率度量。两个系统共享相同的 `config.ContactDefinition` (8Å) 和 `config.RangeBoundaries`，但它们回答不同的评估问题，应互补使用以进行全面的模型评估。
+
+---
+
+- [深入探究/评估与指标/CASP 格式输出](https://zread.ai/j3xugit/RaptorX-Contact/15-casp-format-output)
+
+---
+slug:15-casp-format-output
+blog_type:normal
+---
+
+
+RaptorX-Contact 实现了 **CASP RR（残基-残基）格式** —— 这是结构预测关键评估（CASP）实验中用于残基间接触预测的社区标准交换格式。该系统提供了一个完整的往返流水线：将预测的接触矩阵**序列化**为 CASP `.rr` 文件，将这些文件**反序列化**并验证还原为程序可用的接触矩阵，以及将 CASP 格式的预测结果与真实距离矩阵进行**精度评估**。本页详细介绍了格式规范、序列化/反序列化契约、概率缩放机制，以及控制哪些残基对被输出的过滤启发式规则。
+
+来源：[ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L1-L383), [CalcCASPContactPredAccuracy.py](DL4DistancePrediction2/CalcCASPContactPredAccuracy.py#L1-L26)
+
+## CASP RR 文件规范
+
+CASP RR 格式是一种面向行的文本文件，具有严格的头部-主体结构。RaptorX-Contact 生成和读取的文件均符合此规范，该规范定义了五条必需的头部行，其后是序列和预测数据行，最后以 `END` 标记结束。
+
+| 行 | 内容 | 示例 | 生成方 |
+|------|---------|---------|-------------|
+| 1 | `PFRMAT RR` | `PFRMAT RR` | `SaveContactMatrixInCASPFormat` |
+| 2 | `TARGET <name>` | `TARGET T0953` | `SaveContactMatrixInCASPFormat` |
+| 3 | `AUTHOR <group>` | `AUTHOR RaptorX-Contact` | `SaveContactMatrixInCASPFormat` |
+| 4 | `METHOD <description>` | `METHOD deep dilated residual networks...` | `SaveContactMatrixInCASPFormat` |
+| 5 | `MODEL <N>` | `MODEL 1` | `SaveContactMatrixInCASPFormat` |
+| 6+ | 序列（50字符分段） | `MERRVQVEEVP...` | `SaveContactMatrixInCASPFormat` |
+| k+ | `<i> <j> 0 8 <prob>` | `5 42 0 8 0.9872341` | `SaveContactMatrixInCASPFormat` |
+| 末行 | `END` | `END` | `SaveContactMatrixInCASPFormat` |
+
+每条预测行包含五个字段：**残基索引 i**（从 1 开始）、**残基索引 j**（从 1 开始，j > i）、**距离下界**（始终为 0）、**距离上界**（始终为 8，代表以埃为单位的 Cβ–Cβ 接触截断值），以及 [0, 1] 范围内的**置信度分数**。距离界限 `0 8` 编码了二值接触定义：Cβ–Cβ 距离小于 8Å 即构成接触。
+
+来源：[ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L106-L186), [ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L27-L102)
+
+## 序列化：SaveContactMatrixInCASPFormat
+
+`SaveContactMatrixInCASPFormat` 函数将内存中的预测接触概率矩阵转换为 CASP `.rr` 文件。其签名和完整逻辑包含四个不同阶段：**概率缩放**、**头部输出**、**序列分段**，以及**带过滤的排序对输出**。
+
+```mermaid
+flowchart TD
+    A["输入: contactMatrix L×L"] --> B{ProbScaleFactor == 1?}
+    B -->|是| C[按原样使用矩阵]
+    B -->|否| D["缩放: p → p^ProbScaleFactor"]
+    C --> E[写入 CASP 头部]
+    D --> E
+    E --> F[以 50 字符分段写入序列]
+    F --> G[提取上三角矩阵, 偏移量 ≥ 6]
+    G --> H[展平并按概率降序排序]
+    H --> I[带过滤地输出残基对]
+    I --> J{"残基对数 > 300K?"}
+    J -->|是| K[停止输出]
+    J -->|否| L{"偏移量 < 6?"}
+    L -->|是| M[跳过: 近程范围]
+    L -->|否| N{"残基对数 > 160K 且概率 < 0.05?"}
+    N -->|是| O[跳过: 低置信度尾部]
+    N -->|否| P["写入: i+1 j+1 0 8 prob"]
+    P --> I
+    K --> Q[写入 END]
+    O --> I
+    M --> I
+```
+
+### 概率缩放
+
+在输出之前，每个预测概率 `p` 会通过 `p → p^ProbScaleFactor` 进行转换，其中 `ProbScaleFactor = log(0.5) / log(0.4) ≈ 1.16`。这种缩放使分布变得更陡峭 —— 缩放前的原始预测值 0.4 在缩放后变为 0.5 —— 当使用 0.5 阈值时，这会移动二分类的有效决策边界，从而在 CASP 评估中优化 MCC 和 F1 分数。缩放因子仅在生成 CASP 文件期间应用，而不在训练或内部精度评估期间应用。它补偿了损失函数的权重分布，如果训练权重发生变化，必须重新校准。
+
+来源：[ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L106-L112), [config.py](DL4DistancePrediction2/config.py#L4-L9)
+
+### 残基对过滤与排序
+
+输出算法应用**三层过滤器**来决定哪些残基对出现在输出文件中：
+
+1. **序列间隔过滤器** —— 完全排除满足 |i − j| < 6 的残基对。这移除了那些容易预测且对结构评估无意义的近程残基对。
+
+2. **全局残基对限制** —— 输出残基对的总数上限为 **300,000**，即 CASP 提交的最大值。残基对按概率降序（最高置信度优先）访问，因此该上限仅裁剪掉最低置信度的尾部。
+
+3. **长尾置信度阈值** —— 超过 **160,000** 个输出残基对后，任何缩放概率低于 **0.05** 的残基对都将被抑制。这种双阈值策略确保了高置信度的中/短程接触得以保留，同时防止文件被噪声主导。
+
+通过 `np.triu(contactMatrix2, 6)` 提取上三角矩阵，同时强制实行 j > i 以及最小序列间隔为 6 的要求；然后对取反后的矩阵进行展平并执行 argsort，从而产生全局概率降序的遍历顺序。
+
+来源：[ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L128-L186)
+
+### 序列分段
+
+主氨基酸序列以**每行 50 个字符**的分段写入，从 `MODEL 1` 行的位置开始。对于长度为 L 的蛋白质，这将产生 ⌈L/50⌉ 行序列。`LoadContactMatrixInCASPFormat` 解析器通过拼接在 MODEL 行之后遇到的所有单列行（即恰好包含一个由空格分隔的字段的行）来重建完整序列。
+
+来源：[ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L124-L126), [ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L58-L64)
+
+## 反序列化：LoadContactMatrixInCASPFormat
+
+`LoadContactMatrixInCASPFormat` 函数解析 CASP `.rr` 文件并重建对称的 L×L 接触概率矩阵。它在填充矩阵之前的每个结构边界处执行**格式验证**。
+
+### 验证契约
+
+| 验证点 | 预期条件 | 失败模式 |
+|------------------|-------------------|--------------|
+| 文件长度 | ≥ 5 行 | 返回 `None` |
+| 第 1 行 | 恰好为 `PFRMAT RR` | 返回 `False` |
+| 第 2 行 | 以 `TARGET` 开头 | 返回 `None` |
+| MODEL 行 | 模型编号 = 1 | `AssertionError` |
+| 预测行 | 恰好 5 列 | 返回 `None`，打印错误 |
+| 距离界限 | `[0, 8]` | 返回 `None`，打印错误 |
+| 置信度分数 | ∈ [0, 1] | 返回 `None`，打印错误 |
+| 残基索引 | 1 ≤ index ≤ L | 返回 `None`，打印错误 |
+| 索引排序 | i < j | 返回 `None`，打印错误 |
+
+验证通过后，每个概率被同时写入 `contactMatrix[i, j]` 和 `contactMatrix[j, i]` 以强制执行**对称性**。该函数返回三元组 `(contactMatrix, targetName, sequence)`。这种对称性强制意味着该函数仅适用于对称的接触类型（CbCb, CaCa, CgCg, Beta）—— 它无法正确表示如 CaCg、NO 或 HB 等非对称矩阵。
+
+<CgxTip>反序列化器在内部使用从 0 开始的索引构建矩阵，但 CASP 格式要求残基索引从 1 开始。序列化器在写入时加 1（`i+1, j+1`），而解析器直接从文件中存储索引而不作减 1 调整 —— 如果加载的矩阵用于基于索引的操作而未考虑 0/1 不匹配，这可能是一个潜在的偏移一错误。</CgxTip>
+
+来源：[ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L27-L102)
+
+## 端到端评估流水线
+
+`CalcCASPContactPredAccuracy.py` 脚本提供了命令行界面，用于针对真实距离矩阵评估 CASP 格式的预测文件。它分两步协调反序列化和评估：
+
+```mermaid
+flowchart LR
+    A["CASP .rr 文件"] -->|LoadContactMatrixInCASPFormat| B["(pred, target, seq)"]
+    C["原生 .pkl 文件"] -->|EvaluateSingleCbCbContactPrediction| D["精度数组"]
+    B --> D
+    D --> E["输出: target L TopAcc acc₁ acc₂ ..."]
+```
+
+评估在内部调用 `DataProcessor.LoadNativeDistMatrixFromFile` 读取真实的 Cβ–Cβ 距离矩阵，然后计算五个范围类别（超长程 ≥ 48、长程 ≥ 24、中程 12–23、中长程 ≥ 12、短程 6–11）和四个 Top-L 分数（L、L/2、L/5、L/10）的 `TopAccuracy`，生成一个 20 元素的精度数组。输出格式为：`<targetName> <sequenceLength> TopAcc <acc₁> <acc₂> ... <acc₂₀>`。
+
+来源：[CalcCASPContactPredAccuracy.py](DL4DistancePrediction2/CalcCASPContactPredAccuracy.py#L7-L23), [ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L271-L312), [ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L330-L334)
+
+## 预测流水线中的距离到接触转换
+
+在 CASP 序列化发生之前，预测的**距离概率矩阵**（形状为 L × L × numBins 的 3D 张量）必须被折叠为 2D 的**接触概率矩阵**（L × L）。`RunDistancePredictor2` 流水线根据标签类型以不同方式执行此转换：
+
+| 标签类型 | 转换方法 | 公式 |
+|------------|-------------------|---------|
+| `Discrete*`（如 `Discrete25C`） | 对接触截断值以下的区间求和 | `Σ(distProb[:, :, :labelOf8])` |
+| `Normal1d2` | 拟合正态分布的 CDF | `Φ(ContactDefinition; μ, σ)` |
+| `LogNormal1d2` | 拟合对数正态分布的 CDF | `Φ(log(ContactDefinition); μ, σ)` |
+
+接触截断值 `labelOf8` 由 `LabelsOfOneDistance(config.ContactDefinition, distCutoffs)` 确定，该函数查找截断边界 ≤ 8.001Å 的最大区间索引。对于 HB 和 Beta 原子对类型，接触概率直接取自第一个概率通道（`[:, :, 0]`）。
+
+来源：[RunDistancePredictor2.py](DL4DistancePrediction2/RunDistancePredictor2.py#L200-L231), [DistanceUtils.py](DL4DistancePrediction2/DistanceUtils.py#L234-L239), [config.py](DL4DistancePrediction2/config.py#L175-L176)
+
+## 控制 CASP 输出的配置参数
+
+| 参数 | 值 | 位置 | 作用 |
+|-----------|-------|----------|------|
+| `ProbScaleFactor` | `log(0.5)/log(0.4) ≈ 1.16` | `config.py` L9 | CASP 输出前概率缩放的指数 |
+| `ContactDefinition` | `8.001` | `config.py` L176 | 定义接触的 Cβ–Cβ 距离截断值 |
+| `InteractionLimit` | `15.001` | `config.py` L179 | 超出此距离的残基无相互作用 |
+| `numAllowedPairs` | `300,000` | `ContactUtils.py` L141 | CASP 最大残基对数 |
+| `segmentLen` | `50` | `ContactUtils.py` L124 | 每行序列的字符数 |
+| `threshold4CASP` | `0.05` | `ContactUtils.py` L113 | 超过 160K 对残基的置信度下限 |
+| 阈值适用的残基对限制 | `160,000` | `ContactUtils.py` L169 | 超过此数量后抑制低置信度残基对 |
+| 最小序列间隔 | `6` | `ContactUtils.py` L130, L165 | 近程排除边界 |
+
+来源：[config.py](DL4DistancePrediction2/config.py#L4-L9), [config.py](DL4DistancePrediction2/config.py#L175-L179), [ContactUtils.py](DL4DistancePrediction2/ContactUtils.py#L113-L186)
+
+<CgxTip>硬编码常量 `numAllowedPairs=300000`、160K 置信度阈值以及 `threshold4CASP=0.05` 无法通过 `config.py` 配置。如果你需要针对非 CASP 用例或具有不同限制的 CASP 版本调整这些值，必须直接修改 `SaveContactMatrixInCASPFormat`。</CgxTip>
+
+## 更广泛评估背景下的 CASP 输出
+
+CASP 格式输出位于 RaptorX-Contact 中两条评估路径的交汇处。**批量评估流水线**（`BatchEvaluateContactAccuracy.py`）直接处理 PKL 序列化的预测接触矩阵和真实距离文件，完全绕过 CASP 格式。**CASP 评估流水线**（`CalcCASPContactPredAccuracy.py`）专门验证 CASP 序列化的往返保真度 —— 它读取 `.rr` 文件，重建接触矩阵，并针对真实距离评估精度。有关包括各范围类别 MCC 和 F1 在内的综合精度指标，请参见[距离精度与 MCC](14-distance-accuracy-and-mcc)。有关作为两条流水线基础的 Top-L 精度计算，请参见[接触精度评估](13-contact-accuracy-evaluation)。
+
+---

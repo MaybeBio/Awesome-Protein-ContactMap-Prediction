@@ -1,0 +1,37 @@
+# j3xugit/RaptorX-Contact
+
+Source: https://zread.ai/j3xugit/RaptorX-Contact
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速上手](2-quick-start.md)
+
+## 深入探究
+
+- [深入探究/架构概述](3-architecture-overview.md)
+- [深入探究/配置与距离分箱](16-configuration-and-distance-bins.md)
+### 神经网络模型
+
+- [深入探究/神经网络模型/用于距离预测的深度 ResNet](4-deep-resnet-for-distance.md)
+- [深入探究/神经网络模型/膨胀 ResNet 变体](5-dilated-resnet-variants.md)
+- [深入探究/神经网络模型/嵌入与配对表示](6-embedding-and-pair-representation.md)
+
+### 数据与特征
+
+- [深入探究/数据与特征/输入特征规范](7-input-feature-specification.md)
+- [深入探究/数据与特征/数据加载与处理](8-data-loading-and-processing.md)
+- [深入探究/数据与特征/HHM 特征解析](9-hhm-profile-parsing.md)
+
+### 训练与推理
+
+- [深入探究/训练与推理/模型构建与损失](10-model-building-and-loss.md)
+- [深入探究/训练与推理/优化器实现](11-optimizer-implementations.md)
+- [深入探究/训练与推理/距离预测流水线](12-distance-prediction-pipeline.md)
+
+### 评估与指标
+
+- [深入探究/评估与指标/接触精度评估](13-contact-accuracy-evaluation.md)
+- [深入探究/评估与指标/距离精度与 MCC](14-distance-accuracy-and-mcc.md)
+- [深入探究/评估与指标/CASP 格式输出](15-casp-format-output.md)
+
