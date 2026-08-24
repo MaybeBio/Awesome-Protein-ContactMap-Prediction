@@ -1,0 +1,34 @@
+# j3xugit/RaptorX-3DModeling
+
+Source: https://zread.ai/j3xugit/RaptorX-3DModeling
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/环境配置](3-environment-setup.md)
+
+## 深入解析
+
+- [深入解析/架构概览](4-architecture-overview.md)
+- [深入解析/预测管线数据流](5-prediction-pipeline-data-flow.md)
+- [深入解析/自定义网络集成](15-custom-network-integration.md)
+- [深入解析/比对与质量评估](16-alignment-and-quality-evaluation.md)
+### 核心模块
+
+- [深入解析/核心模块/MSA 与特征生成](6-msa-and-feature-generation.md)
+- [深入解析/核心模块/距离与方向预测](7-distance-and-orientation-prediction.md)
+- [深入解析/核心模块/属性预测网络](8-property-prediction-network.md)
+- [深入解析/核心模块/3D 模型折叠](9-3d-model-folding.md)
+
+### 深度学习架构
+
+- [深入解析/深度学习架构/用于距离预测的 ResNet](10-resnet-for-distance-prediction.md)
+- [深入解析/深度学习架构/膨胀 ResNet 与注意力机制](11-dilated-resnet-and-attention.md)
+- [深入解析/深度学习架构/模型配置参考](12-model-configuration-reference.md)
+
+### 运维与扩展
+
+- [深入解析/运维与扩展/多机分布式执行](13-multi-machine-distributed-execution.md)
+- [深入解析/运维与扩展/GPU 选择与远程预测](14-gpu-selection-and-remote-prediction.md)
+

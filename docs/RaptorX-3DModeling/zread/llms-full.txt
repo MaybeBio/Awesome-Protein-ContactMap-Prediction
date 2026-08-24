@@ -1,0 +1,4336 @@
+# j3xugit/RaptorX-3DModeling
+
+Source: https://zread.ai/j3xugit/RaptorX-3DModeling
+
+# 入门
+
+- [入门/概述](https://zread.ai/j3xugit/RaptorX-3DModeling/1-overview)
+
+---
+slug:1-overview
+blog_type:normal
+---
+
+
+**RaptorX-3DModeling**是一个深度学习系统，它利用深度卷积残差网络预测蛋白质接触、距离、方向及局部结构属性（二级结构、φ/ψ角），随后基于这些预测结果组装3D结构模型。该系统由芝加哥大学Jinbo Xu实验室开发，为公开的RaptorX Web服务器提供支持，并代表了一种里程碑式的方法：以**基于距离的折叠**——而非基于接触的折叠——驱动从头蛋白质结构预测。该系统基于**GPLv3**许可协议，主要在CentOS Linux上测试，运行环境为Python 2.7及GPU加速的Theano。
+
+来源: [README.md](/README.md#L1-L50), [LICENSE](/LICENSE#L1-L30)
+
+## RaptorX 的功能
+
+从核心上看，RaptorX解决了计算生物学中的一个基本问题：仅给定蛋白质的氨基酸序列，预测其三维结构。它通过一个**四阶段流水线**来实现这一目标，将一维序列转化为完全折叠的3D模型：
+
+1. **MSA 与特征生成** — 搜索序列数据库（HHblits、JackHMMer、宏基因组）以构建多序列比对，并提取进化耦合特征
+2. **距离与方向预测** — 将特征输入带有注意力机制的2D空洞残差网络，预测残基间距离概率分布和方向角
+3. **属性预测** — 运行独立的1D残差网络来预测局部结构：φ/ψ角、二级结构（SS3/SS8）和溶剂可及性（ACC）
+4. **3D模型折叠** — 在PyRosetta中将预测的距离、方向和φ/ψ角作为约束条件，对诱饵结构进行折叠和弛豫，然后通过SPICKER对它们进行聚类
+
+来源: [README.md](/README.md#L15-L30), [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L73-L155)
+
+## 架构一览
+
+下图展示了数据如何流经RaptorX的四个主要模块，从原始FASTA序列到最终的3D模型：
+
+```mermaid
+flowchart LR
+    subgraph INPUT
+        FASTA["FASTA / A3M"]
+    end
+
+    subgraph M1["BuildFeatures"]
+        MSA["MSA 生成<br/>(HHblits / JackHMMer)"]
+        FEAT["特征提取<br/>(CCMpred, TGT, HHM)"]
+    end
+
+    subgraph M2["DL4DistancePrediction4"]
+        DRES["2D 空洞残差网络<br/>+ 注意力"]
+        DIST["距离与方向<br/>概率矩阵"]
+    end
+
+    subgraph M3["DL4PropertyPrediction"]
+        PRES["1D 残差网络"]
+        PROP["φ/ψ 角, SS, ACC"]
+    end
+
+    subgraph M4["Folding"]
+        FOLD["PyRosetta<br/>基于约束的折叠"]
+        CLUSTER["SPICKER<br/>诱饵聚类"]
+    end
+
+    FASTA --> MSA --> FEAT
+    FEAT --> DRES --> DIST
+    FEAT --> PRES --> PROP
+    DIST --> FOLD
+    PROP --> FOLD
+    FOLD --> CLUSTER
+```
+
+来源: [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L127-L175), [raptorx-path.sh](/raptorx-path.sh#L1-L8)
+
+## 项目结构
+
+该仓库由四个主要模块及若干支撑目录组织而成：
+
+| 目录 | 作用 | 核心技术 |
+|---|---|---|
+| **`BuildFeatures/`** | MSA 生成与特征提取 | HHblits, JackHMMer, CCMpred, EVcouplings |
+| **`DL4DistancePrediction4/`** | 距离/方向/接触预测 | Theano, 2D 空洞残差网络, Attention |
+| **`DL4PropertyPrediction/`** | 局部属性预测 (φ/ψ, SS, ACC) | Theano, 1D 残差网络 |
+| **`Folding/`** | 基于预测结果构建 3D 模型 | PyRosetta, SPICKER, RosettaCM |
+| **`Common/`** | 共享工具 (PDB, 距离矩阵, 序列) | Python, Biopython |
+| **`Alignment/`** | 比对评分与质量评估 | Python |
+| **`Utils/`** | 模板生成，模型评估 | HHpred, Modeller |
+| **`Server/`** | 顶层编排脚本 | Bash |
+| **`params/`** | GPU 机器配置 | 文本配置 |
+
+来源: [README.md](/README.md#L15-L30), [raptorx-path.sh](/raptorx-path.sh#L1-L8)
+
+## 预测入口点
+
+所有四个阶段均由单个Shell脚本——**`Server/RaptorXFolder.sh`**——进行编排，该脚本按顺序将各模块串联起来：
+
+```bash
+# 阶段 1: MSA + 特征
+$DistFeatureHome/BuildFeatures.sh -o $outDir -g $GPU -m $MSAmethod -r 4 $inFile
+
+# 阶段 2: 属性预测 (φ/ψ, SS, ACC)
+$DL4PropertyPredHome/Scripts/PredictProperty4Server.sh -g $GPU $target $outDir/${target}_OUT/
+
+# 阶段 3: 距离与方向预测
+$DL4DistancePredHome/Scripts/PredictPairRelation4Server.sh $options $target $outDir/${target}_OUT/
+
+# 阶段 4: 折叠 (若 numDecoys > 0)
+$DistanceFoldingHome/LocalFoldNRelaxOneTarget.sh -t $machineType -d $decoyFolder -n $numDecoys -r $runningMode $seqFile $predMatrixFile $predPropertyFile
+```
+
+每个阶段在继续执行前都会验证其输出：如果任何阶段失败，脚本将以错误状态退出。`-n 0`标志将完全跳过折叠步骤，允许你仅运行预测阶段。
+
+来源: [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L127-L195)
+
+## 深度学习模型
+
+RaptorX附带**13个预训练模型文件**（由于每个文件大小在100-200 MB之间，需单独从Zenodo下载）：
+
+- **6个模型**用于距离/方向预测，位于`DL4DistancePrediction4/models/`——这是系统准确率的核心
+- **7个模型**用于属性预测 (φ/ψ, SS, ACC)，位于`DL4PropertyPrediction/models/`
+
+网络架构使用Theano实现，具体包括：
+
+| 网络 | 维度 | 文件 | 用途 |
+|---|---|---|---|
+| **ResNet2D** | 2D | `ResNet4Distance.py` | 用于距离预测的标准残差网络 |
+| **DilatedResNet2D** | 2D | `DilatedResNet4Distance.py` | 空洞卷积 + 注意力机制，用于扩大感受野 |
+| **ResNet1D** | 1D | `ResNet4Property.py` | 用于逐残基属性预测的残差网络 |
+
+**DilatedResNet2D**变体是推荐架构——其空洞卷积能够在不增加参数量比例的情况下捕获长程相互作用，且集成的`AttentionLayer`提供了跨接触图的全局上下文聚合。
+
+<CgxTip>`DilatedResNet2D`架构是生产预测的默认配置。其`AttentionLayer`（位于`DL4DistancePrediction4/AttentionLayer.py`）会计算跨通道的平均池化和最大池化，这对于捕获仅靠局部卷积无法获取的全局结构信号至关重要。</CgxTip>
+
+来源: [DL4DistancePrediction4/config.py](/DL4DistancePrediction4/config.py#L17-L19), [DL4DistancePrediction4/DilatedResNet4Distance.py](/DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L15), [DL4PropertyPrediction/config.py](/DL4PropertyPrediction/config.py#L7-L9), [README.md](/README.md#L100-L115)
+
+## 输出结构
+
+当RaptorX处理某种蛋白质（例如`1pazA`）时，会创建一个`<target>_OUT/`目录，包含所有中间和最终结果：
+
+| 子目录 | 内容 |
+|---|---|
+| `<target>_contact/` | 用于距离/方向预测的 MSA 和输入特征 |
+| `<target>_thread/` | 用于 φ/ψ 预测和穿线的文件 (`.a3m`, `.hhm`, `.tgt`) |
+| `DistancePred/` | 预测的距离/方向矩阵 (`.pkl`)，接触图 (`.txt`)，CASP 格式 (`.rr`)，可视化 (`.png`) |
+| `PropertyPred/` | 预测的 φ/ψ 角，二级结构，可及性 (`.pkl`) |
+| `<target>-RelaxResults/` | 所有生成的诱饵 PDB 文件（折叠 + 弛豫） |
+| `<target>-SpickerResults/` | 聚类后的顶级模型，质量评分，RMSD 矩阵 |
+
+来源: [README.md](/README.md#L135-L160), [Folding/0README](/Folding/0README#L1-L20)
+
+## 环境与依赖
+
+RaptorX的环境通过两个Shell脚本进行配置，它们设置了所有必需的路径：
+
+- **`raptorx-path.sh`** — 映射相对于`ModelingHome`的四个模块目录（`DistFeatureHome`、`DL4DistancePredHome`、`DL4PropertyPredHome`、`DistanceFoldingHome`），并更新`PYTHONPATH`
+- **`raptorx-external.sh`** — 配置外部工具和数据库的路径（HHblits二进制文件、UniRef30数据库、宏基因组数据、JackHMMer数据库、用于模板建模的PDB70）
+
+<CgxTip>在任何运行之前，你必须编辑`raptorx-external.sh`以指向你本地安装的HHblits和序列数据库。`RaptorXFolder.sh`脚本会自动加载这两个路径文件，因此终端用户只需确保设置了`CUDA_ROOT`且`raptorx-external.sh`配置正确即可。</CgxTip>
+
+来源: [raptorx-path.sh](/raptorx-path.sh#L1-L8), [raptorx-external.sh](/raptorx-external.sh#L1-L24)
+
+## 核心功能概览
+
+| 功能 | 描述 | 模块 |
+|---|---|---|
+| **MSA 生成** | HHblits 3.x, JackHMMer, 宏基因组搜索，或用户提供的 A3M | `BuildFeatures` |
+| **距离预测** | 残基间 Cβ-Cβ, Cα-Cα 距离概率分布 | `DL4DistancePrediction4` |
+| **方向预测** | 残基间二面角/角度方向 (例如, Cα1Cβ1Cβ2Cα2) | `DL4DistancePrediction4` |
+| **接触预测** | 由距离概率推导的二元接触图 | `DL4DistancePrediction4` |
+| **属性预测** | φ/ψ 角 (von Mises 分布), SS3/SS8, ACC | `DL4PropertyPrediction` |
+| **3D 折叠** | 使用距离和角度势能进行基于 PyRosetta 约束的折叠 | `Folding` |
+| **模型弛豫** | Rosetta 弛豫，以消除空间位阻并优化侧链 | `Folding` |
+| **诱饵聚类** | 基于 SPICKER 的聚类，以选择代表性模型 | `Folding` |
+| **分布式执行** | 在 GPU 机器上运行预测，在远程 CPU 集群上进行折叠 | `Server` |
+| **比对评估** | 模板比对的质量评分与简化 | `Alignment` |
+
+来源: [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L55-L100), [DL4DistancePrediction4/config.py](/DL4DistancePrediction4/config.py#L56-L80), [DL4PropertyPrediction/config.py](/DL4PropertyPrediction/config.py#L12-L20)
+
+## 后续阅读
+
+既然你已经了解了RaptorX是什么以及它的模块是如何关联的，以下是文档的推荐阅读路径：
+
+1. **[快速开始](2-quick-start)** — 通过单条命令端到端地运行你的首次预测
+2. **[环境配置](3-environment-setup)** — 安装所有依赖并配置`raptorx-external.sh`
+3. **[架构概览](4-architecture-overview)** — 深入了解模块边界和数据契约
+4. **[预测流水线数据流](5-prediction-pipeline-data-flow)** — 追踪流水线中流转的每种文件格式和中间产物
+
+---
+
+- [入门/快速开始](https://zread.ai/j3xugit/RaptorX-3DModeling/2-quick-start)
+
+---
+slug:2-quick-start
+blog_type:normal
+---
+
+
+通过五个核心步骤，让 RaptorX-3DModeling 实现端到端运行——从裸 FASTA 文件到折叠的 3D 蛋白质结构。本指南将带你完成克隆仓库、安装依赖、配置路径、下载预训练模型以及执行首次预测。如果你需要深入了解每个模块存在的*原因*或它们之间的数据流向，请在完成本指南后跳转至[架构概览](4-architecture-overview)或[预测流水线数据流向](5-prediction-pipeline-data-flow)。
+
+来源: [README.md](/README.md#L1-L200), [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L1-L50)
+
+## 先决条件一览
+
+开始之前，请确认你的运行环境满足以下基本要求：
+
+| 需求 | 最低版本 | 用途 |
+|---|---|---|
+| **Linux**（推荐 CentOS 6+） | — | Shell 脚本依赖 bash |
+| **CUDA + cuDNN** | CUDA 8–10.1, cuDNN 7–7.6.5 | 为 Theano 提供 GPU 加速 |
+| **Anaconda / Miniconda** | Python 2.7 | 运行环境 |
+| **GPU 内存** | ≥12 GB（针对 >1000 个残基的蛋白质） | 距离/方向预测 |
+| **CPU 内存** | ≥10 GB（用于折叠大型蛋白质） | 3D 模型构建 |
+
+RaptorX 同样兼容 Python 3 的 conda 虚拟环境——你可以通过 `conda create --name RaptorX python=2` 创建，并在继续操作前使用 `conda activate RaptorX` 激活它。
+
+来源: [README.md](/README.md#L5-L15)
+
+## 第 1 步 — 克隆仓库
+
+```bash
+git clone https://github.com/j3xugit/RaptorX-3DModeling.git $HOME/RaptorX-3DModeling
+```
+
+生成的目录结构包含**四个核心模块**和两个配置 Shell 脚本：
+
+```
+RaptorX-3DModeling/
+├── BuildFeatures/          ← MSA 生成与输入特征提取
+├── DL4DistancePrediction4/  ← 距离 / 方向 / 接触预测
+├── DL4PropertyPrediction/   ← 属性预测 (SS, ACC, Phi/Psi)
+├── Folding/                ← 基于预测结果构建 3D 模型
+├── Server/                 ← 入口脚本 (RaptorXFolder.sh)
+├── raptorx-path.sh         ← 内部路径导出
+├── raptorx-external.sh     ← 外部工具/数据库路径（由你编辑）
+├── example/                ← 示例 FASTA 及输出
+└── params/                 ← GPU 机器列表、模型文件配置
+```
+
+来源: [README.md](/README.md#L17-L32), [raptorx-path.sh](/raptorx-path.sh#L1-L8)
+
+## 第 2 步 — 安装 Python 与深度学习依赖
+
+激活你的 conda 环境，然后按顺序安装以下包：
+
+```bash
+# 核心数值计算与序列化库
+conda install numpy
+conda install -c anaconda msgpack-python
+
+# 生物信息学工具包
+pip install biopython==1.76
+
+# 可视化（可选，用于接触/距离图）
+pip install Pillow
+
+# 支持 GPU 的 Theano 1.0
+conda install numpy scipy mkl
+conda install theano pygpu
+
+# 用于距离预测多进程的共享 ndarray
+git clone https://github.com/crowsonkb/shared_ndarray.git
+cd shared_ndarray && python setup.py install && cd ..
+```
+
+**CUDA 环境** — 导出根路径，以便 Theano 能够定位工具包和 cuDNN 头文件：
+
+```bash
+export CUDA_ROOT=/usr/local/cuda
+```
+
+请验证 `$CUDA_ROOT/include` 包含 cuDNN 头文件，且 `$CUDA_ROOT/lib64` 包含共享库。
+
+来源: [README.md](/README.md#L33-L70)
+
+## 第 3 步 — 安装外部工具与配置路径
+
+### 3a — HHblits（MSA 生成必需）
+
+安装 [HHsuite](https://github.com/soedinglab/hh-suite) 并从 [UniClust 归档](http://wwwuser.gwdg.de/~compbiol/uniclust/2020_03/)下载兼容的序列数据库，例如 `UniRef30_2020_03_hhsuite.tar.gz`。
+
+### 3b — 可选的 MSA 来源
+
+| 工具 | 用途 | 速度 |
+|---|---|---|
+| **Jackhmmer**（通过 EVcouplings） | 替代 MSA 方案，使用 UniRef90 | 慢 — 不推荐 |
+| **MetaGenome**（metaclust_50.fasta） | 为远缘同源物增强 MSA | 慢 — 可选 |
+
+### 3c — 编辑 `raptorx-external.sh`
+
+打开 `RaptorX-3DModeling/raptorx-external.sh` 并**至少**更新 HHblits 的路径。该文件附带了一些占位值：
+
+```bash
+# raptorx-external.sh — 更新以下行
+export HHDIR=/your/path/to/hhsuite-3.2.0-SSE2-Linux/
+export HHDB=/your/path/to/UniRef30_2020_02/UniRef30_2020_02
+```
+
+其他变量（`MetaDB`、`JackDB`、`PDB70HHM`、`PDB70PDB`、`PDB70TPL`）仅在你使用宏基因组数据、jackhmmer 或比较建模时才需要——否则保持原样即可。
+
+来源: [raptorx-external.sh](/raptorx-external.sh#L1-L24), [README.md](/README.md#L71-L95)
+
+### 3d — 在 `.bashrc` 中持久化环境变量
+
+将以下内容追加到你的 `~/.bashrc` 中：
+
+```bash
+export CUDA_ROOT=/usr/local/cuda/
+export ModelingHome=$HOME/RaptorX-3DModeling/
+. $ModelingHome/raptorx-path.sh
+. $ModelingHome/raptorx-external.sh
+```
+
+然后使用 `source ~/.bashrc` 重新加载。`raptorx-path.sh` 脚本导出了四个模块主目录变量（`DistFeatureHome`、`DL4DistancePredHome`、`DL4PropertyPredHome`、`DistanceFoldingHome`）并扩展了 `PYTHONPATH`——这些变量几乎为该软件包中的每个脚本所必需。
+
+来源: [raptorx-path.sh](/raptorx-path.sh#L1-L8), [README.md](/README.md#L280-L305)
+
+## 第 4 步 — 下载预训练深度学习模型
+
+模型文件较大（每个 100–200 MB），且**未**打包在仓库中。请从 [Zenodo](https://doi.org/10.5281/zenodo.4710337) 或 [RaptorX 服务器](http://raptorx.uchicago.edu/download/)下载它们。
+
+| 包 | 数量 | 文件放置位置 |
+|---|---|---|
+| `RXDeepModels4DistOri-FM.tar.gz` | 6 个模型 (.pkl) | `$DL4DistancePredHome/models/` |
+| `RXDeepModels4Property.tar.gz` | 7 个模型 (.pkl) | `$DL4PropertyPredHome/models/` |
+
+解压后，请验证目录中包含 `.pkl` 文件。预测脚本引用的模型文件名定义在：
+
+- **距离模型**：`DL4DistancePrediction4/params/ModelFile4PairwisePred.txt` — 引用 6 个自由模型 `.pkl` 文件以及基于模板的模型变体。
+- **属性模型**：`DL4PropertyPrediction/params/ModelFile4PropertyPred.txt` — 引用 3 个 Phi/Psi 模型和 4 个 SS/ACC 模型。
+
+来源: [README.md](/README.md#L96-L110), [DL4DistancePrediction4/params/ModelFile4PairwisePred.txt](/DL4DistancePrediction4/params/ModelFile4PairwisePred.txt#L1-L43), [DL4PropertyPrediction/params/ModelFile4PropertyPred.txt](/DL4PropertyPrediction/params/ModelFile4PropertyPred.txt#L1-L21)
+
+## 第 5 步 — 运行首次预测
+
+### 完整流水线：预测 + 折叠
+
+单一入口点 `Server/RaptorXFolder.sh` 会按顺序编排所有四个模块。使用内置的示例蛋白质运行它：
+
+```bash
+cd $ModelingHome
+Server/RaptorXFolder.sh -o example/ -n 40 -r 1 example/1pazA.fasta
+```
+
+示例输入 `1pazA.fasta` 包含一条 123 残基的假天青蛋白序列：
+
+```
+>1pazA
+ENIEVHMLNKGAEGAMVFEPAYIKANPGDTVTFIPVDKGHNVESIKDMIPEGAEKFKSKINENYVLTVTQPGAYLVKCTPHYAMGMIALIAVGDSPANLDQIVSAKKPKIVQERLEKVIASAK
+```
+
+来源: [example/1pazA.fasta](/example/1pazA.fasta#L1-L3), [README.md](/README.md#L111-L135)
+
+### 理解命令行选项
+
+| 选项 | 含义 | 默认值 |
+|---|---|---|
+| `-o outDir` | 输出目录（内部会创建一个 `target_OUT/` 子文件夹） | 当前目录 |
+| `-g gpu` | GPU 索引 (0–3)，或 `-1` 表示按可用显存自动选择 | `-1` |
+| `-m MSAmethod` | 位掩码：1=属性用 HHblits，8=距离用 HHblits 3.0，16=宏基因组，4=jackhmmer | `9` (1+8) |
+| `-n numDecoys` | 生成的 3D 初始模型数量；`≤0` 则跳过折叠 | `120` |
+| `-r runningMode` | `0`=仅折叠，`1`=折叠 + 松弛 | `0` |
+| `-l maxLen2BeFolded` | 折叠的最大序列长度 | `1050` |
+| `-c` | 仅以 CASP 格式输出接触（跳过距离概率） | 关闭 |
+| `-R remoteAccount` | 通过 scp/ssh 在远程机器上运行折叠 | 本地 |
+
+来源: [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L51-L120)
+
+### 流水线执行流程
+
+下图展示了 `RaptorXFolder.sh` 对 FASTA 输入在内部触发的流程：
+
+```mermaid
+flowchart LR
+    A["FASTA / A3M 输入"] --> B["BuildFeatures.sh<br/>MSA + 特征生成"]
+    B --> C["PredictProperty4Server.sh<br/>Phi/Psi, SS, ACC"]
+    C --> D["PredictPairRelation4Server.sh<br/>距离, 方向, 接触"]
+    D --> E{"-n > 0?"}
+    E -- 是 --> F["LocalFoldNRelaxOneTarget.sh<br/>3D 模型构建"]
+    E -- 否 --> G["完成 — 仅预测"]
+    F --> H["输出至 target_OUT/"]
+```
+
+每个阶段都会检查非零退出码并在失败时停止，因此你可以通过读取打印到 stderr 的 `ERROR:` 消息来定位是哪个模块出错了。
+
+来源: [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L130-L200)
+
+### 解读输出
+
+成功运行后，输出目录 `target_OUT/` 包含以下子文件夹：
+
+| 子文件夹 | 内容 |
+|---|---|
+| `target_contact/` | 用于距离预测的 MSA 和输入特征 |
+| `target_thread/` | 用于属性预测的 MSA (.a3m)、HMM (.hhm)、HHR 和 TGT 文件 |
+| `DistancePred/` | 预测的距离/方向 `.pkl`、CASP `.rr`、接触图 `.txt`、可视化 `.png` |
+| `PropertyPred/` | 预测的 Phi/Psi、SS、ACC (`.predictedProperties.pkl`) |
+| `target-RelaxResults/` | 生成的 3D 初始模型 (`.pdb` 或 `.pdb.gz`) |
+| `target-SpickerResults/` | 聚类模型、按质量排名的中心点 (`.quality.pdb.gz`)、`ClusteringSummary.txt` |
+
+对于示例蛋白质，40 个松弛后的初始模型会生成在 `1pazA-RelaxResults/` 中，排名前 10 的聚类中心出现在 `1pazA-SpickerResults/` 中。最佳模型通常为 `1pazA_center0.quality.pdb.gz`。
+
+来源: [README.md](/README.md#L137-L155), [example/1pazA_OUT-example](/example/1pazA_OUT-example)
+
+## 常见使用模式
+
+### 仅预测（无 3D 折叠）
+
+跳过计算量大的折叠步骤——当你只需要接触、距离或二级结构时很有用：
+
+```bash
+Server/RaptorXFolder.sh -n 0 example/1pazA.fasta
+```
+
+### 使用已有的 MSA
+
+如果你已经拥有 a3m 格式的比对（第一个序列必须是无空位的查询序列），请使用 `-m 0` 传入：
+
+```bash
+Server/RaptorXFolder.sh -m 0 BuildFeatures/example/1pazA.a3m
+```
+
+<CgxTip>当设置 `-m 0` 时，文件扩展名必须为 `.a3m`——脚本会据此检测并完全绕过 MSA 生成。使用任何其他扩展名都会触发错误。</CgxTip>
+
+### 避免使用慢速的 Jackhmmer
+
+默认的 `-m 9` 仅使用 HHblits（速度快）。如果你想要宏基因组增强但不使用 jackhmmer：
+
+```bash
+Server/RaptorXFolder.sh -m 25 example/1pazA.fasta    # 1 + 8 + 16 = HHblits + 宏基因组
+```
+
+来源: [README.md](/README.md#L118-L135), [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L70-L100)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| `ERROR: Please set environmental variable ModelingHome` | 环境未加载 | 运行 `source ~/.bashrc` 或手动导出 `ModelingHome` |
+| `ERROR: failed to run BuildFeatures.sh` | 缺少 HHblits 路径或数据库 | 验证 `$HHDIR/bin/hhblits` 存在且 `$HHDB` 指向数据库 |
+| `ImportError: No module named theano` | conda 环境错误 | 激活 RaptorX 环境：`conda activate RaptorX` |
+| 大蛋白质出现 GPU 显存不足 | 序列 >1000 残基需要 >12 GB 显存 | 使用 `-g` 选择更大的 GPU 或使用 `-l` 减少序列长度 |
+| `msgpack` 导入失败 | 通过 pip 而非 conda 安装 | `conda install -c anaconda msgpack-python` |
+| `biopython` 版本不兼容 | Python 2.7 上的版本 >1.76 | `pip install biopython==1.76` |
+
+来源: [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L130-L195), [BuildFeatures/BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L1-L15)
+
+## 接下来做什么？
+
+现在你已经完成了一次完整预测，可以深入探索该系统：
+
+1. **理解架构** — [架构概览](4-architecture-overview) 解释了四个模块如何交互以及流水线如此构建的原因。
+2. **追踪流水线中的数据** — [预测流水线数据流向](5-prediction-pipeline-data-flow) 映射了每一个中间文件格式与转换过程。
+3. **跨机器扩展** — [多机分布式执行](13-multi-machine-distributed-execution) 展示了如何在独立的服务器上拆分 MSA 生成、GPU 预测和折叠。
+4. **自定义网络** — [自定义网络集成](15-custom-network-integration) 记录了如何接入你自己的深度学习架构。
+
+---
+
+- [入门/环境配置](https://zread.ai/j3xugit/RaptorX-3DModeling/3-environment-setup)
+
+---
+slug:3-environment-setup
+blog_type:normal
+---
+
+
+RaptorX-3DModeling 是一个用于蛋白质接触/距离/方向预测及 3D 结构折叠的深度学习流水线。正确配置环境是运行任何预测之前最关键的一步。本页将引导你了解每一个前置条件、配置文件和验证步骤，确保该流水线能够端到端顺利执行，不出意外。
+
+## 系统要求
+
+RaptorX 主要为 **Linux** 系统设计，并已在 **CentOS (>6.0)** 系统上使用 **bash** shell 通过测试。虽然代码可以在其他 Linux 发行版上运行，但 CentOS 是参考平台。硬件需求随蛋白质长度而变化——短蛋白质（<300 个残基）需要适度的资源，而大蛋白质（>1000 个残基）则需要大量的 GPU 和 CPU 内存。
+
+| 资源 | 最低要求 | 推荐配置 | 备注 |
+|---|---|---|---|
+| **操作系统** | CentOS 6+ | CentOS 7+ | 任何带有 bash 的 Linux 均可能运行 |
+| **Python** | 2.7 | 2.7 (通过 Anaconda) | 计划支持 Python 3，但目前尚不可用 |
+| **GPU** | 1× GPU, 8 GB 显存 | 1× GPU, ≥12 GB 显存 | 用于距离/方向预测 |
+| **CPU 内存** | 8 GB | ≥10 GB | 用于折叠大蛋白质（>1000 个残基） |
+| **磁盘** | 10 GB | 50 GB+ | 深度模型文件每个 100–200 MB；数据库较大 |
+
+<CgxTip>对于超过 1000 个残基的蛋白质，预测需要 >12 GB 的 GPU 内存，且折叠单个 3D 模型会消耗约 10 GB 的 CPU 内存。请据此规划你的硬件配置。</CgxTip>
+
+来源: [README.md](/README.md#L1-L20), [README.md](/README.md#L160-L171)
+
+## 前置条件安装流程
+
+安装遵循严格的依赖链。每一层都依赖于前一层——切勿跳过，请按顺序安装。
+
+```mermaid
+flowchart TD
+    A["1. Python & 核心包<br/>Anaconda + numpy + msgpack"] --> B["2. BioPython<br/>pip install biopython==1.76"]
+    B --> C["3. GPU 技术栈<br/>CUDA + cuDNN + Theano + pygpu"]
+    C --> D["4. 视觉与深度学习工具<br/>Pillow + shared_ndarray"]
+    D --> E["5. MSA 生成工具<br/>HHblits + 序列数据库"]
+    E --> F["6. 深度学习模型<br/>从 Zenodo 下载"]
+    F --> G["7. 3D 折叠 (可选)<br/>PyRosetta + GNU parallel"]
+    G --> H["8. 环境配置<br/>raptorx-path.sh + raptorx-external.sh"]
+    H --> I["✅ 准备就绪"]
+
+    style A fill:#e8f5e9,stroke:#388e3c
+    style I fill:#c8e6c9,stroke:#2e7d32
+    style H fill:#fff3e0,stroke:#f57c00
+```
+
+来源: [README.md](/README.md#L46-L119), [README.md](/README.md#L119-L143)
+
+## 第 1 步 — Python 环境与核心包
+
+RaptorX 要求使用 **Python 2.7**。最稳妥的方式是使用 Anaconda 或 Miniconda 创建一个隔离环境，以防止与系统中任何 Python 3 安装发生冲突。
+
+**如果你尚未安装 Anaconda**，请从 [docs.conda.io](https://docs.conda.io/en/latest/miniconda.html) 下载并安装适用于 Python 2.7 的 Miniconda。
+
+**如果你已有适用于 Python 3 的 Anaconda/Miniconda**，请创建一个专用的虚拟环境：
+
+```bash
+conda create --name RaptorX python=2
+conda activate RaptorX
+```
+
+进入 `RaptorX` 环境后，安装核心的数值计算和序列化包：
+
+```bash
+conda install numpy
+conda install -c anaconda msgpack-python
+```
+
+> **重要提示**：请通过 `conda` 而非 `pip` 安装 `msgpack-python`。已知在此环境下使用 pip 安装会失败。
+
+来源: [README.md](/README.md#L48-L59)
+
+## 第 2 步 — Biopython
+
+预测模块和 3D 模型构建模块均需使用 Biopython。请将版本固定为 **1.76**——更新的版本与 Python 2.7 不兼容。
+
+```bash
+pip install biopython==1.76
+```
+
+来源: [README.md](/README.md#L61-L65)
+
+## 第 3 步 — GPU 计算技术栈（CUDA, cuDNN, Theano）
+
+距离和方向预测依赖于支持 GPU 加速的 **Theano 1.0**。该层需要按顺序安装三个组件。
+
+### 3a — CUDA 工具包与 cuDNN
+
+请确认你的机器上已安装 CUDA 工具包和 cuDNN 库。设置环境变量：
+
+```bash
+export CUDA_ROOT=/usr/local/cuda
+```
+
+确认 cuDNN 头文件和库文件位于预期位置：
+- 头文件：`$CUDA_ROOT/include/`
+- 库文件：`$CUDA_ROOT/lib64/`
+
+**已测试版本**：Theano 1.04 搭配 CUDA 8–10.1 及 cuDNN 7–7.6.5。其他组合可能可行，但未经测试。
+
+### 3b — Theano 与 pygpu
+
+```bash
+conda install numpy scipy mkl
+conda install theano pygpu
+```
+
+<CgxTip>理论上 Theano 可以在纯 CPU 模式下运行，但 RaptorX 中的多个预测脚本默认 GPU 可用。若要纯 CPU 执行，需对代码进行小幅修改——这不是受支持的配置。</CgxTip>
+
+来源: [README.md](/README.md#L69-L82)
+
+## 第 4 步 — 可视化与深度学习工具
+
+### Pillow
+
+用于将预测的接触图和距离图渲染为图像。
+
+```bash
+pip install Pillow
+```
+
+### shared_ndarray
+
+距离/方向预测的深度学习模型训练和运行时需要此包。该包在 conda 或 pip 上不可用——需从源码安装：
+
+```bash
+git clone https://github.com/crowsonkb/shared_ndarray.git
+cd shared_ndarray/
+python setup.py install
+```
+
+来源: [README.md](/README.md#L69-L89)
+
+## 第 5 步 — MSA 生成工具与数据库
+
+多序列比对（MSA）是所有预测的基础输入。RaptorX 支持两种 MSA 生成器——**HHblits**（快速，必选）和 **Jackhmmer**（慢速，可选）。
+
+### 5a — HHblits（必选）
+
+从 [github.com/soedinglab/hh-suite](https://github.com/soedinglab/hh-suite) 安装 HHsuite。然后下载兼容的序列数据库——例如，从 [UniClust 发布页面](http://wwwuser.gwdg.de/~compbiol/uniclust/2020_03/) 下载 **UniRef30_2020_03**。将数据库解压到指定位置。
+
+### 5b — 通过 EVcouplings 使用 Jackhmmer（可选，不推荐）
+
+EVcouplings 提供基于 Jackhmmer 的 MSA 生成功能，但它运行在 **Python 3** 上（与 RaptorX 的 Python 2.7 环境分离），且速度明显较慢：
+
+```bash
+git clone https://github.com/debbiemarkslab/EVcouplings.git
+conda create -n evfold anaconda python=3
+conda activate evfold
+cd EVcouplings/
+python setup.py install
+```
+
+你还需要来自 UniProt 的 **uniref90.fasta** 数据库。如果没有 Jackhmmer，你仍可使用仅 HHblits 的 MSA 运行 RaptorX（使用 `-m 9` 或 `-m 25`）。
+
+### 5c — 宏基因组数据（可选）
+
+从 [metaclust.mmseqs.org](https://metaclust.mmseqs.org/current_release/) 下载 `metaclust_50.fasta` 并将其安装到已知路径。这能丰富 MSA 信息，从而提升困难靶标的预测质量。
+
+### 5d — 配置外部路径
+
+**此步骤至关重要。** 编辑 `RaptorX-3DModeling/raptorx-external.sh` 以设置所有数据库和工具的路径。默认文件包含占位符路径，必须将其更新为与你的安装路径相匹配：
+
+| 变量 | 用途 | 是否必选？ |
+|---|---|---|
+| `HHDIR` | HHsuite 安装文件夹 | **是** |
+| `HHDB` | HHblits 的 UniRef30 数据库路径 | **是** |
+| `MetaDB` | 宏基因组 fasta 文件路径 | 否 |
+| `JackDB` | Jackhmmer 的 UniRef90 数据库路径 | 否 |
+| `PDB70HHM` | 用于基于模板建模的 PDB70 HHM 文件 | 否 |
+| `PDB70PDB` | 用于 RosettaCM/Modeller 的 PDB70 链 PDB 文件 | 否 |
+| `PDB70TPL` | 用于 RaptorXCM 的 PDB70 .tpl.pkl 文件 | 否 |
+
+来源: [raptorx-external.sh](/raptorx-external.sh#L1-L24), [README.md](/README.md#L91-L117)
+
+## 第 6 步 — 下载预训练深度学习模型
+
+由于模型参数文件较大（每个 100–200 MB），因此**未包含**在代码仓库中。请从 [Zenodo](https://doi.org/10.5281/zenodo.4710337) 或 [raptorx.uchicago.edu/download/](http://raptorx.uchicago.edu/download/) 下载。
+
+| 包 | 内容 | 目标位置 |
+|---|---|---|
+| `RXDeepModels4DistOri-FM.tar.gz` | 用于接触/距离/方向预测的 6 个模型 | `$DL4DistancePredHome/models/`（`.pkl` 文件） |
+| `RXDeepModels4Property.tar.gz` | 用于 Phi/Psi、SS、ACC 预测的 7 个模型 | `$DL4PropertyPredHome/models/`（`.pkl` 文件） |
+
+解压后，请确认两个目标目录中都存在 `.pkl` 模型文件。模型文件缺失会导致预测脚本失败，并给出难以理解的错误信息。
+
+来源: [README.md](/README.md#L119-L127)
+
+## 第 7 步 — 3D 模型构建工具（可选）
+
+**仅当你需要构建 3D 模型时**，才需要这些包。如果你的目标仅仅是预测接触、距离、方向、角度、二级结构或溶剂可及性，请跳过此步骤。
+
+### PyRosetta
+
+从 [pyrosetta.org](http://www.pyrosetta.org/dow) 下载 **Python 2.7** 版本。解压并安装：
+
+```bash
+cd PyRosetta4.Release.python27.linux.release-224/setup/
+python setup.py install
+```
+
+### GNU Parallel（推荐）
+
+多个折叠脚本——`ParallelFoldNRelaxOneTarget.sh` 和 `SRunFoldNRelaxOneTarget.sh`——使用 GNU parallel 在多个 CPU 或机器间分发 decoy 生成任务。检查其可用性：
+
+```bash
+which parallel
+```
+
+若未安装，你仍可使用 `LocalFoldNRelaxOneTarget.sh` 进行折叠，该脚本不需要 GNU parallel。
+
+来源: [README.md](/README.md#L129-L143)
+
+## 第 8 步 — 环境变量配置
+
+RaptorX 依赖一组环境变量来定位其自身模块、外部工具和数据库。配置被拆分到两个 shell 脚本中，你必须在 shell 初始化时 source 它们。
+
+### 8a — 理解配置文件
+
+**`raptorx-path.sh`** 定义了相对于 `$ModelingHome` 的内部模块路径：
+
+| 变量 | 解析为 |
+|---|---|
+| `DistFeatureHome` | `$ModelingHome/BuildFeatures/` |
+| `DL4DistancePredHome` | `$ModelingHome/DL4DistancePrediction4/` |
+| `DL4PropertyPredHome` | `$ModelingHome/DL4PropertyPrediction/` |
+| `DistanceFoldingHome` | `$ModelingHome/Folding/` |
+
+它还会将 `$ModelingHome` 添加到 `PYTHONPATH`，将 `$ModelingHome/bin` 添加到 `PATH`。
+
+**`raptorx-external.sh`** 定义了外部工具和数据库（HHblits、序列数据库、宏基因组数据等）的路径。你必须编辑此文件，使其与你系统上的安装路径相匹配。
+
+来源: [raptorx-path.sh](/raptorx-path.sh#L1-L8), [raptorx-external.sh](/raptorx-external.sh#L1-L24)
+
+### 8b — 添加至 .bashrc
+
+打开 `~/.bashrc` 并追加以下内容，将 `ModelingHome` 路径调整为你实际的克隆位置：
+
+```bash
+export CUDA_ROOT=/usr/local/cuda/
+export ModelingHome=$HOME/RaptorX-3DModeling/
+
+. $ModelingHome/raptorx-path.sh
+. $ModelingHome/raptorx-external.sh
+```
+
+保存后，重载你的 shell：
+
+```bash
+source ~/.bashrc
+```
+
+**如果你使用 csh/tcsh**，请将等效的 `setenv` 和 `source` 命令添加到 `~/.cshrc`。请注意，此包中的大多数脚本均仅在 bash 中经过专门测试。
+
+来源: [README.md](/README.md#L205-L224)
+
+### 8c — GPU 机器配置（用于分布式执行）
+
+如果你计划在远程机器上运行 GPU 预测，请创建 `params/GPUMachines.txt` 文件。每行包含三个字段：**机器名**、**GPU 内存类别**（`SmallRAM` ≤12 GB 或 `LargeRAM` >12 GB）以及**启用状态**（`on`/`off`）：
+
+```
+raptorx9.uchicago.edu  LargeRAM  on
+jinbo@raptorx7.uchicago.edu  SmallRAM  off
+```
+
+如果此文件存在，且你还希望使用**本地** GPU，则必须显式添加你的本地机器：
+
+```
+name-of-your-local-machine  SmallRAM  on
+```
+
+入口脚本 `Server/RaptorXFolder.sh` 会自动 source 这两个路径脚本，并检查 `$ModelingHome/params/GPUMachines.txt` 是否存在。当该文件不存在时，所有 GPU 任务将在本地运行。
+
+来源: [README.md](/README.md#L296-L304), [params/GPUMachines-example.txt](/params/GPUMachines-example.txt#L1-L8), [Server/RaptorXFolder.sh](/Server/RaptorXFolder.sh#L1-L12)
+
+## 验证 — 测试你的安装
+
+完成所有步骤后，请使用代码仓库中提供的示例蛋白质运行一次快速的端到端测试。
+
+### 测试 1：MSA 与特征生成
+
+```bash
+BuildFeatures/GenDistFeaturesFromMSA.sh -o Test_Feat BuildFeatures/example/1pazA.a3m
+```
+
+预期输出：`Test_Feat/` 目录中的三个文件——`1pazA.inputsFeatures.pkl`、`1pazA.extraCCM.pkl` 和 `1pazA.a2m`。
+
+### 测试 2：距离预测
+
+```bash
+DL4DistancePrediction4/Scripts/PredictPairwiseRelation4OneInput.sh -d ./Test_Dist Test_Feat/1pazA.inputsFeatures.pkl
+```
+
+预期输出：`Test_Dist/1pazA.predictedDistMatrix.pkl`。
+
+### 测试 3：接触矩阵导出
+
+```bash
+DL4DistancePrediction4/Scripts/PrintContactPrediction.sh Test_Dist/1pazA.predictedDistMatrix.pkl
+```
+
+预期输出：两个文本文件——`1pazA.CASP.rr` 和 `1pazA.CM.txt`。
+
+### 测试 4：通过 RaptorXFolder.sh 运行完整流水线
+
+```bash
+Server/RaptorXFolder.sh -o example/ -n 40 -r 1 example/1pazA.fasta
+```
+
+预期输出：一个 `1pazA_OUT/` 目录，包含子文件夹 `1pazA_contact/`、`1pazA_thread/`、`DistancePred/`、`PropertyPred/`、`1pazA-RelaxResults/` 和 `1pazA-SpickerResults/`。
+
+来源: [README.md](/README.md#L306-L325), [example/1pazA.fasta](/example/1pazA.fasta#L1-L3)
+
+## 故障排除
+
+| 症状 | 可能原因 | 解决方案 |
+|---|---|---|
+| `ERROR: Please set environmental variable ModelingHome` | 未 source `.bashrc` 或变量缺失 | 运行 `source ~/.bashrc` 并使用 `echo $ModelingHome` 验证 |
+| `ERROR: invalid folder $HHDIR` | `raptorx-external.sh` 中的 `HHDIR` 指向错误路径 | 编辑 `raptorx-external.sh`，填入你实际的 HHsuite 安装位置 |
+| `ERROR: damaged sequence database` | `HHDB` 路径不正确或数据库未解压 | 验证路径并确保数据库位置存在 `_hhm.ffindex` 文件 |
+| `msgpack` 的 ImportError | 通过 pip 而非 conda 安装 | `pip uninstall msgpack-python && conda install -c anaconda msgpack-python` |
+| Biopython 版本错误 | 在 Python 2.7 下安装了 >1.76 的版本 | `pip install biopython==1.76` |
+| 大蛋白质出现 GPU 内存错误 | GPU 显存 <12 GB | 使用 `-h GPUMachines.txt` 路由至 LargeRAM GPU，或缩减输入大小 |
+| 找不到 `.pkl` 模型文件 | 未下载深度模型或放置目录错误 | 从 Zenodo 下载并将 `.pkl` 文件放入 `$DL4DistancePredHome/models/` 和 `$DL4PropertyPredHome/models/` |
+
+来源: [BuildFeatures/BuildMSAs.sh](/BuildFeatures/BuildMSAs.sh#L1-L21), [BuildFeatures/BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L1-L11), [DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh](/DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L1-L11)
+
+## 后续步骤
+
+在环境完全配置并验证完毕后，你已准备好深入探索该流水线：
+
+- **[快速开始](2-quick-start)** — 端到端运行你的首次预测
+- **[架构概览](4-architecture-overview)** — 了解四大主要模块的连接方式
+- **[MSA 与特征生成](6-msa-and-feature-generation)** — 深入了解输入准备工作
+
+---
+
+# 深入解析
+
+- [深入解析/架构概览](https://zread.ai/j3xugit/RaptorX-3DModeling/4-architecture-overview)
+
+---
+slug:4-architecture-overview
+blog_type:normal
+---
+
+
+RaptorX-3DModeling 是一个**基于深度学习的蛋白质结构预测系统**，能够将单条氨基酸序列转化为完整的三维原子模型。该系统实现了 *Distance-based protein folding powered by deep learning* (PNAS, 2019) 中描述的里程碑式方法——通过深度卷积残差网络预测残基间距离和取向的概率分布，随后利用约束优化从这些预测结果中折叠出三维模型。系统架构由四个自治模块组成，这些模块通过一个确定性的 shell 脚本流水线连接，每个模块都拥有独立的深度模型检查点注册表、配置命名空间和执行入口。
+
+## 系统架构概览
+
+下图展示了 RaptorX 四个主要模块的顶层数据流，以及连接它们的关键中间产物：
+
+```mermaid
+flowchart LR
+    subgraph INPUT["输入层"]
+        FASTA["FASTA / .seq"]
+        A3M["MSA (.a3m)"]
+    end
+
+    subgraph M1["BuildFeatures"]
+        MSA["MSA 生成<br/>(HHblits / Jackhmmer / MetaGenome)"]
+        FEAT["特征提取<br/>(CCM, PSFM, MI, Cov, ESM)"]
+        MSA --> FEAT
+    end
+
+    subgraph M2["DL4PropertyPrediction"]
+        RES1D["1D ResNet<br/>(序列 → Phi/Psi, SS, ACC)"]
+    end
+
+    subgraph M3["DL4DistancePrediction4"]
+        EMBED["嵌入层<br/>(1D→2D OuterConcatenate)"]
+        RES2D["2D DilatedResNet + Attention<br/>(矩阵 → 距离/取向概率)"]
+        EMBED --> RES2D
+    end
+
+    subgraph M4["Folding"]
+        POT["势能生成<br/>(基于 DFIRE 的成对势能)"]
+        FOLD["PyRosetta 约束折叠"]
+        SPICKER["Decoy 聚类<br/>(SPICKER)"]
+        POT --> FOLD --> SPICKER
+    end
+
+    FASTA --> MSA
+    A3M --> FEAT
+    FEAT --> RES1D
+    FEAT --> EMBED
+    RES1D --> POT
+    RES2D --> POT
+```
+
+## 四大模块
+
+RaptorX 的代码库被划分为四个顶层目录，每个目录映射到预测流水线中一个语义明确的阶段。编排脚本 `Server/RaptorXFolder.sh` 以严格的顺序调用它们，并在每个边界处进行显式的错误检查。
+
+来源: [RaptorXFolder.sh](/Server/RaptorXFolder.sh#L87-L209), [README.md](/README.md#L1-L50)
+
+| 模块 | 目录 | 职责 | 主要输出 | 深度学习框架 |
+|---|---|---|---|---|
+| **BuildFeatures** | `BuildFeatures/` | MSA 生成与成对/序列特征提取 | `.inputFeatures.pkl`, `.a2m`, `.hhm` | 无（生物信息学工具） |
+| **DL4PropertyPrediction** | `DL4PropertyPrediction/` | 局部结构属性预测 (Φ/Ψ, SS, ACC) | `.predictedProperties.pkl` | Theano + 1D ResNet |
+| **DL4DistancePrediction4** | `DL4DistancePrediction4/` | 残基间距离与取向预测 | `.predictedDistMatrix.pkl` | Theano + 2D DilatedResNet |
+| **Folding** | `Folding/` | 根据预测势能构建三维模型 | PDB decoys + SPICKER clusters | PyRosetta |
+
+来源: [raptorx-path.sh](/raptorx-path.sh#L1-L8)
+
+### 模块 1: BuildFeatures — MSA 与特征生成
+
+该模块是 RaptorX 的数据工程骨干。它接受原始 FASTA 序列或 a3m 格式的预构建 MSA，然后生成下游两个深度学习模块所需的所有输入特征。入口点 `BuildFeatures.sh` 委托给两个子阶段：
+
+1. **MSA 生成** (`BuildMSAs.sh`) — 使用 HHblits (UniRef30)、Jackhmmer (UniRef90) 以及针对宏基因数据的 hmmsearch (MetaClust) 的可配置组合来搜索序列数据库。MSA 方法由位掩码控制：`1` = 用于属性预测的 HHblits，`8` = 用于距离预测的 HHblits 3.0，`4` = Jackhmmer，`16` = 宏基因组增强。
+
+2. **特征提取** (`GenDistFeatures4OneProtein.sh`) — 从生成的 MSA 中计算共演化特征，包括 CCMpred 原始/归一化共演化矩阵、位置特异性频率矩阵 (PSFM)、互信息 (MI)、协方差矩阵以及可选的 ESM-2 嵌入。这些特征被序列化为 `.pkl` 文件并存入 `target_contact/` 子目录。
+
+来源: [BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L1-L119)
+
+### 模块 2: DL4PropertyPrediction — 局部结构属性
+
+该模块预测**逐残基** (1D) 的结构属性：骨架二面角 Φ/Ψ（使用冯·米塞斯分布）、二级结构（3分类和8分类，离散分类）以及溶剂可及性（离散分类）。其架构是一个运行在从 MSA 谱中提取的序列特征上的 **1D ResNet**：
+
+- **网络变体**：`ResNet1D`、`ResNet1DV21`、`ResNet1DV22` — 区别在于残差块内批归一化的位置
+- **标签类型**：`vonMise2d` (Φ/Ψ 角度)、`Discrete3C`/`Discrete8C` (SS)、`Discrete2C` (ACC) — 每种都有专属的输出头（角度使用冯·米塞斯分布，离散分类使用 softmax）
+- **模型数量**：7 个训练好的检查点（Φ/Ψ、SS、ACC 预测器）
+
+`Model4PropertyPrediction.py` 中的 `ResNet4Properties` 类编排了完整的前向传播：1D ResNet 骨干 → 逐响应预测头 → 拼接输出张量。
+
+来源: [Model4PropertyPrediction.py](/DL4PropertyPrediction/Model4PropertyPrediction.py#L1-L150), [config.py](/DL4PropertyPrediction/config.py#L1-L121)
+
+### 模块 3: DL4DistancePrediction4 — 距离与取向
+
+这是 RaptorX 的**核心预测模块**。它预测残基间距离和取向的**成对** (2D) 概率分布。该架构采用两阶段设计：
+
+1. **1D 卷积 → 2D 嵌入**：1D 卷积通路处理序列特征（序列 + PSFM），随后通过 **OuterConcatenate** 投影为 2D 矩阵——即拼接每个残基对 (i,j) 的行与列表示。此步骤同时捕获了序列上下文与成对耦合。
+
+2. **2D DilatedResNet + 注意力**：一个深度 2D 残差网络处理成对矩阵。关键的架构创新包括：
+   - **空洞卷积** (`DilatedResNet2D`)，可在不增加参数量的情况下呈指数级扩大感受野，从而实现长程接触检测
+   - **挤压-激励注意力** (`AttentionLayer`)，采用全局平均/最大池化 → 全连接 → 通道重加权，应用于特定的残差块之后
+   - **按距离范围独立训练** — 为短/中/长程接触设置不同的逻辑回归头
+
+预测的响应包括 Cβ-Cβ 距离（主要）、Cα-Cα 距离、残基间取向（Ω、θ、φ 二面角）以及氢键指示符。在服务器模式预测期间，会集成 **6 个训练好的模型检查点**。
+
+来源: [Model4DistancePrediction.py](/DL4DistancePrediction4/Model4DistancePrediction.py#L1-L200), [DilatedResNet4Distance.py](/DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L200), [AttentionLayer.py](/DL4DistancePrediction4/AttentionLayer.py#L1-L200), [config.py](/DL4DistancePrediction4/config.py#L1-L200)
+
+### 模块 4: Folding — 三维模型构建
+
+折叠模块利用 **PyRosetta** 约束优化，将预测的距离/取向概率和 Φ/Ψ 角度分布转化为原子的三维坐标：
+
+1. **势能生成** (`GenPairwisePotentialFromPrediction.py`) — 将预测的距离概率分布转换为基于 DFIRE 的成对距离势能。α 参数（默认 1.61）控制势能强度的缩放。
+
+2. **约束折叠** — PyRosetta 最小化组合能量函数：预测距离势能 + 预测 Φ/Ψ 角度约束 + Rosetta 原生能量项。生成多个独立的 decoy（默认 120 个），并支持可选的随机扰动。
+
+3. **弛豫** (可选) — 完整的 Rosetta 弛豫可消除空间位阻并优化侧链堆积。此过程计算成本较高（约为折叠时间的 3-4 倍），但能显著提升模型质量。
+
+4. **Decoy 聚类** (SPICKER) — 通过在结构空间中进行基于密度的聚类，从 decoy 集合中挑选最终模型。
+
+该模块支持多种执行后端：顺序执行 (`FoldNRelaxOneTarget.sh`)、GNU 并行 (`ParallelFoldNRelaxOneTarget.sh`)、Slurm (`SlurmFoldNRelaxOneTarget.sh`) 以及通过 SSH/rsync 的远程执行 (`RemoteFoldNRelaxOneTarget.sh`)。
+
+来源: [LocalFoldNRelaxOneTarget.sh](/Folding/LocalFoldNRelaxOneTarget.sh#L1-L159), [GenDistPotential4Threading.sh](/Folding/GenDistPotential4Threading.sh#L1-L62)
+
+## 深度学习架构细节
+
+下表总结了两个预测网络之间的关键架构差异：
+
+| 方面 | 属性预测 (1D) | 距离预测 (2D) |
+|---|---|---|
+| **输入** | 序列特征 (L × C_seq) | 序列 + 成对特征 (L × L × C_pair) |
+| **骨干** | `ResNet1D` | `DilatedResNet2D` |
+| **卷积维度** | 1D（沿序列方向） | 2D（在残基对矩阵上） |
+| **空洞率** | 不适用 | 呈指数级增长的空洞率 |
+| **注意力** | 无 | 挤压-激励 (AvgPool + MaxPool → FC → 重加权) |
+| **嵌入** | 直接序列输入 | 1D 卷积 → OuterConcatenate → 2D 矩阵 |
+| **输出头** | 多任务 (Φ/Ψ, SS, ACC) | 逐响应 (CbCb, CaCa, 取向) |
+| **损失函数** | 冯·米塞斯 (角度)，交叉熵 (离散) | 带有范围依赖权重的加权交叉熵 |
+| **批归一化** | 每个残差块 1 或 2 个（可配置） | 每个残差块 1 或 2 个（可配置） |
+| **模型文件** | 7 个检查点 | 6 个检查点 |
+
+来源: [ResNet4Property.py](/DL4PropertyPrediction/ResNet4Property.py#L1-L150), [ResNet4Distance.py](/DL4DistancePrediction4/ResNet4Distance.py#L1-L100), [DilatedResNet4Distance.py](/DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L200)
+
+## 流水线编排
+
+主编排器 `Server/RaptorXFolder.sh` 将完整的预测流水线编码为具有严格快速失败语义的 shell 脚本。每次模块调用后都会进行退出码检查，并验证预期输出文件是否存在。流水线分四个阶段进行：
+
+```mermaid
+flowchart TD
+    START(["输入: FASTA 或 .a3m"]) --> P1["阶段 1: BuildFeatures.sh<br/>MSA + 特征生成"]
+    P1 -->|"{target}.seq"| P2["阶段 2: PredictProperty4Server.sh<br/>Φ/Ψ, SS, ACC 预测"]
+    P2 -->|".predictedProperties.pkl"| P3["阶段 3: PredictPairRelation4Server.sh<br/>距离与取向预测"]
+    P3 -->|".predictedDistMatrix.pkl"| CHECK{"numDecoys > 0<br/>且 seqLen ≤ maxLen?"}
+    CHECK -->|是| P4["阶段 4: LocalFoldNRelaxOneTarget.sh<br/>或 RemoteFoldNRelaxOneTarget.sh<br/>三维模型折叠"]
+    CHECK -->|否| DONE(["完成: 仅预测"])
+    P4 --> DONE2(["完成: 三维模型位于<br/>target-RelaxResults/<br/>target-SpickerResults/"])
+
+    style P1 fill:#e8f4e8,stroke:#2d7d2d
+    style P2 fill:#e8e8f4,stroke:#2d2d7d
+    style P3 fill:#f4e8e8,stroke:#7d2d2d
+    style P4 fill:#f4f4e8,stroke:#7d7d2d
+```
+
+**关键编排细节：**
+- 默认情况下 GPU 选择是自动的 (`-g -1`)，会选择具有最大可用内存的 GPU
+- 流水线可以跨机器拆分：预测在一台 GPU 服务器上运行，而折叠通过 `-R remoteAccountInfo` 在远程 CPU 集群上运行
+- 当指定 `-n 0` 时，将完全跳过折叠（仅预测模式）
+- 折叠的序列长度限制可通过 `-l` 配置（默认 1050 个残基）
+
+来源: [RaptorXFolder.sh](/Server/RaptorXFolder.sh#L87-L209)
+
+## 环境配置
+
+RaptorX 的运行时环境通过两个互补的 shell 脚本进行配置：
+
+- **`raptorx-path.sh`** — 派生自 `ModelingHome`（代码库根目录）的内部模块路径。定义了 `DistFeatureHome`、`DL4DistancePredHome`、`DL4PropertyPredHome`、`DistanceFoldingHome`，并扩展了 `PYTHONPATH` 和 `PATH`。
+
+- **`raptorx-external.sh`** — 每次安装时必须配置的外部工具和数据库路径。包括 HHblits 安装路径 (`HHDIR`)、UniRef30 数据库 (`HHDB`)、宏基因数据 (`MetaDB`)、Jackhmmer UniRef90 数据库 (`JackDB`)，以及用于基于模板建模的可选 PDB70 数据库。
+
+来源: [raptorx-path.sh](/raptorx-path.sh#L1-L8), [raptorx-external.sh](/raptorx-external.sh#L1-L24)
+
+## 输出目录结构
+
+对于目标蛋白质，所有结果都组织在 `target_OUT/` 目录下，包含以下规范子目录：
+
+| 目录 | 内容 |
+|---|---|
+| `target_contact/` | MSA、HHM 文件以及为距离预测提取的输入特征 |
+| `target_thread/` | 用于 Φ/Ψ 预测和基于线程建模的文件 |
+| `DistancePred/` | 预测的距离/取向/接触矩阵及可视化 |
+| `PropertyPred/` | 预测的 Φ/Ψ 角度、二级结构和溶剂可及性 |
+| `target-RelaxResults/` | 所有生成的三维 decoy PDB 文件 |
+| `target-SpickerResults/` | 用于挑选最终代表模型的聚类结果 |
+
+来源: [README.md](/README.md#L100-L130)
+
+## 支撑基础设施
+
+除四个核心模块外，还有多个支撑目录提供共享实用工具：
+
+- **`Common/`** — 用于 PDB/cIF 操作、距离矩阵计算、HHM/TPL/TGT 文件解析、序列处理以及特征格式转换 (HHM→TGT, TGT→PKL) 的共享 Python 工具
+- **`Alignment/`** — 用于基于模板建模流程的比对质量评估、评分和简化工具
+- **`Utils/`** — 领域模型组装、HHpred 集成、Modeller/RosettaCM 封装，以及最终模型的误差估计
+- **`params/`** — 用于分布式执行的 GPU 机器配置文件
+
+来源: [LoadTPLTGT.py](/Common/LoadTPLTGT.py#L1-L80), [FeatureUtils.py](/DL4DistancePrediction4/FeatureUtils.py#L1-L80)
+
+<CgxTip>具有指数级增长空洞率的 2D DilatedResNet 是一项关键架构创新，使 RaptorX 能够捕获长程接触——这是三维结构最具信息量的信号。在感受野随深度线性增长的标准 ResNet 中无法实现这一点，而空洞卷积实现了指数级的感受野增长，使得第 10 层已经能够“看到”相距 50+ 个残基的位置。这至关重要，因为有效的残基间接触通常在序列中跨越数百个位置。</CgxTip>
+
+<CgxTip>RaptorX 的流水线被刻意设计为 shell 脚本编排，而非单一的 Python 进程。这一设计选择启用了关键的部署模式：在一台机器上运行 GPU 密集型预测（阶段 1-3），而在另一台机器上运行 CPU 密集型折叠（阶段 4），并通过 `RemoteFoldNRelaxOneTarget.sh` 自动传输数据。`-R raptorx@server:workdir/` 标志可激活此分布式模式，无需手动复制文件。</CgxTip>
+
+## 接下来去哪
+
+既然你已经了解了四模块架构和数据流，以下页面将深入探讨每个组件：
+
+- **[预测流水线数据流](5-prediction-pipeline-data-flow)** — 追踪每个流水线边界的确切文件格式和数据转换
+- **[MSA 与特征生成](6-msa-and-feature-generation)** — 深入探讨 BuildFeatures 内部原理、MSA 策略和特征通道组成
+- **[距离与取向预测](7-distance-and-orientation-prediction)** — 2D DilatedResNet 架构与预测工作流的详细解析
+- **[用于距离预测的 ResNet](10-resnet-for-distance-prediction)** — 残差网络构建块的逐层规范
+- **[多机分布式执行](13-multi-machine-distributed-execution)** — 跨异构硬件配置拆分的 GPU/CPU 部署
+
+---
+
+- [深入解析/预测管线数据流](https://zread.ai/j3xugit/RaptorX-3DModeling/5-prediction-pipeline-data-flow)
+
+---
+slug:5-prediction-pipeline-data-flow
+blog_type:normal
+---
+
+
+RaptorX 预测流水线通过四个紧密协调的阶段，将单个蛋白质序列转换为完整的 3D 结构模型：**MSA 生成**、**特征提取**、**深度学习预测**和**折叠**。每个阶段都会产生明确的中间产物供下一阶段使用，从而形成一种线性但存在分支的数据流，其中多个 MSA 来源先汇聚成统一的特征表示，随后再次分叉为平行的距离和性质预测路径。
+
+## 流水线概述
+
+顶层协调器 `RaptorXFolder.sh` 严格按照顺序执行四个模块，每个模块在下一个模块开始前均需通过退出码验证。该流水线接受 FASTA 序列文件（`.fasta` / `.seq`）或预构建的 MSA（`.a3m`）作为输入，并生成一个包含所有中间和最终产物的结构化输出目录。
+
+```mermaid
+flowchart TD
+    A["输入: .fasta / .seq / .a3m"] --> B["BuildFeatures.sh<br/>MSA + 特征生成"]
+    B --> C["PredictProperty4Server.sh<br/>Phi/Psi, SS, ACC 预测"]
+    C --> D["PredictPairRelation4Server.sh<br/>距离 + 方向预测"]
+    D --> E{"numDecoys > 0<br/>且 seqLen ≤ limit?"}
+    E -- 是 --> F["LocalFoldNRelaxOneTarget.sh<br/>3D 模型构建"]
+    E -- 否 --> G["流水线结束<br/>(仅预测)"]
+    F --> H["输出: target_OUT/"]
+
+    style A fill:#e1f5fe
+    style H fill:#e8f5e9
+    style B fill:#fff3e0
+    style C fill:#fff3e0
+    style D fill:#fff3e0
+    style F fill:#fff3e0
+```
+
+来源: [RaptorXFolder.sh](/Server/RaptorXFolder.sh#L1-L209)
+
+## 阶段 1: MSA 生成与特征构建
+
+`BuildFeatures.sh` 脚本是流水线中 I/O 负载最重的阶段，负责将原始序列转换为深度学习预测器所需的数值表示。它包含两个子阶段：**MSA 生成**（通过 `BuildMSAs.sh`）和**特征提取**（通过 `GenDistFeatures4OneProtein.sh`）。
+
+### MSA 生成 (BuildMSAs.sh)
+
+MSA 生成使用一个**位掩码方法选择**系统，其中整数（`-m` 标志）通过位标志编码要激活的 MSA 方法：1（threading HHblits），2（HHblits v2，已弃用），4（Jackhmmer），8（HHblits v3）和 16（宏基因组增强）。默认值 9 组合了标志 1+8（threading + HHblits v3）。当设置 `-m 0` 时，流水线完全跳过 MSA 生成，并通过 `HandleUserA3M.sh` 处理用户提供的 `.a3m` 文件。
+
+MSA 生成步骤会产生**并行的 MSA 分支**——每种方法/参数组合都会在 `target_contact/` 下创建一个单独的子目录，以方法变体命名（例如 `target_uce3`、`target_ure3`、`target_uce3_meta`）。这种分支至关重要，因为下游距离预测器会跨多个 MSA 进行**集成平均**预测。
+
+| MSA 方法 | 标志 | 数据库 | 用途 | 速度 |
+|---|---|---|---|---|
+| HHblits (threading) | 1 | UniRef30 | 性质预测 + threading | 快 |
+| HHblits v2 | 2 | UniRef30 | 接触预测（已弃用） | — |
+| Jackhmmer | 4 | UniRef90 | 距离/方向预测 | 慢 |
+| HHblits v3 | 8 | UniRef30 | 距离/方向预测 | 快 |
+| 宏基因组 | 16 | metaclust_50 | 增强任何现有 MSA | 慢 |
+
+对于 threading MSA（标志 1），HHblits 运行 2 次迭代，e 值阈值为 0.001，`neffmax=6`，输出 `.a3m` 比对和 `.tgt` 文件（threading 的目标格式）。对于距离预测 MSA（标志 8/4），脚本使用基于 CD-HIT 的聚类（`meff_cdhit`）计算 **Meff**（有效序列数），作为下游特征加权的质量指标。
+
+来源: [BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L1-L119), [BuildMSAs.sh](/BuildFeatures/BuildMSAs.sh#L1-L200)
+
+### 特征提取 (GenDistFeaturesFromMSA.sh)
+
+对于每个 MSA 子目录，`GenDistFeatures4OneProtein.sh` 遍历所有方法变体，并分派 `GenDistFeaturesFromMSA.sh` 执行，同时进行并发控制（通过 `numAllowedJobs` 限制并发作业数）。每次调用都会在 `feat_target_method/` 子目录中，将单个 `.a3m` 文件转换为完整的特征集。
+
+`GenDistFeaturesFromMSA.sh` 内的特征提取流水线遵循严格的顺序转换链：
+
+```mermaid
+flowchart LR
+    A3M[".a3m 文件"] --> A2M["A3M_To_PSI → .a2m 文件"]
+    A2M --> SEQ["Extract → .seq 文件"]
+    A2M --> POT["alnstats_omp → .pot 文件"]
+    A3M --> TGT["A3M_To_TGT → .tgt 文件"]
+    TGT --> SS3["DeepCNF_SS_Con → .ss3 文件"]
+    TGT --> ACC["AcconPred → .acc 文件"]
+    ACC --> DISO["Pseudo .diso 文件"]
+    A3M --> CCM["RunCCMpred → .ccmpred + .extraCCM.pkl"]
+    CCM --> FINAL["ReadSingleInputFeature.py → 特征 PKL"]
+    SEQ --> FINAL
+    POT --> FINAL
+    TGT --> FINAL
+    SS3 --> FINAL
+    DISO --> FINAL
+
+    style A3M fill:#e1f5fe
+    style FINAL fill:#e8f5e9
+```
+
+核心转换如下：
+
+- **CCMpred** 计算直接耦合分析 (DCA) 共进化特征（`.ccmpred` + `.extraCCM.pkl`），这是计算成本最高的步骤，也是从 GPU 加速中受益最多的步骤。
+- **A3M → A2M** 转换会去除比对中的插入缺口和二级结构注释。
+- **alnstats_omp** 从 A2M 比对中计算统计势。
+- **DeepCNF_SS_Con** 从 TGT 文件预测 3 态二级结构。
+- **AcconPred** 预测溶剂可及性。
+- **ReadSingleInputFeature.py** 是最终的聚合步骤——它读取所有中间文件（`.ccmpred`、`.pot`、`.tgt`、`.ss3`、`.acc`、`.diso`）并将它们组装成单一统一的特征表示，以供神经网络使用。
+
+对于大型比对（A2M 超过 50,000 条序列，A3M 超过 100,000 条序列），脚本在处理前会将其**下采样**至 50,000 条序列，以控制内存和运行时间。
+
+来源: [GenDistFeatures4OneProtein.sh](/BuildFeatures/GenDistFeatures4OneProtein.sh#L1-L121), [GenDistFeaturesFromMSA.sh](/BuildFeatures/GenDistFeaturesFromMSA.sh#L1-L220)
+
+## 阶段 2: 性质预测
+
+特征构建完成后，`PredictProperty4Server.sh` 会预测局部结构性质——**Phi/Psi 二面角**、**二级结构 (SS)** 和**溶剂可及性 (ACC)**。此阶段使用来自 `target_thread/` 的 threading MSA 特征，并在 `PropertyPred/` 中生成预测文件。
+
+脚本首先检查是否存在预构建的性质特征文件（`target.propertyFeatures.pkl`）。如果不存在，则运行 `CollectPropertyFeatures.sh` 从 threading 分支聚合特征。实际预测被委派给 `PredictPropertyWrapper.sh`，它使用与距离预测器相同的机器选择逻辑来处理本地/远程 GPU 调度。
+
+**输出产物**: `PropertyPred/target.predictedProperties.pkl`——一个包含预测的 Phi/Psi 角度、SS 和 ACC 值的序列化字典，作为折叠阶段的**性质势**输入。
+
+来源: [PredictProperty4Server.sh](/DL4PropertyPrediction/Scripts/PredictProperty4Server.sh#L1-L122)
+
+## 阶段 3: 距离与方向预测
+
+这是流水线的核心深度学习阶段。`PredictPairRelation4Server.sh` 协调距离和方向预测，首先决定在何处运行计算（本地 GPU 还是通过 `GPUMachines.txt` 指定的远程机器），然后执行预测器并对结果进行后处理。
+
+### 特征文件夹解析
+
+`PredictPairRelationLocal.sh` 实现了一种**基于回退的特征选择**策略。它扫描 `target_contact/` 以查找特征目录，优先选择宏基因组增强变体（`feat_target_method_meta`）而非基础变体（`feat_target_method`）。多个特征文件夹以分号连接，作为单个 `-i` 参数传递给 Python 预测器，预测器在所有提供的 MSA 上运行集成。
+
+方法搜索顺序为：`uce3 → uce5 → ure3 → ure5 → user`，且每种均优先选择带 `_meta` 后缀的变体。
+
+### 模型选择
+
+模型选择取决于**比对类型**（`-T` 标志）：
+
+| 比对类型 | 默认模型 | 用例 |
+|---|---|---|
+| 0 (默认) | `EC47C37C19CL99S35V2020MidModels` | 自由建模（无模板） |
+| 1 | `HHEC47C37C19CL99S35PDB70Models` | HHpred 模板比对 |
+| 2 | `NDTEC47C37C19CL99S35BC40Models` | RaptorX threading 比对 |
+| 3 | `HAHHEC47C37C19CL99S35NewPDB70Models` | HHpred + threading 混合 |
+
+### GPU 选择与执行
+
+当 GPU 设置为 `-1`（自动）时，脚本通过 `EstimateGPURAM4DistPred.sh` 估算所需的 GPU 内存，然后调用 `FindOneGPUByMemory.sh` 寻找具有足够空闲内存的 GPU。实际预测运行如下：
+
+```
+THEANO_FLAGS=device=cudaN,floatX=float32 python RunPairwisePredictor.py -m <models> -p <protein> -i <feature_folders> -d <resultDir>
+```
+
+### 后处理
+
+预测完成后，服务器脚本在 `DistancePred/` 结果目录内按顺序执行三个后处理步骤：
+
+1. **`DeriveDistInfo4Threading.sh`**——从预测的距离矩阵 PKL 中提取适合 threading 的距离信息。
+2. **`PrintContactPrediction.py`**——以 CASP 格式（`.CM.txt`）和矩阵格式输出接触预测。
+3. **`PlotContactMapByMatrix.py`**——将预测的接触图可视化为图像。
+4. **`EstimateAtomDistBounds.py`**——从预测矩阵中估算原子间距离边界，作为折叠约束。
+
+**输出产物**: `DistancePred/target.predictedDistMatrix.pkl`——包含预测的距离和方向概率矩阵的主要输出。
+
+来源: [PredictPairRelation4Server.sh](/DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L1-L208), [PredictPairRelationLocal.sh](/DL4DistancePrediction4/Scripts/PredictPairRelationLocal.sh#L1-L208)
+
+## 阶段 4: 3D 模型折叠
+
+折叠阶段仅在 `numDecoys > 0` 且序列长度不超过 `maxLen2BeFolded`（默认 1050 个残基）时条件执行。它接收三个输入：
+
+| 输入 | 来源 | 描述 |
+|---|---|---|
+| `.seq` 文件 | 阶段 1 | 查询蛋白质序列 |
+| `predictedDistMatrix.pkl` | 阶段 3 | 预测的距离/方向概率 |
+| `predictedProperties.pkl` | 阶段 2 | 预测的 Phi/Psi, SS, ACC 值 |
+
+根据是否配置了远程执行（`-R` 标志）来选择折叠脚本：
+
+- **本地**: `Folding/LocalFoldNRelaxOneTarget.sh`
+- **远程**: `Folding/RemoteFoldNRelaxOneTarget.sh`——使用 `scp`/`ssh` 将数据传输到远程账户，支持分机执行，即预测在 GPU 服务器上运行，而折叠在 CPU 集群上运行。
+
+`-r` 标志控制折叠模式：`0` 仅折叠，`1` 折叠 + 弛豫（弛豫可消除空间位阻并优化侧链，但运行时间增加 3-4 倍）。折叠模型被写入 `target-RelaxResults/`，随后被聚类至 `target-SpickerResults/`。
+
+来源: [RaptorXFolder.sh](/Server/RaptorXFolder.sh#L158-L209)
+
+## 完整数据流图
+
+```mermaid
+flowchart TB
+    subgraph 输入
+        FASTA["FASTA / .seq"]
+        A3M["用户 .a3m"]
+    end
+
+    subgraph "阶段 1: BuildFeatures"
+        direction TB
+        BMSA["BuildMSAs.sh"]
+        HHBLITS_T["HHblits → target_thread/<br/>.a3m, .tgt, .hhr"]
+        HHBLITS_C["HHblits → target_contact/<br/>target_uce3/, target_ure3/..."]
+        JACK["Jackhmmer → target_ure3/"]
+        META["hmmsearch + metaDB<br/>→ target_uce3_meta/"]
+        GDF["GenDistFeatures4OneProtein.sh"]
+        GDFMSA["GenDistFeaturesFromMSA.sh<br/>每个 MSA 变体"]
+        CCM["CCMpred → .ccmpred, .extraCCM.pkl"]
+        A2MPOT["A2M + alnstats → .a2m, .pot"]
+        TGTSS["TGT + DeepCNF + AcconPred<br/>→ .tgt, .ss3, .acc, .diso"]
+        RSIF["ReadSingleInputFeature.py<br/>→ 统一特征 PKL"]
+    end
+
+    subgraph "阶段 2: 性质预测"
+        CPF["CollectPropertyFeatures.sh"]
+        PPW["PredictPropertyWrapper.sh<br/>(ResNet)"]
+        PROP["PropertyPred/<br/>target.predictedProperties.pkl"]
+    end
+
+    subgraph "阶段 3: 距离预测"
+        PPR["PredictPairRelationLocal.sh"]
+        RPP["RunPairwisePredictor.py<br/>(DilatedResNet 集成)"]
+        POST["后处理:<br/>DeriveDistInfo + PrintContact<br/>+ PlotContactMap + EstimateBounds"]
+        DIST["DistancePred/<br/>target.predictedDistMatrix.pkl"]
+    end
+
+    subgraph "阶段 4: 折叠"
+        FOLD["LocalFoldNRelaxOneTarget.sh<br/>(PyRosetta)"]
+        DECOY["target-RelaxResults/<br/>(折叠模型)"]
+        SPICK["target-SpickerResults/<br/>(聚类模型)"]
+    end
+
+    FASTA --> BMSA
+    A3M --> GDF
+    BMSA --> HHBLITS_T
+    BMSA --> HHBLITS_C
+    BMSA --> JACK
+    JACK --> META
+    HHBLITS_C --> GDF
+    META --> GDF
+    GDF --> GDFMSA
+    GDFMSA --> CCM
+    GDFMSA --> A2MPOT
+    GDFMSA --> TGTSS
+    CCM --> RSIF
+    A2MPOT --> RSIF
+    TGTSS --> RSIF
+    HHBLITS_T --> CPF
+    CPF --> PPW
+    PPW --> PROP
+    RSIF --> PPR
+    PPR --> RPP
+    RPP --> POST
+    POST --> DIST
+    DIST --> FOLD
+    PROP --> FOLD
+    FOLD --> DECOY
+    DECOY --> SPICK
+```
+
+## 输出目录结构
+
+流水线的所有输出均组织在 `target_OUT/` 下，布局如下：
+
+| 目录 | 产生者 | 内容 |
+|---|---|---|
+| `target_contact/` | BuildMSAs.sh | 原始 MSA 文件及各方法变体的子目录 |
+| `target_contact/feat_target_*/` | GenDistFeaturesFromMSA.sh | 各 MSA 变体提取的特征 |
+| `target_thread/` | BuildMSAs.sh | Threading MSA、TGT 文件、HHR 输出 |
+| `PropertyPred/` | PredictProperty4Server.sh | `target.predictedProperties.pkl`、特征 PKL |
+| `DistancePred/` | PredictPairRelation4Server.sh | `target.predictedDistMatrix.pkl`、CASP 接触、接触图图像 |
+| `target-RelaxResults/` | 折叠脚本 | 所有生成的折叠模型 PDB 文件 |
+| `target-SpickerResults/` | 折叠脚本 | 聚类后的最终模型 |
+
+<CgxTip>流水线的集成策略是核心架构洞察：多个 MSA（来自 HHblits、Jackhmmer、宏基因组）产生独立的特征集，距离预测器对它们的所有预测进行平均。这意味着添加更多 MSA 方法（通过 `-m` 位掩码）会直接提高预测质量，代价是运行时间和 I/O 负载的增加。</CgxTip>
+
+<CgxTip>流水线无需手动拷贝数据即可支持**分机执行**：在 GPU 服务器上运行预测，然后使用 `-R user@host:path` 自动将预测的距离矩阵和性质文件 `scp` 到远程 CPU 集群进行折叠。距离预测器（通过 `GPUMachines.txt`）和折叠阶段均独立支持此模式。</CgxTip>
+
+## 核心数据转换摘要
+
+| 从 → 至 | 格式变化 | 核心操作 |
+|---|---|---|
+| FASTA → a3m | 序列 → 多序列比对 | HHblits/Jackhmmer 数据库搜索 |
+| a3m → ccmpred | 比对 → 共进化矩阵 | 直接耦合分析 (DCA) |
+| a3m → tgt | 比对 → 文件格式 | A3M_To_TGT 转换 |
+| a2m → pot | 比对 → 统计势 | alnstats_omp 计算 |
+| tgt → ss3/acc | 文件格式 → 逐残基预测 | DeepCNF_SS_Con / AcconPred |
+| {ccmpred, pot, tgt, ss3, acc, diso} → PKL | 多文件 → 统一特征 | ReadSingleInputFeature.py 聚合 |
+| 特征 PKL → predictedDistMatrix.pkl | 特征 → L×L 距离/方向矩阵 | RunPairwisePredictor.py (ResNet 集成) |
+| 特征 PKL → predictedProperties.pkl | 特征 → 逐残基性质 | 性质预测器 |
+| {predictedDistMatrix, predictedProperties, seq} → PDB | 预测 → 3D 坐标 | PyRosetta 约束折叠 |
+
+来源: [RaptorXFolder.sh](/Server/RaptorXFolder.sh#L1-L209), [BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L1-L119), [GenDistFeaturesFromMSA.sh](/BuildFeatures/GenDistFeaturesFromMSA.sh#L1-L220), [PredictPairRelation4Server.sh](/DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L1-L208), [PredictProperty4Server.sh](/DL4PropertyPrediction/Scripts/PredictProperty4Server.sh#L1-L122)
+
+## 后续步骤
+
+- 有关 MSA 生成内部机制和特征文件格式的详细信息，请参阅 [MSA 与特征生成](6-msa-and-feature-generation)。
+- 有关使用这些特征的深度学习模型，请参阅 [距离与方向预测](7-distance-and-orientation-prediction) 和 [性质预测网络](8-property-prediction-network)。
+- 有关 ResNet 架构规范，请参阅 [用于距离预测的 ResNet](10-resnet-for-distance-prediction) 和 [膨胀 ResNet 与注意力机制](11-dilated-resnet-and-attention)。
+- 有关跨多台机器的分布式执行，请参阅 [多机分布式执行](13-multi-machine-distributed-execution)。
+
+---
+
+- [深入解析/自定义网络集成](https://zread.ai/j3xugit/RaptorX-3DModeling/15-custom-network-integration)
+
+---
+slug:15-custom-network-integration
+blog_type:normal
+---
+
+
+RaptorX-3DModeling 暴露了一个**模型规格字典**（`modelSpecs`）作为其核心配置契约——这是一个单一的、强类型的 Python `dict`，控制着网络架构、训练算法、特征组合以及预测目标。流水线的每一层——从 CLI 参数解析、模型构建到推理——都读取该字典，使其成为自定义网络集成的规范扩展点。本文档将介绍该契约的架构、新网络类型的注册机制，以及将自定义深度网络引入预测流水线所需的具体步骤。
+
+## 模型规格契约的架构
+
+`modelSpecs` 字典由 `InitializeModelSpecs()` 初始化，随后通过 `ParseCommandLine.py` 解析的命令行参数进行选择性覆盖。这种两阶段初始化——先设置默认值，再应用覆盖——确保了向后兼容性，同时允许完全的架构控制。该字典在训练、检查点序列化和推理过程中保持不变地传递，这意味着保存的 `.pkl` 模型文件是自描述的：它包含自身的 `modelSpecs`，推理加载器可从中重建出完全一致的网络图。
+
+```mermaid
+flowchart TD
+    A["InitializeModelSpecs()<br/>默认 modelSpecs 字典"] --> B["ParseCommandLine.py<br/>CLI 覆盖"]
+    B --> C["完全解析的<br/>modelSpecs 字典"]
+    C --> D["BuildModel()<br/>网络图构建"]
+    C --> E["TrainDistancePredictor.py<br/>训练循环"]
+    C --> F["cPickle.dump()<br/>检查点序列化"]
+    F --> G["保存的 .pkl 模型文件<br/>(内嵌 modelSpecs)"]
+    G --> H["RunPairwisePredictor.py<br/>LoadModels()"]
+    H --> I["BuildModel()<br/>图重建"]
+    D --> J{"modelSpecs['network']<br/>分发"}
+    J -->|ResNet2D*| K["ResNet4Distance.ResNet"]
+    J -->|DilatedResNet2D| L["DilatedResNet4Distance.DilatedResNet"]
+```
+
+该字典包含约 40 个键，划分为五个功能组。下表将每个组映射至其架构角色及定义默认值的来源文件。
+
+| 规格组 | 键示例 | 作用 | 默认值来源 |
+|---|---|---|---|
+| **网络架构** | `network`, `conv1d_hiddens`, `conv2d_hiddens`, `conv2d_dilations`, `activation` | 选择并参数化深度网络拓扑 | [Initialize.py](DL4DistancePrediction4/Initialize.py#L24-L62) |
+| **训练控制** | `algorithm`, `numEpochs`, `lrs`, `L2reg`, `minibatchSize` | 优化器选择、学习率调度、正则化 | [Initialize.py](DL4DistancePrediction4/Initialize.py#L36-L47) |
+| **特征组合** | `UseSequentialFeatures`, `UseRawCCM`, `UseMI`, `ECInfo`, `UseTemplate` | 控制输入特征通道的布尔值与位掩码标志 | [Initialize.py](DL4DistancePrediction4/Initialize.py#L83-L108) |
+| **序列到矩阵** | `seq2matrixMode`, `n_in_embed`, `boundingBoxOffset` | 控制一维序列特征如何转换为二维成对特征 | [Initialize.py](DL4DistancePrediction4/Initialize.py#L65-L70) |
+| **预测目标** | `responses`, `w4responses`, `responseStr` | 声明网络预测的内容（距离、方向等） | [Initialize.py](DL4DistancePrediction4/Initialize.py#L28-L32) |
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L1-L134), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L1-L200)
+
+## 网络类型注册表与分发机制
+
+合法的网络类型集合在 `config.py` 中定义为常量列表：
+
+```python
+allNetworks = ['ResNet2D', 'ResNet2DV21', 'ResNet2DV22', 'ResNet2DV23', 'DilatedResNet2D']
+```
+
+此列表充当**注册表**——在引入自定义网络时，向 `allNetworks` 添加新字符串是首要的强制步骤。分发逻辑位于 `Model4DistancePrediction.py` 和 `Model4PairwisePrediction.py` 两文件内的 `ResNet4DistMatrix.__init__()` 中。当前的分支结构如下：
+
+```python
+# 来自 Model4PairwisePrediction.py
+if modelSpecs['network'].startswith('DilatedResNet'):
+    seqConv = DilatedResNet(rng, input=seqInput, ...)
+else:
+    seqConv = ResNet(rng, input=seqInput, ...)
+
+# ... 随后，对于 2D 矩阵卷积阶段：
+if modelSpecs['network'].startswith('ResNet'):
+    matrixConv = ResNet(rng, input=input_2d, ...)
+elif modelSpecs['network'].startswith('DilatedResNet'):
+    matrixConv = DilatedResNet(rng, input=input_2d, ...)
+else:
+    print 'ERROR: Unimplemented deep network type: ', modelSpecs['network']
+    exit(1)
+```
+
+分发采用 `startswith()` 前缀匹配，因此 `ResNet2D`、`ResNet2DV21`、`ResNet2DV22` 和 `ResNet2DV23` 变体均路由至同一个 `ResNet` 类，但通过 `modelSpecs['network']` 接收不同的 `version` 参数。这是一种刻意的设计模式：**版本变体共享同一个类，但内部块结构不同**（例如，`ResNet2DV22` 在每个残差块中使用两个批归一化层，而 `ResNet2DV21` 使用一个）。
+
+来源：[config.py](DL4DistancePrediction4/config.py#L14-L15), [Model4PairwisePrediction.py](DL4DistancePrediction4/Model4PairwisePrediction.py#L240-L260), [Model4PairwisePrediction.py](DL4DistancePrediction4/Model4PairwisePrediction.py#L310-L320)
+
+## 逐步操作：集成自定义网络
+
+集成过程需按依赖顺序修改四个文件。以下流程图说明了完整流程：
+
+```mermaid
+flowchart LR
+    subgraph Step1["步骤 1: 注册"]
+        A1["config.py<br/>添加至 allNetworks"] --> A2["ParseCommandLine.py<br/>验证通过"]
+    end
+    subgraph Step2["步骤 2: 实现"]
+        B1["创建 CustomNet.py<br/>遵循层协议"] --> B2["暴露: .output, .n_out,<br/>.params, .paramL1, .paramL2"]
+    end
+    subgraph Step3["步骤 3: 接线"]
+        C1["Model4PairwisePrediction.py<br/>添加分发分支"] --> C2["Model4PropertyPrediction.py<br/>添加分发分支"]
+    end
+    subgraph Step4["步骤 4: 配置"]
+        D1["Initialize.py<br/>设置默认 modelSpecs"] --> D2["通过 CLI 训练<br/>-n CustomNet2D"]
+    end
+    Step1 --> Step2 --> Step3 --> Step4
+```
+
+### 步骤 1 — 注册网络类型
+
+在 [config.py](DL4DistancePrediction4/config.py#L14-L15) 中，将你的网络名称追加到 `allNetworks`：
+
+```python
+allNetworks = ['ResNet2D', 'ResNet2DV21', 'ResNet2DV22', 'ResNet2DV23', 
+               'DilatedResNet2D', 'CustomNet2D']
+```
+
+这使得当在命令行指定 `-n CustomNet2D` 时，`ParseCommandLine.py` 中的验证检查能够通过。若无此注册，解析器将以错误提示退出：`"Currently only support the network types in [...]"`。
+
+来源：[config.py](DL4DistancePrediction4/config.py#L14-L15), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L88-L91)
+
+### 步骤 2 — 实现网络类
+
+在 `DL4DistancePrediction4/` 目录下创建一个新的 Python 文件（例如 `CustomNet4Distance.py`）。你的类**必须遵循层协议**——`ResNet4DistMatrix` 中的消费代码会访问以下确切属性：
+
+| 必需属性 | 类型 | 用途 |
+|---|---|---|
+| `self.output` | Theano 符号张量 | 网络的输出张量，供下游预测器消费 |
+| `self.n_out` | `int` | 输出特征通道数，用于确定逻辑回归头的维度 |
+| `self.params` | `list[theano.shared]` | 所有可训练的权重矩阵和偏置向量 |
+| `self.paramL1` | Theano 标量 | 所有参数的 L1 范数，用于正则化 |
+| `self.paramL2` | Theano 标量 | 所有参数的 L2 范数，用于正则化 |
+
+请将 [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L1-L200) 中的 `ResNet` 类作为参考实现进行研读。关键的实现注意事项：
+
+**一维序列卷积的输入形状契约**：输入张量的形状为 `(batchSize, n_in, seqLen)`，其中每个序列位置有 `n_in` 个通道。输出形状必须为 `(batchSize, n_out, seqLen)`。填充位置被掩盖为零，且你的卷积操作必须在每次运算后重新应用掩码，以防止噪声从零填充区域传播。
+
+**二维矩阵卷积的输入形状契约**：输入张量的形状为 `(batchSize, n_in, nRows, nCols)`，表示成对特征。输出形状为 `(batchSize, n_out, nRows, nCols)`。掩码形状为 `(batchSize, #rows_to_be_masked, nCols)`，且必须双向应用（水平和垂直填充同时掩盖）。
+
+**权重初始化**：对 ReLU 激活函数使用 He 初始化（`scale = sqrt(2 / fan_in)`），对 tanh/sigmoid 激活函数使用 Xavier 初始化（`scale = sqrt(6 / (fan_in + fan_out))`）。这与 [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L28-L36) 中的约定一致。
+
+<CgxTip>如果你将 `modelSpecs` 字典作为关键字参数接收，它将被传递至你的网络构造函数中。`DilatedResNet` 类使用 `modelSpecs=modelSpecs` 来读取注意力配置（`modelSpecs['Attention']`），从而在不修改分发逻辑的情况下启用特征条件行为。对于微小的变体，请优先采用此模式，而非添加新的分发分支。</CgxTip>
+
+来源：[ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L1-L200), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L200)
+
+### 步骤 3 — 接入分发逻辑
+
+在**两个**模型构建文件中修改网络分发逻辑。对于 [Model4PairwisePrediction.py](DL4DistancePrediction4/Model4PairwisePrediction.py#L240-L260) 中的距离/方向预测，需为一维序列阶段和二维矩阵阶段均添加分支：
+
+```python
+# 一维序列卷积分发 (约第 250 行)
+if modelSpecs['network'].startswith('DilatedResNet'):
+    seqConv = DilatedResNet(rng, input=seqInput, ...)
+elif modelSpecs['network'].startswith('CustomNet'):
+    from CustomNet4Distance import CustomNet
+    seqConv = CustomNet(rng, input=seqInput, n_in=n_in_seq, 
+                        n_hiddens=n_hiddens_seq, mask=mask_seq, 
+                        modelSpecs=modelSpecs)
+else:
+    seqConv = ResNet(rng, input=seqInput, ...)
+
+# 二维矩阵卷积分发 (约第 315 行)
+if modelSpecs['network'].startswith('ResNet'):
+    matrixConv = ResNet(rng, input=input_2d, ...)
+elif modelSpecs['network'].startswith('DilatedResNet'):
+    matrixConv = DilatedResNet(rng, input=input_2d, ...)
+elif modelSpecs['network'].startswith('CustomNet'):
+    matrixConv = CustomNet(rng, input=input_2d, n_in=n_input2d, 
+                           n_hiddens=n_hiddens_matrix, mask=mask_matrix, 
+                           modelSpecs=modelSpecs)
+else:
+    print 'ERROR: Unimplemented deep network type: ', modelSpecs['network']
+    exit(1)
+```
+
+对于属性预测，需在 [Model4PropertyPrediction.py](DL4PropertyPrediction/Model4PropertyPrediction.py#L35-L42) 中应用类似的修改，该文件目前仅支持 ResNet 变体：
+
+```python
+if modelSpecs['network'].startswith('ResNet'):
+    seqConv = ResNet(rng, input=seqInput, ...)
+elif modelSpecs['network'].startswith('CustomNet'):
+    from CustomNet4Property import CustomNet
+    seqConv = CustomNet(rng, input=seqInput, ...)
+else:
+    print 'Unimplemented deep network type: ', modelSpecs['network']
+    exit(-1)
+```
+
+来源：[Model4PairwisePrediction.py](DL4DistancePrediction4/Model4PairwisePrediction.py#L240-L320), [Model4PropertyPrediction.py](DL4PropertyPrediction/Model4PropertyPrediction.py#L35-L42)
+
+### 步骤 4 — 配置默认值并训练
+
+在 [Initialize.py](DL4DistancePrediction4/Initialize.py#L1-L134) 中，为你的自定义网络所需的任何新 `modelSpecs` 键添加合理的默认值。随后使用 CLI 进行训练：
+
+```bash
+python TrainDistancePredictor.py \
+    -n CustomNet2D \
+    -y "CbCb+CaCa+NO:47C;TwoRDihedral:37C;TwoRAngle:19C" \
+    -c 30,35,40,45 \
+    -d 50,55,60,65,70,75 \
+    -e 80 \
+    -x "SeqOnly:4,6,12;OuterCat:70,35" \
+    -a "AdamW:20+0.0002:1+0.00004" \
+    -t train_meta.json \
+    -v valid_meta.json
+```
+
+`-n` 标志设置 `modelSpecs['network']`，这将路由至你新增的分发分支。所有其他标志配置的是共享基础设施（隐藏层大小、响应、嵌入模式、优化器），你的自定义网络将通过 `modelSpecs` 接收这些配置。
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L1-L134), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L1-L200)
+
+## 扩展预测目标（响应系统）
+
+除网络架构外，响应系统还定义了网络预测**什么**。响应被编码为 `LabelName_LabelType` 格式的字符串（例如 `CbCb_Discrete25C`、`Ca1Cb1Cb2Ca2_Discrete37C`）。合法标签名称和类型的注册表定义在 [config.py](DL4DistancePrediction4/config.py#L161-L200) 中：
+
+| 类别 | 标签名称 | 标签类型 | 解释 |
+|---|---|---|---|
+| **原子间距离** | `CbCb`, `CaCa`, `CgCg`, `CaCg`, `NO` | `Discrete25C`, `Discrete47C` | 距离离散化为 N 个区间 |
+| **结构接触** | `HB`, `Beta` | `Discrete2C` | 氢键 / β配对二分类 |
+| **方向 (二面角)** | `Ca1Cb1Cb2Ca2`, `N1Ca1Cb1Cb2` | `Discrete37C`, `Discrete19C` | 角度离散化为 N 个区间 |
+| **方向 (角度)** | `Ca1Cb1Cb2` | `Discrete19C` | 角度离散化为 N 个区间 |
+
+要添加新的预测目标，你必须：(1) 在 `config.py` 中相关的 `all*Names` 列表中添加标签名称；(2) 在 `responseProbDims` / `responseValueDims` 字典中定义其标签类型和区间数；(3) 确保 `DataProcessor.py` 能够从输入特征中生成对应的真实标签。`-y` CLI 标志接受以分号分隔的响应组，并支持可选的逐响应权重：
+
+```
+-y "CbCb+CaCa+NO:47C:1;TwoRDihedral:37C:0.5;TwoRAngle:19C:0.5"
+```
+
+此处距离响应共享权重 1.0，而方向响应的权重降为 0.5。
+
+来源：[config.py](DL4DistancePrediction4/config.py#L161-L200), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L93-L130)
+
+## 扩展优化器套件
+
+[TrainDistancePredictor.py](DL4DistancePrediction4/TrainDistancePredictor.py#L68-L100) 中的训练循环通过 `UpdateAlgorithm()` 函数分发至优化器类。注册表为：
+
+```python
+allAlgorithms = ['SGDM', 'SGDM2', 'Adam', 'SGNA', 'AdamW', 'AdamWAMS', 'AMSGrad']
+```
+
+每个优化器类（定义在 [Adams.py](DL4DistancePrediction4/Adams.py) 和 [Optimizers.py](DL4DistancePrediction4/Optimizers.py) 中）必须返回一个元组 `(updates, other_params)`，其中 `updates` 是 Theano `(shared_var, update_expression)` 对的列表，`other_params` 跟踪动量/自适应状态变量以维持检查点持久性。要添加自定义优化器：
+
+1. 在 [config.py](DL4DistancePrediction4/config.py#L18) 中将其名称追加到 `allAlgorithms`
+2. 按照 `(params, gparams, lr, ...)` → `(updates, other_params)` 契约实现该类
+3. 在 [TrainDistancePredictor.py](DL4DistancePrediction4/TrainDistancePredictor.py#L68-L100) 的 `UpdateAlgorithm()` 中添加分发分支
+4. 通过 CLI 指定：`-a CustomOpt:20+0.001`
+
+算法字符串语法支持**两阶段训练**：`AdamW:20+0.0002:1+0.00004` 表示先以 lr=0.0002 训练 20 个 epoch，再以 lr=0.00004 训练 1 个 epoch。分号分隔符用于区分均值预测优化器与方差预测优化器（例如 `AdamW:20+0.0002;SGDM:5+0.001`）。
+
+来源：[TrainDistancePredictor.py](DL4DistancePrediction4/TrainDistancePredictor.py#L68-L100), [config.py](DL4DistancePrediction4/config.py#L18)
+
+## 注意力机制集成
+
+`DilatedResNet2D` 网络可选择在每个残差块后引入通道级注意力机制。其配置由 `modelSpecs['Attention']` 控制，并通过 [config.py](DL4DistancePrediction4/config.py#L121-L132) 中的 `ParseAttentionMode()` 进行解析：
+
+```python
+def ParseAttentionMode(modelSpecs):
+    fields = modelSpecs['Attention'].split('+')
+    UseAvg = True
+    UseMax = 'UseMax' in fields
+    UseFC = True
+    if 'UseConv' in fields:
+        UseFC = False
+    return (UseAvg, UseMax, UseFC)
+```
+
+[AttentionLayer](DL4DistancePrediction4/AttentionLayer.py#L200-L260) 类实现了挤压激励式通道注意力：它对空间维度进行池化（通过 `AvgPool` 以及可选的 `MaxPool`），将池化后的向量通过全连接层，并将结果作为通道级缩放因子重新乘回输入张量。在集成自定义网络时，你可以导入并复用此注意力层，同时传递 `modelSpecs` 以读取注意力配置，遵循 [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L200) 中的模式。
+
+<CgxTip>`DilatedResNet4Distance.py` 中的 `AttnConv2DLayer` 类将空洞二维卷积与注意力组合在单个层对象中。如果你的自定义网络同时使用空洞卷积和注意力，请优先组合 `AttnConv2DLayer` 块，而非手动堆叠 `ResConv2DLayer` → `AttentionLayer`，因为组合类能正确处理注意力通路中的掩码传播。</CgxTip>
+
+来源：[AttentionLayer.py](DL4DistancePrediction4/AttentionLayer.py#L200-L260), [config.py](DL4DistancePrediction4/config.py#L121-L132), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L140-L200)
+
+## 模型序列化与推理兼容性
+
+当训练模型通过 `cPickle.dump()` 保存时，完整的 `modelSpecs` 字典会被嵌入到 `.pkl` 文件中。在推理期间，[RunPairwisePredictor.py](DL4DistancePrediction4/RunPairwisePredictor.py#L64-L88) 通过 `LoadModels()` 加载模型，该函数会执行两项关键验证检查：
+
+```python
+if not model['network'] in config.allNetworks:
+    print 'ERROR: unsupported network architecture: ', model['network']
+    exit(1)
+```
+
+这意味着**任何自定义网络类型都必须在推理机的 `config.py` 的 `allNetworks` 中注册**。加载的 `modelSpecs` 会被直接传递给 `BuildModel()`，以重建完全一致的 Theano 计算图。当集成多个模型时，`LoadModels()` 函数还会验证**跨模型一致性**——所有模型在每个标签名称上的标签类型必须保持一致。
+
+[params/ModelFile4PairwisePred.txt](DL4DistancePrediction4/params/ModelFile4PairwisePred.txt#L1-L43) 中的预训练模型注册表通过嵌入了架构信息的命名约定来引用模型文件：`SeqModel30-DilatedResNet2D4CbCb+CaCa+NO_47CPlus-...-AdamW.pkl`。`SeqModel` / `TPLModel` 前缀区分了无模板模型与基于模板的模型，网络类型和响应规格均嵌入在文件名中以确保可追溯性。
+
+来源：[RunPairwisePredictor.py](DL4DistancePrediction4/RunPairwisePredictor.py#L64-L88), [params/ModelFile4PairwisePred.txt](DL4DistancePrediction4/params/ModelFile4PairwisePred.txt#L1-L43)
+
+## 序列到矩阵嵌入模式
+
+自定义网络接收一个**预组装的二维输入张量**（`input_2d`），该张量由原始成对矩阵特征与一个或多个序列到矩阵转换拼接而成。可用的嵌入模式由 `modelSpecs['seq2matrixMode']` 控制：
+
+| 模式 | CLI 标志 | 机制 | 输出形状贡献 |
+|---|---|---|---|
+| **OuterCat** | `OuterCat:70,35` | 一维卷积输出的外拼接，经二维卷积压缩 | `(batchSize, L, L, sum(sizes))` |
+| **SeqOnly** | `SeqOnly:4,6,12` | 按距离范围对氨基酸对进行可学习嵌入 | `(batchSize, L, L, sum(sizes))` |
+| **Seq+SS** | `Seq+SS:4,6,12` | 对(氨基酸, 二级结构)对进行可学习嵌入 | `(batchSize, L, L, sum(sizes))` |
+
+各模式可组合使用：`-x "SeqOnly:4,6,12;OuterCat:70,35"` 将同时应用二者，并沿通道轴拼接其输出。`EmbeddingLayer4AllRange` 类生成依赖于范围的嵌入（短/中/长），并为每个范围提供独立的嵌入向量，这就是尺寸参数为列表的原因——`SeqOnly:4,6,12` 表示短程、中程和长程残基对的嵌入维度分别为 4、6 和 12。
+
+你的自定义网络接收合并后的 `input_2d` 张量，具有 `n_input2d` 个通道，其中 `n_input2d = n_in_matrix + sum(layer.n_out for layer in seq2matrixLayers)`。这与 `ResNet` 和 `DilatedResNet` 使用的合并机制相同，因此无需额外接线。
+
+来源：[Model4PairwisePrediction.py](DL4DistancePrediction4/Model4PairwisePrediction.py#L270-L310), [config.py](DL4DistancePrediction4/config.py#L20), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L158-L182)
+
+## 兼容性检查清单
+
+在将自定义网络部署至生产环境前，请验证此检查清单中的每一项：
+
+| 检查项 | 验证方法 | 失败模式 |
+|---|---|---|
+| 网络已在 `allNetworks` 中注册 | `config.allNetworks.__contains__('CustomNet2D')` | CLI 解析器拒绝 `-n CustomNet2D` |
+| 两个模型文件中均存在分发分支 | 在 `Model4*Prediction.py` 中 Grep `startswith('CustomNet')` | `BuildModel()` 调用 `exit(1)` |
+| 满足层协议 | 访问 `.output`, `.n_out`, `.params`, `.paramL1`, `.paramL2` | 图构建时抛出 AttributeError |
+| 一维输出形状 `(B, n_out, L)` | 在调试构建中打印 `seqConv.output.shape` | 拼接时维度不匹配 |
+| 二维输出形状 `(B, n_out, L, L)` | 在调试构建中打印 `matrixConv.output.shape` | 展平/预测器处维度不匹配 |
+| 掩码传播 | 验证零填充位置在每层后仍保持为零 | 噪声污染，精度下降 |
+| 推理机上的 `allNetworks` | 检查预测服务器上的 `config.py` | `LoadModels()` 拒绝加载保存的 `.pkl` |
+| 检查点兼容性 | 训练 1 个 epoch 后保存并重新加载 `.pkl` | `Compatible()` 返回 False |
+
+来源：[Model4PairwisePrediction.py](DL4DistancePrediction4/Model4PairwisePrediction.py#L240-L320), [RunPairwisePredictor.py](DL4DistancePrediction4/RunPairwisePredictor.py#L64-L88), [config.py](DL4DistancePrediction4/config.py#L14-L18)
+
+## 相关页面
+
+- 了解现有 ResNet 和 DilatedResNet 实现的内部架构，请参阅 [ResNet 距离预测](10-resnet-for-distance-prediction) 和 [空洞 ResNet 与注意力机制](11-dilated-resnet-and-attention)。
+- 获取可配置 `modelSpecs` 键及其默认值的完整集合，请参阅 [模型配置参考](12-model-configuration-reference)。
+- 了解使用这些规格的训练命令行接口，请参阅 [距离与方向预测](7-distance-and-orientation-prediction)。
+- 了解推理期间的多模型集成，请参阅 [GPU 选择与远程预测](14-gpu-selection-and-remote-prediction)。
+
+---
+
+- [深入解析/比对与质量评估](https://zread.ai/j3xugit/RaptorX-3DModeling/16-alignment-and-quality-evaluation)
+
+---
+slug:16-alignment-and-quality-evaluation
+blog_type:normal
+---
+
+
+比对模块为 RaptorX-3DModeling 中基于模板的建模提供了结构骨架。它包含三项紧密耦合的职责：**解析并加载成对的序列-模板比对**、**通过多矩阵相似度引擎对比对进行评分**，以及**使用黄金标准指标（TM-score、GDT-TS、RMSD）评估比对相对于天然 3D 结构的质量**。这些能力共同使得流水线能够选择最佳模板、从中提取结构指导，并定量评估比对的准确度。
+
+## 架构概述
+
+比对模块作为一个**分阶段评估流水线**运行——原始 FASTA 比对文件依次流经解析、评分以及（可选的）几何质量评估阶段。评分子系统是架构的核心，它集成了七种不同的替换矩阵和基于谱的突变分数，以生成下游距离预测网络所使用的逐位置特征向量。
+
+```mermaid
+graph TD
+    A[FASTA Alignment File] --> B[ReadAlignment / ParseAlignmentFile]
+    B --> C[LoadAlignments]
+    C --> D[tpl / tgt Data Objects]
+    D --> E[ScoreAlignments / ScoreOneAlignment]
+    
+    subgraph SimilarityScore Engine
+        E --> F1[BLOSUM 80/62/45]
+        E --> F2[Profile Mutation Scores<br/>PSFM×PSSM]
+        E --> F3[HDSM — Structure-Derived]
+        E --> F4[CC50 — Property Correlation]
+        E --> F5[SS Mutation Score]
+        E --> F6[ACC Mutation Score]
+        E --> F7[Singleton Environment Scores]
+    end
+    
+    E --> G[Local + Global Score Vectors]
+    G --> H[Template Selection / Ranking]
+    
+    A2[Alignment + Native PDBs] --> Q[EvaluateAlignmentQuality]
+    Q --> Q1[SVD Superimposition]
+    Q1 --> Q2[TM-score / GDT-TS / RMSD]
+    Q2 --> Q3[.quality.pkl Output]
+```
+
+来源: [AlignmentUtils.py](Alignment/AlignmentUtils.py#L1-L706), [ScoreAlignments.py](Alignment/ScoreAlignments.py#L1-L268), [EvaluateAlignmentQuality.py](Alignment/EvaluateAlignmentQuality.py#L1-L165)
+
+## 比对解析与加载
+
+### 基于 FASTA 的比对格式
+
+RaptorX 使用**4 行 FASTA 约定**来表示成对比对。每次比对恰好占据四行：模板头、模板序列（含空位）、查询头、查询序列（含空位）。按惯例，模板置于查询之前。
+
+```
+>TPL_NAME
+AAAAACCCCCCCDDDDDDDDDDDDGGGGGGGGGGGHH--HHHHHHHHH
+>QUERY_NAME
+AA--AAAAAAAAACCCCC-CCDD-DDDD-DDDGGGGGGGGGGGGHHHHHHHH-----
+```
+
+`ReadAlignment` 函数解析此格式并返回一个元组 `(templateSeqWithGaps, querySeqWithGaps)`；当指定 `templateFirst`、`seqTemplatePair` 或 `queryName` 参数时，还可选地进行名称消歧。`ParseAlignmentFile` 工具将多重比对文件拆分为独立的 `{tplName}-{tgtName}.fasta` 文件，以便进行并行处理。
+
+来源: [AlignmentUtils.py](Alignment/AlignmentUtils.py#L41-L135), [ParseAlignmentFile.py](Alignment/ParseAlignmentFile.py#L1-L20)
+
+### 带有模板/目标解析的批量加载
+
+`LoadAlignments` 是批量工作流的主力函数。它读取多重比对文件，验证每个 4 行块是否具有对应的 `.tpl` / `.tgt` 文件（若没有则回退到 `.tpl.pkl` / `.tgt.pkl`），并返回三个对象：比对元组列表、已加载模板对象字典和已加载目标对象字典。`KeepTPLSimple` 标志是一项关键的内存优化——设置该标志后，它会从模板中剥离 `atomDistMatrix` 和 `atomOrientationMatrix`，从而降低仅穿线工作流（不需要完整结构矩阵）的内存占用。
+
+来源: [LoadAlignments.py](Alignment/LoadAlignments.py#L1-L104)
+
+## 评分引擎：多矩阵相似度评估
+
+评分系统是该模块架构上最重要的组件。它为每次比对生成 **11 维的逐位置局部特征向量**以及一个 **14 维的全局分数向量**，从而支持下游的模板排序和特征提取。
+
+### 评分维度
+
+| 特征索引 | 分数名称 | 类别 | 描述 |
+|:---:|:---|:---|:---|
+| 0 | `seq_Id` | 一致性 | 二值匹配：残基相同则为 1，否则为 0 |
+| 1 | `blosum80` | 替换 | BLOSUM80 —— 近缘同源 |
+| 2 | `blosum62` | 替换 | BLOSUM62 —— 中等分歧 |
+| 3 | `blosum45` | 替换 | BLOSUM45 —— 远缘同源 |
+| 4 | `spScore` | 谱 | 双向 PSFM×PSSM + PSSM×残基 |
+| 5 | `spScore_ST` | 谱 | 单向：查询 PSFM × 模板 PSSM |
+| 6 | `pmScore` | 谱 | 双向 PSFM×PSSM 内积 |
+| 7 | `pmScore_ST` | 谱 | 单向 PSFM×PSSM 内积 |
+| 8 | `cc50` | 结构 | CC50 基于相关性的属性矩阵 |
+| 9 | `hdsm` | 结构 | HDSM —— 结构比对衍生矩阵 |
+| 10 | `SS3` | 二级 | 3 态 SS 突变分数（螺旋/折叠/环） |
+
+**全局分数向量**对局部分数求和进行了扩展：`[seqLen, numAligned, summedLocalScores[0..10], numGapOpenings, numGaps]`——共 14 个值，用于表征比对覆盖度、质量和空位罚分信息。
+
+来源: [ScoreAlignments.py](Alignment/ScoreAlignments.py#L57-L210), [SimilarityScore.py](Alignment/SimilarityScore.py#L1-L200)
+
+### 替换矩阵层级
+
+`SimilarityScore.py` 编码了**七种评分矩阵**，涵盖三类进化和结构信息：
+
+**基于序列的替换矩阵**覆盖不同的进化距离：BLOSUM80 捕获具有高序列一致性的近缘同源物，BLOSUM62 是标准的中等分歧矩阵，而 BLOSUM45 将灵敏度扩展到远缘同源物。它们都是 21×20 矩阵（20 种标准氨基酸 + Z 占位符），在用于特征生成的 `newBLOSUM*` 变体中，Z 所在的行/列被清零。
+
+**结构衍生矩阵**提供了超出序列替换所能提供的远缘同源灵敏度：**HDSM**（同源衍生结构矩阵）是一个从结构比对中训练得到的 20×20 float32 矩阵，用于捕获在结构约束下保留的替换模式。**CC50** 是一个相关系数矩阵，编码氨基酸理化性质的相似度，通过从原始相关值中减去 0.5 进行中心化。
+
+**基于谱的突变分数**基于 HHblits/HHpred 谱 HMM 的 PSFM（位置特异性频率矩阵）和 PSSM（位置特异性评分矩阵）进行计算。存在两种评分范式：`MutationOf2Pos6`（双向：模板 PSSM × 查询残基 + 查询 PSSM × 模板残基）和 `MutationOf2Pos5`（双向的完整 PSFM×PSSM 内积）。`_ST` 变体仅限于单向的“模板谱到查询序列”方向。
+
+来源: [SimilarityScore.py](Alignment/SimilarityScore.py#L1-L300), [SimilarityScore.py](Alignment/SimilarityScore.py#L200-L350)
+
+### 二级结构与溶剂可及性评分
+
+除了氨基酸替换之外，评分引擎还通过三种额外的分数类型引入了**结构环境兼容性**：
+
+**3 态 SS 突变分数**（`SSMutationScore_3State`）：使用 3×3 突变矩阵（螺旋/折叠/环），将模板的 DSSP 分配二级结构与查询的预测 SS3 概率向量进行比较。点积 `SSMutation[tplSS] · query['SS3'][pos]` 得出兼容性分数。
+
+**6 态 SS 突变分数**（`SSMutationScore_6State`）：扩展至 6 种 SS 态（H/I, G, E/B, T, S, L），使用 6×6 突变矩阵，对查询的预测 SS8 概率分布求和。
+
+**3 态 ACC 突变分数**（`ACCMutationScore_3State`）：使用 3×3 埋藏/中等/暴露突变矩阵评估溶剂可及性兼容性，计算 `ACCMutation[tplACC] · query['ACC_prob'][pos]`。
+
+**单体环境分数**捕获单个氨基酸在其结构上下文中的适应度：`SingletonScore_ProfileBased` 使用查询的 PSFM 与 20×9 单体矩阵（20 种氨基酸 × 3 种 SS × 3 种 ACC）进行计算，而 `SingletonScore_WS` 则根据氨基酸类型和结构环境直接索引经 TM-score 优化的 WS_Singleton 矩阵。
+
+来源: [SimilarityScore.py](Alignment/SimilarityScore.py#L300-L580)
+
+### ScoreOneAlignment 工作流
+
+`ScoreOneAlignment` 函数编排了完整的单比对评分流水线：
+
+1. **验证**比对一致性——比对中的模板/查询序列必须是相应 tpl/tgt 数据对象的子串
+2. **初始化**特征数组：`localScores`（L×11 float32）、`insertX`（L×1 二进制插入标志）、`missingX`（L×1 缺失坐标标志）
+3. **迭代**比对列——跳过双空位，标记插入，从所有 11 个评分维度累积匹配态特征
+4. **计算全局分数**，掩码插入项：`globalScore = Σ(localScores × (1 - insertX))`
+5. **计算空位统计**（开放数和总空位数），修剪首尾空位后进行
+6. **返回** `(globalScore, localScores, insertX, missingX, XYresidues)`
+
+当指定 `seqBounds`（如 `1-100`）时，评分将限制在该查询片段内，从而实现结构域级别的评估。
+
+来源: [ScoreAlignments.py](Alignment/ScoreAlignments.py#L57-L210)
+
+## 用于距离预测的比对特征生成
+
+`AlignmentUtils.py` 通过 `GenFeature4Alignment` 函数将比对评分与深度学习预测流水线桥接起来。这是基于模板的信息进入距离/方向预测网络的关键集成点。
+
+### 特征向量构建
+
+该函数生成一个拼接的特征向量 `hstack([insertX, sequentialFeatures])`，其中 `insertX` 是 1 维的二进制插入标志，`sequentialFeatures` 是 10+ 维的分数向量（基础 10 维特征，加上可选的 SS3、SS8、ACC 和环境分数）。同时，它从模板中提取**结构指导矩阵**：
+
+- **距离矩阵**：通过 `CopyTemplateMatrix` 直接从 `tpl['atomDistMatrix']` 复制，或在仅有原子坐标可用时通过 `CalcDistMatrix(copiedCoordinates)` 计算
+- **方向矩阵**：类似地从 `tpl['atomOrientationMatrix']` 复制，或通过 `CalcTwoROriMatrix` 计算
+
+`ScoreAlignment` 函数驱动此双输出过程，迭代比对列以同时计算相似度分数并构建用于矩阵复制的 `seq2templateMapping`。
+
+来源: [AlignmentUtils.py](Alignment/AlignmentUtils.py#L300-L510)
+
+### 基于比对映射的模板矩阵复制
+
+`CopyTemplateMatrix` 实现了精确的残基索引重映射。给定 `seq2templateMapping = (seqIndices, templateIndices)` 对，它构建以 `InvalidDistance`/`InvalidDegree` 哨兵值初始化的完整大小查询矩阵（seqLen × seqLen），然后在映射位置复制相应的模板子矩阵：
+
+```
+seqMatrix[seqIndices[i], seqIndices[j]] = templateMatrix[templateIndices[i], templateIndices[j]]
+```
+
+未比对的查询位置保留哨兵值，以此向下游网络发出信号：这些残基对没有可用的模板信息。这种稀疏填充策略对于多模板穿线中常见的部分比对至关重要。
+
+来源: [AlignmentUtils.py](Alignment/AlignmentUtils.py#L201-L299)
+
+### 特征生成变体
+
+四种 `GenerateAlignmentFeatures*` 变体支持不同的数据访问模式：
+
+| 变体 | 输入 | 用例 |
+|:---|:---|:---|
+| `GenerateAlignmentFeatures` | 文件路径（aliDir, tgtDir, tplDir, pdbDir） | 从磁盘独立生成特征 |
+| `GenerateAlignmentFeatures2` | 内存中的 queryData、aliDir、tplDir | 查询数据已加载；避免冗余 I/O |
+| `GenerateAlignmentFeatures3` | 内存中的 queryData、单个 aliFile、tplFile | 预测期间的单次比对评估 |
+| `GenerateAlignmentFeatures4` | 内存中的 queryData、aliFile、tplFolder | 从比对头自动解析模板名称 |
+
+来源: [AlignmentUtils.py](Alignment/AlignmentUtils.py#L530-L700)
+
+## 几何质量评估
+
+`EvaluateAlignmentQuality.py` 提供了针对天然 3D 结构的比对**真值基准测试**。这是最终的质量评估，有别于上述的启发式评分。
+
+### 叠合与指标计算
+
+评估流水线基于 Cα 原子坐标运行：
+
+1. **提取坐标**：使用 `PDBUtils.ExtractCoordinatesBySeq` 从天然 PDB 文件中分别提取模板和查询的坐标，容许 ≤5 个残基不匹配
+2. **匹配原子**：通过 `MatchAtoms` 实现——逐列遍历比对，仅在匹配态（两个残基均非空位且均具有有效坐标）收集坐标对
+3. **SVD 叠合**：使用 `Bio.SVDSuperimposer`——计算使 RMSD 最小化的最优旋转/平移，然后计算变换后的逐位置距离偏差
+4. **指标计算**：基于偏差向量计算：
+
+| 指标 | 公式 | 解释 |
+|:---|:---|:---|
+| **RMSD** | `√(Σd²/n)` | 匹配 Cα 原子的均方根偏差 |
+| **TM-score** | `Σ[1/(1+d²/d₀²)] / L` | 长度归一化；d₀ = 1.24(L−15)^(1/3) − 1.8 |
+| **GDT-TS** | `(P₀.₅ + P₁ + P₂ + P₄) / 4 × 100/L` | 距离阈值内残基的平均比例 |
+| **GHA** | `(P₀.₅ + P₁ + P₂ + P₄) / 4 × 100/L` | 使用所有四个阈值（0.5Å–4Å）的 GDT |
+| **uGDT** | 未归一化的 GDT | 长度归一化前的 GDT |
+
+<CgxTip>TM-score 通过查询序列长度（而非匹配残基数）进行归一化，使其与长度无关，适用于比较不同覆盖度的比对。TM-score > 0.5 通常表示正确的折叠拓扑。</CgxTip>
+
+### 输出持久化
+
+结果被序列化为 `.quality.pkl` cPickle 文件，包含：`{alnfile, TM, GDT, uGDT, GHA, uGHA, RMSD, deviations}`。`deviations` 数组通过 `ExpandDeviations` 扩展至完整的查询序列长度——未比对的位置接收 999 的哨兵偏差值，从而能够在整个序列上进行逐位置误差分析。
+
+来源: [EvaluateAlignmentQuality.py](Alignment/EvaluateAlignmentQuality.py#L22-L165)
+
+### 批量质量评估
+
+`BatchEvaluateAlignmentQuality.sh` 自动对比对列表进行质量评估。对于每个 `queryName-templateName` 条目，它解析比对文件（`{tplName}-{queryName}.fasta`）、查询 PDB 和模板 PDB，然后对每一对调用 `EvaluateAlignmentQuality.py`。
+
+```
+Usage: BatchEvaluateAlignmentQuality.sh alignmentListFile alignDir queryPDBDir templatePDBDir [ResultDir]
+```
+
+来源: [BatchEvaluateAlignmentQuality.sh](Alignment/BatchEvaluateAlignmentQuality.sh#L1-L33)
+
+## 模板数据精简
+
+`SimplifyTPLPKL.py` 解决了一个实际的内存问题：完整的 `tpl.pkl` 文件包含距离预测所需的完整距离和方向矩阵（`atomDistMatrix`、`atomOrientationMatrix`），但仅穿线工作流只需 Cβ–Cβ 距离子矩阵。该精简过程剥离所有方向数据，并将 `atomDistMatrix` 缩减为仅包含 `{CbCb}`，从而产生适用于比对评分的轻量级模板表示，无需承担完整结构矩阵的开销。
+
+<CgxTip>在大规模穿线之前运行 `SimplifyTPLPKL.py`，可将每个模板的内存占用从约 O(L²) 降低至单个 CbCb 矩阵。当通过 `LoadAlignments` 同时加载数千个模板时，这一点尤为重要。</CgxTip>
+
+来源: [SimplifyTPLPKL.py](Alignment/SimplifyTPLPKL.py#L1-L45), [BatchSimplifyTPLPKL.sh](Alignment/BatchSimplifyTPLPKL.sh#L1-L38)
+
+## 辅助脚本
+
+`Alignment/Scripts/` 目录包含模板搜索和选择工具：
+
+- **`BatchSearchTemplates.sh`** / **`SearchTemplates.sh`**：模板数据库搜索工作流
+- **`SelectTemplatesFromRankFile.py`**：基于分数阈值从排序列表中筛选模板
+- **`generate_tpl_tgt_rank_pkl.py`**：将模板-目标排序数据序列化为 PKL 格式，供下游使用
+- **`PKL2TXT.py`**：调试工具，将 PKL 排序文件转换为人类可读的文本
+
+`Alignment/Utils/` 目录包含 `build3Dmodel` C++ 二进制文件和 `Rank2Fasta` 工具——用于将比对排序转换为 FASTA 格式以及从比对数据构建 3D 模型的遗留工具。
+
+来源: [Alignment/Scripts/](Alignment/Scripts/), [Alignment/Utils/](Alignment/Utils/)
+
+## 模块交互概览
+
+| 组件 | 输入 | 输出 | 下游消费者 |
+|:---|:---|:---|:---|
+| `ReadAlignment` | FASTA 文件 | (tplSeq, querySeq) 元组 | 所有评分函数 |
+| `LoadAlignments` | 多重比对文件 + 目录 | (alignments, tplPool, tgtPool) | `ScoreAlignments` |
+| `ScoreOneAlignment` | alignment + tpl + tgt | (globalScore, localScores, insertX, missingX) | 模板排序 |
+| `GenFeature4Alignment` | alignment + tpl + tgt | (simScore, distMatrix, oriMatrix) | [距离和方向预测](7-distance-and-orientation-prediction) |
+| `EvaluateAlignmentQuality` | alignment + PDBs | .quality.pkl (TM, GDT, RMSD…) | 基准测试 |
+| `SimplifyTPLPKL` | 重量级 tpl.pkl | 轻量级 tpl.pkl | [MSA 和特征生成](6-msa-and-feature-generation) |
+
+此处描述的比对评分和特征生成直接输入到 [距离和方向预测](7-distance-and-orientation-prediction) 中记录的距离预测流水线，在那里，模板衍生的距离矩阵与深度学习预测相融合。关于生成谱突变分数所消费的谱数据（PSSM/PSFM）的 MSA 生成过程，请参见 [MSA 和特征生成](6-msa-and-feature-generation)。
+
+---
+
+## 核心模块
+
+- [深入解析/核心模块/MSA 与特征生成](https://zread.ai/j3xugit/RaptorX-3DModeling/6-msa-and-feature-generation)
+
+---
+slug:6-msa-and-feature-generation
+blog_type:normal
+---
+
+
+**MSA 与特征生成**模块是 RaptorX-3DModeling 流水线的基础阶段，负责将原始蛋白质序列转换为供下游深度学习预测器使用的丰富多通道特征表示。该模块主要位于 `BuildFeatures/` 目录下，负责协调跨多数据库的同源搜索、共进化分析、二级结构预测及紧凑序列化，最终生成 `.inputFeatures.pkl` 产物，为[距离与方向预测](7-distance-and-orientation-prediction)和[性质预测网络](8-property-prediction-network)提供数据支撑。
+
+## 流水线架构
+
+从 FASTA 输入到序列化特征 PKL 的端到端流程由三层 shell 脚本协调控制。`BuildFeatures.sh` 作为顶层入口，将任务委派给 `BuildMSAs.sh` 进行比对生成，然后再委派给 `GenDistFeatures4OneProtein.sh` 提取每个 MSA 的特征。每个 MSA 变体（由不同搜索方法和 E-value 阈值生成）均被独立处理至各自的特征子目录中。
+
+```mermaid
+flowchart TD
+    A["FASTA / A3M Input"] --> B{"Input Type?"}
+    B -->|"FASTA"| C["BuildMSAs.sh"]
+    B -->|"A3M"| D["HandleUserA3M.sh"]
+    C --> E["HHblits (Threading)"]
+    C --> F["HHblits V3 (Contact)"]
+    C --> G["Jackhmmer (Contact)"]
+    E --> H["MetaDataSearch"]
+    F --> H
+    G --> H
+    D --> I["User MSA + Meff"]
+    H --> J["GenDistFeatures4OneProtein.sh"]
+    I --> J
+    J --> K["GenDistFeaturesFromMSA.sh"]
+    K --> L["CCMpred (GPU/CPU)"]
+    K --> M["A3M → A2M → TGT"]
+    K --> N["SS3 / ACC / DISO"]
+    K --> O["alnstats_omp (.pot)"]
+    L --> P["ReadSingleInputFeature.py"]
+    M --> P
+    N --> P
+    O --> P
+    P --> Q["*.inputFeatures.pkl"]
+```
+
+来源：[BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L1-L119), [BuildMSAs.sh](/BuildFeatures/BuildMSAs.sh#L1-L360), [GenDistFeatures4OneProtein.sh](/BuildFeatures/GenDistFeatures4OneProtein.sh#L1-L121)
+
+## MSA 生成策略
+
+系统采用**位标志组合模式**来选择要运行的同源搜索方法。`-m` 标志接受一个由值 1、2、4、8 和 16 通过按位或组合而成的整数，默认值为 **25**（即 1 + 8 + 16）。此设计允许对 MSA 生成组合进行细粒度控制，而无需增加布尔命令行标志的数量。
+
+| 位标志 | 方法 | 用途 | E-value 变体 | 输出子目录 |
+|----------|--------|---------|------------------|---------------------|
+| **1** | HHblits (threading) | 用于 threading 与性质预测的序列谱 | e=0.001, neffmax=6 | `{target}_thread/` |
+| **2** | HHblits V2 | 接触预测（已弃用） | e=0.001, e=1 | `{target}_v2uce3/`, `{target}_v2uce5/` |
+| **4** | Jackhmmer | 接触与距离预测（慢） | e=0.001, e=0.00001 | `{target}_ure3/`, `{target}_ure5/` |
+| **8** | HHblits V3 | 接触与距离预测 | e=0.001, e=0.00001 | `{target}_uce3/`, `{target}_uce5/` |
+| **16** | MetaDataSearch | 利用宏基因组序列丰富现有 MSA | 按方法丰富 | `{target}_{method}_meta/` |
+
+每种搜索方法在不同 E-value 阈值下生成**两种 MSA 变体**——宽松阈值（如 e=0.001 的 `uce3`）用于捕获更多远缘同源物，严格阈值（如 e=0.00001 的 `uce5`）则侧重高置信度命中。命名约定对此进行了编码：`uce` = UniClust30+E-value，`ure` = UniRef90+E-value，其中尾随数字（`3` 或 `5`）标识 E-value 等级。
+
+来源：[BuildMSAs.sh](/BuildFeatures/BuildMSAs.sh#L28-L58), [BuildMSAs.sh](/BuildFeatures/BuildMSAs.sh#L122-L127)
+
+### 用于距离预测的 HHblits 包装器
+
+`HHblitsWrapper/BuildMSA4DistPred.sh` 脚本封装了 HHblits 的执行，并具备智能的**覆盖率自动确定**功能。当覆盖率设置为 `-1`（自动）时，它会将最小比对覆盖率计算为 `max(60%, 7000/(L-1))`，其中 L 为查询序列长度——这确保了短蛋白质保持严格的覆盖率，而长蛋白质则放宽覆盖率以保证至少约 80 个残基的比对深度。实际的 HHblits 调用会添加关键的过滤标志：`-maxfilt 500000 -diff inf -id 99 -cov {coverage}`，以防止结果集过早截断。
+
+来源：[BuildMSA4DistPred.sh](/BuildFeatures/HHblitsWrapper/BuildMSA4DistPred.sh#L129-L155)
+
+### 带自适应门控的宏基因组富集
+
+MetaDataSearch 阶段基于有效序列数（Meff），按每个 MSA **有条件地跳过**。如果 `ln(Meff) ≥ 6`（即 Meff > ~403），则认为 MSA 足够深并跳过宏基因组富集——这是一项关键优化，可避免在已富含信息的比对上进行昂贵的数据库搜索。对于浅层 MSA，`BuildMSAFromMetaData.sh` 使用来自宏基因组数据库的序列来增强现有比对，生成合并的 `{method}_meta` 子目录。
+
+来源：[BuildMSAs.sh](/BuildFeatures/BuildMSAs.sh#L319-L358)
+
+### Meff 计算
+
+生成每个 MSA 后，使用 `Meff_CDHIT/meff_cdhit` 计算 **Meff**（有效序列数），这是一个基于 CD-HIT 的工具，在特定序列同一性阈值下对序列进行聚类并计算聚类代表数。对于非常大的比对（超过 200,000 行），将跳过 Meff 计算并写入占位符值 11。Meff 值作为 `{target}.meff` 与比对结果一同存储，并作为宏基因组富集的门控信号。
+
+来源：[BuildMSAs.sh](/BuildFeatures/BuildMSAs.sh#L232-L248)
+
+## 用户提供的 MSA 处理
+
+当输入文件具有 `.a3m` 扩展名或指定了 `-m 0` 时，`HandleUserA3M.sh` 将接管 `BuildMSAs.sh` 的工作。它会验证用户的比对结果，生成 threading TGT 文件，并将 MSA 放入 `{target}_user` 接触子目录中同时计算 Meff。此路径使用户能够注入自定义比对（例如，来自结构模板或专用数据库），同时仍可利用下游完整的特征生成流程。
+
+来源：[HandleUserA3M.sh](/BuildFeatures/HandleUserA3M.sh#L1-L70), [BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L88-L108)
+
+## 从 MSA 生成特征
+
+一旦 MSA 建立，`GenDistFeatures4OneProtein.sh` 将遍历所有有效的 MSA 子目录（匹配模式 `{target}_{method}`），并为每个子目录分派 `GenDistFeaturesFromMSA.sh`。作业并发机制通过轮询 `ps` 获取运行中的实例，来限制同时运行的特征生成进程数（默认为 2）——这是完整任务队列的一种轻量级替代方案。
+
+被处理的 MSA 方法包括：`user`、`uce3`、`uce5`、`ure3`、`ure5`、`uce3_meta`、`uce5_meta`、`ure3_meta`、`ure5_meta`。每种方法均生成一个名为 `feat_{target}_{method}` 的并行特征目录。
+
+来源：[GenDistFeatures4OneProtein.sh](/BuildFeatures/GenDistFeatures4OneProtein.sh#L96-L120)
+
+### 特征提取流水线
+
+`GenDistFeaturesFromMSA.sh` 是将单个 `.a3m` 文件转换为完整特征集的核心模块。该流水线执行六个连续阶段，每个阶段均具有幂等的文件存在性检查：
+
+| 阶段 | 输入 | 输出 | 工具 | 用途 |
+|-------|-------|--------|------|---------|
+| **1. CCMpred** | `.a3m` | `.ccmpred`, `.extraCCM.pkl` | `RunCCMpredWrapper.sh` | 伪似然共进化矩阵 |
+| **2. A2M 转换** | `.a3m` | `.a2m` | `A3M_To_PSI` | 保留插入的比对，用于 PSSM/PSFM |
+| **3. FASTA 提取** | `.a2m` | `.seq` | `head -n1` | 纯净的查询序列 |
+| **4. 成对势** | `.a2m` | `.pot` | `alnstats_omp` | 接触势、MI 及 APC 校正后的 MI |
+| **. TGT 生成** | `.a3m` + `.seq` | `.tgt` | `A3M_To_TGT` | 位置特异性评分矩阵 + SS+ SS8 |
+| **6. 性质预测** | `.tgt` | `.ss3`, `.acc`, `.diso` | `DeepCNF_SS_Con`, `AcconPred`B` | 二级结构、溶剂可及性、无序预测 |
+
+**大比对采样**：当比对大小超过阈值时，阶段 4 和 5 会实施自适应采样。对于 `.pot` 生成，序列数超过 50,000 的比对会通过 `SampleA2MByNumber.py` 降采样至 50,000。对于 `.tgt` 转换，阈值为 100,000 条序列。原始文件会被临时替换、处理后再恢复——这确保了下游工具能接收到可管理的输入，而不会造成永久性数据丢失。
+
+来源：[GenDistFeaturesFromMSA.sh](/BuildFeatures/GenDistFeaturesFromMSA.sh#L90-L220)
+
+### CCMpred 执行策略
+
+`RunCCMpredWrapper.sh` 脚本实现了**GPU 优先、CPU 回退**的执行策略，并支持可选的远程机器委派。决策树如下：
+
+1. 通过 `EstimateGPURAM4CCMpred.sh` **估算 GPU RAM** 需求
+2. 如果 RAM 超过 15GB，则从 GPU 机器文件中选定 `LargeRAM` 机器；否则，选定任何带 `RAM` 标5志的机器
+3. 如果选定机器为远程，则通过 `RunCCMpredRemote.sh` 分派；否则，通过 `RunCCMpred.sh` 本地运行
+4. 如果 GPU 执行失败且 `GPUmode` 允许 CPU 回退（模式 2 或 4），则使用 10–20 个线程在 CPU 上重新运行 CCMpred
+5. 后处理：通过 `CCMpredUtils.py` 将 `.mpk`（MsgPack）转换为 `.extraCCM.pkl`，并通过 `normalize_ccmpred_sep.py` 计算Z分数归一化
+
+来源：[RunCCMpredWrapper.sh](/BuildFeatures/Scripts/RunCCMpredWrapper.sh#L96-L200)
+
+## 特征组装与序列化
+
+最后阶段调用 `ReadSingleInputFeature.py`，该脚本调用 `ReadProteinFeatures.ReadFeatures()` 将所有残基级和成对特征加载到单个 Python 字典中，并使用 cPickle 以最高协议序列化为 `{target}.inputFeatures.pkl`。
+
+### 特征字典结构
+
+组装后的特征字典包含以下键，表示**三种不同的特征类别**：序列特征（按位置）、成对特征（L×L 矩阵）和共进化特征（带子结构的 L×L 矩阵）：
+
+| 键 | 形状 | 类型 | 来源文件 | 描述 |
+|-----|-------|------|-------------|-------------|
+| `name` | 标量 | str | — | 蛋白质标识符 |
+| `sequence` | L | str | `.seq` | 氨基酸序列 |
+| `SS3` | L × 3 | float32 | `.ss3` | 3 态二级结构概率 (H/E/C) |
+| `ACC` | L × 3 | float32 | `.acc` | 溶剂可及性概率 (buried/medium/exposed) |
+| `DISO` | L × N | float32 | `.diso` | 无序预测概率 |
+| `PSFM` | L × 20 | float32 | `.tgt` | 位置特异性频率矩阵 |
+| `PSSM` | L × 20 | float32 | `.tgt` | 位置特异性评分矩阵 (对数几率) |
+| `SS8` | L × 8 | float32 | `.tgt` | 8 态二级结构概率 |
+| `ccmpredZ` | L × L | float32 | `.ccmpred_zscore` | Z分数归一化的 CCMpred 接触矩阵 |
+| `ccmpred` | L × L | float32 | `.ccmpred` | 原始 CCMpred 精度矩阵 |
+| `OtherPairs` | L × L × 3 | float16 | `.pot` | 接触势、MI 及 APC 校正后的 MI |
+
+此外，当通过 `FeatureUtils.LoadFeaturePKL()` 加载用于训练或预测时，该字典可扩展以下内容：
+
+| 扩展键 | 形状 | 描述 |
+|--------------|-------|-------------|
+| `CCMFnorm` | L × L | 20×20 精度块的 Frobenius 范数 (APC 校正) |
+| `CCMFnormZ` | L × L | Z分数归一化的 Fnorm |
+| `sumCCM` | L × L × 43 | 降维精度矩阵 (每对 43 通道摘要) |
+| `rawCCM` | L × L × 441 | 每对的完整 21×21 精度子矩阵 |
+| `fullMI` | L × L × 20 × 20 | 来自 A2M 的完整互信息 |
+| `fullCov` | L × L × 20 × 20 | 来自 A2M 的完整协方差矩阵 |
+| `ESM` | L × L × D | ESM-2 注意力权重 (可配置层) |
+
+来源：[ReadProteinFeatures.py](/DL4DistancePrediction4/ReadProteinFeatures.py#L178-L242), [FeatureUtils.py](/DL4DistancePrediction4/FeatureUtils.py#L11-L92), [CCMpredUtils.py](/DL4DistancePrediction4/CCMpredUtils.py#L52-L132)
+
+### CCMpred 精度矩阵降维
+
+CCMpred MsgPack 输出包含每个残基对 (i, j) 的完整 21×21（20 种氨基酸 + 缺口）精度子矩阵。`CCMpredUtils.Reduce()` 将其压缩为每对 43 通道的表示：20 个来自行 L2 范数的值（第 0–19 列），20 个来自列 L2 范数的值（第 0–19 行），以及 1 个缺口-缺口条目幅值。同时，它计算 20×20 子块的 Frobenius 范数，应用**平均乘积校正 (APC)** 以消除系统发育偏差，并对结果进行Z分数归一化。此降维操作将存储从 O(L²×441) 缩减至 O(L²×43)，同时保留了主要的共进化信号。
+
+来源：[CCMpredUtils.py](/DL4DistancePrediction4/CCMpredUtils.py#L83-L132)
+
+## 输出目录结构
+
+对于目标蛋白质 `1pazA`，特征生成后的完整输出树如下：
+
+```
+1pazA_OUT/
+├── 1pazA.seq                          # 纯净的 FASTA 序列
+├── 1pazA_thread/                      # Threading MSA 和谱
+│   ├── 1pazA.a3m
+│   └── 1pazA.tgt
+├── 1pazA_contact/                     # 接触/距离 MSA 变体
+│   ├── 1pazA_uce3/                    # HHblits V3, e=0.001
+│   │   ├── 1pazA.a3m
+│   │   └── 1pazA.meff
+│   ├── 1pazA_uce5/                    # HHblits V3, e=0.00001
+│   ├── 1pazA_uce3_meta/              # + 宏基因组富集
+│   └── ...
+├── feat_1pazA_uce3/                   # uce3 MSA 的特征
+│   ├── 1pazA.a3m                      # 比对 (已复制)
+│   ├── 1pazA.a2m                      # 保留插入的比对
+│   ├── 1pazA.seq                      # 序列
+│   ├── 1pazA.tgt                      # TGT (PSSM/PSFM/SS8)
+│   ├── 1pazA.ccmpred                  # 原始 CCMpred 矩阵
+│   ├── 1pazA.ccmpred_zscore           # Z分数 CCMpred
+│   ├── 1pazA.extraCCM.pkl             # 降维精度 + Fnorm
+│   ├── 1pazA.pot                      # 成对势 (MI, APC-MI)
+│   ├── 1pazA.ss3                      # 3 态二级结构
+│   ├── 1pazA.acc                      # 溶剂可及性
+│   ├── 1pazA.diso                     # 无序预测
+│   └── 1pazA.inputFeatures.pkl        # 组装的特征字典
+└── feat_1pazA_uce5/                   # uce5 MSA 的特征
+    └── ...
+```
+
+<CgxTip>每个 MSA 变体均生成一个**独立、自包含的特征集**。下游预测流水线通常选择具有最高 Meff 的特征集以获得最佳准确率，但所有变体均可用于集成或质量比较策略。</CgxTip>
+
+来源：[BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L110-L118), [GenDistFeaturesFromMSA.sh](/BuildFeatures/GenDistFeaturesFromMSA.sh#L107-L219)
+
+## 批处理
+
+`BatchBuildFeatures.sh` 支持蛋白质列表的并行处理。它通过轮询 `ps` 获取运行中的 `BuildFeatures.sh` 进程，来维护一个并发池（默认 3 个同时作业），当池满时以随机退避方式休眠。这种基于轮询的简单调度器避免了完整作业队列系统的开销，同时兼顾了 GPU 内存限制。
+
+```bash
+# 每次处理 5 个蛋白质列表，自动选择 GPU
+BatchBuildFeatures.sh -n 5 -g -1 proteinList.txt /path/to/sequences/
+```
+
+来源：[BatchBuildFeatures.sh](/BuildFeatures/BatchBuildFeatures.sh#L1-L95)
+
+## 关键环境变量
+
+MSA 与特征生成模块需要几个环境变量来定位外部工具和数据库：
+
+| 变量 | 指向 | 需求方 |
+|----------|-----------|-------------|
+| `ModelingHome` | RaptorX-3DModeling 根目录 | `BuildFeatures.sh`, `GenDistFeaturesFromMSA.sh` |
+| `DistFeatureHome` | `BuildFeatures/` 目录 | 模块中的所有脚本 |
+| `DL4DistancePredHome` | `DL4DistancePrediction4/` 目录 | `GenDistFeaturesFromMSA.sh`, CCMpred 后处理 |
+| `HHDIR` | HHblits 安装目录 | `BuildMSAs.sh`, `BuildMSA4DistPred.sh` |
+| `HHDB` | 默认 HHblits 序列数据库 | `BuildMSAs.sh`, `BuildMSA4DistPred.sh` |
+| `JackDB` | Jackhmmer 序列数据库 | `BuildMSAs.sh` (可选，用于标志 4) |
+
+<CgxTip>`GPUmode` 参数（`-r` 标志）控制整个特征流水线的计算资源选择：模式 1 = 仅本地 GPU；模式 2 = 本地 GPU + CPU；模式 3 = 本地 GPU + 远程 GPU；模式 4 = 以上所有。模式 4 是 `GenDistFeaturesFromMSA.sh` 的默认值，确保 CCMpred 能够利用包括 `GPUMachines.txt` 中列出的远程机器在内的任何可用硬件。</CgxTip>
+
+来源：[BuildFeatures.sh](/BuildFeatures/BuildFeatures.sh#L3-L17), [GenDistFeaturesFromMSA.sh](/BuildFeatures/GenDistFeaturesFromMSA.sh#L1-L14)
+
+## 后续步骤
+
+一旦为所有 MSA 变体生成了特征 PKL，流水线便会进入深度学习推理阶段。特征字典将由[距离与方向预测](7-distance-and-orientation-prediction)中描述的距离和方向预测网络以及[性质预测网络](8-property-prediction-network)中描述的性质预测网络所消费。处理这些特征的模型架构详见[用于距离预测的 ResNet](10-resnet-for-distance-prediction)和[膨胀 ResNet 与注意力机制](11-dilated-resnet-and-attention)。
+
+---
+
+- [深入解析/核心模块/距离与方向预测](https://zread.ai/j3xugit/RaptorX-3DModeling/7-distance-and-orientation-prediction)
+
+---
+slug:7-distance-and-orientation-prediction
+blog_type:normal
+---
+
+
+`DL4DistancePrediction4` 模块是 RaptorX-3DModeling 的计算核心——一个深度残差网络系统，它从多序列比对（MSA）特征中同时预测**残基间距离分布**和**取向角概率**。与二元接触图预测器不同，该模块输出距离区间和取向区间上的完整离散概率分布，这些分布随后被转换为用于 3D 折叠的距离势能。该架构实现了一个 **1D→2D 转换流水线**：序列级特征经过 1D 残差卷积，通过外部拼接和嵌入提升为成对矩阵，然后通过 2D 残差（或膨胀残差）卷积进行精炼，最后由逐响应的分类或回归头进行解码。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L1-L68), [config.py](DL4Distance4/config.py#L1-L200)
+
+## 预测量：响应与标签分类体系
+
+系统预测一组丰富的成对几何量，称为**响应**。每个响应都是一个形式为 `LabelName_LabelType` 的字符串（例如 `CbCb_Discrete25C`、`Ca1Cb1Cb2Ca2_Discrete37C`）。标签分类体系完全在 `config.py` 中定义，并决定了网络输出哪些几何属性以及如何对它们进行离散化。
+
+**与距离相关的响应**涵盖五种原子对类型以及两种二元属性：
+
+| 标签名 | 语义 | 对称 |
+|---|---|---|
+| `CbCb` | Cβ–Cβ 残基间距离 | 是 |
+| `CaCa` | Cα–Cα 距离 | 是 |
+| `CgCg` | Cγ–Cγ 距离（伪原子） | 是 |
+| `CaCg` | Cα–Cγ 距离 | 否 |
+| `NO` | N–O 距离 | 否 |
+| `HB` | 氢键指示符 | 否 |
+| `Beta` | β-配对指示符 | 是 |
+
+**取向响应**分为两个几何族。**双残基取向**集使用局部 Cβ 中心坐标系：二面角 `Ca1Cb1Cb2Ca2` 和 `N1Ca1Cb1Cb2`，以及平面角 `Ca1Cb1Cb2`。**四 Cα 取向**集使用序列上相邻的 Cα 原子：二面角 `Ca1Ca2Ca3Ca4` 和 `Ca1Ca2Ca4Ca3`，以及平面角 `Ca1Ca2Ca3` 和 `Ca1Ca2Ca4`。便捷缩写（`TwoROri`、`FourCaOri`、`AllOri`）通过 `ParseLabelNames` 展开为其组成名称。
+
+**离散化方案**被编码为诸如 `25C`、`37C`、`56C` 的后缀字符串——数字表示距离/取向区间的数量。对于距离，区间在下界（~2–5Å）和上界（~15–22Å）之间均匀分布。存在三种无效条目处理模式：basic（无效项合并到最后一个区间）、`Plus`（无效项作为单独标签，计入损失）和 `Minus`（无效项作为单独标签，不计入损失）。连续标签类型（`Normal`、`LogNormal`）也被支持用于基于回归的预测。
+
+来源: [config.py](DL4DistancePrediction4/config.py#L178-L398), [DistanceUtils.py](DL4DistancePrediction4/DistanceUtils.py#L11-L23)
+
+## 网络架构：ResNet4DistMatrix
+
+核心模型类是 **`ResNet4DistMatrix`**，它通过五个连续的阶段编排完整的预测流水线。其构造函数接受 `seqInput`（batchSize × seqLen × n_in_seq）、`matrixInput`（batchSize × seqLen × seqLen × n_in_matrix）、可选的 `embedInput`、用于子矩阵采样的 `boundingbox`，以及完全参数化架构的 `modelSpecs` 字典。
+
+```mermaid
+flowchart TB
+    subgraph Stage1["阶段 1: 1D 序列卷积"]
+        SI[seqInput<br/>B × L × F_seq] --> RC1["ResNet / DilatedResNet<br/>(1D 卷积块)"]
+        RC1 --> CO[conv_out<br/>B × L × H_seq]
+    end
+
+    subgraph Stage2["阶段 2: 1D → 2D 转换"]
+        CO --> MP["MidpointFeature<br/>(OuterConcatenate)"]
+        CO --> |"可选"| EL["EmbeddingLayer<br/>(Seq+SS / SeqOnly)"]
+        MP --> C2D1["Conv2D4DistMatrix<br/>(压缩, hwsz=0)"]
+        EL --> C2D1
+    end
+
+    subgraph Stage3["阶段 3: 2D 矩阵卷积"]
+        MI[matrixInput<br/>B × L × L × F_mat] --> CAT["拼接<br/>matrixInput + seq2matrix 输出"]
+        C2D1 --> CAT
+        CAT --> RC2["ResNet / DilatedResNet<br/>(2D 卷积块)"]
+        RC2 --> MO[conv_out<br/>B × L × L × H_mat]
+    end
+
+    subgraph Stage4["阶段 4: 多响应预测头"]
+        MO --> P1["NN4LogReg<br/>(离散标签)"]
+        MO --> P2["NN4Normal<br/>(连续标签)"]
+        P1 --> O1["距离概率<br/>B × L × L × numBins"]
+        P2 --> O2["μ, σ 参数<br/>B × L × L × 2"]
+    end
+
+    Stage1 --> Stage2 --> Stage3 --> Stage4
+```
+
+**阶段 1 — 1D 序列卷积**：`seqInput` 张量穿过一叠 1D 残差卷积块（根据 `modelSpecs['network']` 选择 `ResNet` 或 `DilatedResNet`）。每个块包含带有批归一化和可配置激活函数（ReLU 或 tanh）的残差连接。输出 `conv_out` 的形状为 (B, L, H_seq)，其中 H_seq 是最终的隐藏通道数。
+
+**阶段 2 — 1D→2D 转换**：1D 卷积输出通过两种互补机制转换为成对矩阵。**OuterConcatenate** 路径计算 `MidpointFeature(seqConv.output)`，它在每个位置 拼接残基 i 和 j 的特征向量，生成 (B, L, L, 2×H_seq) 张量。这可以选择通过 halfWinSize=0 的 `Conv2D4DistMatrix`（逐点卷积）进行压缩。**Embedding** 路径（当提供 `embedInput` 时触发）通过 `EmbeddingLayer4AllRange` 映射主序列和/或预测的二级结构。所有 2D 输出沿着特征轴与原始 `matrixInput` 拼接。
+
+**阶段 3 — 2D 矩阵卷积**：拼接后的 2D 特征张量进入另一叠残差块——`ResNet`（标准 2D 卷积）或 `DilatedResNet`（带可选注意力的膨胀 2D 卷积）。这是表征能力的主要所在：2D 卷积捕获跨距离/取向矩阵的空间相关性。输出形状为 (B, L, L, H_mat)。
+
+**阶段 4 — 多响应预测头**：对于 `modelSpecs['responses']` 中的每个响应，附加一个专用预测头。**离散**响应使用 `NN4LogReg`——一个在 `numBins` 个类别上以 softmax 终止的多层神经网络。**连续**响应（Normal/LogNormal）使用 `NN4Normal`，它输出分布参数（μ, σ）。逐响应的输出被拼接以形成最终的 `output`（预测值）和 `output_prob`（概率分布）张量。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L219-L399), [Model4PairwisePrediction.py](DL4DistancePrediction4/Model4PairwisePrediction.py#L1-L200)
+
+## 残差块实现
+
+存在两种残差网络实现，它们共享相同的结构模式，但在卷积策略上有所不同。
+
+### ResNet4Distance — 标准残差卷积
+
+`ResNet4Distance.py` 提供了 `ResConv1DLayer` 和 `ResConv2DLayer`——基础构建块。每个层应用具有奇数大小核（由 `halfWinSize` 控制）的卷积，添加偏置，应用激活函数，然后应用**掩码传播**以在卷积后将填充位置清零。掩码机制对于变长蛋白质批处理至关重要：批次中的所有序列都右对齐，卷积后左侧的填充零会被重新清零，以防止噪声污染。
+
+`batch_norm()` 中的批归一化是感知掩码的：它计算均值和标准差时**排除**填充位置，然后在归一化后重新将填充条目清零。这确保了统计量仅反映有效残基。
+
+`ResNet` 类堆叠多个残差块，每个块由两个带有跳跃连接的卷积层组成：`output = input + Conv2( activation(Conv1(input)) )`。`version` 参数在 `ResNet2D`、`ResNet2DV21`、`ResNet2DV22` 和 `ResNet2DV23` 之间选择——它们的主要差异在于残差块内批归一化的放置位置。
+
+### DilatedResNet4Distance — 带注意力的膨胀卷积
+
+`DilatedResNet4Distance.py` 通过两项关键创新扩展了标准 ResNet。**膨胀卷积**（`filter_dilation` 参数）在不增加参数数量的情况下呈指数级扩展感受野——一叠具有膨胀率 [1, 2, 4, 8, ...] 的块能以极小的代价实现与大核相同的有效感受野。同时提供了 1D 和 2D 膨胀卷积层。
+
+**`AttnConv2DLayer`** 将卷积与通道注意力机制融合。在膨胀 2D 卷积产生输出后，应用一个 `AttentionLayer`。注意力层通过平均池化（`AvgPool`）和/或最大池化（`MaxPool`）计算全局通道描述符，将它们通过全连接（或卷积）的压缩-激励通路，并重新加权卷积输出。这允许网络在整个距离矩阵上自适应地强调信息丰富的特征通道。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L1-L200), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L242), [AttentionLayer.py](DL4DistancePrediction4/AttentionLayer.py#L182-L260)
+
+## 预测头：分类与回归
+
+### NN4LogReg — 离散标签分类
+
+对于离散化的距离/取向区间，`NN4LogReg` 实现了一个多层神经网络分类器。它堆叠可配置的 `HiddenLayer` 实例（带 ReLU 激活的全连接层），随后是一个 `LogRegLayer`，该层应用 softmax 生成 `n_out` 个区间上的概率分布。负对数似然损失 `NLL()` 和 0-1 错误率 `errors()` 都支持可选的逐样本加权，当不同的残基对范围（短/中/长）接收不同的损失权重时会使用此加权。
+
+### NN4Normal — 连续分布回归
+
+对于连续距离预测，`NN4Normal` 输出 Normal 或 LogNormal 分布的参数。网络预测每个残基对的均值（μ）和方差（σ²），使折叠阶段能够使用完整的分布而不是点估计。特定于方差预测的参数被单独跟踪（`params4var`），以允许差异化正则化。
+
+来源: [NN4LogReg.py](DL4DistancePrediction4/NN4LogReg.py#L114-L200), [NN4Normal.py](DL4DistancePrediction4/NN4Normal.py#L1-L50)
+
+## 距离离散化与评估
+
+### DistanceUtils — 离散化、评估与概率校准
+
+**离散化**（`DiscretizeDistMatrix`）使用 `np.digitize` 针对所选区间方案的距离截断数组，将连续的 L×L 距离矩阵转换为 L×L 标签矩阵。无效距离（负值）根据 Plus/Minus 模式映射到最后一个区间或单独的区间。伴随函数 `LabelsOfOneDistance` 和 `LabelsOfDistance` 将标量距离映射到区间索引。
+
+**评估**在两个层级提供。`EvaluateProbAccuracy()` 将预测的概率矩阵与真实距离进行比较：它计算接触预测的精确率、召回率和 F1（概率 > 阈值 ⇒ 预测为接触），具有可配置的最小序列分离度（`minSeqSep`，默认为 12）以排除微不足道的短程接触。`EvaluateDistanceBoundAccuracy()` 评估点估计距离预测，计算绝对误差、相对误差、精确率/召回率/F1，以及使用多个距离阈值（0.5, 1, 2, 4, 8 Å）的类 GDT 分数。
+
+**概率校准**（`FixDistProb`）通过标签权重与参考（背景）概率的比率调整原始预测概率，纠正距离范围上的训练集偏差。`CalcLabelProb()` 计算按序列分离范围（长、中、短、近）分层的经验标签频率分布。
+
+来源: [DistanceUtils.py](DL4DistancePrediction4/DistanceUtils.py#L1-L200)
+
+## 取向离散化与接触推导
+
+### OrientationUtils — 二面角与平面角处理
+
+取向角（二面角和平面角）需要特殊处理，因为它们**仅在两个残基空间上接近时才有意义**。`DiscretizeOrientationMatrix()` 函数针对特定于取向的区间应用 `np.digitize`，然后执行三个关键的后处理步骤：(1) 缺失 Cβ 原子的残基被分配一个随机有效标签（以避免偏向最后一个区间）；(2) 超出距离阈值（`distThreshold4Orientation`，通常为 20Å）的残基对映射到最后一个区间；(3) 具有无效 3D 坐标的残基映射到最后一个区间。距离和取向之间的这种耦合确保了仅在空间上相近的残基对才会被信任其取向预测。
+
+`DeriveOriContactMatrix()` 通过对所有有效（非最后）取向区间的概率求和，将预测的取向概率矩阵转换为接触概率矩阵——如果任何有效取向是可能的，则预测残基对处于接触状态。`DeriveContactMatrices()` 在预测结果中的所有取向上应用此转换。
+
+来源: [OrientationUtils.py](DL4DistancePrediction4/OrientationUtils.py#L43-L151)
+
+## 标签处理流水线
+
+### LabelUtils — 真值提取与权重计算
+
+`CollectLabels()` 是从原始结构数据到训练标签的桥梁。对于每个响应，它从蛋白质的 `atomDistMatrix` 或 `atomOrientationMatrix` 中提取相应的矩阵，然后使用相应的截断方案对其进行离散化。距离标签使用 `DistanceUtils.DiscretizeDistMatrix()`；取向标签使用 `OrientationUtils.DiscretizeOrientationMatrix()` 并以 Cβ–Cβ 距离矩阵作为门控信号。二元标签（HB、Beta）跳过离散化。
+
+`CalcLabelDistribution()` 计算按序列分离范围分层的经验标签频率分布。`CalcLabelWeight()` 从这些分布中推导出逐标签的训练权重——核心见解是**长程接触虽然罕见但结构上至关重要**，因此它们的损失贡献会被加权。加权系统在两个层级运作：范围权重（短/中/长分离）和标签权重（逐区间频率的倒数），两者乘性组合。
+
+来源: [LabelUtils.py](DL4DistancePrediction4/LabelUtils.py#L20-L200)
+
+## 训练流水线
+
+### TrainDistancePredictor — 优化器编排与检查点
+
+训练入口点 `TrainDistancePredictor.py` 从 `Model4PairwisePrediction` 导入 `BuildModel` 并支持七种优化算法：`SGDM`、`SGDM2`、`Nesterov` (SGNA)、`Adam`、`AMSGrad`、`AdamW` 和 `AdamWAMS`。`UpdateAlgorithm()` 调度器路由到相应的优化器。AdamW 和 AdamWAMS 遵循 L2 正则化感知公式实现解耦的权重衰减（`pdecay` 参数）。
+
+**检查点管理**（`InitializeChkpoint`）支持完整的训练重启：最佳验证损失、最佳参数值、最佳优化器状态和当前周期都被持久化。重启时，通过 `Compatible()` 兼容性检查来恢复参数值。
+
+**验证**（`ValidateAllData`）遍历小批量，计算损失、误差和准确率。当启用 `UseSampleWeight` 时应用样本权重，通过批次相对于归一化基数的总权重来缩放每个批次的损失贡献。
+
+**批次加权**（`CalcBatchWeight`、`ScaleLossByBatchWeight`）补偿变长蛋白质：较大的蛋白质贡献更多残基对，否则将主导梯度。权重计算为批次总权重与参考基数的比率，作为损失的乘法缩放应用。
+
+来源: [TrainDistancePredictor.py](DL4DistancePrediction4/TrainDistancePredictor.py#L1-L200)
+
+## 推理流水线
+
+### RunPairwisePredictor — 多模型预测与接触推导
+
+`RunPairwisePredictor.py` 是生产推理入口点。其命令行界面接受：`-m`（一个或多个模型 PKL 文件，以分号分隔）、`-p`（蛋白质名称、名称列表文件或预构建的特征 PKL）、`-i`（包含 `.inputFeatures.pkl`、`.extraCCM.pkl` 和 `.a2m` 文件的特征文件夹）、可选的 `-a`（用于模板引导预测的比对文件）、可选的 `-t`（模板 PKL 文件），以及 `-d`（输出目录）。
+
+**多模型集成**是核心推理策略。`LoadModels()` 加载多个模型规范，验证版本 ≥ 3.0 和网络兼容性，并检查所有模型对于相同标签名是否共享一致的标签类型。`CollectLabelWeightNDistribution()` 跨模型平均标签权重和参考分布，产生集成级别的校准参数。
+
+**预测输出**是每个蛋白质的 6 元组：`(proteinName, sequence, predictedDistMatrixProb, predictedContactMatrix, labelWeightMatrix, labelDistributionMatrix)`。预测的距离概率矩阵形状为 L×L×numBins；接触矩阵通过对距离 < 8Å 的区间概率求和推导而来（即 `ContactDefinition`）。
+
+`DeriveContactMatrix()` 处理三种响应类别：距离响应（离散标签的区间求和，Normal/LogNormal 的 CDF 评估）、HB/Beta 响应（直接提取概率）和取向响应（委派给 `OrientationUtils.DeriveOriContactMatrix`）。
+
+来源: [RunPairwisePredictor.py](DL4DistancePrediction4/RunPairwisePredictor.py#L1-L200)
+
+## 特征加载与组合
+
+### FeatureUtils — 输入特征组装
+
+`LoadFeaturePKL()` 加载基础 `.inputFeatures.pkl` 文件，并使用由 modelSpecs 中 `ECInfo` 位掩码控制的可选额外特征对其进行扩充：CCM F-范数（`CCMFnorm`）、CCM 摘要（`sumCCM`）、原始 CCM 矩阵（`rawCCM`）、从 `.a2m` 计算的完整互信息（`fullMI`）以及完整协方差矩阵（`fullCov`）。也可以为指定的 Transformer 层加载 ESM-2 注意力特征（`.esm2.pkl`）。
+
+**成对位置特征**编码序列分离信息：`LocationFeature`（min(1, |i−j|/50)）、`CubeRootFeature`（∛|i−j|）、`LogFeature`（log₁₀(|i−j|+1)）和 `NewLocationFeature`（1/(1+|i−j|) 和 1/√(1+|i−j|)）。这些帮助网络区分短程和长程对，而不完全依赖进化耦合。
+
+来源: [FeatureUtils.py](DL4DistancePrediction4/FeatureUtils.py#L1-L150)
+
+## 架构选择与配置参考
+
+模型架构完全由 `modelSpecs` 字典决定。下表总结了控制距离/取向预测网络的关键配置参数：
+
+| 参数 | 类型 | 描述 |
+|---|---|---|
+| `network` | str | 架构：`ResNet2D`、`ResNet2DV23` 或 `DilatedResNet2D` |
+| `responses` | list[str] | 预测量，例如 `['CbCb_Discrete25C', 'Ca1Cb1Cb2Ca2_Discrete37C']` |
+| `n_in_seq` | int | 1D 序列路径的输入特征通道数 |
+| `n_in_matrix` | int | 2D 矩阵路径的输入特征通道数 |
+| `conv1d_hiddens` | list[int] | 1D 卷积块的隐藏通道宽度 |
+| `conv2d_hiddens` | list[int] | 2D 卷积块的隐藏通道宽度 |
+| `conv1d_repeats` | int | 1D 残差块重复次数 |
+| `conv2d_repeats` | int | 2D 残差块重复次数 |
+| `halfWinSize_seq` | int/list | 1D 卷积的半窗口大小 |
+| `halfWinSize_matrix` | int | 2D 卷积的半窗口大小 |
+| `conv2d_hwszs` | list[int] | 逐块半窗口大小（DilatedResNet） |
+| `conv2d_dilations` | list[int] | 逐块膨胀率（DilatedResNet） |
+| `logreg_hiddens` | list[int] | 预测头中的隐藏层宽度 |
+| `seq2matrixMode` | dict | 键：`OuterCat`、`Seq+SS` 或 `SeqOnly`，附带通道计数 |
+| `activation` | str | `RELU` 或 `TANH` |
+| `batchNorm` | bool | 启用批归一化 |
+| `distThreshold4Orientation` | float | 有效取向的距离截断值（默认 20.0） |
+
+<CgxTip>掩码传播模式（在每次卷积和批归一化后将填充位置重新清零）不是可选的——它对于正确的变长蛋白质批处理至关重要。没有它，零填充会将信号泄漏到边界位置，降低序列末端的预测质量。</CgxTip>
+
+<CgxTip>使用 DilatedResNet2D 时，膨胀调度应是非递减的（例如 [1,1,2,2,4,4,8,8]）以确保完整的感受野覆盖。`AttnConv2DLayer` 在每次膨胀卷积后应用通道注意力，这会显著增加大型蛋白质的内存使用量——在预测超过 500 个残基的序列时请监控 GPU 内存。</CgxTip>
+
+## 数据流总结
+
+从 MSA 特征到 3D 相关预测的端到端数据流遵循以下路径：
+
+```mermaid
+flowchart LR
+    MSA["MSA 特征<br/>(.inputFeatures.pkl<br/>.extraCCM.pkl)"] --> FU["FeatureUtils<br/>LoadFeaturePKL"]
+    FU --> Seq["seqInput<br/>B × L × F_seq"]
+    FU --> Mat["matrixInput<br/>B × L × L × F_mat"]
+    FU --> Emb["embedInput<br/>(序列 + SS)"]
+
+    Seq --> Model["ResNet4DistMatrix"]
+    Mat --> Model
+    Emb --> Model
+
+    Model --> DistP["距离概率<br/>L × L × numBins"]
+    Model --> OriP["取向概率<br/>L × L × numBins"]
+    Model --> ContP["接触矩阵<br/>L × L"]
+
+    DistP --> Fold["折叠阶段<br/>(距离势能)"]
+    OriP --> Fold
+    ContP --> Eval["评估<br/>(精确率/召回率/F1)"]
+```
+
+特征生成产生三个输入流：序列特征（PSSM、预测的 SS、溶剂可及性）、成对特征（CCM、MI、协方差、位置特征）和嵌入输入（主序列、二级结构）。这些进入 `ResNet4DistMatrix`，为每个配置的响应输出概率分布。距离概率通过区间求和转换为接触矩阵；取向概率类似地转换。两者都作为距离/取向势能输入到折叠阶段。
+
+来源: [RunPairwisePredictor.py](DL4DistancePrediction4/RunPairwisePredictor.py#L121-L160), [LabelUtils.py](DL4DistancePrediction4/LabelUtils.py#L20-L84)
+
+## 与相邻模块的关系
+
+距离/取向预测模块在整个流水线中位于**特征生成**和 **3D 折叠**之间。其输入由 [MSA 和特征生成](6-msa-and-feature-generation) 产生（特别是 `BuildFeatures/GenDistFeaturesFromMSA.sh` 和 `GenTGTFromA3M.sh`）。其输出被 [3D 模型折叠](9-3d-model-folding) 通过 `GenDistPotential4Threading.sh` 消费，后者将预测的距离概率转换为与 Rosetta/CNS 兼容的距离约束。内部网络架构在 [用于距离预测的 ResNet](10-resnet-for-distance-prediction) 和 [膨胀 ResNet 与注意力](11-dilated-resnet-and-attention) 中详述。跨多 GPU/机器的训练和推理在 [多机分布式执行](13-multi-machine-distributed-execution) 和 [GPU 选择与远程预测](14-gpu-selection-and-remote-prediction) 中介绍。
+
+---
+
+- [深入解析/核心模块/属性预测网络](https://zread.ai/j3xugit/RaptorX-3DModeling/8-property-prediction-network)
+
+---
+slug:8-property-prediction-network
+blog_type:normal
+---
+
+
+**属性预测网络**是一个基于一维 ResNet 的深度学习模块，用于从 MSA 生成的序列特征中预测残基级结构属性——包括骨架二面角 (φ/ψ)、二级结构、溶剂可及性、无序性和 CLE 标签。与在二维接触图上操作的距离预测网络不同，该网络沿**序列维度**进行处理，通过一个带有多个专用输出头的共享 ResNet 骨架网络，为每个残基生成一个预测结果。
+
+来源: [Model4PropertyPrediction.py](DL4PropertyPrediction/Model4PropertyPrediction.py#L1-L303), [config.py](DL4PropertyPrediction/config.py#L1-L121)
+
+## 架构概述
+
+属性预测网络遵循**共享骨架、多头**架构。单个一维 ResNet 处理序列特征矩阵，其输出被路由到独立的预测头——每个预测头都根据其目标属性的统计分布进行了定制。
+
+```mermaid
+graph TD
+    A["Sequential Features<br/>(batch, seqLen, n_in_seq)"] --> B["1D ResNet Backbone<br/>ResNet4Property"]
+    B --> C["Convolved Features<br/>(batch, seqLen, n_out)"]
+    C --> D["Flatten to<br/>(batch×seqLen, n_out)"]
+    D --> E1["NN4PhiPsi<br/>von Mises Distribution"]
+    D --> E2["NN4LogReg<br/>Softmax Classification"]
+    D --> E3["NN4Normal<br/>Gaussian Distribution"]
+    E1 --> F1["φ, ψ Angles<br/>(mean, σ², ρ)"]
+    E2 --> F2["SS3/SS8/ACC/DISO/CLE<br/>Class Probabilities"]
+    E3 --> F3["Θ, τ Angles<br/>(mean, σ², ρ)"]
+    F1 --> G["Concatenated Output<br/>y_pred + output4prob"]
+    F2 --> G
+    F3 --> G
+```
+
+`Model4PropertyPrediction.py` 中的 `ResNet4Properties` 类负责协调此架构。它实例化 ResNet 骨架网络，然后遍历 `modelSpecs` 中的 `responses` 列表，根据每个响应的标签类型附加相应的预测头。
+
+来源: [Model4PropertyPrediction.py](DL4PropertyPrediction/Model4PropertyPrediction.py#L12-L80)
+
+## 可预测属性与标签类型
+
+该网络支持**七种属性名称**和**四种标签类型族**，它们组合起来定义了每个响应。响应字符串的格式为 `PropertyName_LabelType`（例如 `PhiPsi_vonMise2d`、`SS3_Discrete3C`）。
+
+| 属性名称 | 描述 | 典型标签类型 | 值维度 | 概率维度 |
+|---|---|---|---|---|
+| **PhiPsi** | 骨架 φ/ψ 二面角 | `vonMise2d` | 2 | 5 |
+| **SS3** | 3 状态二级结构 (H/E/L) | `Discrete3C` | 1 | 3 |
+| **SS8** | 8 状态二级结构 | `Discrete8C` | 1 | 8 |
+| **ACC** | 溶剂可及性 (B/M/E) | `Discrete3C` | 1 | 3 |
+| **ThetaTau** | 残基间方向角 | `Gauss2d` | 2 | 5 |
+| **DISO** | 无序性预测 | `Discrete2C` | 1 | 2 |
+| **CLE** | 局部结构环境 (18 类) | `Discrete18C` | 1 | 18 |
+
+`config.py` 模块定义了所有有效的标签类型及其维度映射（`responseValueDims`、`responseProbDims`），以及用于拆分响应字符串的解析函数 `Response2LabelType` 和 `Response2LabelName`。
+
+来源: [config.py](DL4PropertyPrediction/config.py#L6-L76), [PropertyUtils.py](DL4PropertyPrediction/PropertyUtils.py#L1-L45)
+
+## 预测头
+
+每个预测头都实现了一个 `loss()` 方法（负对数似然）、一个 `errors()` 方法，并暴露了 `y_pred`（预测值）和 `output`（分布参数）。预测头的选择逻辑位于 `ResNet4Properties.__init__` 中：
+
+### NN4PhiPsi — 角度数据的冯·米塞斯分布
+
+对于周期性角度预测 (φ, ψ)，使用了**二元冯·米塞斯分布**。该网络输出五个参数：两个均值（通过 `tanh` 限制在 [−π, π] 之间）、两个方差（通过 `(1 + tanh)/2 · π² + σ²_min` 限制为正值），以及一个相关系数（通过 `tanh` 限制在 [−0.99, 0.99] 之间）。均值和方差/相关参数是分离的——方差参数通过 `params4var` 进行追踪，以支持潜在的两阶段训练策略：即先训练均值，然后再训练分布形状。
+
+来源: [NN4PhiPsi.py](DL4PropertyPrediction/NN4PhiPsi.py#L60-L135)
+
+### NN4Normal — 非周期性值的高斯分布
+
+对于非周期性连续预测（Θ, τ 方向角），使用了**二元（或一元）高斯分布**。其架构与 NN4PhiPsi 类似，但具有无界均值（均值层没有 `tanh`），以及通过 ReLU 限制边界的方差。它支持 `n_variables = 1`（Gauss1d，n_out ∈ {1,2}）或 `n_variables = 2`（Gauss2d，n_out ∈ {2,4,5}）。
+
+来源: [NN4Normal.py](DL4PropertyPrediction/NN4Normal.py#L55-L140)
+
+### NN4LogReg — 离散标签的 Softmax 分类
+
+对于分类预测（SS3、SS8、ACC、DISO、CLE），一个**多层前馈网络**最终接入一个 `LogRegLayer`，该层对 `n_out` 个类别应用 softmax。负对数似然（NLL）为标准的交叉熵，预测值为 softmax 输出的 `argmax`。可选的隐藏层（由 `logreg_hiddens` 控制）可以插入到最终分类层之前。
+
+来源: [NN4LogReg.py](DL4PropertyPrediction/NN4LogReg.py#L85-L200)
+
+### 预测头选择汇总
+
+| 标签类型前缀 | 头部类 | 分布 | 输出参数 |
+|---|---|---|---|
+| `vonMise` | `NN4PhiPsi` | 二元冯·米塞斯分布 | mean(2), σ²(2), ρ(1) |
+| `Gauss` | `NN4Normal` | 高斯分布 | mean, σ², 可选 ρ |
+| `Discrete` | `NN4LogReg` | 离散分类 | 类别概率 |
+
+来源: [Model4PropertyPrediction.py](DL4PropertyPrediction/Model4PropertyPrediction.py#L45-L80)
+
+## 一维 ResNet 骨干网络
+
+骨干网络在 `ResNet4Property.py` 中实现，提供了三种网络变体：`ResNet1D`、`ResNet1DV21` 和 `ResNet1DV22`。所有变体共享相同的核心构建块，但残差块中批归一化的位置有所不同。
+
+### 残差卷积层 (ResConv1DLayer)
+
+基本单元是带有对称填充 (`border_mode='half'`) 的一维卷积。输入形状为 `(batch, n_in, seqLen)`，输出形状为 `(batch, n_out, seqLen)`。权重初始化对 ReLU 激活函数使用 He 初始化，对其他激活函数使用 Xavier 初始化。**掩码机制**在卷积后将填充位置置零，以防止变长序列填充产生噪声。
+
+来源: [ResNet4Property.py](DL4PropertyPrediction/ResNet4Property.py#L7-L63)
+
+### 瓶颈块
+
+`BottleneckBlock` 实现了一个遵循预激活设计模式的三层残差单元：1×1 卷积（降维）→ K×1 卷积（特征提取）→ 1×1 卷积（维数恢复）。`n_bottleneck` 参数控制内部维度（默认值：`n_in / 2`）。跳跃连接支持两种增加维度的方法：`full_projection`（可学习的 1×1 卷积）和 `identity`（直接相加，仅在维度匹配时使用）。
+
+来源: [ResNet4Property.py](DL4PropertyPrediction/ResNet4Property.py#L309-L375)
+
+### 带掩码的批归一化
+
+`batch_norm` 函数在计算均值和标准差时会**排除掩码（零填充）位置**的统计信息。这对于批次中变长的蛋白质序列至关重要——朴素的批归一化会被填充的零所污染。该实现同时处理三维张量（序列特征）和四维张量（成对特征），对于四维输入，沿水平和垂直两个方向应用掩码。
+
+来源: [ResNet4Property.py](DL4PropertyPrediction/ResNet4Property.py#L140-L210)
+
+## 特征生成流水线
+
+输入特征从 MSA 派生文件（HHM 或 TGT 格式）生成，并组装成逐残基的特征矩阵。
+
+```mermaid
+flowchart LR
+    A3M["A3M MSA File"] -->|hhmake| HHM["HHM File"]
+    A3M -->|GenTGT| TGT["TGT File"]
+    HHM -->|GenPropertyFeaturesFromHHM| FEAT["propertyFeatures.pkl"]
+    TGT -->|GenPropertyFeaturesFromTGT| FEAT
+    FEAT -->|DataProcessor.LoadPropertyFeatures| BATCH["Training/Prediction Batches"]
+    BATCH --> RESNET["1D ResNet"]
+```
+
+### 特征来源
+
+| 生成器 | 输入 | 提取的关键特征 |
+|---|---|---|
+| `GenPropertyFeaturesFromHHM` | `.hhm` 文件 | PSSM, PSFM, 序列, NEFF |
+| `GenPropertyFeaturesFromTGT` | `.tgt` 文件 | PSSM, PSFM, 序列, NEFF, predSS3, predSS8, predACC |
+| `GenPropertyFeaturesFromMultiHHMs` | 多个 HHM | 来自多个 MSA 的组合特征 |
+| `GenPropertyFeaturesFromMultiTGTs` | 多个 TGT | 来自多个模板的组合特征 |
+
+**PSSM**（位置特异性评分矩阵）是主要的序列特征。可以通过 `modelSpecs` 标志切换附加特征：
+
+| 特征标志 | 描述 | 维度 |
+|---|---|---|
+| `UsePSFM` | 位置特异性频率矩阵 | +20 |
+| `UseOneHotEncoding` | 氨基酸的独热编码 | +20 |
+| `UseSequenceEmbedding` | 3Gram 学习嵌入 | +20 |
+| `UseTemplate` | 模板相似性 + 模板属性 | +10 到 +25 |
+
+当启用 `UseTemplate` 时，模板相似性得分（10 个特征：AA 一致性、BLOSUM80/62/45、SP 得分等）和模板结构属性（SS8、ACC、CNa、CNb、Phi、Psi、Theta、Tau）将被追加，其中特定的模板属性将根据目标响应进行选择。
+
+来源: [GenPropertyFeaturesFromHHM.py](DL4PropertyPrediction/GenPropertyFeaturesFromHHM.py#L1-L58), [GenPropertyFeaturesFromTGT.py](DL4PropertyPrediction/GenPropertyFeaturesFromTGT.py#L1-L54), [DataProcessor.py](DL4PropertyPrediction/DataProcessor.py#L19-L120)
+
+## 模型配置
+
+`Initialize.py` 模块定义了默认的模型规格。关键配置参数如下：
+
+| 参数 | 默认值 | 描述 |
+|---|---|---|
+| `network` | `ResNet1D` | 骨干网络架构变体 |
+| `responses` | `['PhiPsi_vonMise']` | 要预测的属性响应列表 |
+| `w4responses` | `[1.]` | 每个响应的损失权重 |
+| `conv1d_hiddens` | `[80, 100, 120, 140]` | 每个 ResNet 阶段的隐藏通道宽度 |
+| `conv1d_repeats` | `[0, 0, 0, 0]` | 每个阶段的额外残差块 |
+| `logreg_hiddens` | `[]` | 分类头中的隐藏层 |
+| `halfWinSize_seq` | `5` | 卷积核半宽（有效卷积核 = 11） |
+| `activation` | `relu` | 整个网络中的非线性激活函数 |
+| `batchNorm` | `True` | 启用带掩码的批归一化 |
+| `algorithm` | `Adam` | 均值参数的优化器 |
+| `algorithm4var` | `Adam` | 方差/相关参数的优化器 |
+| `minibatchSize` | `200` | 训练批次大小 |
+| `L2reg` | `0.0001` | L2 正则化系数 |
+
+<CgxTip>多响应训练通过列出多个响应来配置（例如 `['PhiPsi_vonMise2d', 'SS3_Discrete3C', 'ACC_Discrete3C']`）。每个响应都有其对应的预测头和损失权重，从而能够从单个共享骨干网络中联合训练角度、二级结构和可及性预测。</CgxTip>
+
+来源: [Initialize.py](DL4PropertyPrediction/Initialize.py#L1-L53), [config.py](DL4PropertyPrediction/config.py#L83-L121)
+
+## 训练流水线
+
+训练入口点 `TrainPropertyPredictor.py` 实现了一个完整的训练循环，具有以下关键特性：
+
+**优化器支持**：Adam、AdamW、AMSGrad、AdamWAMS、SGDM、SGDM2 和 Nesterov 动量。`UpdateAlgorithm` 函数根据 `modelSpecs['algorithm']` 分派到相应的优化器。
+
+**两阶段优化**：均值参数和方差/相关参数可以使用独立的优化器（`algorithm` 对比 `algorithm4var`）以及独立的学习率计划（`lrs` 对比 `lrs4var`，`numEpochs` 对比 `numEpochs4var`）。
+
+**基于检查点的重启**：`InitializeChkpoint` 函数从检查点文件加载已保存的参数值和优化器状态，使中断的训练能够无缝恢复。
+
+**自适应验证频率**：验证频率随着训练的进行而增加——早期 epoch 的验证频率较低（2× 基础频率），中期 epoch 为 1.8×，晚期 epoch 为基础频率，从而在计算成本与早停保真度之间取得平衡。
+
+**样本权重**：没有 3D 坐标的残基（通过 `Missing` 字段标记）在损失计算中的权重为零，防止未定义的 φ/ψ 角度破坏训练过程。
+
+来源: [TrainPropertyPredictor.py](DL4PropertyPrediction/TrainPropertyPredictor.py#L1-L200)
+
+## 预测流水线
+
+两个预测入口点适用于不同的规模：
+
+| 脚本 | 用例 | 输入 |
+|---|---|---|
+| `RunPropertyPredictor.py` | 单个/少数蛋白质 | 直接使用 PKL 特征文件 |
+| `RunBatchPropertyPredictor.py` | 大规模批量预测 | 蛋白质列表文件 + 特征文件夹 |
+
+两者都遵循在 `PredictProperty()` 中实现的相同核心工作流：
+
+1. **模型加载**：每个模型文件 (`.pkl`) 包含 `modelSpecs` 和 `paramValues`。多个模型可以进行集成。
+2. **预测器编译**：`BuildModel(forTrain=False)` 构建计算图，然后 `theano.function` 编译输出 `[output4prob, y_pred]` 的预测函数。
+3. **特征加载与批处理**：`DataProcessor.LoadPropertyFeatures` 组装特征矩阵；`SplitData2Batches` 创建最多包含 30 个蛋白质的微型批次。
+4. **批次预测**：对于每个批次，编译后的函数会同时生成分布参数和预测值。
+5. **掩码移除**：使用掩码中的序列长度信息去除填充位置。
+6. **集成平均**：当多个模型预测同一个蛋白质时，结果将被平均。对于离散标签，平均后的概率将经过 argmax 运算，然后通过 `PropertyUtils.Coding2String` 解码为字符串表示。
+
+<CgxTip>多模型集成在解码前对**概率分布**（而非点预测值）进行平均。这对于离散标签尤为重要，因为对 argmax 输出进行平均毫无意义——对 softmax 概率取平均然后再取 argmax 才能产生恰当的集成决策。</CgxTip>
+
+来源: [RunPropertyPredictor.py](DL4PropertyPrediction/RunPropertyPredictor.py#L55-L200), [RunBatchPropertyPredictor.py](DL4PropertyPrediction/RunBatchPropertyPredictor.py#L50-L200)
+
+## 评估
+
+`EvaluatePropertyAccuracy.py` 通过将预测结果与真实属性文件进行比较来计算每个蛋白质的预测准确率。评估指标取决于响应类型：
+
+| 响应类型 | 指标 | 备注 |
+|---|---|---|
+| SS3, SS8, ACC, CLE | 分类错误率 | Q3/Q8 准确率 = 1 − 错误率 |
+| DISO | 分类错误率 | 训练期间按 `w4diso` 加权 |
+| PhiPsi | 圆形平均绝对误差 | `min(|Δ|, 2π − |Δ|)` 处理角度环绕；末端残基和缺失残基的相邻残基被排除 |
+
+来源: [EvaluatePropertyAccuracy.py](DL4PropertyPrediction/EvaluatePropertyAccuracy.py#L1-L47), [PropertyUtils.py](DL4PropertyPrediction/PropertyUtils.py#L155-L240)
+
+## 与 RaptorX 流水线的集成
+
+属性预测网络在完整的 RaptorX 流水线中作为**第二预测阶段**运行，位于 MSA/特征生成之后、3D 折叠之前。其输出馈入两个下游消费者：
+
+- **折叠模块**：预测的 φ/ψ 角和二级结构通过 `CalcPropertyPotential.py` 转换为 Rosetta 约束文件，将片段组装偏向于预测的局部结构。
+- **距离预测细化**：当配置了 `UseTemplate` 或二级结构特征时，预测的 SS 和 ACC 可作为距离/方向预测网络的附加特征。
+
+`Scripts/` 中的 Shell 脚本编排了完整的预测工作流：`PredictProperty4OneProtein.sh` 对单个目标运行从特征生成到预测的流程，而 `PredictPropertyLocal.sh` 和 `PredictPropertyRemote.sh` 则负责 GPU 选择和远程执行。
+
+来源: [PropertyUtils.py](DL4PropertyPrediction/PropertyUtils.py#L240-L299), [GenPropertyFeatures4Proteins.py](DL4PropertyPrediction/GenPropertyFeatures4Proteins.py#L1-L1)
+
+## 后续步骤
+
+- 关于预测残基间距离和方向的二维对应网络，请参阅 [距离与方向预测](7-distance-and-orientation-prediction)。
+- 关于两个预测网络共享的 ResNet 构建块细节，请参阅 [距离预测的 ResNet](10-resnet-for-distance-prediction) 和 [空洞 ResNet 与注意力机制](11-dilated-resnet-and-attention)。
+- 关于属性预测如何约束 3D 模型构建，请参阅 [3D 模型折叠](9-3d-model-folding)。
+- 关于从输入序列到 3D 模型的完整数据流，请参阅 [预测流水线数据流](5-prediction-pipeline-data-flow)。
+
+---
+
+- [深入解析/核心模块/3D 模型折叠](https://zread.ai/j3xugit/RaptorX-3DModeling/9-3d-model-folding)
+
+---
+slug:9-3d-model-folding
+blog_type:normal
+---
+
+
+折叠模块是 RaptorX-3DModeling 流水线的最终阶段——它将深度学习预测的距离、方向和属性转化为原子级分辨率的 3D 蛋白质结构。该模块运行于统计力学与基于梯度的优化的交汇处，将预测的概率分布转化为能量势，并将其作为约束条件输入结构建模引擎（通过 PyRosetta 调用的 Rosetta、CNS Solve 或 Modeller），随后通过能量评分和 SPICKER 聚类选出最佳模型。整体架构体现了 *Jinbo Xu, PNAS 2019* 确立的**基于距离的蛋白质折叠**范式：折叠过程完全由预测的残基间几何信息驱动，而非依赖模板同源性。
+
+来源: [0README](/Folding/0README#L1-L30), [0README_overall](/Folding/0README_overall#L1-L50)
+
+## 架构概述
+
+折叠流水线可分解为四个紧密耦合的阶段：**势生成**、**约束推导**、**结构优化**和**模型选择**。每个阶段均可配置并支持多种后端引擎，从而在准确度与计算成本之间进行权衡。
+
+```mermaid
+flowchart TD
+    subgraph Phase1["阶段 1: 势生成"]
+        A["预测的距离/方向 PKL<br/>(来自 DL4DistancePrediction4)"] --> B["GenPairwisePotentialFromPrediction.py"]
+        B --> C["DFIRE / DOPE / SimuRW<br/>参考态"]
+        C --> D["两两势 PKL<br/>(距离 + 方向)"]
+        
+        E["预测的属性 PKL<br/>(来自 DL4PropertyPrediction)"] --> F["GenPropertyPotential4Rosetta.py"]
+        F --> G["Phi/Psi 二面角约束<br/>(AMBER / CHARMM / Harmonic)"]
+    end
+
+    subgraph Phase2["阶段 2: 约束推导"]
+        D --> H["GeneratePairPotential4Rosetta.py"]
+        H --> I["SPLINE 约束文件<br/>+ 直方图文件"]
+        G --> I
+    end
+
+    subgraph Phase3["阶段 3: 结构优化"]
+        I --> J{后端引擎}
+        J -->|"主要"| K["PyRosetta<br/>FoldNRelax.py"]
+        J -->|"备选"| L["CNS Solve<br/>FoldByDistance.sh"]
+        J -->|"基于模板"| M["Modeller<br/>RunModeller.py"]
+        K --> N["Decoy 集合<br/>(20+ 个模型)"]
+        L --> N
+        M --> N
+    end
+
+    subgraph Phase4["阶段 4: 模型选择"]
+        N --> O["能量评分<br/>ScoreModels.py"]
+        O --> P["SPICKER 聚类"]
+        P --> Q["Top 5 模型<br/>+ 质量评估"]
+    end
+```
+
+来源: [GenPairwisePotentialFromPrediction.py](/Folding/GenPairwisePotentialFromPrediction.py#L1-L50), [GenPropertyPotential4Rosetta.py](/Folding/GenPropertyPotential4Rosetta.py#L1-L30), [FoldNRelax.py](/Folding/Scripts4Rosetta/FoldNRelax.py#L1-L40), [FoldByDistance.sh](/Folding/Scripts4Server/FoldByDistance.sh#L1-L50)
+
+## 势生成：从概率到能量
+
+折叠模块的核心理论贡献在于将预测的概率分布转化为具有物理基础的能量势。这并非简单的负对数变换——它需要一个**参考态**来捕捉零模型中距离的预期分布，以确保生成的势在随机构象中为零，而在预测的几何构象中为负值（有利）。
+
+### DFIRE 距离势
+
+主要方法是 **DFIRE**（距离标度有限理想气体参考态），它通过观测势与参考势的差值来计算势能：
+
+**V(i,j) = V_ref(d) − V_obs(i,j,d) = [α·log(r/r_c) + log(Δr/Δr_c)] − log[P(d|i,j) / P(d_c|i,j)]**
+
+其中 `α=1.61` 是 DFIRE 指数（可在 1.57–1.63 之间调节），`r_c` 是参考距离区间（默认 18Å），`P(d|i,j)` 是残基 `i` 和 `j` 之间距离区间 `d` 的预测概率。参考态模拟了在有限理想气体中观测到距离 `d` 的概率，并由指数 `α` 进行缩放。对于宽于 1Å 的区间，使用更精确的数值积分（`CalcApproxRefPot`）来代替中点近似。
+
+来源: [GenPairwisePotentialFromPrediction.py](/Folding/GenPairwisePotentialFromPrediction.py#L97-L160)
+
+### 方向势
+
+方向势（残基间夹角和二面角，如 ω、θ、φ）采用更简单的对数几率形式，并参考依赖于序列间隔的参考分布：
+
+**V_ori(i,j,θ) = −log[P(θ|i,j)] − [−log[P_ref(θ|seqSep)]]**
+
+该势能在各区间上按其均值进行平移，然后**以残基 i 和 j 之间距离 < 20Å 的概率进行加权**（`validProb`）。这种加权抑制了不太可能接触的长程残基对产生的噪声，这是一个显著改善折叠收敛性的关键设计选择。
+
+来源: [GenPairwisePotentialFromPrediction.py](/Folding/GenPairwisePotentialFromPrediction.py#L51-L95)
+
+### 参考态选项
+
+| 参考态 | 公式 | 关键参数 | 适用场景 |
+|---|---|---|---|
+| **DFIRE** (默认) | α·log(r/r_c) + log(Δr/Δr_c) | α=1.61, r_c=18Å | 通用折叠 |
+| **DOPE** | 按回转半径缩放 | r_c=20Å, rg_scale=1.0 | 紧凑的球状蛋白 |
+| **SimuRW** | 随机游走参考态 | r_c=20Å, 需要外部文件 | 无序/柔性区域 |
+
+来源: [GenPairwisePotentialFromPrediction.py](/Folding/GenPairwisePotentialFromPrediction.py#L12-L25)
+
+### Phi/Psi 属性势
+
+属性预测网络预测的骨架二面角（Φ/Ψ）通过 von Mises 分布参数转换为兼容 Rosetta 的二面角约束。支持的函数形式包括：
+
+| 函数 | 公式 | 典型用途 |
+|---|---|---|
+| **AMBERPERIODIC** (默认) | k·(1 + cos(n·x − x₀)) | Rosetta 折叠——周期性，处理角度卷绕 |
+| **CHARMM** | ½·k·(1 − cos(n·(x − x₀))) | 兼容 CNS 的评分 |
+| **HARMONIC** | ½·k·(x − x₀)² | 小角度近似 |
+| **CIRCULARHARMONIC** | 谐波势的圆变体 | 周期性边界强制 |
+
+当无序预测可用时，约束权重将按 `(1 − P_disorder)` 进行缩放，从而有效降低缺乏稳定二面角的柔性区域的权重。
+
+来源: [GenPropertyPotential4Rosetta.py](/Folding/GenPropertyPotential4Rosetta.py#L18-L75), [CalcPropertyPotential.py](/Folding/CalcPropertyPotential.py#L1-L30)
+
+## 约束推导：从势到 Rosetta 格式
+
+原始势矩阵必须转换为 Rosetta 的原生约束格式才能驱动折叠。`GeneratePairPotential4Rosetta.py` 分两阶段执行此转换：
+
+**距离约束**被写为 SPLINE 函数，残基 i 和 j 之间的每个约束都会生成一个包含各距离区间势值的直方图文件，以及引用该直方图的约束行。SPLINE 表示允许 Rosetta 通过插值在任意原子间距离处评估约束。
+
+**方向约束**在输出前需经过两级选择标准过滤：(1) 仅保留按 `validProb` 排名在前 `topRatio × L` 的残基对（其中 L 为序列长度，默认 topRatio=20）；(2) 丢弃各区间最大绝对势值低于 `potThreshold`（默认 0.04）的残基对。对于对称标签（如 θ），每个约束仅出现一次；对于非对称标签（如 ω），势值除以 4（两次出现 × 半偏移平均）以避免重复计数。
+
+约束文件将写入临时目录（对于残基数 <400 的机器或指定的高内存节点，优先使用 `/dev/shm` 以获取内存盘速度），在加载到 PyRosetta pose 后即被清理。
+
+来源: [GeneratePairPotential4Rosetta.py](/Folding/Scripts4Rosetta/GeneratePairPotential4Rosetta.py#L23-L200), [FoldNRelax.py](/Folding/Scripts4Rosetta/FoldNRelax.py#L83-L140)
+
+## 结构优化：折叠引擎
+
+### PyRosetta (主引擎)
+
+`FoldNRelax.py` 使用 PyRosetta 实现了主要的折叠协议，支持三种运行模式：
+
+| 模式 | 标志 | 描述 |
+|---|---|---|
+| **仅折叠** | `-r 0` | 在约束下最小化，跳过 FastRelax |
+| **折叠 + 弛豫** | `-r 1` (默认) | 在约束下折叠，随后使用约束权重进行 FastRelax |
+| **仅弛豫** | `-r 2` | 对带有约束的现有 PDB 进行 FastRelax |
+
+**折叠**阶段历经四个优化步骤：
+
+1. **空间碰撞消除** — 使用带 `lbfgs_armijo_nonmonotone` 的 `MinMover` 最小化范德华能量（`scorefxn_vdw.wts`），最多迭代 5 轮，直至评分降至 10 以下
+2. **约束最小化** — 对带有完整约束评分函数（`scorefxn.wts`）的 `MinMover` 应用 `RepeatMover(4×)`，使用 LBFGS 非单调优化器
+3. **基于扰动的细化** (可选，`-p` 标志) — 以递减噪声（σ = 10°, 7.5°, 3°, 2°）迭代扰动 Φ/Ψ 角度，每次扰动后进行最小化，并保留最佳评分构象
+4. **笛卡尔最小化** — 在笛卡尔坐标空间（`scorefxn_cart.wts`）进行最终细化以获得精确几何结构
+
+**初始 pose** 通过从预测的 AMBER 分布（而非随机）中采样 Φ/Ψ 角度生成，这在优化开始前将链置于近天然构象中。此举至关重要——随机初始化将需要更多优化周期才能收敛。
+
+**弛豫**阶段使用 Rosetta 的 `FastRelax`，其 `ref2015` 评分函数由约束项增强：
+
+| 项 | 默认权重 | 标志 |
+|---|---|---|
+| `atom_pair_constraint` | 0.2 | `-w` |
+| `dihedral_constraint` | 0.2 | `-d` |
+| `angle_constraint` | 0.2 | `-a` |
+| `hbond_lr_bb` + `fa_elec` + `ss_pair` + `sheet` | 无 (关闭) | `-e` |
+
+FastRelax 在双空间模式（笛卡尔 + 扭转）下运行，每个周期最多 200 次迭代，且骨架、侧链和跳跃自由度均处于激活状态。
+
+来源: [FoldNRelax.py](/Folding/Scripts4Rosetta/FoldNRelax.py#L258-L400), [GenPotentialNFoldRelax.sh](/Folding/Scripts4Rosetta/GenPotentialNFoldRelax.sh#L1-L60)
+
+### CNS Solve (备选引擎)
+
+`FoldByDistance.sh` 使用 CNS（晶体学与 NMR 系统）实现折叠，这对于遵循 NMR 结构确定传统、由距离约束驱动的折叠尤为有效。该流水线包括：
+
+1. **扩展链生成** — `SEQ_To_Input` 将 FASTA 转换为 CNS 序列格式，随后 `gseq.inp` 和 `extn.inp` 生成扩展骨架
+2. **约束生成** — 距离边界转换为 CNS TBL 格式（`ConvertDistBounds2CNSTBL.py`），二级结构生成 NOE、二面角和氢键约束（`SSE_To_TBL`），角度约束来自 `GenAngleRestraints4CNS.py`
+3. **模拟退火** — `DGSA_File_Mod` 参数化退火协议（NOE 缩放、角度缩放、随机种子），随后 `cns_solve` 运行距离几何 + 模拟退火生成 decoy
+4. **NOE 违例排序** — 按 NOE 违例评分对 decoy 排序，并选择前 K 个模型
+
+关键 CNS 参数包括 NOE 缩放因子（默认 5.0）、二面角约束缩放（默认 10.0）、距离截断（默认 12Å）和边界类型（0–4，控制预测分布如何映射到距离上下界）。
+
+来源: [FoldByDistance.sh](/Folding/Scripts4Server/FoldByDistance.sh#L1-L100), [GenAngleRestraints4CNS.py](/Folding/Scripts4CNS/GenAngleRestraints4CNS.py#L28-L70)
+
+### Modeller (基于模板的引擎)
+
+`RunModeller.py` 在模板可用时提供基于同源性的建模作为补充方法。它主要用于多模板穿线场景，而非从头折叠。
+
+来源: [RunModeller.py](/Folding/Scripts4Modeller/RunModeller.py#L1-L10)
+
+## 模型选择与聚类
+
+生成 decoy 集合后（通常每个任务 20 个模型，并行任务共 40 个），流水线通过两阶段过程选择最佳模型：
+
+**能量评分**（`ScoreModels.py`）根据 Rosetta ref2015 能量和特定蛋白的两两势（`CalcPairPotential.py`）评估每个 decoy。`Score` 函数将每个模型中的实际原子间距离离散化，查找对应的势值，并对序列间隔 ≥ `minSeqSep`（默认 5）的所有残基对求和。
+
+**SPICKER 聚类**（`SpickerOneTargetTarget.sh`）对 decoy 集合执行基于密度的聚类。工作流为：从模型列表生成 SPICKER 的输入数据 → 运行 SPICKER 算法 → 通过 `ParseSpickerResult.py` 解析聚类结果。聚类中心代表结构上最具代表性的模型。可选地，在聚类前可通过 Rosetta 能量预过滤模型（`SelectModels4Clustering.py`），并在聚类后评估模型质量（`AssessModelByRef.sh`）。
+
+最终输出为 5 个排名后的 PDB 模型及质量评估：
+
+| 输出文件 | 内容 |
+|---|---|
+| `seqid_model_X.pdb` | PDB 格式的前 5 个 3D 模型 |
+| `seqid.model_summary` | 以埃为单位的全局误差估计 |
+| `seqid_modelX.localQuality.txt` | 每个Cα原子的以埃为单位的误差估计 |
+
+来源: [CalcPairPotential.py](/Folding/CalcPairPotential.py#L12-L55), [SpickerOneTarget.sh](/Folding/Scripts4SPICKER/SpickerOneTarget.sh#L1-L80), [0README](/Folding/0README#L8-L25)
+
+## 编排与执行模式
+
+该模块提供多种执行包装器，用于处理跨 CPU 和机器的任务分配：
+
+| 脚本 | 执行模式 | 核心特性 |
+|---|---|---|
+| `LocalFoldNRelaxOneTarget.sh` | 单机，本地 | 直接执行 |
+| `ParallelFoldNRelaxOneTarget.sh` | 单机，多核 | 跨 CPU 的 GNU parallel |
+| `SRunFoldNRelaxOneTarget.sh` | 通过 SSH 多机 | `srun` 风格远程分发 |
+| `SlurmFoldNRelaxOneTarget.sh` | HPC 集群 | SLURM 任务阵列提交 |
+| `FoldingWrapper10.sh` | 服务器集成 | 端到端：预测 → 折叠 → 5个模型 |
+
+`FoldingWrapper` 脚本是生产环境中使用的最高层级编排器。`FoldingWrapper10.sh` 从各自的预测目录中解析预测的距离/方向 PKL 和属性 PKL，验证其存在性，构建包含所有参数的输出路径（`target_atomPairTypes_t_boundType_c_cutoff_A_angleScale`），检查已有结果以避免冗余计算，并以每批 20 个模型、选择 10 个模型的设置委托给 `FoldByPredictedRestraints.sh`。
+
+`FoldProtein4Server.sh` 是服务器级入口点，它设置 `DistanceFoldingHome` 环境变量，解析预测子目录（`DistancePred/Dist_Server_*/` 和 `PropertyPred/PhiPsiSS8_Server_*/`），并调用相应的包装器。
+
+来源: [FoldingWrapper10.sh](/Folding/Scripts4Server/FoldingWrapper10.sh#L1-L80), [FoldProtein4Server.sh](/Folding/Scripts4Server/FoldProtein4Server.sh#L1-L53), [LocalFoldNRelaxOneTarget.sh](/Folding/LocalFoldNRelaxOneTarget.sh#L1-L5)
+
+## C++ 实用程序
+
+`source_code/` 目录包含与 Python 脚本一同编译的性能关键型 C++ 程序：
+
+| 程序 | 用途 |
+|---|---|
+| `SEQ_To_Input.cpp` | 将 FASTA 序列转换为 CNS 输入格式 |
+| `EstiDist_To_TBL.cpp` | 将估计的距离边界转换为 CNS 约束 TBL 文件 |
+| `SSE_To_TBL.cpp` | 将二级结构预测转换为 CNS NOE/二面角/hbond 约束 |
+| `DGSA_File_Mod.cpp` | 使用作业特定参数修改 CNS 距离几何模拟退火输入文件 |
+| `GCNNzsco_To_TBL.cpp` | 将预测的接触 Z 分数转换为 CNS 约束格式 |
+
+这些程序处理数据密集型的转换步骤，在大规模批处理中 Python 会显得过慢。
+
+来源: [source_code/](/Folding/source_code/DGSA_File_Mod.cpp#L1-L5), [Makefile](/Folding/source_code/Makefile#L1-L5)
+
+## 模型质量评估辅助工具
+
+`Helpers/` 子目录提供了折叠后的质量分析工具：`CalcModelQuality.sh` 及其批处理变体为生成的模型计算基于能量的质量评分；`AnalyzeDeepScore.py` 和 `AnalyzeMaxCluster.py` 提供基于深度学习评分和聚类密度的替代质量指标；`CollectModelQuality.py` 聚合跨多目标的质量指标；`Normalize.py` 对评分进行归一化以实现跨目标比较。这些工具的输出将汇入 `.model_summary` 和 `.localQuality.txt` 输出文件。
+
+来源: [CalcModelQuality.sh](/Folding/Helpers/CalcModelQuality.sh#L1-L5), [CollectModelQuality.py](/Folding/Helpers/CollectModelQuality.py#L1-L5)
+
+<CgxTip>DFIRE 指数 α=1.61 并非随意取值——它是有限理想气体参考态的经验测定临界指数。将 α 设置为 > 10 会触发 1.57 到 1.63 之间的随机值，这可用于多模型生成中的集合多样性。当 `-a` 标志超过 10 时，此随机化将在 `GenPairwisePotentialFromPrediction.py` 和 `FoldNRelax.py` 中应用。</CgxTip>
+
+<CgxTip>约束文件生成在可用且序列少于 400 个残基时，利用 `/dev/shm`（内存盘）进行临时存储——这避免了成千上万个 SPLINE 直方图文件的 I/O 瓶颈。在指定的高内存机器（`raptorx6`–`raptorx10`）上，无论序列长度如何，始终使用 `/dev/shm`。约束目录在约束加载到 PyRosetta pose 后会立即删除，以防内存耗尽。</CgxTip>
+
+## 关键配置参数
+
+| 参数 | 默认值 | 作用域 | 描述 |
+|---|---|---|---|
+| `alpha` (DFIRE) | 1.61 | 势生成 | 参考态指数 |
+| `largestDistance` | 18Å | DFIRE 势 | 参考区间的距离截断 |
+| `w4distance` | 0.2 | Rosetta Relax | 原子对约束权重 |
+| `w4dihedral` | 0.2 | Rosetta Relax | 二面角约束权重 |
+| `w4angle` | 0.2 | Rosetta Relax | 角度约束权重 |
+| `ncycles` | 1000 | 折叠阶段 | MinMover 迭代次数 |
+| `tolerance` | 0.0001 | 折叠阶段 | MinMover 收敛阈值 |
+| `NOE_scale` | 5.0 | CNS 折叠 | 距离约束能量常数 |
+| `Angle_scale` | 10.0 | CNS 折叠 | 二面角约束能量常数 |
+| `dist_cutoff` | 12Å (CNS) / 15Å (Rosetta) | 两种引擎 | 约束的最大距离 |
+| `topRatio` | 20 | 方向约束 | 每个残基的约束数 (× L) |
+| `numModels` | 20 每任务 | Decoy 生成 | 每个并行任务的 Decoy 数 |
+
+来源: [FoldNRelax.py](/Folding/Scripts4Rosetta/FoldNRelax.py#L428-L470), [GenPotentialNFoldRelax.sh](/Folding/Scripts4Rosetta/GenPotentialNFoldRelax.sh#L20-L50), [FoldByDistance.sh](/Folding/Scripts4Server/FoldByDistance.sh#L55-L90)
+
+## 流水线集成
+
+折叠模块位于 RaptorX 预测流水线的末端。其输入直接来自深度学习模块：
+
+- 来自[距离与方向预测](7-distance-and-orientation-prediction)的**距离/方向预测**以 `*.predictedDistMatrix.pkl` 形式输入——包含 (name, sequence, predDistProb, predContactMatrix, labelWeight, labelDistribution) 元组
+- 来自[属性预测网络](8-property-prediction-network)的**属性预测**以 `*.predictedProperties.pkl` 形式输入，包含 von Mises Φ/Ψ 参数和无序预测
+- 来自[MSA 与特征生成](6-msa-and-feature-generation)的 **MSA 和特征**被间接使用（它们作为预测网络的输入）
+
+从序列到结构的完整端到端流程由 `Scripts4Server/` 中的服务器级脚本编排，将预测 → 势生成 → 折叠 → 选择串联为单一的自动化流水线。
+
+要了解生成本模块输入预测的深度学习模型，请参阅[距离与方向预测](7-distance-and-orientation-prediction)和[属性预测网络](8-property-prediction-network)。有关大规模运行折叠的分布式执行基础设施，请参阅[多机分布式执行](13-multi-machine-distributed-execution)。
+
+---
+
+## 深度学习架构
+
+- [深入解析/深度学习架构/用于距离预测的 ResNet](https://zread.ai/j3xugit/RaptorX-3DModeling/10-resnet-for-distance-prediction)
+
+---
+slug:10-resnet-for-distance-prediction
+blog_type:normal
+---
+
+
+用于距离预测的 ResNet 是 RaptorX-3DModeling 残基间距离预测流程的架构骨干。该网络基于 Theano 构建，并针对二维接触图形状的张量从第一性原理出发进行设计，实现了一个**双路径 ResNet** —— 1D ResNet 处理序列特征（PSSM、二级结构、溶剂可及性），2D ResNet 处理成对特征（共进化矩阵、互信息）—— 通过外部拼接变换将逐残基表示转换为残基对表示，从而将两条路径桥接起来。该设计通过右下对齐填充及二值掩码传播来优先处理变长蛋白质，这一关键工程决策使其有别于通用的计算机视觉 ResNet。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L1-L1008), [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L1-L931)
+
+## 架构概述
+
+完整模型 `ResNet4DistMatrix` 由四个阶段组合而成：**1D 序列 ResNet → 序列到矩阵变换 → 2D 矩阵 ResNet → 逐响应预测头**。每个阶段均可通过 `modelSpecs` 字典独立配置，使得同一代码库能够实例化从简单的纯 2D ResNet 到带有嵌入层和多个距离/方向输出的完整序列-成对流程等各种架构。
+
+```mermaid
+flowchart TB
+    subgraph "Stage 1: Sequence Feature Processing"
+        SEQ_IN["seqInput<br/>(batchSize, seqLen, n_in_seq)"] --> RESNET_1D["1D ResNet<br/>(ResNet or DilatedResNet)"]
+        EMB_IN["embedInput<br/>(batchSize, seqLen, n_in_embed)"] --> EMBED["EmbeddingLayer<br/>(SeqOnly / Seq+SS)"]
+    end
+
+    subgraph "Stage 2: Sequence-to-Matrix Transformation"
+        RESNET_1D -->|"outer concatenate"| MIDPOINT["MidpointFeature<br/>(bounding box crop)"]
+        MIDPOINT --> COMPRESS["Conv2D4DistMatrix<br/>(1×1 compression)"]
+        EMBED --> COMPRESS
+    end
+
+    subgraph "Stage 3: Matrix ResNet"
+        MAT_IN["matrixInput<br/>(batchSize, seqLen, seqLen, n_in_matrix)"] --> CONCAT["Channel Concatenation"]
+        COMPRESS --> CONCAT
+        CONCAT --> RESNET_2D["2D ResNet<br/>(ResNet or DilatedResNet)"]
+    end
+
+    subgraph "Stage 4: Prediction Heads"
+        RESNET_2D --> HEAD1["NN4LogReg<br/>(Discrete labels)"]
+        RESNET_2D --> HEAD2["NN4Normal<br/>(Continuous labels)"]
+    end
+
+    style RESNET_1D fill:#4a90d9,color:#fff
+    style RESNET_2D fill:#4a90d9,color:#fff
+    style MIDPOINT fill:#e8a838,color:#fff
+    style HEAD1 fill:#5cb85c,color:#fff
+    style HEAD2 fill:#5cb85c,color:#fff
+```
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L219-L399), [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L766-L825)
+
+## 核心卷积层
+
+ResNet 的基础由两个自定义卷积实现构成，用于处理带掩码的变长输入——这是蛋白质结构预测中独有的需求，因为同一批次内的序列长度各不相同。
+
+### ResConv1DLayer — 掩码一维卷积
+
+`ResConv1DLayer` 对形状为 `(batchSize, n_in, seqLen)` 的 3D 张量进行操作。它通过重塑为 4D 张量并委派给 Theano 的 `conv2d`（设置 `border_mode='half'` 即 same 填充）来实现窗口化的一维卷积。卷积操作之后，若存在掩码，则将填充位置置零，以防止噪声从填充区域传播。
+
+权重初始化遵循 ReLU 激活函数的 **He 初始化**方案（`scale = √(2 / fan_in)`）以及其他激活函数的 **Xavier/Glorot 初始化**方案，在构建时根据激活函数进行选择。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L6-L71)
+
+### ResConv2DLayer — 掩码二维卷积
+
+`ResConv2DLayer` 对形状为 `(batchSize, n_in, nRows, nCols)` 的 4D 张量进行操作，使用大小为 `(2 × halfWinSize + 1)²` 的方形卷积核。掩码的形状为 `(batchSize, #rows_to_be_masked, nCols)`，并在**水平和垂直两个方向**上应用——先掩码填充行，再掩码填充列——确保左上三角填充区域完全置零。这种双向掩码是必不可少的，因为距离矩阵是对称的，而填充在左上角呈现为 L 形区域。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L74-L146)
+
+### 带掩码的批归一化
+
+`batch_norm` 函数在计算均值和标准差时**排除填充位置**。对于 4D 输入，有效元素数量的计算方式为：
+
+```
+x_num = mask.sum() * 2 + batch_size * (nRows - mask_rows) * (nCols - mask_rows) - mask[:, :mask_rows, :mask_rows].sum()
+```
+
+减法项调整了水平掩码和垂直掩码重叠区域的双重计算。通过 Theano 的 `batch_normalization`（在 `low_mem` 模式下）进行归一化后，重新应用掩码将填充位置重置为零。该函数同时返回归一化后的输出和可学习的 `[gamma, bias]` 参数。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L148-L235)
+
+## 残差块变体
+
+系统实现了四种残差块变体，每种在批归一化放置位置与参数效率之间提供不同的权衡。所有残差块均通过基于 `input.ndim` 动态选择 `ResConv1DLayer` 或 `ResConv2DLayer`，同时支持 1D（3D 张量）和 2D（4D 张量）输入。
+
+| 变体 | 卷积层 | 批归一化层 | 批归一化放置位置 | 预激活 | 关键特征 |
+|---------|-------------|------------------|--------------|----------------|--------------------|
+| **ResBlockV1** | 2 | 0 或 2 | 卷积后 | 否 | 原始 ResNet 风格；每次卷积后进行批归一化 |
+| **ResBlockV2** | 2 | 0 或 1 | 块中间 | 是 | 预激活；两次卷积间单个批归一化 |
+| **ResBlockV22** | 2 | 0 或 2 | 卷积前 | 是 | 每个块两个批归一化层；精度最佳 |
+| **ResBlockV23** | 2 | 0 或 1 | 块中间 | 是 | 优化的 V2；移除未使用的批归一化参数 |
+
+### BottleneckBlock
+
+一种三卷积瓶颈设计：`1×1 → k×k → 1×1`，其中瓶颈维度 `n_bottleneck` 默认为 `n_in / 2`。当通道维度较大时，这可以减少参数量。第一个 1×1 卷积降维通道，中间卷积执行空间特征提取，最后一个 1×1 卷积恢复通道。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L342-L441), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L442-L536), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L537-L631), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L632-L726), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L727-L817)
+
+### 维度增加方法
+
+所有残差块均支持三种策略来处理堆栈间通道维度的变化：
+
+- **`partial_projection`**（默认）：当 `n_out > n_in` 时，1×1 线性卷积将 `n_in → (n_out - n_in)` 通道映射，然后沿通道轴将输入与此投影拼接，并加到卷积路径输出上。当 `n_out == n_in` 时，使用简单的恒等跳跃连接：`output = conv_path + input`。
+- **`full_projection`**：1×1 线性卷积直接将 `n_in → n_out` 通道映射，并将结果加到卷积路径上。这等价于标准的 ResNet 投影快捷方式。
+- **`identity`**：对输入通道进行零填充以匹配 `n_out`。目前会引发错误，因为实际中仅支持投影。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L391-L424), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L494-L523)
+
+## ResNet — 完整网络
+
+`ResNet` 类将残差块组装成由两个并行列表控制的**堆叠架构**：`n_hiddens`（每个堆栈的通道维度）和 `n_repeats`（每个堆栈的块重复次数）。总深度为 `1 + Σ n_repeats[i]` 个块加上一个起始层。
+
+```mermaid
+flowchart LR
+    INPUT["Input<br/>(n_in channels)"] --> START["Start Conv<br/>(n_in → n_hiddens[0])"]
+    START --> S1B1["ResBlock × n_repeats[0]<br/>(n_hiddens[0] ch)"]
+    S1B1 --> S2DIM["ResBlock (dim increase)<br/>(n_hiddens[0] → n_hiddens[1])"]
+    S2DIM --> S2B1["ResBlock × n_repeats[1]<br/>(n_hiddens[1] ch)"]
+    S2B1 --> S3DIM["ResBlock (dim increase)<br/>(n_hiddens[1] → n_hiddens[2])"]
+    S3DIM --> S3B1["ResBlock × n_repeats[2]<br/>(n_hiddens[2] ch)"]
+    S3B1 --> OUT["Output<br/>(n_hiddens[-1] ch)"]
+
+    style START fill:#e8a838,color:#fff
+    style S1B1 fill:#4a90d9,color:#fff
+    style S2DIM fill:#d9534f,color:#fff
+    style S2B1 fill:#4a90d9,color:#fff
+    style S3DIM fill:#d9534f,color:#fff
+    style S3B1 fill:#4a90d9,color:#fff
+```
+
+残差块变体由 `version` 参数选择：`ResNet2D` 和 `ResNet2DV21` 使用 `ResBlockV2`，`ResNet2DV22` 使用 `ResBlockV22`，**`ResNet2DV23`**（推荐）使用 `ResBlockV23`。输入张量经历维度重排，从 `(batchSize, seqLen, n_in)` 或 `(batchSize, nRows, nCols, n_in)` 转换为 Theano 的 conv2d 所需的卷积优先格式 `(batchSize, n_in, ...)`，输出时再重排回特征在最后的约定。
+
+<CgxTip>配置 ResNet 时，`n_hiddens` 必须是一个**递增序列**，且长度必须与 `n_repeats` 相同。每个堆栈的第一个块（堆栈 0 除外）通过 `partial_projection` 执行维度增加，而后续的块由于输入和输出通道匹配，使用恒等快捷方式。</CgxTip>
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L819-L908)
+
+## ResNet4DistMatrix — 预测模型
+
+`ResNet4DistMatrix` 是协调完整预测流程的顶层模型类。其构造函数接收五个输入张量和一个配置字典：
+
+| 参数 | 形状 | 描述 |
+|-----------|-------|-------------|
+| `seqInput` | `(B, L, n_in_seq)` | 序列特征：PSSM、预测的二级结构、溶剂可及性 |
+| `matrixInput` | `(B, L, L, n_in_matrix)` | 成对特征：CCM、MI、协方差、接触势 |
+| `mask_seq` | `(B, #masked_cols)` | 填充序列位置的二值掩码 |
+| `mask_matrix` | `(B, #masked_rows, L)` | 填充矩阵行的二值掩码 |
+| `embedInput` | `(B, L, n_in_embed)` | 嵌入输入：一级序列 ± 预测的二级结构 |
+| `boundingbox` | `(4,)` | 大蛋白质的裁剪框 `[top, left, bottom, right]` |
+
+### 阶段 1：序列卷积
+
+1D ResNet（或当网络名称以 `DilatedResNet` 开头时的 DilatedResNet）通过 `conv1d_hiddens` 通道及每个堆栈 `conv1d_repeats` 次重复来处理 `seqInput`。半窗口大小为标准 ResNet 的 `halfWinSize_seq`，或 DilatedResNet 的重复列表。
+
+### 阶段 2：序列到矩阵变换
+
+此阶段将 1D 逐残基特征转换为 2D 残基对特征。支持两种模式：
+
+- **`OuterCat`**：1D ResNet 的输出经过 `MidpointFeature`（执行外部拼接：对于位置 i 和 j，拼接 features[i] 和 features[j]），然后经过带有 `halfWinSize=0`（1×1 卷积）的 `Conv2D4DistMatrix` 以压缩翻倍的通道维度。当指定边界框时，将中间特征裁剪为子矩阵，以便在长蛋白质训练时节省内存。
+- **`SeqOnly` / `Seq+SS`**：`EmbeddingLayer4AllRange` 直接将原始序列（及可选的二级结构）映射为成对矩阵表示。
+
+所有激活的 seq-to-matrix 模式的输出与 `matrixInput` 进行**通道拼接**，形成组合的 2D 输入。
+
+### 阶段 3：矩阵 ResNet
+
+组合的 2D 张量进入带有 `conv2d_hiddens` 通道和 `conv2d_repeats` 次重复的 2D ResNet（或 DilatedResNet）。这是网络中最深的部分，也是残基间距离模式的主要特征提取器。
+
+### 阶段 4：多响应预测头
+
+对于 `modelSpecs['responses']` 中的每个响应，附加一个预测头：
+
+- **离散标签**（例如，离散化距离区间、方向区间）：`NN4LogReg` —— 一个逻辑回归头，输出标签空间上的概率分布。
+- **连续标签**（例如，服从正态/对数正态分布的距离）：`NN4Normal` —— 输出均值和方差参数，其中方差特定参数被单独跟踪以用于潜在的微分正则化。
+
+所有预测头的输出沿通道轴拼接，以生成最终的 `output`（预测值）和 `output_prob`（预测的概率分布）。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L219-L399)
+
+## 损失与误差计算
+
+`ResNet4DistMatrix` 的 `loss` 方法会分派至每个预测器的损失函数，支持通过 `weightList` 进行逐样本加权。对于离散响应，通常为加权交叉熵；对于正态/对数正态响应，则为负对数似然。`trainByRefLoss` 标志允许翻转损失符号以进行参考状态训练。
+
+`errors` 方法计算分类错误率。对于细粒度距离离散化（12C、25C、52C），它在内部使用从 `config.ContactDefinition` 和 `config.InteractionLimit` 派生的距离区间边界将其折叠为 3 类方案（接触 / 中程 / 长程），使该指标更具可解释性。
+
+`TopAccuracyByRange` 方法分别评估**长程**（|i−j| ≥ 24）、**中程**（12 ≤ |i−j| < 24）和**短程**（6 ≤ |i−j| < 12）接触的 top-L/k 预测精度——这是 CASP 竞赛中的标准评估协议。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L409-L516), [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L597-L764)
+
+## 网络变体与配置
+
+`config.py` 模块定义了有效网络架构的全集及其选择逻辑：
+
+| 网络名称 | 块类型 | 关键差异 |
+|--------------|------------|----------------|
+| `ResNet2D` | `ResBlockV2` | 原始版本；每个块单个批归一化，预激活 |
+| `ResNet2DV21` | `ResBlockV2` | 与 ResNet2D 相同（向后兼容） |
+| `ResNet2DV22` | `ResBlockV22` | 每个块两个批归一化层；经验上更优 |
+| **`ResNet2DV23`** | **`ResBlockV23`** | **推荐**；移除未使用批归一化参数的优化 V2 |
+| `DilatedResNet2D` | `DilatedResNet` | 膨胀卷积，用于扩大感受野 |
+
+<CgxTip>`ResNet2DV23` 是推荐的变体。它产生与 `ResNet2DV21` 相同的计算图，但存储的参数更少，从而在不影响推理结果的情况下减少了模型序列化时的内存占用。</CgxTip>
+
+响应系统支持多种原子对距离类型（`CbCb`、`CaCa`、`CgCg`、`CaCg`、`NO`）、氢键（`HB`）、β 配对（`Beta`）以及残基间取向角（`Ca1Cb1Cb2Ca2`、`N1Ca1Cb1Cb2`、`Ca1Cb1Cb2`）。每个响应由其专属的预测头独立预测，允许单次前向传播同时生成距离概率、方向概率和氢键预测。
+
+来源: [config.py](DL4DistancePrediction4/config.py#L12-L19), [config.py](DL4DistancePrediction4/config.py#L178-L200)
+
+## BuildModel — 模型构建入口点
+
+`BuildModel(modelSpecs, forTrain)` 是实例化完整计算图的工厂函数。它声明所有符号 Theano 变量——`x`（序列特征）、`y`（成对特征）、`xmask`、`ymask`、`xem`（嵌入输入）、`boundingbox`——构建 `ResNet4DistMatrix`，并返回训练包（模型 + 输入 + 标签 + 权重 + 边界框 + 参考损失标志）或预测包（仅模型 + 输入）。
+
+标签张量类型根据响应配置选择：离散标签使用 `wtensor3`/`wtensor4`（16 位整型以节省内存），连续标签使用 `tensor3`/`tensor4`。当在 `modelSpecs` 中启用 `UseSampleWeight` 时，有条件地创建样本权重张量。
+
+来源: [Model4DistancePrediction.py](DL4DistancePrediction4/Model4DistancePrediction.py#L766-L825)
+
+## 掩码系统 — 处理变长蛋白质
+
+掩码系统是此 ResNet 实现中独具特色的工程特性。由于蛋白质长度不同，但小批量需要统一的张量形状，较短的序列会被**右填充**（对于 1D）或**右下填充**（对于 2D）以匹配批次中最长的序列。
+
+掩码是一个二值张量，其中 `0` 表示填充位置，`1` 表示真实数据位置。掩码在每一层中传播：
+
+1. **卷积层**：卷积后，填充位置通过与掩码的逐元素乘法置零。对于 2D 卷积，这在水平和垂直方向上独立应用。
+2. **批归一化**：统计量（均值、方差）仅在真实位置上计算，防止填充零偏移归一化。
+3. **残差块**：掩码被传递至所有子层，确保整个网络中一致的噪声抑制。
+
+这种方法在计算上比动态展开更廉价，并维持了完整的 Theano 计算图兼容性，代价是在填充位置上存在少量的无效计算。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L53-L62), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L123-L139), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L148-L207)
+
+## 权重初始化策略
+
+初始化方案根据激活函数进行调整，遵循已有的理论成果：
+
+| 激活函数 | 分布 | 缩放公式 |
+|------------|-------------|---------------|
+| ReLU | 高斯分布 | `√(2 / (n_in × kernel_size + n_out))` |
+| tanh / 其他 | 均匀分布 | `√(6 / (n_in × kernel_size + n_out))` |
+| sigmoid | 均匀分布 × 4 | `4 × √(6 / (n_in × kernel_size + n_out))` |
+
+对于 1D 卷积，`kernel_size = windowSize`；对于 2D 卷积，`kernel_size = wSize²`。偏置在所有情况下均初始化为零。ReLU 的 He 初始化考虑了 ReLU 使一半激活值置零的事实，因此需要 √2 的方差补偿。
+
+来源: [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L28-L36), [ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L100-L108)
+
+## 相关页面
+
+- 此 ResNet 的膨胀卷积扩展记录在 [Dilated ResNet and Attention](11-dilated-resnet-and-attention) 中，它在不增加参数量的情况下扩大了感受野。
+- 有关控制这些架构的完整可调参数集，请参见 [Model Configuration Reference](12-model-configuration-reference)。
+- 为 `seqInput` 和 `matrixInput` 提供输入的上游特征生成涵盖在 [MSA and Feature Generation](6-msa-and-feature-generation) 中。
+- 预测距离矩阵的下游消费者记录在 [3D Model Folding](9-3d-model-folding) 中。
+
+---
+
+- [深入解析/深度学习架构/膨胀 ResNet 与注意力机制](https://zread.ai/j3xugit/RaptorX-3DModeling/11-dilated-resnet-and-attention)
+
+---
+slug:11-dilated-resnet-and-attention
+blog_type:normal
+---
+
+
+RaptorX-3D 的距离预测精度取决于其在标准 ResNet 骨干网络之上叠加的两项协同架构创新：**空洞卷积**（在无参数爆炸的前提下指数级扩展感受野）和**通道注意力机制**（压缩-激励风格，动态重加权特征通道）。这些机制共同作用，使网络能够捕捉接触图上的长程残基间耦合，以及每个空间位置上最具信息量的特征通道——这两者对于从共进化输入中预测准确的距离分布至关重要。
+
+## 架构背景：从 ResNet 到空洞 ResNet
+
+标准的 `ResNet4Distance` 模块提供了基线 2D 残差网络：`ResConv2DLayer` 应用带有 `border_mode='half'`（same-padding）的普通卷积，而 `ResBlockV2`/`ResBlockV23` 在每个残差块中堆叠两个此类卷积，并可选地使用批归一化。其关键局限在于，每个卷积均使用 `dilation=1`，这意味着有效感受野仅随深度线性增长——对于长度为 *L* 的接触图，若要捕捉序列距离相差甚远的残基 *i* 和 *j* 之间的相关性，需要极深的网络或极大的卷积核，而这两种方案的计算成本都极其高昂。
+
+`DilatedResNet4Distance` 扩展了这一基础架构，在每个卷积层中引入了 `dilation` 参数，并引入了将卷积与通道注意力融合的 `AttnConv2DLayer`。膨胀参数通过 `filter_dilation=(dilation, dilation)` 传递给 Theano 的 `T.nnet.conv2d`，该函数按膨胀因子间隔排布滤波器权重——空间大小为 *k*、膨胀率为 *d* 的卷积核，其有效感受野为 *d·(k−1)+1*，从而实现了跨层感受野的指数级增长。
+
+来源：[ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L74-L145), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L78)
+
+## 空洞卷积层
+
+### ResConv1DLayer — 空洞 1D 卷积
+
+`ResConv1DLayer` 作用于形状为 `(batchSize, n_in, seqLen)` 的序列特征张量。它通过 `dimshuffle` 将输入重组为 4D 以兼容 Theano 的 2D 卷积，随后应用空洞滤波器。膨胀分支逻辑如下：
+
+```
+if dilation > 1:
+    conv_out = T.nnet.conv2d(in4conv2D, self.W, filter_shape=w_shp,
+                             border_mode='half', filter_dilation=(1, dilation))
+else:
+    conv_out = T.nnet.conv2d(in4conv2D, self.W, filter_shape=w_shp,
+                             border_mode='half')
+```
+
+1D 情况使用 `filter_dilation=(1, dilation)` 的原因在于，滤波器形状为 `(n_out, n_in, 1, windowSize)`——膨胀仅沿序列（列）维度应用。权重初始化对 ReLU 采用 He 初始化（`scale = √(2 / fan_in)`），对其他激活函数采用 Xavier 初始化，其中 `fan_in = n_in × windowSize`。
+
+来源：[DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L9-L78)
+
+### ResConv2DLayer — 空洞 2D 卷积
+
+`ResConv2DLayer` 是成对（接触图）的对应模块，作用于 `(batchSize, n_in, nRows, nCols)`。它通过 `filter_dilation=(dilation, dilation)` 应用各向同性膨胀，并使用大小为 `(wSize, wSize)` 的方形卷积核，其中 `wSize = 2 × halfWinSize + 1`。此处同样适用上述膨胀分支逻辑。在卷积和激活之后，**双向掩码** 会将沿水平和垂直轴的填充伪影置零——这至关重要，因为同一批次中的蛋白质长度各异，且在填充张量中呈右下对齐。
+
+来源：[DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L81-L157)
+
+### 感受野数学原理
+
+下表展示了在 `halfWinSize=1`（3×3 卷积核）的 4 块 DilatedResNet 中，膨胀堆叠如何叠加感受野：
+
+| 块索引 | 膨胀率 | 卷积核大小 | 每块有效感受野 | 累积感受野 (近似) |
+|:-----------:|:--------:|:-----------:|:----------------------:|:-----------------------:|
+| 0           | 1        | 3×3         | 3                      | 3                       |
+| 1           | 2        | 3×3         | 5                      | 7                       |
+| 2           | 4        | 3×3         | 7                      | 11                      |
+| 3           | 8        | 3×3         | 11                     | 19                      |
+
+在膨胀率为 `[1, 2, 4, 8]` 的情况下，4 个块仅使用 3×3 卷积核和 8 个卷积层即可实现约 19 的感受野——而 `dilation=1` 的标准 ResNet 需要约 9 层 3×3 卷积才能达到相同的覆盖范围，且每层增加的参数量远大于基于膨胀的方案。
+
+<CgxTip>配置膨胀调度时，请使用 2 的幂次（1, 2, 4, 8, …）以确保全覆盖且无网格伪影——非 2 的幂次调度可能会在感受野中留下未被采样任何输入像素的“空洞”。</CgxTip>
+
+来源：[DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L1026-L1094)
+
+## 通道注意力机制
+
+### 架构概述
+
+`AttentionLayer` 实现了 **压缩-激励**（SE）风格的通道注意力。与计算成对空间亲和力（O(L²) 成本）的自注意力机制不同，该机制通过池化空间维度生成逐通道描述符，随后通过紧凑变换学习通道间依赖关系，从而在 O(L) 复杂度下运行。其流程如下：
+
+```mermaid
+graph LR
+    A["Input Tensor<br/>(B, C, H, W)"] --> B["Spatial Pooling<br/>AvgPool + MaxPool"]
+    B --> C["Channel Descriptor<br/>(C,)"]
+    C --> D{"Transform?"}
+    D -->|"UseFC=True"| E["FullConnectionLayer<br/>W: (C, C)"]
+    D -->|"UseFC=False"| F["SimpleConvLayer<br/>1D Conv along C"]
+    E --> G["Attention Weights<br/>α ∈ (C,)"]
+    F --> G
+    G --> H["Element-wise Multiply<br/>input × α"]
+    H --> I["Attended Output<br/>(B, C, H, W)"]
+```
+
+注意力权重 `α` 是一个逐通道向量，与完整空间张量进行广播相乘：`output = input × α`，其中 `α` 通过 `dimshuffle` 进行维度重组以对齐输入的维度。这意味着接触图中的每个空间位置 均接收相同的通道重加权——注意力回答的是“哪些特征通道全局重要？”，而非“哪些位置关注了哪些位置？”。
+
+来源：[AttentionLayer.py](DL4DistancePrediction4/AttentionLayer.py#L182-L222)
+
+### 池化策略：AvgPool 和 MaxPool
+
+两种互补的池化操作将空间维度降维为通道描述符：
+
+- **`AvgPool`** 计算每个通道的均值，**排除被掩码（零填充）的位置**。对于 4D 输入，它计算 `x_sum / x_num`，其中 `x_num` 通过 `mask.sum() * 2 + batchSize × (H - mask_H) × (W - mask_W) - overlap_correction` 计算有效（非掩码）区域。重叠校正会减去水平和垂直掩码区域中被重复计算的交集部分。
+
+- **`MaxPool`** 计算每个实例、每个通道的最大值（跨空间维度），然后在批次内求平均：`x.max(axis=[2,3]).mean(axis=[0])`。这捕捉了每个通道中激活最强烈的空间位置。
+
+当两者同时启用（`UseAvg=True, UseMax=True`）时，`FullConnectionLayer2` 通过**同一个**权重矩阵 `W` 分别变换每种池化结果，然后取平均：`output = (σ(avg·W) + σ(max·W)) / 2`。在两条路径之间共享权重，使得参数量保持可控，同时允许网络从分布（平均）和峰值（最大）统计信息中共同学习。
+
+来源：[AttentionLayer.py](DL4DistancePrediction4/AttentionLayer.py#L8-L111)
+
+### 变换路径：FullConnection 与 SimpleConv
+
+存在两种变换选项用于从通道描述符计算注意力权重：
+
+| 属性 | `FullConnectionLayer` / `FullConnectionLayer2` | `SimpleConvLayer` / `SimpleConvLayer2` |
+|:---------|:-----------------------------------------------|:---------------------------------------|
+| 权重形状 | `(n_in, n_in)` — 全通道间 | `(1, 1, windowSize, 1)` — 局部 1D 卷积 |
+| 参数量 | C² | windowSize |
+| 归纳偏置 | 全局通道交互 | 局部通道邻域 |
+| 默认激活函数 | Sigmoid | Sigmoid |
+| 适用场景 | 完整的通道间建模 | 轻量级，参数高效 |
+
+`FullConnectionLayer` 对池化描述符应用稠密的 `(C, C)` 矩阵，对任意通道间依赖关系进行建模。`SimpleConvLayer` 将通道描述符视为 1D 序列，并应用小型 1D 卷积（默认 `halfWinSize=2`，卷积核大小为 5），仅对局部通道邻域进行建模——参数极少但表达能力较弱。
+
+<CgxTip>默认配置 `UseAvg=True, UseMax=True, UseFC=True` 提供了最强的注意力机制，但每个注意力层会增加 C² 个参数。对于具有大量通道的模型（如 n_hiddens=[64, 128, 256]），请考虑使用 `UseFC=False` 切换至 `SimpleConvLayer`，从而将注意力的参数开销降低数个数量级。</CgxTip>
+
+来源：[AttentionLayer.py](DL4DistancePrediction4/AttentionLayer.py#L63-L178)
+
+## AttnConv2DLayer：融合卷积与注意力
+
+`AttnConv2DLayer` 是关键集成点，膨胀与注意力在此单层内汇聚。其处理流程为：
+
+```
+Input → DilatedConv2D → BiasAdd → AttentionLayer → Activation → MaskCorrection → Output
+```
+
+这与独立的 `ResConv2DLayer` 流程（`Input → DilatedConv2D → BiasAdd → Activation → MaskCorrection`）不同，它将注意力机制插入在非线性激活**之前**、偏置**之后**。注意力被应用于原始卷积输出（`conv_out + b`），而非激活后的结果——这是刻意为之：对预激活值应用注意力，允许 SE 机制在弱通道通过非线性激活之前对其进行抑制，防止弱通道的伪激活被 ReLU 放大。
+
+参数列表聚合了卷积与注意力的参数：`self.params = [W, b] + attnLayer.params`，L1/L2 正则化项也相应求和。注意力配置目前硬编码为 `UseAvg=True, UseMax=True, UseFC=True`，尽管被注释掉的 `attnOptions` 参数暗示其曾支持逐层配置。
+
+来源：[DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L159-L241)
+
+## DilatedResBlock：核心构建块
+
+`DilatedResBlock` 是膨胀架构的基础残差单元。它在预激活残差设计中结合了三种机制：
+
+```mermaid
+graph TD
+    X["Input x"] --> A1["ReLU(x)"]
+    A1 --> C1["AttnConv2DLayer<br/>(dilation=d, halfWinSize=h)"]
+    C1 --> BN1["BatchNorm (optional)"]
+    BN1 --> A2["ReLU(·)"]
+    A2 --> C2["AttnConv2DLayer<br/>(dilation=d, halfWinSize=h)"]
+    C2 --> SUM
+    
+    X --> PROJ{"n_out == n_in?"}
+    PROJ -->|"Yes"| ID["Identity: x"]
+    PROJ -->|"No"| PP["Partial Projection:<br/>concat(x, Conv1x1(x))"]
+    ID --> SUM
+    PP --> SUM
+    
+    SUM --> OUT["Output"]
+```
+
+块级别的**层选择逻辑**决定了是使用 `AttnConv2DLayer` 还是 `ResConv2DLayer`：
+
+```python
+if input.ndim == 4:
+    attnFlag = config.ParseAttentionMode(modelSpecs)
+    if attnFlag is not None:
+        ConvLayer = AttnConv2DLayer    # 启用注意力
+    else:
+        ConvLayer = ResConv2DLayer      # 普通空洞卷积
+```
+
+这意味着注意力的启用或禁用是基于 `modelSpecs['Attention']` 键对**所有** 2D 块全局生效的——不存在逐块的注意力开关。`config.py` 中的 `ParseAttentionMode` 函数将注意力字符串格式（如 `"UseAvg+UseMax"` 或 `"UseAvg+UseMax+UseConv"`）解析为三元组 `(UseAvg, UseMax, UseFC)`。
+
+当 `n_out > n_in` 时，**维度增加**策略使用 `partial_projection`：输入与 1×1 卷积投影拼接 `[x, Conv1x1(x)]` 并加到残差路径中，确保恒等快捷路径原封不动地传递原始通道，而新通道则是学习得到的。
+
+来源：[DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L913-L1024), [config.py](DL4DistancePrediction4/config.py#L150-L167)
+
+## DilatedResNet：完整网络组装
+
+`DilatedResNet` 通过堆叠 `DilatedResBlock` 实例构建完整网络。其架构遵循**多尺度堆叠**模式：
+
+```mermaid
+graph TD
+    IN["Input<br/>(B, L, L, n_in)"] --> START["StartConv<br/>n_in → n_hiddens［0］<br/>dilation［0］, halfWinSize［0］"]
+    START --> S0["Stack 0:<br/>n_repeats［0］ × DilatedResBlock<br/>at n_hiddens［0］, dilation［0］"]
+    S0 --> DIM1["Dim-Increase Block<br/>n_hiddens［0］ → n_hiddens［1］<br/>dilation［1］, halfWinSize［1］"]
+    DIM1 --> S1["Stack 1:<br/>n_repeats［1］ × DilatedResBlock<br/>at n_hiddens［1］, dilation［1］"]
+    S1 --> DIM2["Dim-Increase Block<br/>n_hiddens［1］ → n_hiddens［2］<br/>dilation［2］, halfWinSize［2］"]
+    DIM2 --> S2["Stack 2: ..."]
+    S2 --> OUT["Output<br/>(B, L, L, n_hiddens［-1］)"]
+```
+
+构造函数强制了若干不变量：`len(n_hiddens) == len(n_repeats) == len(halfWinSize) == len(dilation)`，确保每个堆叠都有对应的隐藏维度、重复次数、卷积核大小和膨胀率。`n_hiddens` 序列必须是**递增的**——每个堆叠在比前一个更高的通道维度上运行，且每个堆叠的第一个块通过 `partial_projection` 执行维度增加。
+
+用于距离预测的典型配置如下所示：
+
+| 参数 | Stack 0 | Stack 1 | Stack 2 | Stack 3 |
+|:----------|:--------|:--------|:--------|:--------|
+| `n_hiddens` | 64      | 128     | 256     | 512     |
+| `n_repeats` | 5       | 5       | 5       | 3       |
+| `halfWinSize` | 1    | 1       | 1       | 1       |
+| `dilation` | 1       | 2       | 4       | 8       |
+
+这创建了一个网络，其中早期的堆叠以全分辨率处理局部模式，中间的堆叠以加倍的感受野捕捉中程耦合，而后期的堆叠则对长程残基间依赖关系进行建模——所有这些均使用 3×3 卷积核，且膨胀未带来任何参数量的增加。
+
+来源：[DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L1026-L1117)
+
+## 对比分析：标准 ResNet 与带注意力的空洞 ResNet
+
+| 方面 | `ResNet4Distance` | `DilatedResNet4Distance` |
+|:-------|:------------------|:-------------------------|
+| 卷积膨胀 | 固定为 1 | 每堆叠可配置 `[1, 2, 4, 8]` |
+| 注意力机制 | 无 | 通过 `AttnConv2DLayer` 实现的 SE 风格通道注意力 |
+| 卷积层 (2D) | `ResConv2DLayer` (无膨胀) | `ResConv2DLayer` (带膨胀) 或 `AttnConv2DLayer` |
+| 感受野增长 | O(depth × kernelSize) | O(depth × dilation × kernelSize) |
+| 块变体 | `BottleneckBlock`, `ResBlockV1/V2/V22/V23` | 仅 `DilatedResBlock` |
+| 批归一化 | 每块可选 | 通过 `modelSpecs['batchNorm']` 控制 |
+| 维度增加 | `full_projection`, `partial_projection`, `identity` | `full_projection`, `partial_projection` |
+| 掩码处理 | 双向（水平 + 垂直） | 双向（逻辑相同） |
+| 参数开销 | 基线 | 每注意力层 +C² (FC 模式) 或 +5 (Conv 模式) |
+| 网络配置键 | `'ResNet2D'` / `'ResNet2DV2*'` | `'DilatedResNet2D'` |
+
+标准 ResNet 提供了更多的块变体选择（具有 1×1→3×3→1×1 瓶颈结构的 `BottleneckBlock`，采用后激活的 `ResBlockV1`，采用预激活及不同 BN 布局的 `ResBlockV2/V22/V23`），而空洞 ResNet 则整合为单一的 `DilatedResBlock` 设计，优先采用集成了注意力的预激活 V2 风格布局。
+
+来源：[ResNet4Distance.py](DL4DistancePrediction4/ResNet4Distance.py#L342-L535), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L537-L912), [config.py](DL4DistancePrediction4/config.py#L17-L17)
+
+## 注意力配置参考
+
+注意力模式通过 `modelSpecs['Attention']` 字符串指定，由 `config.ParseAttentionMode` 解析。其格式为以 `+` 分隔的模式标志列表：
+
+| 配置字符串 | UseAvg | UseMax | UseFC | 描述 |
+|:---------------------|:------:|:------:|:-----:|:------------|
+| (键缺失或为 None) | —      | —      | —     | 禁用注意力；使用 `ResConv2DLayer` |
+| `"UseAvg"` | ✓ | ✗ | ✓ | 仅平均池化，全连接变换 |
+| `"UseAvg+UseMax"` | ✓ | ✓ | ✓ | 双池化，全连接变换（默认） |
+| `"UseAvg+UseMax+UseConv"` | ✓ | ✓ | ✗ | 双池化，轻量级 1D 卷积变换 |
+| `"UseAvg+UseConv"` | ✓ | ✗ | ✗ | 仅平均池化，1D 卷积变换 |
+
+当禁用注意力时（键缺失），`DilatedResBlock` 会回退至 `ResConv2DLayer`——网络仍受益于空洞卷积，但缺乏通道重加权机制。膨胀 + 注意力（`AttnConv2DLayer`）的组合代表了全功能配置。
+
+来源：[config.py](DL4DistancePrediction4/config.py#L150-L167), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L931-L948)
+
+## 带掩码的批归一化
+
+`DilatedResNet4Distance` 和 `ResNet4Distance` 均实现了自定义 `batch_norm` 函数，以正确处理同一批次中长度不一的蛋白质。标准批归一化会在整个填充张量上计算统计量，包含了会使均值和方差被人为拉低的零填充位置。掩码版本的操作如下：
+
+1. 计算所有元素的 `x_sum`，依赖于掩码位置已被置零的前置条件。
+2. 根据掩码张量计算 `x_num`（有效元素计数），并针对水平和垂直掩码区域相交的 2D 情况应用重叠校正。
+3. 导出 `x_mean = x_sum / x_num` 和 `x_std = √(E[x²] - (E[x])² + ε)`。
+4. 使用计算出的统计量应用 Theano 的 `batch_normalization`。
+5. 在输出中将掩码位置重新置零（批归一化可能在先前为零的位置产生非零值）。
+
+`BatchNormLayer` 包装器将其暴露为带有可学习 `gamma` 和 `bias` 参数的可组合层，并将这些参数返回以包含在父块的参数列表中。
+
+来源：[DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L243-L329)
+
+## 设计理念与变体适用场景
+
+**空洞卷积**解决了接触/距离预测中的一个结构性问题：在序列上相距甚远但在 3D 空间中相邻的残基对，会在接触图的对角线外侧位置产生共进化信号。使用小卷积核的标准卷积需要许多层才能将信息从对角线传播到这些遥远位置。空洞卷积通过扩展采样网格在更少的层中实现了这一点——这对于具有 300+ 个残基的蛋白质至关重要，因为其长程接触可能位于对角线外 200+ 个位置。
+
+**通道注意力**解决了一个特征选择问题：距离网络的输入包含异构通道（共进化得分、序列特征、二级结构、模板信息），其信噪比差异极大。SE 机制学会根据每次输入自适应地抑制噪声通道并放大信息通道，当某些蛋白质存在模板特征而其他蛋白质缺失时，这一点尤为重要。
+
+在以下情况下使用**标准 ResNet**（[用于距离预测的 ResNet](10-resnet-for-distance-prediction)）：训练数据有限（注意力会增加参数）、蛋白质较短（<150 个残基，长程接触有限）或计算预算紧张。在以下情况下使用**带注意力的 DilatedResNet**：针对具有大量长程接触的长蛋白质、使用丰富的多通道输入特征，或在 GPU 显存充足时追求最大预测精度。
+
+有关详细的参数配置，请参见[模型配置参考](12-model-configuration-reference)。有关该网络运行的流水线上下文，请参见[距离与方向预测](7-distance-and-orientation-prediction)。
+
+---
+
+- [深入解析/深度学习架构/模型配置参考](https://zread.ai/j3xugit/RaptorX-3DModeling/12-model-configuration-reference)
+
+---
+slug:12-model-configuration-reference
+blog_type:normal
+---
+
+
+本参考文档记录了控制 RaptorX 两个深度学习子系统（**DL4DistancePrediction4**（成对距离/方位预测）和 **DL4PropertyPrediction**（一维单残基属性预测））的所有可配置参数。这两个子系统共享一个通用的架构模式：一个由 `Initialize.py` 初始化的 `modelSpecs` 字典，可通过 `ParseCommandLine.py` 覆盖，并根据 `config.py` 中定义的枚举进行验证。理解这三层配置层级对于自定义网络架构、训练策略和预测目标至关重要。
+
+## 配置架构
+
+配置系统遵循明确的覆盖级联机制——首先在代码中建立默认值，然后通过命令行参数进行选择性替换，最后根据 `config.py` 中的允许值集合进行验证。这种设计确保了任何有效的检查点文件都可以通过重新下发其原始命令行参数来复现。
+
+```mermaid
+graph TD
+    A[Initialize.py<br/>默认 modelSpecs 字典] --> B[ParseCommandLine.py<br/>CLI 参数覆盖]
+    B --> C[config.py<br/>验证与枚举]
+    C --> D[模型构建<br/>ResNet / DilatedResNet / Attention]
+    C --> E[优化器选择<br/>AdamW / SGDM / AdaDelta ...]
+    C --> F[标签与离散化<br/>距离 / 方位 / 属性]
+    D --> G[训练后的 .pkl 检查点]
+    E --> G
+    F --> G
+    G --> H[params/ModelFile*.txt<br/>用于推理的模型注册表]
+```
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L1-L134), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L1-L339), [config.py](DL4DistancePrediction4/config.py#L1-L506)
+
+## 全局参数（两个子系统通用）
+
+以下参数在距离和属性预测流水线中共享，若子系统间的默认值不同则会特别注明。
+
+| 参数 | 距离预测默认值 | 属性预测默认值 | CLI 标志 | 描述 |
+|-----------|-----------------|------------------|----------|-------------|
+| `network` | `DilatedResNet2D` | `ResNet1D` | `-n` | 网络架构选择器 |
+| `algorithm` | `AdamW` | `Adam` | `-a` | 优化算法 |
+| `numEpochs` | `[20, 1]` | `[19, 2]` | `-a` | 每个训练阶段的轮数 |
+| `lrs` | `[0.0002, 0.00004]` | `[0.0002, 0.00002]` | `-a` | 每个阶段的学习率 |
+| `minibatchSize` | `60000` | `200` | `-s` | 每批最小残基对数 |
+| `maxbatchSize` | `122500` (350×350) | `1500` | `-s` | 每批最大子矩阵大小 |
+| `L2reg` | `0.0001` | `0.0001` | `-g` | L2 正则化因子 |
+| `batchNorm` | `True` | `True` | `-k` | 启用批归一化 |
+| `UseSampleWeight` | `True` | `True` | `-k` | 对无效残基对的权重置零 |
+| `validation_frequency` | `100` | `100` | — | 验证间隔（批次数） |
+| `patience` | `5` | `5` | — | 早停容忍度（轮数） |
+| `activation` | `RELU` | `relu` (Theano) | `-k` | 激活函数 |
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L1-L134), [Initialize.py](DL4PropertyPrediction/Initialize.py#L1-L53)
+
+## 距离预测配置 (DL4DistancePrediction4)
+
+### 网络架构选项
+
+距离预测子系统支持五种 2D 网络架构。推荐且默认的选择是 `DilatedResNet2D`，它通过空洞卷积和可选的注意力层对标准 ResNet 进行了扩展，从而在不引发参数爆炸的情况下扩大了感受野。
+
+| 网络 | 描述 | 每 ResBlock 的 BatchNorm | 支持空洞卷积 | 支持注意力 |
+|---------|-------------|----------------------|------------------|-------------------|
+| `ResNet2D` | 原始 2D ResNet | 1 | 否 | 否 |
+| `ResNet2DV21` | 与 ResNet2D 相同（别名） | 1 | 否 | 否 |
+| `ResNet2DV22` | 每个块双 BatchNorm | 2 | 否 | 否 |
+| `ResNet2DV23` | 裁剪未使用的 BN 参数 | 1 | 否 | 否 |
+| `DilatedResNet2D` | **推荐** — 空洞卷积 + 注意力 | 1 | 是 | 是 |
+
+来源：[config.py](DL4DistancePrediction4/config.py#L12-L17), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L1-L200)
+
+### 1D 卷积流水线（序列特征处理）
+
+1D 卷积阶段在将每个残基的序列特征嵌入到 2D 成对表示之前对其进行处理。其配置由三个等长数组控制：
+
+| 参数 | 默认值 | CLI 标志 | 格式 |
+|-----------|---------|----------|--------|
+| `conv1d_hiddens` | `[30, 35, 40, 45]` | `-c` | 逗号分隔的整数，例如 `30,35,40,45` |
+| `conv1d_repeats` | `[0, 0, 0, 0]` | `-c` | 冒号之后，例如 `30,35,40,45:0,0,0,0` |
+| `conv1d_hwsz` | `7` | `-z` | 单个整数（`+` 之前的第一部分） |
+
+`conv1d_hiddens` 中的每个条目定义了一个 ResBlock 的通道宽度。对应的 `conv1d_repeats` 值指定了该 ResBlock 重复的次数（0 = 单次前向传播）。`conv1d_hwsz` 设置了所有 1D 卷积核的半窗口大小，生成的卷积核宽度为 `2 × hwsz + 1`。
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L46-L49), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L205-L212)
+
+### 2D 卷积流水线（成对特征处理）
+
+2D 阶段是距离/方位预测的核心。DilatedResNet2D 架构引入了逐层的空洞因子和独立的半窗口大小，从而实现了多尺度感受野。
+
+| 参数 | 默认值 | CLI 标志 | 格式 |
+|-----------|---------|----------|--------|
+| `conv2d_hiddens` | `[50, 55, 60, 65, 70, 75]` | `-d` | 逗号分隔的整数 |
+| `conv2d_repeats` | `[4, 4, 4, 4, 4, 4]` | `-d` | 冒号之后，例如 `50,55,...:4,4,...` |
+| `conv2d_hwszs` | `[1, 1, 1, 1, 1, 1]` | `-z` | `+` 之后，逗号分隔 |
+| `conv2d_dilations` | `[1, 1, 2, 4, 2, 1]` | `-l` | 逗号分隔的整数 |
+
+空洞模式 `[1, 1, 2, 4, 2, 1]` 创造了一种感受野：在中间层扩展以捕获长程相互作用，在输出层收缩以进行细粒度的局部优化。当通过 CLI 提供单个空洞值时，它将被广播到所有层。
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L51-L55), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L214-L242), [DilatedResNet4Distance.py](DL4DistancePrediction4/DilatedResNet4Distance.py#L80-L157)
+
+### 逻辑回归头
+
+在最终的 2D 卷积之后，多层逻辑回归头将特征映射到输出标签分布：
+
+| 参数 | 默认值 | CLI 标志 |
+|-----------|---------|----------|
+| `logreg_hiddens` | `[80]` | `-e` |
+
+空列表 `[]` 将绕过隐藏层，产生从最后一个卷积输出到标签概率的直接线性映射。
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L58), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L223-L224)
+
+### 序列到矩阵的嵌入模式
+
+序列（1D）特征在进入 2D 卷积流水线之前，必须转换为成对（2D）表示。共有三种嵌入策略可用，它们可以**组合使用**（但 `SeqOnly` 和 `Seq+SS` 互斥）：
+
+| 模式 | 描述 | 参数格式 |
+|------|-------------|-----------------|
+| `SeqOnly` | 嵌入氨基酸对类型；参数为短/中/长程的嵌入长度 | `SeqOnly:4,6,12` |
+| `Seq+SS` | 嵌入组合的氨基酸 + 二级结构对 | `Seq+SS:4,6,12` |
+| `OuterCat` | 卷积后 1D 特征的外部拼接；参数为 `[output_dim, compress_dim]` | `OuterCat:70,35` |
+
+**默认值**：`SeqOnly:4,6,12;OuterCat:70,35` — 将直接对嵌入与深度卷积特征的外部拼接相结合。`SeqOnly` 后面的数字分别是短程、中程和长程残基对的嵌入向量长度。对于 `OuterCat`，第一个数字是 1D 卷积输出维度，第二个是压缩维度。
+
+**CLI 语法**：`-x SeqOnly:4,6,12;OuterCat:70,35`
+
+来源：[config.py](DL4DistancePrediction4/config.py#L23-L25), [Initialize.py](DL4DistancePrediction4/Initialize.py#L66-L68), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L165-L191)
+
+### 响应规格（距离与方位目标）
+
+**响应**是基本的预测目标，由标签名称（预测什么）和标签类型（如何离散化/建模）定义。响应字符串格式是最复杂的 CLI 参数：
+
+**格式**：`-y LabelNames:LabelType:Weight;...`
+
+多个响应组以 `;` 分隔。在一个组内，多个标签名称以 `+` 连接。权重因子是可选的（默认为 1.0）。
+
+#### 标签名称 — 原子对距离
+
+| 名称 | 描述 | 对称 |
+|------|-------------|-----------|
+| `CbCb` | Cβ–Cβ 距离（最常见） | 是 |
+| `CaCa` | Cα–Cα 距离 | 是 |
+| `CgCg` | Cγ–Cγ 距离 | 是 |
+| `CaCg` | Cα–Cγ 距离 | 否 |
+| `NO` | N–O 距离 | 否 |
+| `HB` | 氢键距离 | 否 |
+| `Beta` | Beta 配对距离 | 是 |
+
+**缩写**：`AllAP` 展开为所有原子对类型。
+
+#### 标签名称 — 残基间方位
+
+| 名称 | 描述 | 类别 |
+|------|-------------|----------|
+| `Ca1Cb1Cb2Ca2` | 经由 Cα₁-Cβ₁-Cβ₂-Cα₂ 的二面角 | 2-体 |
+| `N1Ca1Cb1Cb2` | 经由 N₁-Cα₁-Cβ₁-Cβ₂ 的二面角 | 2-体 |
+| `Ca1Cb1Cb2` | 经由 Cα₁-Cβ₁-Cβ₂ 的夹角 | 2-体 |
+| `Ca1Ca2Ca3Ca4` | 4 个连续 Cα 原子的二面角 | 4-体 |
+| `Ca1Ca2Ca4Ca3` | 4 个 Cα 原子的（交叉）二面角 | 4-体 |
+| `Ca1Ca2Ca3` | 3 个连续 Cα 原子的夹角 | 4-体 |
+| `Ca1Ca2Ca4` | 3 个 Cα 原子的（交叉）夹角 | 4-体 |
+
+**缩写**：`TwoROri`, `TwoRDihedral`, `TwoRAngle`, `FourCaOri`, `FourCaDihedral`, `FourCaAngle`, `AllOri`, `AllDihedral`, `AllAngle`。
+
+#### 标签类型 — 离散化方案
+
+距离和方位值被离散化为分箱以进行分类。命名约定 `XXC` 表示 XX 个离散分箱。后缀 `Plus` 和 `Minus` 控制无效条目的处理方式：
+
+| 方案 | 范围 | 分箱 | 用途 |
+|--------|-------|------|-------|
+| `56C` | 2.0–20.0 Å | 55 等宽 + 1 无效 | 细粒度距离 |
+| `47C` | 2.0–20.0 Å | 46 等宽 + 1 无效 | **生产级距离** |
+| `25C` | 4.5–16.0 Å | 24 等宽 + 1 无效 | 粗粒度距离 |
+| `37C` | −180°–180° | 37 等宽 | **生产级二面角** |
+| `19C` | 0°–180° | 19 等宽 | **生产级夹角** |
+| `3C` | [0, 8, 15] Å | 3 自定义 | 接触分类 |
+| `2C` | [0, 8] Å | 2 自定义 | 二元接触 |
+
+- **Plus**：无效条目被分离到独立的分箱中，在损失中**计入**
+- **Minus**：无效条目被分离，从损失中**排除**
+- **无后缀**：无效条目合并到最后一个有效分箱中
+
+**生产级响应字符串**：`CbCb+CaCa+NO:47CPlus;TwoRDihedral:37C;TwoRAngle:19C`
+
+来源：[config.py](DL4DistancePrediction4/config.py#L180-L285), [config.py](DL4DistancePrediction4/config.py#L370-L436), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L74-L118)
+
+### 输入特征标志
+
+这些布尔标志控制将哪些进化和结构特征输入网络。它们通过 `-k` 键值对标志设置（例如，`-k UseRawCCM:yes;UsePSICOV:no`）。
+
+| 标志 | 默认值 | 描述 |
+|------|---------|-------------|
+| `UseSequentialFeatures` | `True` | 包含序列（1D）特征 |
+| `UseOneHotEncoding` | `True` | 氨基酸序列的独热编码 |
+| `UseSS` | `True` | 包含预测的二级结构 |
+| `UseACC` | `True` | 包含预测的溶剂可及性 |
+| `UsePSSM` | `True` | 包含位置特定打分矩阵 |
+| `UseDisorder` | `False` | 包含无序预测 |
+| `UseCCMZ` | `False` | 包含带 Z 分数的 CCM |
+| `UseRawCCM` | `True` | 包含原始共进化矩阵 |
+| `UseMI` | `True` | 包含互信息 |
+| `UseContactPotential` | `True` | 包含接触势 |
+| `UseOtherPairs` | `True` | 启用 MI + ContactPotential 的简写 |
+| `UsePSICOV` | `False` | 包含 PSICOV 精度矩阵 |
+| `UsePriorDistancePotential` | `False` | 包含先验距离势 |
+| `UseTemplate` | `False` | 包含模板特征 |
+| `UseNewPosFeatures` | `False` | 使用新位置特征 |
+| `NoOldPosFeatures` | `True` | 排除旧序列分离特征 |
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L82-L121)
+
+### 进化耦合信息 (ECInfo)
+
+`ECInfo` 参数是一个位掩码整数，控制将哪些进化耦合矩阵变体作为输入特征包含进来。每一位启用一种不同的表示：
+
+| 位 | 值 | 提取的标志 | 描述 |
+|-----|-------|----------------|-------------|
+| 0 | 1 | `bUseCCMFnorm` | 具有 Frobenius 归一化的 CCM |
+| 1 | 2 | `bUseCCMsum` | 具有求和归一化的 CCM |
+| 2 | 4 | `bUseCCMraw` | 原始 CCM（未归一化） |
+| 3 | 8 | `bUseFullMI` | 完整互信息矩阵 |
+| 4 | 16 | `bUseFullCov` | 完整协方差矩阵 |
+
+**示例**：`ECInfo=7`（位 0+1+2）启用 CCMFnorm + CCMsum + CCMraw。默认值为 `0`（不直接通过 ECInfo 启用；原始 CCM 通过 `UseRawCCM` 单独启用）。
+
+来源：[config.py](DL4DistancePrediction4/config.py#L101-L118)
+
+### 训练算法规格
+
+算法字符串以紧凑格式编码了优化器、训练阶段和学习率调度：
+
+**格式**：`-a Algorithm:Epochs1+LR1:Epochs2+LR2[;Algorithm4Var:Epochs1+LR1:...]`
+
+| 算法 | 描述 |
+|-----------|-------------|
+| `AdamW` | 具有解耦权重衰减的 Adam（**推荐用于距离预测**） |
+| `Adam` | 标准 Adam |
+| `AMSGrad` | 具有 AMSGrad 收敛保证的 Adam |
+| `AdamWAMS` | AdamW + AMSGrad 组合 |
+| `SGDM` | 具有动量的 SGD（替代公式） |
+| `SGDM2` | 具有动量的 SGD（标准公式） |
+| `SGNA` | 具有 Nesterov 加速的 SGD |
+
+**距离预测默认值**：`AdamW:20+0.0002:1+0.00004` — 20 轮训练，学习率 lr=0.0002，然后 1 轮训练，学习率 lr=0.00004（5× 衰减）。
+
+**属性预测默认值**：`Adam:19+0.0002:2+0.00002` — 19 轮训练，学习率 lr=0.0002，然后 2 轮训练，学习率 lr=0.00002（10× 衰减）。
+
+可选的第二段（在 `;` 之后）指定了用于方差预测的独立优化器调度。如果省略，则均值和方差使用相同的算法和调度。
+
+来源：[config.py](DL4DistancePrediction4/config.py#L21), [Initialize.py](DL4DistancePrediction4/Initialize.py#L29-L37), [ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L121-L162)
+
+### 样本加权与范围配置
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `UseSampleWeight` | `True` | 对无效/相邻残基对权重置零 |
+| `NoWeight4Label` | `True` | 所有标签分箱统一权重 |
+| `NoWeight4Range` | `True` | 所有序列分离范围统一权重 |
+| `rangeMode` | `All` | 评估所有残基对，包括 \|i−j\|<6 |
+| `LRbias` | `mid` | 小距离的偏差方向 |
+| `SeparateTrainByRange` | `False` | 按范围训练独立模型 |
+| `TrainByRefLoss` | `False` | 依据（真实损失 − 参考损失）训练 |
+| `distThreshold4Orientation` | `20.0` | 方位预测的距离截断值 |
+
+来源：[Initialize.py](DL4DistancePrediction4/Initialize.py#L103-L124)
+
+### 注意力与高级特征
+
+| 参数 | 默认值 | 描述 |
+|-----------|---------|-------------|
+| `Attention` | `None` | 注意力模式字符串，例如 `UseMax+UseConv` |
+| `CompressMatrixInput` | `False` | 在 2D CNN 之前压缩高通道成对特征 |
+| `hiddens4MatrixCompress` | `[100, 50]` | 矩阵压缩网络的隐藏维度 |
+| `boundingBoxOffset` | `None` | 子矩阵采样距对角线的最大偏移量 |
+| `ESM` | `None` | ESM 嵌入层选择（例如 `33` 或 `1t33`） |
+| `NumDataLoaders` | `2` | 并行数据加载器计数 |
+| `QSize` | `400` | 多进程队列大小 |
+
+`Attention` 模式字符串支持组合：`UseMax` 启用最大池注意力（默认仅平均池），`UseConv` 用卷积替换全连接注意力层。解析结果是一个三元组 `(UseAvg, UseMax, UseFC)`。
+
+来源：[config.py](DL4DistancePrediction4/config.py#L120-L176), [Initialize.py](DL4DistancePrediction4/Initialize.py#L70-L71), [AttentionLayer.py](DL4DistancePrediction4/AttentionLayer.py#L182-L200)
+
+### 预训练模型注册表
+
+生产模型注册在 `params/ModelFile4PairwisePred.txt` 中。共有三个模型族可用：
+
+| 族 | 模板 | 比对 | 模型 | 响应 |
+|--------|-----------|------------|--------|----------|
+| `EC47C37C19CL99S35Mid` | 无（无模板） | — | 6 (A–F) | CbCb+CaCa+NO:47CPlus + TwoRDihedral:37C + TwoRAngle:19C |
+| `NDTEC47C37C19CL99S35BC40` | CathS35/BC40 | DeepThreader (8 种策略) | 5 (A–E) | 同上 |
+| `HHEC47C37C19CL99S35PDB70` | CathS35/PDB70 | HHpred | 5 (A–E) | 同上 |
+
+所有模型均使用 `DilatedResNet2D` 和 `AdamW` 优化器，并作为 `.pkl` 检查点文件存储。在推理期间，来自同族的多模型将被集成。
+
+来源：[ModelFile4PairwisePred.txt](DL4DistancePrediction4/params/ModelFile4PairwisePred.txt#L1-L43)
+
+---
+
+## 属性预测配置 (DL4PropertyPrediction)
+
+### 网络架构选项
+
+属性预测子系统在 1D 序列数据上运行，支持三种 ResNet 变体：
+
+| 网络 | 描述 | 每 ResBlock 的 BatchNorm |
+|---------|-------------|----------------------|
+| `ResNet1D` | 原始 1D ResNet | 1 |
+| `ResNet1DV21` | 裁剪未使用的 BN 参数 | 1 |
+| `ResNet1DV22` | 每个块双 BatchNorm | 2 |
+
+当通过 CLI 指定 `ResNet1D` 时，它会在训练时自动升级为 `ResNet1DV21`（两者在功能上等效，但 V21 的参数记录更整洁）。
+
+来源：[config.py](DL4PropertyPrediction/config.py#L4-L7), [ParseCommandLine.py](DL4PropertyPrediction/ParseCommandLine.py#L60-L70)
+
+### 响应规格（属性目标）
+
+属性响应遵循格式 `PropertyName_LabelType[:Weight]`，多个响应以 `;` 分隔。每个响应将一个**标签名称**（哪种属性）与一个**标签类型**（如何对其分布建模）配对。
+
+#### 标签名称（属性）
+
+| 名称 | 描述 |
+|------|-------------|
+| `PhiPsi` | 骨架二面角 (φ, ψ) |
+| `SS3` | 3 类二级结构 |
+| `SS8` | 8 类二级结构 |
+| `ACC` | 溶剂可及性 |
+| `ThetaTau` | Theta-tau 角 |
+| `DISO` | 无序预测 |
+| `CLE` | 切割位点预测 |
+
+#### 标签类型（分布模型）
+
+| 类型 | 维度 | 概率参数 | 描述 |
+|------|-----------|-------------|-------------|
+| `vonMise2d` | 2 | 5 | 完整 2D von Mises (φ,ψ) |
+| `vonMise2d2` | 2 | 2 | 简化 2D von Mises |
+| `vonMise2d4` | 2 | 4 | 具有 4 个参数的 2D von Mises |
+| `Gauss1d` | 1 | 2 | 1D 高斯 (μ, σ) |
+| `Gauss2d` | 2 | 5 | 完整 2D 高斯 |
+| `Gauss2d2` | 2 | 2 | 对角 2D 高斯 |
+| `Gauss2d4` | 2 | 4 | 具有 4 个参数的 2D 高斯 |
+| `Discrete2C` | 1 | 2 | 二元分类 |
+| `Discrete3C` | 1 | 3 | 3 类分类 |
+| `Discrete8C` | 1 | 8 | 8 类分类 |
+| `Discrete18C` | 1 | 18 | 18 类分类 |
+
+**示例**：`-y PhiPsi_vonMise2d4:2;SS3_Discrete3C:1;SS8_Discrete8C:1;ACC_Gauss1d:1`
+
+来源：[config.py](DL4PropertyPrediction/config.py#L9-L52), [ParseCommandLine.py](DL4PropertyPrediction/ParseCommandLine.py#L72-L104)
+
+### 1D 卷积与窗口配置
+
+| 参数 | 默认值 | CLI 标志 | 格式 |
+|-----------|---------|----------|--------|
+| `conv1d_hiddens` | `[80, 100, 120, 140]` | `-c` | `80,100,120,140:0,0,0,0` |
+| `conv1d_repeats` | `[0, 0, 0, 0]` | `-c` | 冒号之后 |
+| `halfWinSize_seq` | `5` | `-w` | 单个整数 |
+| `logreg_hiddens` | `[]` | `-e` | 逗号分隔的整数 |
+
+来源：[Initialize.py](DL4PropertyPrediction/Initialize.py#L31-L38)
+
+### 特征标志（属性子系统）
+
+| 标志 | 默认值 | 描述 |
+|------|---------|-------------|
+| `UseOneHotEncoding` | `False` | 氨基酸序列的独热编码 |
+| `UsePSFM` | `False` | 使用位置特定频率矩阵 |
+| `UseTemplate` | `False` | 包含模板特征 |
+| `UseSequenceEmbedding` | `False` | 使用学习到的序列嵌入 |
+| `batchNorm` | `True` | 启用批归一化 |
+| `w4disorder` | `3.0` | 无序损失的权重因子 |
+
+来源：[Initialize.py](DL4PropertyPrediction/Initialize.py#L44-L50), [config.py](DL4PropertyPrediction/config.py#L53)
+
+### 预训练模型注册表
+
+属性模型注册在 `params/ModelFile4PropertyPred.txt` 中，包含两个模型组：
+
+| 组 | 属性 | 模型数量 | 优化器 |
+|-------|------------|-------------|-----------|
+| `PhiPsiSet10820` | PhiPsi (von Mises 2d4) | 3 (L11, L15, L19) | SGNA 多阶段 |
+| `SS3SS8ACC3Set10820` | SS3 + SS8 + ACC (离散) | 4 (L29, L35, L39, L49) | AdamW |
+
+模型文件名编码了完整配置：例如，`SeqResNet1DV214PhiPsi_vonMise2d4-L11Log41W6I60SGNA:16+0.01:5+0.002:1+0.0004-pdb25-10820-train-35069.pkl` 解码为 ResNet1DV21、4 个块、序列长度 ≤11、LogReg 隐藏单元=41、窗口=6、输入维度=60、SGNA 及 3 阶段调度。
+
+来源：[ModelFile4PropertyPred.txt](DL4PropertyPrediction/params/ModelFile4PropertyPred.txt#L1-L21)
+
+---
+
+## 完整 CLI 参考
+
+### 距离预测训练器
+
+```
+python TrainDistancePredictor.py \
+  -N ModelID \                    # 可选的模型标识符
+  -n DilatedResNet2D \            # 网络架构
+  -y CbCb+CaCa+NO:47CPlus \      # 响应规格
+  -c 30,35,40,45:0,0,0,0 \       # 1D 卷积隐藏单元:重复次数
+  -d 50,55,60,65,70,75:4,4,4,4,4,4 \ # 2D 卷积隐藏单元:重复次数
+  -l 1,1,2,4,2,1 \               # 空洞因子
+  -z 7+1,1,1,1,1,1 \             # 1D_hwsz+2D_hwszs
+  -e 80 \                        # LogReg 隐藏单元
+  -w 7,2 \                       # 半窗口大小 (1D, 2D)
+  -x SeqOnly:4,6,12;OuterCat:70,35 \ # 序列到矩阵嵌入
+  -a AdamW:20+0.0002:1+0.00004 \ # 算法:轮数+学习率调度
+  -g 0.0001 \                    # L2 (,L1) 正则化
+  -s 60000,122500 \              # 最小,最大小批量大小
+  -t train_meta.json \           # 训练元数据
+  -v valid_meta.json \           # 验证元数据
+  -r checkpoint.pkl \            # 从检查点重启
+  -k UsePSICOV:yes;UseTemplate:no # 键值对覆盖
+```
+
+### 属性预测训练器
+
+```
+python TrainPropertyPredictor.py \
+  -n ResNet1D \                  # 网络架构
+  -y PhiPsi_vonMise2d4:2;SS3_Discrete3C:1 \ # 响应规格
+  -c 80,100,120,140:0,0,0,0 \   # 1D 卷积隐藏单元:重复次数
+  -e  \                          # LogReg 隐藏单元（空）
+  -w 5 \                         # 半窗口大小
+  -a Adam:19+0.0002:2+0.00002 \ # 算法调度
+  -g 0.0001 \                    # L2 正则化
+  -s 200,1500 \                  # 最小,最大批量大小
+  -t train_file.pkl \            # 训练数据
+  -v valid_file.pkl \            # 验证数据
+  -k UseSequenceEmbedding:yes    # 键值对覆盖
+```
+
+来源：[ParseCommandLine.py](DL4DistancePrediction4/ParseCommandLine.py#L8-L49), [ParseCommandLine.py](DL4PropertyPrediction/ParseCommandLine.py#L17-L44)
+
+## 离散化边界参考
+
+下表记录了每种离散化方案的精确边界值，这些值决定了如何将连续的距离和角度值映射到离散标签分箱中。
+
+### 距离离散化边界
+
+| 方案 | 起始 (Å) | 结束 (Å) | 分箱数 | 间距 |
+|--------|-----------|---------|----------|---------|
+| `56C` | 2.0 | 20.0 | 55 | 等宽 (0.327 Å) |
+| `47C` | 2.0 | 20.0 | 46 | 等宽 (0.391 Å) |
+| `42C` | 2.0 | 22.0 | 41 | 等宽 (0.488 Å) |
+| `25C` | 4.5 | 16.0 | 24 | 等宽 (0.479 Å) |
+| `14C` | 4.0 | 16.0 | 13 | 等宽 (0.923 Å) |
+| `3C` | — | — | 3 | 自定义: [0, 8, 15] |
+| `2C` | — | — | 2 | 自定义: [0, 8] |
+
+### 方位离散化边界
+
+| 类型 | 方案 | 范围 | 分箱数 |
+|------|--------|-------|----------|
+| 二面角 | `37C` | −180° 到 180° | 37 等宽 |
+| 二面角 | `25C` | −180° 到 180° | 25 等宽 |
+| 夹角 | `19C` | 0° 到 180° | 19 等宽 |
+| 夹角 | `13C` | 0° 到 180° | 13 等宽 |
+
+### 物理常数
+
+| 常数 | 值 | 描述 |
+|----------|-------|-------------|
+| `ContactDefinition` | 8.00001 Å | Cβ–Cβ 接触阈值 |
+| `InteractionLimit` | 15.00001 Å | 超过此值则假定无相互作用 |
+| `MaxBetaDistance` | 8.0 Å | Beta 配对的最大 Cβ 距离 |
+| `MaxHBDistance` | 9.5 Å | 氢键作用的最大 Cβ 距离 |
+| `ProbScaleFactor` | ln(0.5)/ln(0.23) ≈ 0.389 | CASP RR 概率缩放指数 |
+
+来源：[config.py](DL4DistancePrediction4/config.py#L378-L486)
+
+<CgxTip>修改离散化方案时请注意，`config.py` 中的 `ProbScaleFactor` 是根据训练权重因子校准的。更改离散化分箱或响应权重都需要重新校准此常数，以在 p=0.5 的二元接触阈值下保持一致的 MCC/F1 分数。</CgxTip>
+
+<CgxTip>`ECInfo` 位掩码与独立的 `UseRawCCM`/`UseMI`/`UseContactPotential` 标志在**不同的代码路径**上运作。设置 `UseOtherPairs=True` 将通过遗留路径启用 MI + ContactPotential，而 `ECInfo` 的位 3 和 4 则通过较新的位掩码路径启用完整的 MI 和协方差矩阵。为获得最大的特征覆盖率，请同时设置 `UseOtherPairs:yes` 并将 `ECInfo` 设为所需的位掩码值。</CgxTip>
+
+---
+
+**下一步**：有关这些配置背后的网络层级别内部机制，请参阅 [用于距离预测的 ResNet](10-resnet-for-distance-prediction) 和 [空洞 ResNet 与注意力](11-dilated-resnet-and-attention)。有关在 GPU 集群上部署已配置模型的操作详情，请参阅 [GPU 选择与远程预测](14-gpu-selection-and-remote-prediction)。
+
+---
+
+## 运维与扩展
+
+- [深入解析/运维与扩展/多机分布式执行](https://zread.ai/j3xugit/RaptorX-3DModeling/13-multi-machine-distributed-execution)
+
+---
+slug:13-multi-machine-distributed-execution
+blog_type:normal
+---
+
+
+RaptorX-3DModeling 实现了**双层分布式执行架构**，将 GPU 密集型的深度学习推理与 CPU 密集型的 3D 模型折叠解耦，使得每个阶段都能在最适合其工作负载的机器上运行。该系统通过 SSH/SCP 文件传输来编排远程 GPU 预测，通过基于 rsync 的工作目录进行远程折叠，并通过 Slurm 集群提交来实现大规模诱饵生成——所有这些编排均从单一入口点发起，机器之间无需任何手动数据移动。
+
+## 分布式架构概述
+
+系统将完整的预测流水线划分为可以跨越不同物理机器的**三个执行域**：(1) 在本地机器上进行特征生成与 MSA 构建，(2) 在远程 GPU 服务器上进行深度学习推理，(3) 在远程 CPU 集群或工作站上进行 3D 折叠。每个域通过基于文件的数据契约进行通信——使用 PKL 文件存储预测矩阵，FASTA 文件存储序列，Rosetta 约束文件用于折叠——这些文件通过 SSH/SCP/rsync 自动传输。
+
+```mermaid
+graph TB
+    subgraph "Local Machine (Orchestrator)"
+        A[RaptorXFolder.sh<br/>Entry Point] --> B[BuildFeatures.sh<br/>MSA + Features]
+        B --> C[Local Feature Files<br/>*_OUT/]
+    end
+
+    subgraph "Remote GPU Server"
+        D[PredictPairRelationRemote.sh] --> E[PredictPairRelationLocal.sh<br/>on remote GPU]
+        F[PredictPropertyRemote.sh] --> G[PredictPropertyLocal.sh<br/>on remote GPU]
+    end
+
+    subgraph "Remote Folding Machine"
+        H[RemoteFoldNRelaxOneTarget.sh] --> I{Machine Type?}
+        I -->|type 1| J[ParallelFoldNRelaxOneTarget.sh<br/>GNU Parallel]
+        I -->|type 2| K[SRunFoldNRelaxOneTarget.sh<br/>Slurm srun]
+        I -->|type 3| L[SlurmFoldNRelaxOneTarget.sh<br/>Slurm sbatch arrays]
+        I -->|type 4| M[FoldNRelaxOneTarget.sh<br/>Sequential]
+    end
+
+    C -->|GPU via GPUMachines.txt| D
+    C -->|GPU via GPUMachines.txt| F
+    E -->|SCP results back| N[predictedDistMatrix.pkl]
+    G -->|SCP results back| O[predictedProperties.pkl]
+    N --> P[Local Result Assembly]
+    O --> P
+    P -->|-R remoteAccount| H
+
+    style A fill:#4a9eff,color:white
+    style D fill:#ff7b54,color:white
+    style F fill:#ff7b54,color:white
+    style H fill:#54b8ff,color:white
+```
+
+**GPUMachines.txt** 文件充当服务注册表。当本地机器在该文件中的状态为 `on` 时，预测将在本地运行；否则，系统会从处于激活状态的条目中随机选择一台远程机器（通过 `shuf`），并将整个预测工作负载透明地转移至该远程机器。
+
+来源：[RaptorXFolder.sh](/Server/RaptorXFolder.sh#L1-L209), [PredictPairRelation4Server.sh](/DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L1-L208), [PredictPropertyWrapper.sh](/DL4PropertyPrediction/Scripts/PredictPropertyWrapper.sh#L1-L125)
+
+## GPU 机器注册表配置
+
+文件 `params/GPUMachines.txt`（示例位于 `params/GPUMachines-example.txt`）定义了可用于远程预测的配备 GPU 的机器池。每行指定一个机器地址、一个 RAM 类别以及一个开/关状态：
+
+| 列 | 描述 | 示例值 |
+|--------|-------------|----------------|
+| **主机名** | 可通过 SSH 访问的机器地址 | `raptorx9.uchicago.edu`, `jinbo@raptorx7.uchicago.edu` |
+| **RAM 类别** | 用于负载均衡提示的内存类别 | `LargeRAM`, `SmallRAM` |
+| **状态** | 此机器是否处于激活状态 | `on`, `off` |
+
+示例配置展示了实际运行时的选择逻辑：
+
+```
+raptorx9.uchicago.edu LargeRAM on       ← 符合远程预测条件
+raptorx8.uchicago.edu LargeRAM on       ← 符合远程预测条件
+raptorx7.uchicago.edu LargeRAM on       ← 符合远程预测条件
+jinbo@raptorx7.uchicago.edu SmallRAM off ← 从池中排除
+raptorx6.uchicago.edu SmallRAM off      ← 从池中排除
+```
+
+解析算法的工作流程如下：编排器读取所有状态为 `on` 的行，从第一列提取主机名，然后与本地机器的 `hostname` 进行比较。如果本地机器与某个激活条目匹配，预测将在本地运行。如果不匹配，则通过 `shuf | head -1` 随机选择一台远程机器。这种随机选择机制在 GPU 服务器之间提供了基础的负载分配，而无需中央调度器。
+
+<CgxTip>前提条件：GPUMachines.txt 中列出的所有机器都必须可以通过**免密 SSH** 访问。在运行分布式工作流之前，请使用 `ssh-keygen` 和 `ssh-copy-id` 完成设置。脚本使用 `ssh -o StrictHostKeyChecking=no` 来绕过首次连接时的主机密钥验证。</CgxTip>
+
+来源：[GPUMachines-example.txt](/params/GPUMachines-example.txt#L1-L8), [PredictPairRelation4Server.sh](/DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L97-L117), [PredictPropertyWrapper.sh](/DL4PropertyPrediction/Scripts/PredictPropertyWrapper.sh#L88-L107)
+
+## 远程预测协议（SSH/SCP 传输）
+
+距离/方向预测器和属性预测器在委托给远程 GPU 机器时，都遵循相同的**传输-执行-获取**协议。该协议在远程主机上创建一个临时工作目录，通过 SCP 传输输入特征，通过 SSH 在远程机器上执行本地预测脚本，通过 SCP 获取结果，并清理远程目录。
+
+### 距离预测远程流程
+
+`PredictPairRelationRemote.sh` 实现了距离/方向预测的完整协议：
+
+```mermaid
+sequenceDiagram
+    participant L as Local Machine
+    participant R as Remote GPU Server
+
+    L->>R: "ssh mkdir -p tmpWorkDir4RemoteDistancePrediction-..."
+    L->>R: "scp -r inputFolder/ (all feature files)"
+    L->>R: "ssh $DL4DistancePredHome/Scripts/PredictPairRelationLocal.sh<br/>with -d, -g, -f, -m options"
+    Note over R: GPU inference runs locally on R
+    R-->>L: "(exit code indicates success/failure)"
+    L->>R: "scp -r RemoteResultDir/*.* LocalResultDir/"
+    L->>R: "ssh rm -rf tmpWorkDir4RemoteDistancePrediction-..."
+```
+
+远程工作目录的命名约定包含目标名称、本地主机名和进程 ID 以确保唯一性：`tmpWorkDir4RemoteDistancePrediction-${target}-${localMachine}-$$`。当来自不同本地机器的多个预测并发运行在同一 GPU 服务器上时，这可以防止冲突。
+
+### 属性预测远程流程
+
+`PredictPropertyRemote.sh` 遵循相同的模式，但仅传输单个 PKL 特征文件（而非整个目录），并且仅获取 `predictedProperties.pkl` 输出。远程工作目录命名为 `tmpWorkDir4RemotePropertyPrediction-${target}-${localMachine}-$$`。
+
+### 服务器级调度逻辑
+
+`*4Server.sh` 脚本用作**调度层**，负责决定是在本地还是远程执行。`PredictPairRelation4Server.sh` 和 `PredictProperty4Server.sh`（通过 `PredictPropertyWrapper.sh`）都实现了以下决策树：
+
+1. 检查 `GPUMachines.txt` 是否存在 → 若不存在，在本地运行
+2. 解析文件中所有状态为 `on` 的条目 → 若无此类条目，在本地运行
+3. 将本地主机名与激活条目进行比较 → 若匹配，在本地运行
+4. 通过 `grep -w on | shuf | head -1` 选择一台远程机器 → 委托给 `*Remote.sh`
+
+来源：[PredictPairRelationRemote.sh](/DL4DistancePrediction4/Scripts/PredictPairRelationRemote.sh#L1-L135), [PredictPropertyRemote.sh](/DL4PropertyPrediction/Scripts/PredictPropertyRemote.sh#L1-L117), [PredictPairRelation4Server.sh](/DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L119-L155), [PredictProperty4Server.sh](/DL4PropertyPrediction/Scripts/PredictProperty4Server.sh#L1-L122)
+
+## GPU 选择与内存估算
+
+在本地运行预测时（无论是在原始机器上，还是在委托后的远程 GPU 服务器上），系统都会使用 `FindOneGPUByMemory.sh` 自动选择最佳的可用 GPU。该脚本查询 NVIDIA SMI 以获取每个 GPU 的可用显存，并选择具有最多可用显存的 GPU。
+
+### 距离预测的 GPU 内存估算
+
+`EstimateGPURAM4DistPred.sh` 使用基于序列长度的二次公式计算 GPU 内存需求：
+
+```
+neededRAM = 367,729,730 + 93,485 × L + 3,990 × L² + 500,000,000
+```
+
+其中 **L** 为蛋白质序列长度。这反映了距离矩阵预测网络的 O(L²) 内存复杂度。例如：
+
+| 序列长度 | 预估 GPU 内存 | 典型 GPU 适用性 |
+|----------------|-------------------|------------------------|
+| 200 个残基 | ~1.1 GB | 任意 GPU |
+| 500 个残基 | ~2.8 GB | 任意 GPU |
+| 1000 个残基 | ~7.5 GB | 8GB+ 显存 GPU（如 RTX 2080） |
+| 1500 个残基 | ~15.3 GB | 16GB+ 显存 GPU（如 V100） |
+
+### GPU 选择算法
+
+`FindOneGPUByMemory.sh` 实现了基于轮询的 GPU 获取策略：
+
+1. 查询 `nvidia-smi` 以获取具有最大可用显存的 GPU
+2. 如果可用显存 ≥ 所需内存 → 立即返回该 GPU 索引
+3. 如果显存不足 → 等待 1 分钟后重试
+4. 重复此过程最多 **90 分钟**（可通过第二个参数配置）
+5. 如果仍未找到合适的 GPU → 返回 `-1`（失败）
+
+这种轮询方式允许系统优雅地等待其他 GPU 任务完成，而不是立即失败，使其适用于资源竞争激烈的共享 GPU 环境。
+
+来源：[EstimateGPURAM4DistPred.sh](/DL4DistancePrediction4/Scripts/EstimateGPURAM4DistPred.sh#L1-L13), [FindOneGPUByMemory.sh](/Utils/FindOneGPUByMemory.sh#L1-L59), [PredictPairRelationLocal.sh](/DL4DistancePrediction4/Scripts/PredictPairRelationLocal.sh#L186-L208)
+
+## 分布式折叠：机器类型分类
+
+预测完成后，3D 折叠阶段可以在完全不同的机器上执行。`RaptorXFolder.sh` 入口点提供 `-R` 选项来指定远程折叠账户（例如 `raptorx@raptorx3.uchicago.edu:Work4Server/`），以及 `-t` 选项来声明机器类型。折叠调度器 `LocalFoldNRelaxOneTarget.sh` 根据机器类型路由至以下四种执行策略之一：
+
+| 机器类型 (`-t`) | 脚本 | 执行模型 | 需求 |
+|---------------------|--------|-----------------|-------------|
+| **0**（自动检测） | 基于主机名的选择 | 将已知主机名匹配至类型 1–4 | 预配置的主机名模式 |
+| **1** | `ParallelFoldNRelaxOneTarget.sh` | 多 CPU 工作站上的 GNU Parallel | 已安装 GNU `parallel` |
+| **2** | `SRunFoldNRelaxOneTarget.sh` | 同构节点的 Slurm `srun` | Slurm 集群，节点上安装 GNU `parallel` |
+| **3** | `SlurmFoldNRelaxOneTarget.sh` | 异构节点的 Slurm `sbatch` 数组作业 | Slurm 集群 |
+| **4** | `Scripts4Rosetta/FoldNRelaxOneTarget.sh` | 单 CPU 上的顺序执行 | 无（回退方案） |
+
+当指定 `-t 0` 时，系统会执行主机名匹配以自动检测执行环境：
+
+```
+raptorx10.uchicago.edu  → ParallelFoldNRelaxOneTarget.sh (type 1)
+raptorx3.uchicago.edu   → SRunFoldNRelaxOneTarget.sh (type 2)
+slurm.ttic.edu          → SlurmFoldNRelaxOneTarget.sh (type 3)
+raptorx[4-9]            → ParallelFoldNRelaxOneTarget.sh (type 1)
+default                 → Scripts4Rosetta/FoldNRelaxOneTarget.sh (type 4)
+```
+
+来源：[LocalFoldNRelaxOneTarget.sh](/Folding/LocalFoldNRelaxOneTarget.sh#L89-L130), [RaptorXFolder.sh](/Server/RaptorXFolder.sh#L38-L56)
+
+## 远程折叠协议
+
+`RemoteFoldNRelaxOneTarget.sh` 实现了与远程预测相同的传输-执行-获取模式，但用于折叠阶段。`-R` 选项接受格式为 `user@host:WorkDir` 的字符串，该字符串将被解析为远程账户和基础工作目录。
+
+```mermaid
+flowchart LR
+    A[Local Machine] -->|"1. ssh mkdir"| B[Remote Machine]
+    A -->|"2. scp seqFile +<br/>predictedDistMatrix.pkl +<br/>predictedProperties.pkl"| B
+    A -->|"3. ssh LocalFoldNRelaxOneTarget.sh<br/>with -t, -d, -n, -r options"| B
+    B -->|"4. rsync -av<br/>RelaxResults/"| A
+    A -->|"5. ssh rm -rf<br/>tmpWorkDir"| B
+```
+
+协议步骤如下：
+
+1. **创建远程工作目录**：`ssh $RemoteAccount "mkdir -p $RemoteWorkDir"`，目录命名为 `tmpWorkDir4RemoteDistFolding-${target}-${localMachine}-$$`
+2. **传输输入文件**：`scp $inFile $pairMatrixFile $propertyFile $RemoteAccount:$RemoteWorkDir/` —— 发送序列文件、预测距离矩阵和预测属性
+3. **远程执行折叠**：在远程机器上运行 `$DistanceFoldingHome/LocalFoldNRelaxOneTarget.sh`，该脚本随后会根据 `-t` 参数分派至相应的执行策略
+4. **获取结果**：`rsync -av $RemoteAccount:$RemoteWorkDir/${target}-RelaxResults/ $savefolder/` —— 使用 rsync 高效传输生成的 PDB 诱饵文件
+5. **清理**：`ssh $RemoteAccount "rm -rf $RemoteWorkDir"` —— 移除远程机器上的临时目录
+
+<CgxTip>远程机器必须正确设置 `DistanceFoldingHome` 和 `ModelingHome` 环境变量，并且必须安装 Rosetta。折叠模块是 RaptorX-3DModeling 中唯一需要存在于远程折叠机器上的部分——不需要 GPU 或深度学习模型。</CgxTip>
+
+来源：[RemoteFoldNRelaxOneTarget.sh](/Folding/RemoteFoldNRelaxOneTarget.sh#L1-L159)
+
+## 执行策略详述
+
+### GNU Parallel 折叠（类型 1）
+
+`ParallelFoldNRelaxOneTarget.sh` 使用 GNU Parallel 在单个节点的可用 CPU 间分配诱饵生成任务。它首先从预测的距离/方向 PKL 文件生成 Rosetta 约束文件（对于小于 450 个残基的序列暂存至 `/dev/shm`，否则存至 `/tmp` 以加快 I/O 速度），然后通过管道将折叠命令传入 `parallel --delay $delay $parallelOptions`。延迟时间计算为 `max(1, seqLen/100)` 秒，以避免文件系统过载。资源限制可按机器配置：
+
+| 主机名 | `--memfree` | `--load` | 理由 |
+|----------|------------|----------|-----------|
+| raptorx10.uchicago.edu | 120G | 92% | 大内存工作站 |
+| raptorx[7-9].uchicago.edu | 20G | 98% | 标准工作站 |
+
+来源：[ParallelFoldNRelaxOneTarget.sh](/Folding/ParallelFoldNRelaxOneTarget.sh#L1-L163), [LocalFoldNRelaxOneTarget.sh](/Folding/LocalFoldNRelaxOneTarget.sh#L131-L159)
+
+### 同构节点的 Slurm srun（类型 2）
+
+`SRunFoldNRelaxOneTarget.sh` 将诱饵总数划分为多个批次，并将每个批次作为独立的 `srun` 调用提交。每批次的任务数动态计算：
+
+- **默认**：每批次 20 个任务
+- **序列长度 > 500 个残基时**：`numTasks = max(10, 10000 / seqLen)` —— 较长序列每个任务消耗更多内存，因此并发数更低
+
+每个 `srun` 命令在单个 Slurm 节点上运行 `ParallelFoldNRelaxOneTarget.sh`，后者随后在该节点内使用 GNU Parallel。脚本以 1 秒的间隔错开启动所有 srun 作业作为后台进程，然后 `wait` 等待所有作业完成。队列和资源规格按集群配置：
+
+```
+# Default (raptorx3)
+QUEUE=cpu
+SPEC="-c20 --exclude=cpu3 --nodes=1-1"
+
+# TTIC Slurm cluster
+QUEUE=contrib-cpu
+SPEC="-C avx --nodes=1-1"
+```
+
+来源：[SRunFoldNRelaxOneTarget.sh](/Folding/SRunFoldNRelaxOneTarget.sh#L1-L161)
+
+### Slurm sbatch 数组作业（类型 3）
+
+`SlurmFoldNRelaxOneTarget.sh` 专为具有异构节点（CPU/内存配置各异）的 Slurm 集群设计。它使用 `ArrayJobs.py` 辅助脚本将折叠命令划分为包含多达 **1000 个命令**的数组作业，然后通过 `sbatch` 提交。节点规格根据蛋白质大小进行调整：
+
+| 序列长度 | 节点规格 | 队列覆盖 |
+|----------------|-------------------|---------------|
+| ≥ 1200 个残基 | `-c3`（每个任务 3 个 CPU 核心） | — |
+| ≥ 600 个残基 | `-c2`（每个任务 2 个 CPU 核心） | — |
+| < 600 个残基 | `-c1`（每个任务 1 个 CPU 核心） | — |
+| slurm.ttic.edu 上 ≥ 500 个残基 | — | `contrib-cpu-long` |
+
+提交后，脚本每 2 分钟轮询一次 `squeue`，并在生成足够多的诱饵模型后提前退出（即使数组作业仍在运行），这对于某些任务可能失败但已有充足模型的大型作业而言，是一项实用的优化措施。
+
+`ArrayJobs.py` 为每个批次生成两个伴生文件：一个包含 Rosetta 命令的 `batch-commands-N.txt` 文件，以及一个包含 `#SBATCH` 指令和 `--array=1-N` 的 `sbatch-script-N.txt` 文件，该脚本使用 `sed` 提取并执行 `SLURM_ARRAY_TASK_ID` 处的命令。
+
+来源：[SlurmFoldNRelaxOneTarget.sh](/Folding/SlurmFoldNRelaxOneTarget.sh#L1-L200), [ArrayJobs.py](/Folding/Helpers/ArrayJobs.py#L1-L61)
+
+## 端到端分布式执行示例
+
+以下演示了一个完整的分布式执行过程，其中特征生成在本地运行，预测委托给 GPU 服务器，折叠委托给 Slurm 集群：
+
+```bash
+# 步骤 1：配置 GPU 机器注册表
+cat > params/GPUMachines.txt << EOF
+gpu-server.example.edu LargeRAM on
+EOF
+
+# 步骤 2：运行带有分布式执行的完整流水线
+Server/RaptorXFolder.sh \
+  -g -1 \                          # 自动选择 GPU
+  -m 8 \                           # HHblits 3.0 用于 MSA
+  -R cluster@example.edu:WorkDir \ # 远程折叠账户
+  -t 3 \                           # Slurm 异构集群
+  -n 200 \                         # 200 个诱饵
+  -r 1 \                           # 折叠 + 弛豫
+  -l 1500 \                        # 最大蛋白质长度 1500
+  input/1pazA.fasta
+```
+
+执行经历以下阶段：
+
+1. **本地**：`BuildFeatures.sh` 在 `1pazA_OUT/` 中生成 MSA 和特征文件
+2. **远程 GPU**：`PredictPairRelationRemote.sh` 将特征传输至 `gpu-server.example.edu`，运行推理，获取 `1pazA.predictedDistMatrix.pkl`
+3. **远程 GPU**：`PredictPropertyRemote.sh` 传输特征，获取 `1pazA.predictedProperties.pkl`
+4. **本地后处理**：推导距离信息，打印接触预测，可视化接触图
+5. **远程 Slurm**：`RemoteFoldNRelaxOneTarget.sh` 将预测文件传输至 `cluster@example.edu`，提交 Slurm 数组作业，等待 200 个诱饵生成完毕，通过 rsync 获取结果
+
+来源：[RaptorXFolder.sh](/Server/RaptorXFolder.sh#L130-L209), [GPUMachines-example.txt](/params/GPUMachines-example.txt#L1-L8)
+
+## 分布式设置的环境变量
+
+本地编排机器和远程机器都需要特定的环境变量。`raptorx-path.sh` 和 `raptorx-external.sh` 文件定义了这些变量，但**远程机器必须拥有其自身正确配置的副本**。
+
+| 变量 | 用途 | 要求位置 | 示例 |
+|----------|---------|-------------|---------|
+| `ModelingHome` | 根安装目录 | 所有机器 | `/home/user/RaptorX-3DModeling` |
+| `DistFeatureHome` | 特征生成模块 | 本地机器 | `$ModelingHome/BuildFeatures/` |
+| `DL4DistancePredHome` | 距离预测模块 | GPU 机器 | `$ModelingHome/DL4DistancePrediction4/` |
+| `DL4PropertyPredHome` | 属性预测模块 | GPU 机器 | `$ModelingHome/DL4PropertyPrediction/` |
+| `DistanceFoldingHome` | 折叠模块 | 折叠机器 | `$ModelingHome/Folding/` |
+| `HHDIR` | HHsuite 安装路径 | 本地机器（MSA 生成） | `/mnt/data/HHblits/hhsuite-3.2.0/` |
+| `HHDB` | UniRef30 数据库 | 本地机器（MSA 生成） | `/mnt/data/UniRef30_2020_02` |
+| `CUDA_ROOT` | CUDA/CUDNN 路径 | GPU 机器 | `/usr/local/cuda/` |
+| `PYTHONPATH` | Python 模块路径 | 所有机器 | `$ModelingHome:$PYTHONPATH` |
+
+来源：[raptorx-path.sh](/raptorx-path.sh#L1-L8), [raptorx-external.sh](/raptorx-external.sh#L1-L24)
+
+## 多蛋白质批量执行
+
+`BatchBuildFeatures.sh` 为蛋白质列表提供并发特征生成功能。它最多生成 `numAllowedJobs`（默认为 3）个并发的 `BuildFeatures.sh` 进程，并通过 `ps -x | grep` 监控以强制执行并发限制。每个作业使用随机休眠间隔（0-3 秒）实现错峰提交，以避免共享 GPU 上的资源争用。
+
+对于多个蛋白质的分布式预测，每个蛋白质的 `*4Server.sh` 调用都会通过 `GPUMachines.txt` 独立解析其 GPU 目标，因此一批蛋白质通过随机选择自然地分布到所有可用的 GPU 服务器上——从而在没有集中式作业调度器的情况下提供了隐式并行性。
+
+来源：[BatchBuildFeatures.sh](/BuildFeatures/BatchBuildFeatures.sh#L1-L95), [PredictPairRelation4Server.sh](/DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L119-L155)
+
+## 分布式执行故障排除
+
+| 症状 | 根本原因 | 解决方案 |
+|---------|-----------|------------|
+| `ERROR: failed to create $RemoteWorkDir at $RemoteAccount` | 未配置免密 SSH | 运行 `ssh-copy-id user@remotehost` |
+| `ERROR: cannot find an appropriate GPU` | 在 90 分钟等待时间内没有 GPU 拥有足够的可用显存 | 减少并发作业，使用更大显存的 GPU，或增加 `FindOneGPUByMemory.sh` 的第 2 个参数以延长等待时间 |
+| `ERROR: failed to scp prediction results` | 远程预测在生成输出前崩溃 | 检查远程日志；验证 GPU 服务器上存在 `CUDA_ROOT` 和模型文件 |
+| 在远程机器上 `ERROR: failed to run LocalFoldNRelaxOneTarget.sh` | 折叠机器上未设置 `DistanceFoldingHome` | 在远程机器的 shell 配置文件中 source `raptorx-path.sh` |
+| 折叠作业在 Slurm 上挂起 | 队列规格不匹配 | 针对您的集群编辑 `SlurmFoldNRelaxOneTarget.sh` / `SRunFoldNRelaxOneTarget.sh` 中的 `QUEUE` 和 `SPEC` 变量 |
+| `WARNING: there is no local GPU...` | 当 GPUMachines.txt 仅列出远程机器时属正常情况 | 这是预期行为；预测将委托给远程服务器 |
+
+若要更深入地控制 GPU 选择和远程预测机制，请参阅 [GPU 选择与远程预测](14-gpu-selection-and-remote-prediction)。若要自定义分布式预测中使用的神经网络模型，请参阅 [自定义网络集成](15-custom-network-integration)。
+
+---
+
+- [深入解析/运维与扩展/GPU 选择与远程预测](https://zread.ai/j3xugit/RaptorX-3DModeling/14-gpu-selection-and-remote-prediction)
+
+---
+slug:14-gpu-selection-and-remote-prediction
+blog_type:normal
+---
+
+
+RaptorX-3DModeling 实现了**双层 GPU 调度架构**：一种是实时查询硬件状态的自动本地 GPU 选择机制，另一种是通过 SSH/SCP 透明地将计算卸载到配备 GPU 的机器上的远程预测框架。本页说明了如何发现 GPU 资源、如何根据蛋白质序列长度估算内存需求、机器注册表如何将工作路由到本地或远程主机，以及折叠阶段如何将远程执行扩展到 CPU 集群。
+
+## 基于空闲内存的自动 GPU 选择
+
+GPU 分配的基础是 [`FindOneGPUByMemory.sh`](Utils/FindOneGPUByMemory.sh)，该脚本会轮询 `nvidia-smi`，以找到满足调用者指定要求且**空闲内存最大**的单块 GPU。该脚本接受两个参数：`RAM_needed_bytes`（所需的最低 GPU 内存，单位为字节）和可选的 `mins_to_wait`（等待时长，单位为分钟，默认为 90）。脚本会进入轮询循环——每分钟检查一次——直到找到空闲内存超过要求的 GPU，或者等待超时。如果未找到合适的 GPU，则返回 `-1`。
+
+选择逻辑首先将 `nvidia-smi` 报告的总内存减去 500 MB 作为每块 GPU 的可用内存上限，将其视为驱动程序开销的安全裕量。如果请求的内存超过所有 GPU 的上限最大值，脚本将立即以 `-1` 退出——继续等待已无意义。在循环内部，它会按空闲内存对所有 GPU 进行降序排序，并选择裕量最大的一块。这种贪心策略意味着在轻负载下，作业会集中在同一块 GPU 上；但在资源争用时，它们会自然分散到其他可用设备上。
+
+来源：[FindOneGPUByMemory.sh](Utils/FindOneGPUByMemory.sh#L1-L59)
+
+## 根据序列长度估算 GPU 内存
+
+在调用 GPU 选择器之前，系统必须确定**一个预测作业需要多少 GPU 内存**。这由 [`EstimateGPURAM4DistPred.sh`](DL4DistancePrediction4/Scripts/EstimateGPURAM4DistPred.sh) 处理，该脚本应用了一个基于距离预测网络经验性能分析的闭式二次公式：
+
+```
+neededRAM = 367,729,730 + 93,485 × L + 3,990 × L² + 500,000,000
+```
+
+其中 **L** 为蛋白质序列长度。常数项（≈368 MB）表示模型参数占用，线性项考虑了依赖序列的特征图，而3二次项在长序列中起主导作用，因为距离矩阵按 L² 增长。500 MB 的填充量提供了额外的安全裕量。对于 300 个残基的蛋白质，计算结果D'x约 1.2 GB；对于 1000 个残基的蛋白质，则超过 10 GB——这证实了项目的指导原则&3方针，即极大的蛋白质需要具有超过 12 GB 内存的 GPU。
+
+对于**属性预测**（φ/ψ 角度），内存占用要小得多，并硬编码为固定的 1 GB（`1073741824` 字节），因为属性网络基于逐残基特征而非成对矩阵进行运算。
+
+来源：[EstimateGPURAM4DistPred.sh](DL4DistancePrediction4/Scripts/EstimateGPURAM4DistPred.sh#L1-L13), [PredictPropertyLocal.sh](DL4PropertyPrediction/Scripts/PredictPropertyLocal.sh#L89-L93)
+
+## 预测流水线中的 GPU 选择
+
+本地预测脚本将 GPU 选择集成为一个两步过程：估算内存，然后查找 GPU。在 [`PredictPairRelationLocal.sh`](DL4DistancePrediction4/Scripts/PredictPairRelationLocal.sh) 中，当 GPU 参数为 `-1`（默认值）时，脚本会调用估算器，然后在 30 分钟的等待时间窗口内调用选择器：
+
+```bash
+neededRAM=`$DL4DistancePredHome/Scripts/EstimateGPURAM4DistPred.sh $seqFile`
+GPU=`$ModelingHome/Utils/FindOneGPUByMemory.sh $neededRAM 30`
+```
+
+如果未找到 GPU，脚本将报错退出——距离预测**无法回退到 CPU**。一旦获取到 GPU 索引，它将被转换为 Theano 设备字符串（`cuda0`、`cuda1` 等），并通过 `THEANO_FLAGS` 环境变量与 cuDNN 路径配置一起传递：
+
+```bash
+THEANO_FLAGS=blas.ldflags=,device=$GPU,floatX=float32,\
+  dnn.include_path=${CUDA_ROOT}/include,\
+  dnn.library_path=${CUDA_ROOT}/lib64 \
+  python $program $arguments
+```
+
+对于 [`PredictPropertyLocal.sh`](DL4PropertyPrediction/Scripts/PredictPropertyLocal.sh) 中的属性预测，流程类似但有一个关键区别：如果未找到 GPU，它将**回退到 CPU**（`GPU=cpu`）并发出警告，而不是失败。这是可行的，因为属性网络较小的内存占用使得 CPU 推理成为可能，尽管速度较慢。
+
+来源：[PredictPairRelationLocal.sh](DL4DistancePrediction4/Scripts/PredictPairRelationLocal.sh#L191-L208), [PredictPropertyLocal.sh](DL4PropertyPrediction/Scripts/PredictPropertyLocal.sh#L89-L106)
+
+## GPU 机器注册表
+
+远程预测系统由一个 **GPU 机器文件**控制，该文件默认位于 `$ModelingHome/params/GPUMachines.txt`。示例配置位于 [`params/GPUMachines-example.txt`](params/GPUMachines-example.txt)：
+
+```
+raptorx9.uchicago.edu LargeRAM on
+raptorx8.uchicago.edu LargeRAM on
+raptorx7.uchicago.edu LargeRAM on
+jinbo@raptorx7.uchicago.edu SmallRAM off
+raptorx6.uchicago.edu SmallRAM off
+```
+
+每行包含三个字段：**主机名**（可选地带有 username@）、**内存类别**（`LargeRAM` 或 `SmallRAM`）和**状态**（`on` 或 `off`）。内存类别是供管理员参考的信息标签；调度逻辑不会直接使用它。状态字段控制资格：只有标记为 `on` 的机器才是远程工作的候选节点。这允许管理员通过将机器设置为 `off` 来优雅地排空机器以进行维护，而无需删除其配置。
+
+来源：[GPUMachines-example.txt](params/GPUMachines-example.txt#L1-L8)
+
+## 本地与远程调度逻辑
+
+调度决策在距离和属性预测的服务器脚本中保持一致地实现。以下流程图说明了完整的路由算法：
+
+```mermaid
+flowchart TD
+    A["PredictPairRelation4Server.sh<br/>or PredictProperty4Server.sh"] --> B{"GPUMachineFile<br/>exists?"}
+    B -- No --> C["UseRemoteMachine = false"]
+    B -- Yes --> D["Extract machines<br/>with status 'on'"]
+    D --> E{"Any 'on'<br/>machines?"}
+    E -- No --> C
+    E -- Yes --> F{"Local hostname<br/>matches an 'on'<br/>machine?"}
+    F -- Yes --> C
+    F -- No --> G["UseRemoteMachine = true"]
+    C --> H["Run Local script<br/>with local GPU"]
+    G --> I["Select remote machine<br/>randomly (shuf)"]
+    I --> J["Run Remote script<br/>with -r remoteAccount"]
+```
+
+关键的洞察是，**如果本地机器在机器文件中显示为状态 `on`，则它会从远程候选中被排除**。这防止了机器通过 SSH 连接到自身。当选择远程执行时，使用 `shuf | head -1` 从符合条件的 `on` 机器中**随机**选择一台，提供了无需中央调度器的简单负载分配。
+
+来源：[PredictPairRelation4Server.sh](DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L107-L155), [PredictPropertyWrapper.sh](DL4PropertyPrediction/Scripts/PredictPropertyWrapper.sh#L81-L124)
+
+## 远程预测执行协议
+
+一旦分派到远程机器，远程脚本遵循**四阶段 SSH/SCP 协议**，该协议在距离和属性预测中结构相同：
+
+| 阶段 | 动作 | 距离预测 | 属性预测 |
+|-------|--------|-------------------|-------------------|
+| **1. 准备** | 创建远程工作目录 | `ssh mkdir -p $RemoteWorkDir` | `ssh mkdir -p $RemoteWorkDir` |
+| **2. 传输** | 将输入数据复制到远程 | `scp -r $inputFolder` | `scp $inputFeature` |
+| **3. 执行** | 远程运行本地预测脚本 | `ssh PredictPairRelationLocal.sh` | `ssh PredictPropertyLocal.sh` |
+| **4. 检索** | 将结果复制回并清理 | `scp -r results; ssh rm -rf` | `scp result.pkl; ssh rm -rf` |
+
+远程工作目录名编码了目标、发起主机和 PID 以保证唯一性：`tmpWorkDir4RemoteDistancePrediction-${target}-${localMachine}-$$`。当来自不同主机的多个预测同时针对同一台远程机器时，此命名约定可防止冲突。SSH 命令上的 `-o StrictHostKeyChecking=no` 标志简化了可信环境中的执行，但应在安全敏感的部署中加以审查。
+
+对于距离预测，整个输入特征文件夹（包含 MSA 特征、序列文件和可选的模板比对）通过 `scp -r` 传输。对于属性预测，仅发送单个 `.propertyFeatures.pkl` 文件。执行后，结果将被拉回，并且远程临时目录将被删除。未能删除远程目录会产生警告而不是错误，从而允许流水线继续运行。
+
+来源：[PredictPairRelationRemote.sh](DL4DistancePrediction4/Scripts/PredictPairRelationRemote.sh#L89-L135), [PredictPropertyRemote.sh](DL4PropertyPrediction/Scripts/PredictPropertyRemote.sh#L73-L117)
+
+## 特征生成的 GPU 模式
+
+特征生成阶段（[`BuildFeatures.sh`](BuildFeatures/BuildFeatures.sh)）通过 `-r` 标志引入了更细粒度的 GPU 模式系统，该标志控制 CCMpred（共进化特征提取器）如何利用计算资源：
+
+| 模式 | 行为 |
+|------|----------|
+| **1** | 仅使用本地 GPU |
+| **2** | 使用本地 GPU 和 CPU（`GenDistFeatures4OneProtein.sh` 的默认值） |
+| **3** | 使用本地 GPU 和机器文件中的远程 GPU |
+| **4** | 使用本地 GPU/CPU 和机器文件中的远程 GPU（`BuildFeatures.sh` 中的默认值） |
+
+模式 4 最具进取心——它利用了所有可用资源。特征生成脚本 [`GenDistFeatures4OneProtein.sh`](BuildFeatures/GenDistFeatures4OneProtein.sh) 并行处理多个 MSA 方法（uce3、uce5、ure3、ure5 及其 _meta 变体），具有可配置的并发限制（`-n numAllowedJobs`，默认为 2）。每个 MSA 触发一次 `GenDistFeaturesFromMSA.sh` 的独立调用作为后台进程，脚本会等待所有进程完成。设置 `gpu=-1` 允许这些并发作业自动分布到多块 GPU 上。
+
+来源：[BuildFeatures.sh](BuildFeatures/BuildFeatures.sh#L13-L118), [GenDistFeatures4OneProtein.sh](BuildFeatures/GenDistFeatures4OneProtein.sh#L96-L120)
+
+## 用于 3D 模型构建的远程折叠
+
+虽然 GPU 预测发生在配备 GPU 的机器上，但折叠阶段是**受 CPU 限制的**，并且可以卸载到完全不同类别的机器上。顶级入口点 [`Server/RaptorXFolder.sh`](Server/RaptorXFolder.sh) 接受 `-R remoteAccountInfo` 选项（例如 `raptorx@raptorx3.uchicago.edu:Work4Server/`），该选项将预测与折叠解耦。设置后，脚本将调用 [`RemoteFoldNRelaxOneTarget.sh`](Folding/RemoteFoldNRelaxOneTarget.sh) 而非本地变体。
+
+远程折叠协议与预测协议类似，但传输三个文件：序列文件、预测的距离/方向 PKL 以及预测的属性 PKL。然后，它在远程机器上执行 `LocalFoldNRelaxOneTarget.sh`，并使用 `rsync -av` 检索整个 `RelaxResults/` 目录。传输后，远程工作目录将被清理。
+
+折叠阶段还支持一个**机器类型**参数（`-t`），用于在目标机器上选择执行策略：
+
+| 类型 | 策略 | 脚本 |
+|------|----------|--------|
+| **0** | 通过主机名自行决定 | 自动选择 |
+| **1** | 使用 GNU parallel 的多 CPU | `ParallelFoldNRelaxOneTarget.sh` |
+| **2** | Slurm 集群，同构节点 | `SRunFoldNRelaxOneTarget.sh` |
+| **3** | Slurm 集群，异构节点 | `SlurmFoldNRelaxOneTarget.sh` |
+| **4** | 不使用 GNU parallel 的多 CPU | `Scripts4Rosetta/FoldNRelaxOneTarget.sh` |
+
+类型 0 根据已知机器执行主机名匹配（例如，`raptorx10` → parallel，`slurm.ttic.edu` → slurm），但可能不适用于任意主机。类型 1–4 为可移植性提供了显式控制。slurm 变体还根据序列长度进一步调整作业队列（`contrib-cpu` 与 `contrib-cpu-long`），边界为 450 个残基。
+
+<CgxTip>在 BuildFeatures.sh 中使用 GPU 模式 4 时，请确保已对 GPUMachines.txt 中列出的所有机器配置了无密码 SSH——如果 SSH 身份验证阻塞了远程作业启动，CCMpred 将静默失败。</CgxTip>
+
+来源：[Server/RaptorXFolder.sh](Server/RaptorXFolder.sh#L186-L199), [RemoteFoldNRelaxOneTarget.sh](Folding/RemoteFoldNRelaxOneTarget.sh#L113-L159), [LocalFoldNRelaxOneTarget.sh](Folding/LocalFoldNRelaxOneTarget.sh#L104-L144), [SRunFoldNRelaxOneTarget.sh](Folding/SRunFoldNRelaxOneTarget.sh#L14-L20)
+
+## 端到端远程执行示例
+
+下图显示了在使用远程折叠运行 RaptorXFolder.sh 时的完整数据流，说明了 GPU 和 CPU 工作如何跨机器分布：
+
+```mermaid
+flowchart LR
+    subgraph Local["Local Machine (GPU)"]
+        A["RaptorXFolder.sh"] --> B["BuildFeatures.sh<br/>(GPU: MSA + CCMpred)"]
+        B --> C["PredictProperty4Server.sh<br/>(GPU: φ/ψ angles)"]
+        C --> D["PredictPairRelation4Server.sh<br/>(GPU: distance/orientation)"]
+    end
+    subgraph Remote["Remote Machine (CPU cluster)"]
+        E["RemoteFoldNRelaxOneTarget.sh"] --> F["LocalFoldNRelaxOneTarget.sh"]
+        F --> G["ParallelFoldNRelaxOneTarget.sh<br/>or SlurmFoldNRelaxOneTarget.sh"]
+    end
+    D -->|"scp: seq + distPKL + propPKL"| E
+    G -->|"rsync: RelaxResults/"| A
+```
+
+本地机器处理所有依赖 GPU 的阶段（特征生成、属性预测、距离预测），而远程机器处理计算密集型的折叠。`-R` 标志和 `-t` 标志共同提供了对折叠执行位置和方式的细粒度控制，而无需在机器之间手动传输文件。
+
+<CgxTip>随机远程机器选择（`shuf | head -1`）不提供 GPU 内存感知——如果随机选择的机器对于大型蛋白质没有足够的 VRAM，作业将在远程 Theano 启动时失败。对于具有混合蛋白质大小的生产工作负载，考虑按内存类别对 GPUMachines.txt 进行分区，并根据 EstimateGPURAM4DistPred.sh 的输出进行编程选择。</CgxTip>
+
+来源：[Server/RaptorXFolder.sh](Server/RaptorXFolder.sh#L133-L174), [PredictPairRelation4Server.sh](DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L146-L155)
+
+## 配置参考
+
+下表总结了整个流水线中与 GPU 选择和远程执行相关的所有命令行选项：
+
+| 脚本 | 选项 | 默认值 | 描述 |
+|--------|--------|---------|-------------|
+| `RaptorXFolder.sh` | `-g` | `-1` | GPU 索引；-1 = 基于空闲内存自动选择 |
+| `RaptorXFolder.sh` | `-R` | 空 | 用于折叠的远程账户，例如 `user@host:workdir` |
+| `RaptorXFolder.sh` | `-t` | `0` | 折叠的机器类型（0–4） |
+| `BuildFeatures.sh` | `-g` | `-1` | CCMpred 的 GPU 索引 |
+| `BuildFeatures.sh` | `-r` | `4` | GPU 模式：1=本地 GPU，2=GPU+CPU，3=GPU+远程 GPU，4=GPU+CPU+远程 GPU |
+| `BuildFeatures.sh` | `-h` | `GPUMachines.txt` | 机器注册表文件 |
+| `PredictPairRelation4Server.sh` | `-g` | `-1` | 距离预测的 GPU 索引 |
+| `PredictPairRelation4Server.sh` | `-h` | `GPUMachines.txt` | 远程分派的机器注册表 |
+| `PredictProperty4Server.sh` | `-g` | `-1` | 属性预测的 GPU 索引 |
+| `PredictProperty4Server.sh` | `-h` | `GPUMachines.txt` | 远程分派的机器注册表 |
+| `FindOneGPUByMemory.sh` | arg1 | — | 所需的 GPU 内存（字节） |
+| `FindOneGPUByMemory.sh` | arg2 | `90` | 放弃前的等待时间（分钟） |
+| `EstimateGPURAM4DistPred.sh` | arg1 | — | 要估算内存的序列文件 |
+
+来源：[Server/RaptorXFolder.sh](Server/RaptorXFolder.sh#L74-L112), [BuildFeatures.sh](BuildFeatures/BuildFeatures.sh#L47-L74), [PredictPairRelation4Server.sh](DL4DistancePrediction4/Scripts/PredictPairRelation4Server.sh#L50-L82), [FindOneGPUByMemory.sh](Utils/FindOneGPUByMemory.sh#L3-L9)
+
+## 延伸阅读
+
+要了解消耗这些 GPU 资源的预测模块是如何架构的，请参阅[距离和方向预测](7-distance-and-orientation-prediction)和[属性预测网络](8-property-prediction-network)。有关包含多机器协调的完整分布式执行模型，请参阅[多机器分布式执行](13-multi-machine-distributed-execution)。有关加载到这些 GPU 上的深度学习模型的配置，请参阅[模型配置参考](12-model-configuration-reference)。
+
+---
