@@ -692,8 +692,6 @@ ESMDynamic
 ---
 https://www.nature.com/articles/s41467-026-69172-y
 
----
-https://deepwiki.com/j3xugit/RaptorX-3DModeling/1-overview
 
 
 --- 
@@ -731,18 +729,21 @@ https://deepwiki.com/j3xugit/RaptorX-3DModeling/1-overview
 ## Bench
 
 <details>
-<summary>FoldBench</summary>
+<summary>CASP</summary>
 
-- Description: FoldBench is a low-homology benchmark spanning proteins, nucleic acids, ligands, and six major interaction types, enabling assessments that were previously infeasible with task-specific datasets. (Benchmarking all-atom biomolecular structure prediction with FoldBench)
-- Paper: [Benchmarking all-atom biomolecular structure prediction with FoldBench](https://www.nature.com/articles/s41467-025-67127-3) (Nature Communications, 2025)
-- Code: https://github.com/BEAM-Labs/FoldBench
+- Description: Our goal is to help advance the methods of identifying protein structure from sequence. The Center has been organized to provide the means of objective testing of these methods via the process of blind prediction. The Critical Assessment of protein Structure Prediction (CASP) experiments aim at establishing the current state of the art in protein structure prediction, identifying what progress has been made, and highlighting where future effort may be most productively focused.
+- Paper: N/A
+- Code: N/A
+- Url: https://predictioncenter.org/
 
 </details>
 
----
+--- 
 
 <details>
-<summary>CAPRI/CASP-CAPRI collaboration</summary>
+<summary>CAPRI</summary>
+
+> CASP-CAPRI collaboration
 
 - Description: Recent progress in determining and predicting the structures of proteins and protein assemblies calls for closer integration of the different computational approaches for modeling assemblies and their building blocks. To enhance the integration between the different modeling techniques and between the distinct scientific communities that develop these techniques, CAPRI joint forces with CASP (Critical Assessment of Structure Prediction), whose traditional focus has been on the prediction of the 3D structure of individual proteins. Since 2014, CASP and CAPRI have conducted joint assembly prediction experiments during the regular CASP prediction season, organized every two years. For on-going or upcoming joint CASP-CAPRI assembly prediction challenges, see CAPRI Round announcements.
 - Paper: N/A
@@ -754,16 +755,30 @@ https://deepwiki.com/j3xugit/RaptorX-3DModeling/1-overview
 ---
 
 <details>
-<summary>CASP</summary>
+<summary>CAID</summary>
 
-- Description: Our goal is to help advance the methods of identifying protein structure from sequence. The Center has been organized to provide the means of objective testing of these methods via the process of blind prediction. The Critical Assessment of protein Structure Prediction (CASP) experiments aim at establishing the current state of the art in protein structure prediction, identifying what progress has been made, and highlighting where future effort may be most productively focused.
-- Paper: N/A
-- Code: N/A
-- Url: https://predictioncenter.org/
+- Description: The the Critical Assessment of Intrinsic protein Disorder (CAID) experiment was established in 2018 as a community-based blind test to determine the state of the art in prediction of intrinsically disordered regions and the subset of residues involved in binding.
+
+  Given a protein sequence, the task of an ID predictor is to assign a score to each residue for its propensity of being intrinsically disordered at any stage of the protein’s life. In CAID, we evaluated the accuracy of the prediction methods as well as software runtimes, which directly impact their suitability for large-scale analyses.
+- Paper: [CAID prediction portal: a comprehensive service for predicting intrinsic disorder and binding regions in proteins](https://academic.oup.com/nar/article/51/W1/W62/7184153) (Nucleic Acids Research, 2023)
+- Url: https://caid.idpcentral.org/
 
 </details>
 
---- 
+
+
+---
+
+<details>
+<summary>FoldBench</summary>
+
+- Description: FoldBench is a low-homology benchmark spanning proteins, nucleic acids, ligands, and six major interaction types, enabling assessments that were previously infeasible with task-specific datasets. (Benchmarking all-atom biomolecular structure prediction with FoldBench)
+- Paper: [Benchmarking all-atom biomolecular structure prediction with FoldBench](https://www.nature.com/articles/s41467-025-67127-3) (Nature Communications, 2025)
+- Code: https://github.com/BEAM-Labs/FoldBench
+
+</details>
+
+---
 
 ## Contributing 
 
