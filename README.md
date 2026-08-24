@@ -686,8 +686,16 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
+<details>
+<summary>ESMDynamic</summary>
 
-ESMDynamic
+> predict protein dynamic contact maps, contact occupancy, and kinetics from single sequences
+
+- **Paper:** [ESMDynamic: Fast and Accurate Prediction of Protein Dynamic Contact Maps from Single Sequences](https://www.biorxiv.org/content/10.1101/2025.08.20.671365v2) (bioRxiv, 2026)
+- **Docs:** [Read more →](docs/ESMDynamic/) *to be written*
+- **Code:** https://github.com/ShuklaGroup/esmdynamic
+- **Approach:** DL
+</details>
 
 ---
 https://www.nature.com/articles/s41467-026-69172-y
