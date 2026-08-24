@@ -608,6 +608,20 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ---
 
+<details>
+<summary>PLMGraph-Inter</summary>
+
+- **Paper:** [Protein language model embedded geometric graphs power inter-protein contact prediction](https://elifesciences.org/reviewed-preprints/92184) (eLife, 2024)
+- **Docs:** [Read more →](docs/PLMGraph-Inter/) *to be written*
+- **Code:** https://github.com/ChengfeiYan/PLMGraph-Inter
+- **Approach:** DL
+</details>
+
+
+
+---
+
+
 PLMGraph-Inter
 
 https://github.com/ChengfeiYan/PLMGraph-Inter
