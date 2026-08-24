@@ -739,6 +739,32 @@ https://deepwiki.com/j3xugit/RaptorX-3DModeling/1-overview
 
 </details>
 
+---
+
+<details>
+<summary>CAPRI/CASP-CAPRI collaboration</summary>
+
+- Description: Recent progress in determining and predicting the structures of proteins and protein assemblies calls for closer integration of the different computational approaches for modeling assemblies and their building blocks. To enhance the integration between the different modeling techniques and between the distinct scientific communities that develop these techniques, CAPRI joint forces with CASP (Critical Assessment of Structure Prediction), whose traditional focus has been on the prediction of the 3D structure of individual proteins. Since 2014, CASP and CAPRI have conducted joint assembly prediction experiments during the regular CASP prediction season, organized every two years. For on-going or upcoming joint CASP-CAPRI assembly prediction challenges, see CAPRI Round announcements.
+- Paper: N/A
+- Code: N/A
+- Url: https://www.ebi.ac.uk/pdbe/complex-pred/capri/casp-capri/
+
+</details>
+
+---
+
+<details>
+<summary>CASP</summary>
+
+- Description: Our goal is to help advance the methods of identifying protein structure from sequence. The Center has been organized to provide the means of objective testing of these methods via the process of blind prediction. The Critical Assessment of protein Structure Prediction (CASP) experiments aim at establishing the current state of the art in protein structure prediction, identifying what progress has been made, and highlighting where future effort may be most productively focused.
+- Paper: N/A
+- Code: N/A
+- Url: https://predictioncenter.org/
+
+</details>
+
+--- 
+
 ## Contributing 
 
 ### Entry template for `Models & Tools` part
