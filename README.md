@@ -721,7 +721,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 ### C. IDR-specific
 
-> ⚠️ 
+> ⚠️ Category A and B models labelled as "for IDR" are also relevant here, but this section is reserved for models that are specifically designed for intrinsically disordered regions (IDRs) and their unique challenges.
 
 
 <!-- More IDR-specific placeholders can be added here -->
