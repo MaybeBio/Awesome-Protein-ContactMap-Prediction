@@ -20,75 +20,42 @@
 
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    line-height: 1.5;
+    background: var(--bg); color: var(--text); line-height: 1.5;
   }
 
-  /* ── Header ── */
   header {
     background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    color: #fff;
-    padding: 2rem 1.5rem 1.5rem;
-    text-align: center;
+    color: #fff; padding: 2rem 1.5rem 1.5rem; text-align: center;
   }
   header h1 { font-size: 1.8rem; font-weight: 700; letter-spacing: -0.02em; }
   header p  { font-size: 0.95rem; opacity: .75; margin-top: .25rem; }
 
-  /* ── Legend / filter bar ── */
   .filter-bar {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: .75rem;
-    padding: 1.25rem 1rem;
-    background: #fff;
+    display: flex; flex-wrap: wrap; justify-content: center; gap: .75rem;
+    padding: 1rem; background: #fff;
     border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
-    z-index: 100;
+    position: sticky; top: 0; z-index: 100;
   }
   .filter-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: .45rem;
-    padding: .4rem 1rem;
-    border-radius: 999px;
+    display: inline-flex; align-items: center; gap: .45rem;
+    padding: .35rem .9rem; border-radius: 999px;
     border: 2px solid transparent;
-    font-size: .85rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all .2s;
-    background: #f0f0f0;
-    color: var(--text);
+    font-size: .82rem; font-weight: 600; cursor: pointer;
+    transition: all .2s; background: #f0f0f0; color: var(--text);
   }
   .filter-btn:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,.12); }
-  .filter-btn .dot {
-    display: inline-block;
-    width: 10px; height: 10px;
-    border-radius: 50%;
-  }
+  .filter-btn .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
   .filter-btn.active-all   { border-color: #333; background: #e8e8e8; }
   .filter-btn.active-as    { border-color: var(--cat-as); background: rgba(58,123,213,.12); }
   .filter-btn.active-ae    { border-color: var(--cat-ae); background: rgba(123,175,212,.12); }
   .filter-btn.active-b     { border-color: var(--cat-b);  background: rgba(230,126,34,.12); }
   .filter-btn.active-c     { border-color: var(--cat-c);  background: rgba(46,204,113,.12); }
-  .filter-btn .count {
-    font-weight: 400;
-    opacity: .5;
-    font-size: .75rem;
-  }
-  .filter-bar .sep {
-    width: 1px;
-    background: var(--border);
-    align-self: stretch;
-  }
+  .filter-btn .count { font-weight: 400; opacity: .5; font-size: .72rem; }
+  .filter-bar .sep { width: 1px; background: var(--border); align-self: stretch; }
 
-  /* ── Timeline container ── */
   .tl-wrapper {
-    overflow-x: auto;
-    overflow-y: visible;
-    padding: 2rem 1rem 4rem;
+    overflow-x: auto; overflow-y: hidden;
+    padding: 1.5rem 1rem 3rem;
     min-height: calc(100vh - 160px);
     cursor: grab;
   }
@@ -97,192 +64,102 @@
   .tl-wrapper::-webkit-scrollbar-track  { background: #e9ecef; border-radius: 5px; }
   .tl-wrapper::-webkit-scrollbar-thumb { background: #adb5bd; border-radius: 5px; }
 
-  .tl {
-    position: relative;
-    min-width: 3600px;
-    padding: 0 60px;
-    user-select: none;
-  }
+  .tl { position: relative; min-width: 3600px; padding: 0 60px; user-select: none; }
 
-  /* ── The track line ── */
+  /* The horizontal track line */
   .tl-track {
-    position: absolute;
-    top: 50%;
-    left: 0; right: 0;
-    height: 4px;
-    background: var(--border);
-    border-radius: 2px;
-    transform: translateY(-50%);
-    pointer-events: none;
+    position: absolute; left: 0; right: 0;
+    height: 4px; background: var(--border); border-radius: 2px;
+    pointer-events: none; z-index: 1;
   }
   .tl-track-progress {
-    position: absolute;
-    top: 0; left: 0; bottom: 0;
+    position: absolute; top: 0; left: 0; bottom: 0;
     background: linear-gradient(90deg, var(--cat-as), var(--cat-ae), var(--cat-b), var(--cat-c));
-    border-radius: 2px;
-    transition: width .35s ease;
+    border-radius: 2px; transition: width .35s ease;
   }
 
-  /* ── Year labels ── */
-  .tl-years {
-    position: relative;
-    height: 40px;
-    margin-bottom: 1rem;
-  }
+  .tl-years { position: relative; height: 36px; margin-bottom: .5rem; }
   .tl-year {
-    position: absolute;
-    top: 0;
-    font-size: .8rem;
-    color: var(--text-light);
-    font-weight: 600;
+    position: absolute; top: 0;
+    font-size: .78rem; color: var(--text-light); font-weight: 600;
     transform: translateX(-50%);
   }
   .tl-year::after {
-    content: '';
-    display: block;
-    width: 1px; height: 16px;
-    background: var(--border);
-    margin: 4px auto 0;
+    content: ''; display: block;
+    width: 1px; height: 14px; background: var(--border); margin: 3px auto 0;
   }
 
-  /* ── Items row ── */
-  .tl-items {
-    position: relative;
-    height: 380px;
-  }
+  .tl-items { position: relative; }
 
-  /* ── Single tool card ── */
   .tl-item {
-    position: absolute;
-    top: 0;
-    width: 160px;
+    position: absolute; width: 148px;
     transform: translateX(-50%);
     transition: opacity .35s ease, transform .35s ease;
-    cursor: default;
+    cursor: default; z-index: 2;
   }
   .tl-item.hidden {
-    opacity: 0 !important;
-    pointer-events: none;
+    opacity: 0 !important; pointer-events: none;
     transform: translateX(-50%) scale(.85) !important;
   }
 
   .tl-card {
-    background: var(--card-bg);
-    border-radius: 10px;
-    padding: .65rem .7rem;
-    box-shadow: 0 2px 10px rgba(0,0,0,.07);
-    border-left: 4px solid #ccc;
+    background: var(--card-bg); border-radius: 7px;
+    padding: .32rem .5rem; box-shadow: 0 2px 7px rgba(0,0,0,.06);
+    border-left: 3px solid #ccc;
     transition: box-shadow .2s;
-    min-height: 85px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
+    font-size: .72rem; line-height: 1.22;
   }
-  .tl-card:hover {
-    box-shadow: 0 4px 20px rgba(0,0,0,.13);
-  }
-  .tl-card .name {
-    font-size: .82rem;
-    font-weight: 700;
-    line-height: 1.2;
-    margin-bottom: .25rem;
-  }
-  .tl-card .journal {
-    font-size: .7rem;
-    color: var(--text-light);
-    line-height: 1.3;
-  }
+  .tl-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+  .tl-card .name { font-size: .73rem; font-weight: 700; line-height: 1.15; margin-bottom: .08rem; }
+  .tl-card .meta { font-size: .62rem; color: var(--text-light); line-height: 1.2; }
   .tl-card .year-badge {
-    display: inline-block;
-    font-size: .65rem;
-    font-weight: 700;
-    padding: .1rem .45rem;
-    border-radius: 4px;
-    color: #fff;
-    align-self: flex-start;
-    margin-top: .35rem;
+    display: inline-block; font-size: .58rem; font-weight: 700;
+    padding: .04rem .32rem; border-radius: 3px; color: #fff; margin-top: .15rem;
   }
 
-  /* ── Connector line: card → track ── */
+  /* Connector from card edge to track */
   .tl-item .connector {
-    position: absolute;
-    left: 50%;
-    width: 2px;
-    background: var(--border);
-    transform: translateX(-50%);
+    position: absolute; left: 50%; width: 1.5px;
+    background: var(--border); transform: translateX(-50%);
+    pointer-events: none;
   }
 
-  /* Staggered layout — half above, half below the track */
-  .tl-item.above { top: 10px; }
-  .tl-item.below { top: 210px; }
-  .tl-item.above .connector { bottom: -66px; height: 66px; }
-  .tl-item.below .connector { top: -66px; height: 66px; }
-
-  /* ── A · single_structure ── */
   .cat-as .tl-card { border-left-color: var(--cat-as); }
   .cat-as .year-badge { background: var(--cat-as); }
-
-  /* ── A · idr_ensemble ── */
   .cat-ae .tl-card { border-left-color: var(--cat-ae); }
   .cat-ae .year-badge { background: var(--cat-ae); }
+  .cat-b  .tl-card { border-left-color: var(--cat-b); }
+  .cat-b  .year-badge { background: var(--cat-b); }
+  .cat-c  .tl-card { border-left-color: var(--cat-c); }
+  .cat-c  .year-badge { background: var(--cat-c); }
 
-  /* ── Category B ── */
-  .cat-b .tl-card { border-left-color: var(--cat-b); }
-  .cat-b .year-badge { background: var(--cat-b); }
-
-  /* ── Category C ── */
-  .cat-c .tl-card { border-left-color: var(--cat-c); }
-  .cat-c .year-badge { background: var(--cat-c); }
-
-  /* ── Tooltip / detail popup ── */
   .tl-tooltip {
-    display: none;
-    position: fixed;
-    z-index: 200;
-    background: #fff;
-    border-radius: 10px;
-    padding: .9rem 1rem;
-    box-shadow: 0 8px 30px rgba(0,0,0,.18);
-    max-width: 340px;
-    font-size: .8rem;
-    line-height: 1.45;
+    display: none; position: fixed; z-index: 200;
+    background: #fff; border-radius: 10px;
+    padding: .9rem 1rem; box-shadow: 0 8px 30px rgba(0,0,0,.18);
+    max-width: 340px; font-size: .8rem; line-height: 1.45;
     pointer-events: none;
   }
   .tl-tooltip.show { display: block; }
-  .tl-tooltip .tt-name {
-    font-weight: 700;
-    font-size: .95rem;
-    margin-bottom: .25rem;
-  }
-  .tl-tooltip .tt-field {
-    margin-top: .1rem;
-  }
+  .tl-tooltip .tt-name { font-weight: 700; font-size: .95rem; margin-bottom: .25rem; }
+  .tl-tooltip .tt-field { margin-top: .1rem; }
   .tl-tooltip .tt-field strong { color: var(--text-light); }
   .tl-tooltip .tt-sub {
-    display: inline-block;
-    font-size: .65rem;
-    font-weight: 600;
-    padding: .1rem .45rem;
-    border-radius: 4px;
-    color: #fff;
-    margin-top: .2rem;
+    display: inline-block; font-size: .65rem; font-weight: 600;
+    padding: .1rem .45rem; border-radius: 4px; color: #fff; margin-top: .2rem;
   }
 
-  /* ── Empty state ── */
   .empty-state {
-    display: none;
-    text-align: center;
-    padding: 4rem 2rem;
-    color: var(--text-light);
-    font-size: 1.1rem;
+    display: none; text-align: center; padding: 4rem 2rem;
+    color: var(--text-light); font-size: 1.1rem;
   }
   .empty-state.visible { display: block; }
 
   @media (max-width: 600px) {
     header h1 { font-size: 1.3rem; }
-    .filter-btn { font-size: .75rem; padding: .3rem .7rem; }
-    .tl-item { width: 130px; }
-    .tl-card .name { font-size: .72rem; }
+    .filter-btn { font-size: .72rem; padding: .3rem .7rem; }
+    .tl-item { width: 120px; }
+    .tl-card .name { font-size: .65rem; }
   }
 </style>
 </head>
@@ -293,23 +170,18 @@
   <p>Timeline of methods organized by category</p>
 </header>
 
-<!-- ── Filter bar ── -->
 <div class="filter-bar" id="filterBar">
-  <button class="filter-btn active-all" data-filter="all" id="btnAll">
+  <button class="filter-btn active-all" data-filter="all">
     <span class="dot" style="background:#555;"></span> All <span class="count" id="countAll"></span>
   </button>
-
   <div class="sep"></div>
-
   <button class="filter-btn" data-filter="as">
     <span class="dot" style="background:var(--cat-as);"></span> A · single-structure <span class="count" id="countAs"></span>
   </button>
   <button class="filter-btn" data-filter="ae">
     <span class="dot" style="background:var(--cat-ae);"></span> A · ensemble <span class="count" id="countAe"></span>
   </button>
-
   <div class="sep"></div>
-
   <button class="filter-btn" data-filter="B">
     <span class="dot" style="background:var(--cat-b);"></span> B · sequence-based <span class="count" id="countB"></span>
   </button>
@@ -318,156 +190,177 @@
   </button>
 </div>
 
-<!-- ── Timeline ── -->
 <div class="tl-wrapper" id="tlWrapper">
-  <div class="tl" id="tl">
-    <div class="tl-track">
-      <div class="tl-track-progress" id="trackProgress"></div>
-    </div>
+  <div class="tl" id="tl" style="left: -948px; top: 14px;">
+    <div class="tl-track" id="tlTrack"><div class="tl-track-progress" id="trackProgress"></div></div>
     <div class="tl-years" id="tlYears"></div>
     <div class="tl-items" id="tlItems"></div>
   </div>
-  <div class="empty-state" id="emptyState">
-    No tools match the selected filter.
-  </div>
+  <div class="empty-state" id="emptyState">No tools match the selected filter.</div>
 </div>
 
-<!-- ── Tooltip ── -->
 <div class="tl-tooltip" id="tooltip"></div>
 
 <script>
-// ── DATA ────────────────────────────────────────────────────────
 const tools = [
-  // ═══ A · Structure-based : Single structure prediction (sub=as) ═══
-  { id:'AF2',         name:'AlphaFold2',          sub:'as', journal:'Nature',             year:2021, paper:'https://www.nature.com/articles/s41586-021-03819-2', code:'https://github.com/google-deepmind/alphafold' },
-  { id:'AF3',         name:'AlphaFold3',          sub:'as', journal:'Nature',             year:2024, paper:'https://www.nature.com/articles/s41586-024-07487-w', code:'https://github.com/google-deepmind/alphafold3' },
-  { id:'AF-Multimer', name:'AlphaFold-Multimer',  sub:'as', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2021.10.04.463034v2', code:'https://github.com/jcheongs/alphafold-multimer' },
-  { id:'ColabFold',   name:'ColabFold',           sub:'as', journal:'Nature Methods',     year:2022, paper:'https://www.nature.com/articles/s41592-022-01488-1', code:'https://github.com/sokrypton/colabfold' },
-  { id:'ESMFold',     name:'ESMFold',             sub:'as', journal:'Science',            year:2023, paper:'https://www.science.org/doi/10.1126/science.ade2574', code:'https://github.com/facebookresearch/esm' },
-  { id:'ESMFold2',    name:'ESMFold2',            sub:'as', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.06.03.729735v1', code:'https://github.com/Biohub/esm#esmfold2' },
-  { id:'RoseTTAFold',  name:'RoseTTAFold',         sub:'as', journal:'Science',            year:2021, paper:'https://www.science.org/doi/10.1126/science.abj8754', code:'https://github.com/RosettaCommons/RoseTTAFold' },
-  { id:'RF2',          name:'RoseTTAFold2',        sub:'as', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2023.05.24.542179v1', code:'https://github.com/uw-ipd/RoseTTAFold2' },
-  { id:'RF2NA',        name:'RoseTTAFold2NA',      sub:'as', journal:'Nature Methods',     year:2023, paper:'https://www.nature.com/articles/s41592-023-02086-5', code:'https://github.com/uw-ipd/RoseTTAFold2NA' },
-  { id:'RF3',          name:'RoseTTAFold3',        sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.08.14.670328v2', code:'https://github.com/RosettaCommons/foundry' },
-  { id:'OpenFold',     name:'OpenFold',            sub:'as', journal:'Nature Methods',     year:2024, paper:'https://www.nature.com/articles/s41592-024-02272-z', code:'https://github.com/aqlaboratory/openfold' },
-  { id:'UniFold',      name:'Uni-Fold',            sub:'as', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2022.08.04.502811v3', code:'https://github.com/dptech-corp/Uni-Fold' },
-  { id:'OmegaFold',    name:'OmegaFold',           sub:'as', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2022.07.21.500999v1', code:'https://github.com/HeliXonProtein/OmegaFold' },
-  { id:'EquiFold',     name:'EquiFold',            sub:'as', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2', code:'https://github.com/Genentech/equifold' },
-  { id:'RF-AA',        name:'RoseTTAFold All-Atom',sub:'as', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2', code:'https://github.com/baker-laboratory/RoseTTAFold-All-Atom' },
-  { id:'Boltz',        name:'Boltz family',        sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2024.11.19.624167v4', code:'https://github.com/jwohlwend/boltz' },
-  { id:'Chai1',        name:'Chai-1',              sub:'as', journal:'bioRxiv',            year:2024, paper:'https://www.biorxiv.org/content/10.1101/2024.10.10.615955v2', code:'https://github.com/chaidiscovery/chai-lab' },
-  { id:'Chai2',        name:'Chai-2',              sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.07.05.663018v1', code:'N/A' },
-  { id:'HelixFold',    name:'HelixFold',           sub:'as', journal:'arXiv',              year:2022, paper:'https://arxiv.org/abs/2207.05477', code:'https://github.com/PaddlePaddle/PaddleHelix' },
-  { id:'HelixFold-S',  name:'HelixFold-Single',    sub:'as', journal:'arXiv',              year:2023, paper:'https://arxiv.org/abs/2207.13921', code:'https://github.com/PaddlePaddle/PaddleHelix' },
-  { id:'HelixFold-M',  name:'HelixFold-Multimer',  sub:'as', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2404.10260', code:'N/A' },
-  { id:'HelixFold3',   name:'HelixFold3',          sub:'as', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2408.16975', code:'https://github.com/PaddlePaddle/PaddleHelix' },
-  { id:'ProtenixMini', name:'Protenix-Mini',       sub:'as', journal:'arXiv',              year:2025, paper:'https://arxiv.org/abs/2507.11839', code:'https://github.com/bytedance/Protenix' },
-  { id:'Protenix',     name:'Protenix',            sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.01.08.631967v1', code:'https://github.com/bytedance/Protenix' },
-  { id:'Protenix-v1',  name:'Protenix-v1',         sub:'as', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.02.05.703733v1', code:'https://github.com/bytedance/Protenix' },
-  { id:'Protenix-v2',  name:'Protenix-v2',         sub:'as', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.04.10.717613v1', code:'https://github.com/bytedance/Protenix' },
+  { id:'AF2',         name:'AlphaFold2',          sub:'as', journal:'Nature',                     year:2021 },
+  { id:'AF3',         name:'AlphaFold3',          sub:'as', journal:'Nature',                     year:2024 },
+  { id:'AF-Multimer', name:'AlphaFold-Multimer',  sub:'as', journal:'bioRxiv',                    year:2022 },
+  { id:'ColabFold',   name:'ColabFold',           sub:'as', journal:'Nature Methods',             year:2022 },
+  { id:'ESMFold',     name:'ESMFold',             sub:'as', journal:'Science',                    year:2023 },
+  { id:'ESMFold2',    name:'ESMFold2',            sub:'as', journal:'bioRxiv',                    year:2026 },
+  { id:'RoseTTAFold', name:'RoseTTAFold',         sub:'as', journal:'Science',                    year:2021 },
+  { id:'RF2',         name:'RoseTTAFold2',        sub:'as', journal:'bioRxiv',                    year:2023 },
+  { id:'RF2NA',       name:'RoseTTAFold2NA',      sub:'as', journal:'Nature Methods',             year:2023 },
+  { id:'RF3',         name:'RoseTTAFold3',        sub:'as', journal:'bioRxiv',                    year:2025 },
+  { id:'OpenFold',    name:'OpenFold',            sub:'as', journal:'Nature Methods',             year:2024 },
+  { id:'UniFold',     name:'Uni-Fold',            sub:'as', journal:'bioRxiv',                    year:2022 },
+  { id:'OmegaFold',   name:'OmegaFold',           sub:'as', journal:'bioRxiv',                    year:2022 },
+  { id:'EquiFold',    name:'EquiFold',            sub:'as', journal:'bioRxiv',                    year:2023 },
+  { id:'RF-AA',       name:'RoseTTAFold All-Atom',sub:'as', journal:'bioRxiv',                    year:2023 },
+  { id:'Boltz',       name:'Boltz family',        sub:'as', journal:'bioRxiv',                    year:2025 },
+  { id:'Chai1',       name:'Chai-1',              sub:'as', journal:'bioRxiv',                    year:2024 },
+  { id:'Chai2',       name:'Chai-2',              sub:'as', journal:'bioRxiv',                    year:2025 },
+  { id:'HelixFold',   name:'HelixFold',           sub:'as', journal:'arXiv',                      year:2022 },
+  { id:'HelixFold-S', name:'HelixFold-Single',    sub:'as', journal:'arXiv',                      year:2023 },
+  { id:'HelixFold-M', name:'HelixFold-Multimer',  sub:'as', journal:'arXiv',                      year:2024 },
+  { id:'HelixFold3',  name:'HelixFold3',          sub:'as', journal:'arXiv',                      year:2024 },
+  { id:'ProtenixMini',name:'Protenix-Mini',       sub:'as', journal:'arXiv',                      year:2025 },
+  { id:'Protenix',    name:'Protenix',            sub:'as', journal:'bioRxiv',                    year:2025 },
+  { id:'Protenix-v1', name:'Protenix-v1',         sub:'as', journal:'bioRxiv',                    year:2026 },
+  { id:'Protenix-v2', name:'Protenix-v2',         sub:'as', journal:'bioRxiv',                    year:2026 },
 
-  // ═══ A · Structure-based : Conformational ensemble generation (sub=ae) ═══
-  { id:'AlphaFlow',    name:'AlphaFlow/ESMFlow',    sub:'ae', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2402.04845', code:'https://github.com/bjing2016/alphaflow' },
-  { id:'BioEmu',       name:'BioEmu',              sub:'ae', journal:'Science',            year:2025, paper:'https://www.science.org/doi/10.1126/science.adv9817', code:'https://github.com/microsoft/bioemu' },
-  { id:'PhantoIDP',    name:'Phanto-IDP',          sub:'ae', journal:'Briefings in Bioinformatics', year:2024, paper:'https://academic.oup.com/bib/article/25/1/bbad429/7453435', code:'https://github.com/Junjie-Zhu/Phanto-IDP' },
-  { id:'IDPFold',      name:'IDPFold',             sub:'ae', journal:'Advanced Science',   year:2025, paper:'https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202511636', code:'https://github.com/Junjie-Zhu/IDPFold' },
-  { id:'IDPFold2',     name:'IDPFold2',            sub:'ae', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.01.14.699584v1', code:'https://github.com/Junjie-Zhu/IDPFold2' },
-  { id:'STARLING',     name:'STARLING',            sub:'ae', journal:'Nature',             year:2026, paper:'https://www.nature.com/articles/s41586-026-10141-2', code:'https://github.com/idptools/starling' },
-  { id:'IDP-LZerD',    name:'IDP-LZerD',           sub:'ae', journal:'PLOS Computational Biology', year:2017, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005485', code:'https://github.com/kiharalab/idp_lzerd' },
-  { id:'IDPForge',     name:'IDPForge',            sub:'ae', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.03.25.714313v2', code:'https://github.com/THGLab/IDPForge' },
-  { id:'AlphaFlex',    name:'AlphaFlex (AFX-IDPForge)', sub:'ae', journal:'bioRxiv',       year:2026, paper:'https://www.biorxiv.org/content/10.1101/2025.11.24.690279v2', code:'https://github.com/THGLab/IDPForge' },
-  { id:'IdpSAM',       name:'IdpSAM',              sub:'ae', journal:'PLOS Computational Biology', year:2024, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1012144', code:'https://github.com/giacomo-janson/idpsam' },
-  { id:'IDP-o',        name:'IDP-o',               sub:'ae', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3', code:'https://github.com/PeptoneLtd/IDP-o' },
-  { id:'PepTron',      name:'PepTron',             sub:'ae', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3', code:'https://github.com/PeptoneLtd/PepTron' },
+  { id:'AlphaFlow',   name:'AlphaFlow/ESMFlow',    sub:'ae', journal:'arXiv',                         year:2024 },
+  { id:'BioEmu',      name:'BioEmu',              sub:'ae', journal:'Science',                        year:2025 },
+  { id:'PhantoIDP',   name:'Phanto-IDP',          sub:'ae', journal:'Briefings in Bioinformatics',     year:2024 },
+  { id:'IDPFold',     name:'IDPFold',             sub:'ae', journal:'Advanced Science',               year:2025 },
+  { id:'IDPFold2',    name:'IDPFold2',            sub:'ae', journal:'bioRxiv',                        year:2026 },
+  { id:'STARLING',    name:'STARLING',            sub:'ae', journal:'Nature',                         year:2026 },
+  { id:'IDP-LZerD',   name:'IDP-LZerD',           sub:'ae', journal:'PLOS Computational Biology',     year:2017 },
+  { id:'IDPForge',    name:'IDPForge',            sub:'ae', journal:'bioRxiv',                        year:2026 },
+  { id:'AlphaFlex',   name:'AlphaFlex',           sub:'ae', journal:'bioRxiv',                        year:2026 },
+  { id:'IdpSAM',      name:'IdpSAM',              sub:'ae', journal:'PLOS Computational Biology',     year:2024 },
+  { id:'IDP-o',       name:'IDP-o',               sub:'ae', journal:'bioRxiv',                        year:2025 },
+  { id:'PepTron',     name:'PepTron',             sub:'ae', journal:'bioRxiv',                        year:2025 },
 
-  // ═══ B · Sequence-based ═══
-  { id:'FINCHES',      name:'FINCHES',             sub:'B', journal:'Science',            year:2025, paper:'https://www.science.org/doi/10.1126/science.adq8381', code:'https://github.com/idptools/finches' },
-  { id:'Disobind',     name:'Disobind',            sub:'B', journal:'Cell Systems',       year:2026, paper:'https://www.cell.com/cell-systems/abstract/S2405-4712(25)00319-9', code:'https://github.com/isblab/disobind' },
-  { id:'DeepInteract', name:'DeepInteract',        sub:'B', journal:'arXiv',              year:2022, paper:'https://arxiv.org/abs/2110.02423', code:'https://github.com/BioinfoMachineLearning/DeepInteract' },
-  { id:'GLINTER',      name:'GLINTER',             sub:'B', journal:'Bioinformatics',     year:2021, paper:'https://academic.oup.com/bioinformatics/article/38/4/947/6424887', code:'https://github.com/zw2x/glinter' },
-  { id:'ComplexContact',name:'ComplexContact',     sub:'B', journal:'Nucleic Acids Research', year:2018, paper:'https://academic.oup.com/nar/article/46/W1/W432/5001161', code:'N/A' },
-  { id:'DRN1D2D',      name:'DRN-1D2D_Inter',      sub:'B', journal:'Briefings in Bioinformatics', year:2023, paper:'https://academic.oup.com/bib/article/24/2/bbad039/7033302', code:'https://github.com/ChengfeiYan/DRN-1D2D_Inter' },
-  { id:'PLMGraph',     name:'PLMGraph-Inter',      sub:'B', journal:'eLife',              year:2024, paper:'https://elifesciences.org/reviewed-preprints/92184', code:'https://github.com/ChengfeiYan/PLMGraph-Inter' },
-  { id:'DeepHomo',     name:'DeepHomo',            sub:'B', journal:'Briefings in Bioinformatics', year:2021, paper:'https://academic.oup.com/bib/article/22/5/bbab038/6159364', code:'N/A' },
-  { id:'DeepHomo2',    name:'DeepHomo2/DeepHomoSeq',sub:'B', journal:'Briefings in Bioinformatics', year:2022, paper:'https://academic.oup.com/bib/article/24/1/bbac499/6849483', code:'N/A' },
-  { id:'CDPred',       name:'CDPred',              sub:'B', journal:'Nature Communications', year:2022, paper:'https://www.nature.com/articles/s41467-022-34600-2', code:'https://github.com/BioinfoMachineLearning/CDPred' },
-  { id:'RaptorX',      name:'RaptorX-Contact',     sub:'B', journal:'PROTEINS / PNAS',    year:2017, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005324', code:'https://github.com/j3xugit/RaptorX-Contact' },
-  { id:'ESMDynamic',   name:'ESMDynamic',          sub:'B', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.1101/2025.08.20.671365v2', code:'https://github.com/ShuklaGroup/esmdynamic' },
-  { id:'bAIes',        name:'bAIes',               sub:'B', journal:'Nature Communications', year:2026, paper:'https://www.nature.com/articles/s41467-026-69172-y', code:'https://github.com/COSBlab/bAIes-IDP' },
-
-  // ═══ C · IDR-specific ═══
-  // (currently empty placeholder in README)
+  { id:'FINCHES',      name:'FINCHES',             sub:'B', journal:'Science',                       year:2025 },
+  { id:'Disobind',     name:'Disobind',            sub:'B', journal:'Cell Systems',                  year:2026 },
+  { id:'DeepInteract', name:'DeepInteract',        sub:'B', journal:'arXiv',                          year:2022 },
+  { id:'GLINTER',      name:'GLINTER',             sub:'B', journal:'Bioinformatics',                year:2021 },
+  { id:'ComplexContact',name:'ComplexContact',     sub:'B', journal:'Nucleic Acids Research',        year:2018 },
+  { id:'DRN1D2D',      name:'DRN-1D2D_Inter',      sub:'B', journal:'Briefings in Bioinformatics',   year:2023 },
+  { id:'PLMGraph',     name:'PLMGraph-Inter',      sub:'B', journal:'eLife',                         year:2024 },
+  { id:'DeepHomo',     name:'DeepHomo',            sub:'B', journal:'Briefings in Bioinformatics',   year:2021 },
+  { id:'DeepHomo2',    name:'DeepHomo2',           sub:'B', journal:'Briefings in Bioinformatics',   year:2022 },
+  { id:'CDPred',       name:'CDPred',              sub:'B', journal:'Nature Communications',         year:2022 },
+  { id:'RaptorX',      name:'RaptorX-Contact',     sub:'B', journal:'PROTEINS / PNAS',               year:2017 },
+  { id:'ESMDynamic',   name:'ESMDynamic',          sub:'B', journal:'bioRxiv',                       year:2026 },
+  { id:'bAIes',        name:'bAIes',               sub:'B', journal:'Nature Communications',         year:2026 },
 ];
 
-// ── Derived ──
-const yearMin = 2017;
-const yearMax = 2026;
-const yearSpan = yearMax - yearMin;
+const yearMin = 2017, yearMax = 2026;
 const PX_PER_YEAR = 320;
 
-// ── Build year labels ──
-(function buildYears() {
-  const container = document.getElementById('tlYears');
+// Sort tools by subcategory then by name within each year for cleaner grouping
+tools.sort((a, b) => {
+  if (a.year !== b.year) return a.year - b.year;
+  const subOrder = { as:0, ae:1, B:2, C:3 };
+  return (subOrder[a.sub]||0) - (subOrder[b.sub]||0) || a.name.localeCompare(b.name);
+});
+
+// ── Layout params ──
+const CARD_H = 59;    // compact card height
+const CARD_GAP = 3;   // vertical gap
+const TOP_PAD = 16;   // padding above topmost card
+const BOT_PAD = 16;
+
+// Group tools by year
+const yearGroups = {};
+tools.forEach(t => {
+  if (!yearGroups[t.year]) yearGroups[t.year] = [];
+  yearGroups[t.year].push(t);
+});
+
+// Max above/below count across all years
+let maxAbove = 0, maxBelow = 0;
+Object.values(yearGroups).forEach(group => {
+  const a = Math.ceil(group.length / 2);
+  const b = group.length - a;
+  if (a > maxAbove) maxAbove = a;
+  if (b > maxBelow) maxBelow = b;
+});
+
+// Compute track Y position so track is centered in the card stack
+const TRACK_Y = TOP_PAD + maxAbove * (CARD_H + CARD_GAP);
+const totalH = TRACK_Y + CARD_GAP + maxBelow * (CARD_H + CARD_GAP) + BOT_PAD;
+
+document.getElementById('tlItems').style.height = totalH + 'px';
+document.getElementById('tlTrack').style.top = TRACK_Y + 'px';
+
+// ── Year labels ──
+(function () {
+  const c = document.getElementById('tlYears');
   for (let y = yearMin; y <= yearMax; y++) {
     const el = document.createElement('div');
     el.className = 'tl-year';
     el.style.left = xPos(y) + 'px';
     el.textContent = y;
-    container.appendChild(el);
+    c.appendChild(el);
   }
 })();
 
-// ── Helper ──
-function xPos(year) {
-  return ((year - yearMin) / yearSpan) * ((yearSpan) * PX_PER_YEAR) + 60;
-}
+function xPos(year) { return ((year - yearMin) / (yearMax - yearMin)) * ((yearMax - yearMin) * PX_PER_YEAR) + 60; }
 
-// ── Sub display names ──
-const subLabel = {
-  'as': 'A · Single structure',
-  'ae': 'A · Conformational ensemble',
-  'B':  'B · Sequence-based',
-  'C':  'C · IDR-specific'
-};
-const subColor = {
-  'as': 'var(--cat-as)',
-  'ae': 'var(--cat-ae)',
-  'B':  'var(--cat-b)',
-  'C':  'var(--cat-c)'
-};
-
-// ── Render items ──
-let above = true;
+// ── Render all items ──
 const catCounts = { as:0, ae:0, B:0, C:0 };
 
 tools.forEach((t, i) => {
-  const el = document.createElement('div');
-  const cls = (t.sub === 'as' || t.sub === 'ae') ? 'cat-' + t.sub : 'cat-' + t.sub.toLowerCase();
-  el.className = `tl-item ${cls} ${above ? 'above' : 'below'}`;
-  el.dataset.sub = t.sub;
-  el.style.left = xPos(t.year) + 'px';
-  // stagger items in the same year slightly
-  const sameYear = tools.filter(x => x.year === t.year);
-  if (sameYear.length > 1) {
-    const idx = sameYear.indexOf(t);
-    const offset = idx - (sameYear.length - 1) / 2;
-    el.style.left = (xPos(t.year) + offset * 30) + 'px';
+  const group = yearGroups[t.year];
+  const totalN = group.length;
+  const idx = group.indexOf(t);
+  const aboveN = Math.ceil(totalN / 2);
+
+  // Vertical position: alternate above/below, closest to track first
+  let top, connectorTop, connectorH;
+  if (idx < aboveN) {
+    const depth = aboveN - idx; // 1=closest to track
+    top = TRACK_Y - depth * (CARD_H + CARD_GAP);
+    connectorTop = top + CARD_H;
+    connectorH = depth * (CARD_H + CARD_GAP) - CARD_H;
+  } else {
+    const depth = idx - aboveN;
+    top = TRACK_Y + CARD_GAP + depth * (CARD_H + CARD_GAP);
+    connectorTop = TRACK_Y;
+    connectorH = CARD_GAP + depth * (CARD_H + CARD_GAP);
   }
 
+  // Horizontal: slight fan-out for same-year tools, grouped by subcategory
+  const subOrder = { as:0, ae:1, B:2, C:3 };
+  const sameSub = group.filter(g => g.sub === t.sub);
+  const subIdx = sameSub.indexOf(t);
+  const subOffset = sameSub.length > 1 ? (subIdx - (sameSub.length - 1) / 2) * 22 : 0;
+  const left = xPos(t.year) + subOffset;
+
+  const cls = (t.sub === 'as' || t.sub === 'ae') ? 'cat-' + t.sub : 'cat-' + t.sub.toLowerCase();
+  const el = document.createElement('div');
+  el.className = `tl-item ${cls}`;
+  el.dataset.sub = t.sub;
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+
   el.innerHTML = `
-    <div class="connector"></div>
+    <div class="connector" style="top:${connectorTop}px;height:${connectorH}px;"></div>
     <div class="tl-card">
       <div class="name">${t.name}</div>
-      <div class="journal">${t.journal}</div>
+      <div class="meta">${t.journal}</div>
       <span class="year-badge">${t.year}</span>
     </div>`;
 
-  el.addEventListener('mouseenter', showTooltip.bind(null, t, el));
+  el.addEventListener('mouseenter', e => showTooltip(t, el, e));
   el.addEventListener('mouseleave', hideTooltip);
   el.addEventListener('mousemove', moveTooltip);
 
   document.getElementById('tlItems').appendChild(el);
-  above = !above;
   catCounts[t.sub] = (catCounts[t.sub] || 0) + 1;
 });
 
@@ -479,82 +372,65 @@ document.getElementById('countB').textContent = tools.filter(t => t.sub === 'B')
 document.getElementById('countC').textContent = tools.filter(t => t.sub === 'C').length;
 
 // ── Filtering ──
-const filterBtns = document.querySelectorAll('[data-filter]');
-filterBtns.forEach(btn => {
+document.querySelectorAll('[data-filter]').forEach(btn => {
   btn.addEventListener('click', () => {
     const f = btn.dataset.filter;
-    filterBtns.forEach(b => b.className = 'filter-btn');
+    document.querySelectorAll('[data-filter]').forEach(b => b.className = 'filter-btn');
     if (f === 'all') btn.classList.add('active-all');
     else btn.classList.add('active-' + f.toLowerCase());
 
-    let visibleCount = 0;
+    let visible = 0;
     document.querySelectorAll('.tl-item').forEach(el => {
       const match = f === 'all' || el.dataset.sub === f;
       el.classList.toggle('hidden', !match);
-      if (match) visibleCount++;
+      if (match) visible++;
     });
-
-    document.getElementById('emptyState').classList.toggle('visible', visibleCount === 0);
+    document.getElementById('emptyState').classList.toggle('visible', visible === 0);
   });
 });
 
-// ── Drag-to-scroll ──
+// ── Drag to scroll ──
 let isDown = false, startX, scrollLeft;
 const wrapper = document.getElementById('tlWrapper');
 wrapper.addEventListener('mousedown', e => {
   isDown = true; startX = e.pageX - wrapper.offsetLeft; scrollLeft = wrapper.scrollLeft;
 });
 wrapper.addEventListener('mouseleave', () => { isDown = false; });
-wrapper.addEventListener('mouseup', () => { isDown = false; });
+wrapper.addEventListener('mouseup',   () => { isDown = false; });
 wrapper.addEventListener('mousemove', e => {
   if (!isDown) return;
   e.preventDefault();
-  const x = e.pageX - wrapper.offsetLeft;
-  wrapper.scrollLeft = scrollLeft - (x - startX);
+  wrapper.scrollLeft = scrollLeft - (e.pageX - wrapper.offsetLeft - startX);
 });
 
 // ── Tooltip ──
 const tip = document.getElementById('tooltip');
+const subLabel = { 'as':'A · Single structure','ae':'A · Ensemble','B':'B · Sequence-based','C':'C · IDR-specific' };
+const subColor = { 'as':'var(--cat-as)','ae':'var(--cat-ae)','B':'var(--cat-b)','C':'var(--cat-c)' };
 function showTooltip(t, el, e) {
-  const sl = subLabel[t.sub] || t.sub;
-  const sc = subColor[t.sub] || '#999';
   tip.innerHTML = `
     <div class="tt-name">${t.name}</div>
     <div class="tt-field"><strong>Journal:</strong> ${t.journal} (${t.year})</div>
-    <div class="tt-field">
-      <span class="tt-sub" style="background:${sc}">${sl}</span>
-    </div>
-    ${t.paper ? `<div class="tt-field"><strong>Paper:</strong> <a href="${t.paper}" target="_blank">${t.paper.replace(/^https?:\/\//,'').slice(0,45)}…</a></div>` : ''}
-    ${t.code && t.code !== 'N/A' ? `<div class="tt-field"><strong>Code:</strong> <a href="${t.code}" target="_blank">repo</a></div>` : ''}
-  `;
+    <div class="tt-field"><span class="tt-sub" style="background:${subColor[t.sub]||'#999'}">${subLabel[t.sub]||t.sub}</span></div>`;
   tip.classList.add('show');
   positionTip(e);
 }
 function moveTooltip(e) { positionTip(e); }
 function hideTooltip() { tip.classList.remove('show'); }
 function positionTip(e) {
-  const x = e.clientX + 16;
-  const y = e.clientY + 16;
-  const maxX = window.innerWidth - 360;
-  const maxY = window.innerHeight - 200;
-  tip.style.left = Math.min(x, maxX) + 'px';
-  tip.style.top = Math.min(y, maxY) + 'px';
+  tip.style.left = Math.min(e.clientX + 16, window.innerWidth - 360) + 'px';
+  tip.style.top = Math.min(e.clientY + 16, window.innerHeight - 200) + 'px';
 }
 
-// ── Track progress ──
+// ── Track progress indicator ──
 function updateProgress() {
   const sw = wrapper.scrollWidth - wrapper.clientWidth;
-  const p = sw > 0 ? wrapper.scrollLeft / sw : 0;
-  document.getElementById('trackProgress').style.width = (p * 100) + '%';
+  document.getElementById('trackProgress').style.width = (sw > 0 ? wrapper.scrollLeft / sw : 0) * 100 + '%';
 }
 wrapper.addEventListener('scroll', updateProgress);
 updateProgress();
 
-// ── Auto-scroll to latest year ──
-setTimeout(() => {
-  wrapper.scrollLeft = wrapper.scrollWidth;
-}, 200);
+setTimeout(() => { wrapper.scrollLeft = wrapper.scrollWidth; }, 200);
 </script>
-
 </body>
 </html>
