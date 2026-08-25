@@ -3,7 +3,7 @@
 [![Awesome](https://awesome.re/badge.svg)](https://awesome.re)
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
 [![PR's Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)](http://makeapullrequest.com)
-[![Timeline](https://img.shields.io/badge/📊-Timeline-blueviolet?style=flat)](timeline/)
+[![Timeline](https://img.shields.io/badge/📊-Timeline-blueviolet?style=flat)](index.html)
 
 
 
@@ -37,7 +37,7 @@ A curated collection of computational tools for `intermolecular interaction pred
     - [Conformational ensemble generation](#2--idr-ensemble-generation)
   - [B. Sequence-based](#b-sequence-based-contact-map-prediction)
   - [C. IDR-specific](#c-idr--fuzzy-binding-specific)
-- [Timeline](timeline/)
+- [Timeline](index.html)
 - [Datasets](#datasets)
 - [Bench](#bench)
 - [Contributing](#contributing)
