@@ -713,6 +713,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/bAIes/) *to be written*
 - **Code:**  https://github.com/COSBlab/bAIes-IDP | https://github.com/plumed/plumed2
 - **Approach:** DL
+- **For IDR**
 </details>
 
 
@@ -727,6 +728,27 @@ A curated collection of computational tools for `intermolecular interaction pred
 ### C. IDR-specific
 
 > ⚠️ Category A and B models labelled as "for IDR" are also relevant here, but this section is reserved for models that are specifically designed for intrinsically disordered regions (IDRs) and their unique challenges.
+
+> ℹ️ The tools below are tagged **For IDR** in their home category and are cross-listed here for the IDR-centric view. Full entries live in [A · Conformational ensemble](#conformational-ensemble-generation) and [B · Sequence-based](#b-sequence-based-contact-map-like-prediction).
+
+#### From A · Conformational ensemble generation
+
+- **Phanto-IDP** — Briefings in Bioinformatics, 2024
+- **IDPFold** — Advanced Science, 2025
+- **IDPFold2** — bioRxiv, 2026
+- **STARLING** — Nature, 2026
+- **IDP-LZerD** — PLOS Computational Biology, 2017
+- **IDPForge** — bioRxiv, 2026
+- **AlphaFlex (AFX-IDPForge)** — bioRxiv, 2026
+- **IdpSAM** — PLOS Computational Biology, 2024
+- **IDP-o** — bioRxiv, 2025
+- **PepTron** — bioRxiv, 2025
+
+#### From B · Sequence-based
+
+- **FINCHES** — Science, 2025
+- **Disobind** — Cell Systems, 2026
+- **bAIes** — Nature Communications, 2026
 
 
 <!-- More IDR-specific placeholders can be added here -->

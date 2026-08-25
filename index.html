@@ -112,6 +112,9 @@
   .tl-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,.12); }
   .tl-card .name { font-size: .73rem; font-weight: 700; line-height: 1.15; margin-bottom: .08rem; }
   .tl-card .meta { font-size: .62rem; color: var(--text-light); line-height: 1.2; }
+  .tag-dots { display: inline-flex; gap: 3px; vertical-align: middle; margin-left: 4px; }
+  .tag-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
   .tl-card .year-badge {
     display: inline-block; font-size: .58rem; font-weight: 700;
     padding: .04rem .32rem; border-radius: 3px; color: #fff; margin-top: .15rem;
@@ -191,7 +194,7 @@
 </div>
 
 <div class="tl-wrapper" id="tlWrapper">
-  <div class="tl" id="tl" style="left: -948px; top: 14px;">
+  <div class="tl" id="tl">
     <div class="tl-track" id="tlTrack"><div class="tl-track-progress" id="trackProgress"></div></div>
     <div class="tl-years" id="tlYears"></div>
     <div class="tl-items" id="tlItems"></div>
@@ -232,19 +235,19 @@ const tools = [
 
   { id:'AlphaFlow',   name:'AlphaFlow/ESMFlow',    sub:'ae', journal:'arXiv',                         year:2024 },
   { id:'BioEmu',      name:'BioEmu',              sub:'ae', journal:'Science',                        year:2025 },
-  { id:'PhantoIDP',   name:'Phanto-IDP',          sub:'ae', journal:'Briefings in Bioinformatics',     year:2024 },
-  { id:'IDPFold',     name:'IDPFold',             sub:'ae', journal:'Advanced Science',               year:2025 },
-  { id:'IDPFold2',    name:'IDPFold2',            sub:'ae', journal:'bioRxiv',                        year:2026 },
-  { id:'STARLING',    name:'STARLING',            sub:'ae', journal:'Nature',                         year:2026 },
-  { id:'IDP-LZerD',   name:'IDP-LZerD',           sub:'ae', journal:'PLOS Computational Biology',     year:2017 },
-  { id:'IDPForge',    name:'IDPForge',            sub:'ae', journal:'bioRxiv',                        year:2026 },
-  { id:'AlphaFlex',   name:'AlphaFlex',           sub:'ae', journal:'bioRxiv',                        year:2026 },
-  { id:'IdpSAM',      name:'IdpSAM',              sub:'ae', journal:'PLOS Computational Biology',     year:2024 },
-  { id:'IDP-o',       name:'IDP-o',               sub:'ae', journal:'bioRxiv',                        year:2025 },
-  { id:'PepTron',     name:'PepTron',             sub:'ae', journal:'bioRxiv',                        year:2025 },
+  { id:'PhantoIDP',   name:'Phanto-IDP',          sub:'ae', tags:['C'], journal:'Briefings in Bioinformatics',     year:2024 },
+  { id:'IDPFold',     name:'IDPFold',             sub:'ae', tags:['C'], journal:'Advanced Science',               year:2025 },
+  { id:'IDPFold2',    name:'IDPFold2',            sub:'ae', tags:['C'], journal:'bioRxiv',                        year:2026 },
+  { id:'STARLING',    name:'STARLING',            sub:'ae', tags:['C'], journal:'Nature',                         year:2026 },
+  { id:'IDP-LZerD',   name:'IDP-LZerD',           sub:'ae', tags:['C'], journal:'PLOS Computational Biology',     year:2017 },
+  { id:'IDPForge',    name:'IDPForge',            sub:'ae', tags:['C'], journal:'bioRxiv',                        year:2026 },
+  { id:'AlphaFlex',   name:'AlphaFlex',           sub:'ae', tags:['C'], journal:'bioRxiv',                        year:2026 },
+  { id:'IdpSAM',      name:'IdpSAM',              sub:'ae', tags:['C'], journal:'PLOS Computational Biology',     year:2024 },
+  { id:'IDP-o',       name:'IDP-o',               sub:'ae', tags:['C'], journal:'bioRxiv',                        year:2025 },
+  { id:'PepTron',     name:'PepTron',             sub:'ae', tags:['C'], journal:'bioRxiv',                        year:2025 },
 
-  { id:'FINCHES',      name:'FINCHES',             sub:'B', journal:'Science',                       year:2025 },
-  { id:'Disobind',     name:'Disobind',            sub:'B', journal:'Cell Systems',                  year:2026 },
+  { id:'FINCHES',      name:'FINCHES',             sub:'B', tags:['C'], journal:'Science',                       year:2025 },
+  { id:'Disobind',     name:'Disobind',            sub:'B', tags:['C'], journal:'Cell Systems',                  year:2026 },
   { id:'DeepInteract', name:'DeepInteract',        sub:'B', journal:'arXiv',                          year:2022 },
   { id:'GLINTER',      name:'GLINTER',             sub:'B', journal:'Bioinformatics',                year:2021 },
   { id:'ComplexContact',name:'ComplexContact',     sub:'B', journal:'Nucleic Acids Research',        year:2018 },
@@ -255,7 +258,7 @@ const tools = [
   { id:'CDPred',       name:'CDPred',              sub:'B', journal:'Nature Communications',         year:2022 },
   { id:'RaptorX',      name:'RaptorX-Contact',     sub:'B', journal:'PROTEINS / PNAS',               year:2017 },
   { id:'ESMDynamic',   name:'ESMDynamic',          sub:'B', journal:'bioRxiv',                       year:2026 },
-  { id:'bAIes',        name:'bAIes',               sub:'B', journal:'Nature Communications',         year:2026 },
+  { id:'bAIes',        name:'bAIes',               sub:'B', tags:['C'], journal:'Nature Communications',         year:2026 },
 ];
 
 const yearMin = 2017, yearMax = 2026;
@@ -311,6 +314,10 @@ document.getElementById('tlTrack').style.top = TRACK_Y + 'px';
 
 function xPos(year) { return ((year - yearMin) / (yearMax - yearMin)) * ((yearMax - yearMin) * PX_PER_YEAR) + 60; }
 
+// ── Category labels / colors ──
+const subLabel = { 'as':'A · Single structure','ae':'A · Ensemble','B':'B · Sequence-based','C':'C · IDR-specific' };
+const subColor = { 'as':'var(--cat-as)','ae':'var(--cat-ae)','B':'var(--cat-b)','C':'var(--cat-c)' };
+
 // ── Render all items ──
 const catCounts = { as:0, ae:0, B:0, C:0 };
 
@@ -345,13 +352,18 @@ tools.forEach((t, i) => {
   const el = document.createElement('div');
   el.className = `tl-item ${cls}`;
   el.dataset.sub = t.sub;
+  if (t.tags) el.dataset.tags = t.tags.join(',');
   el.style.left = left + 'px';
   el.style.top = top + 'px';
+
+  const tagDots = (t.tags || []).map(tg =>
+    `<span class="tag-dot" style="background:var(--cat-${tg.toLowerCase()})" title="${subLabel[tg]||tg}"></span>`
+  ).join('');
 
   el.innerHTML = `
     <div class="connector" style="top:${connectorTop}px;height:${connectorH}px;"></div>
     <div class="tl-card">
-      <div class="name">${t.name}</div>
+      <div class="name">${t.name}${tagDots ? ' <span class="tag-dots">'+tagDots+'</span>' : ''}</div>
       <div class="meta">${t.journal}</div>
       <span class="year-badge">${t.year}</span>
     </div>`;
@@ -369,7 +381,7 @@ document.getElementById('countAll').textContent = tools.length;
 document.getElementById('countAs').textContent = tools.filter(t => t.sub === 'as').length;
 document.getElementById('countAe').textContent = tools.filter(t => t.sub === 'ae').length;
 document.getElementById('countB').textContent = tools.filter(t => t.sub === 'B').length;
-document.getElementById('countC').textContent = tools.filter(t => t.sub === 'C').length;
+document.getElementById('countC').textContent = tools.filter(t => t.sub === 'C' || (t.tags||[]).includes('C')).length;
 
 // ── Filtering ──
 document.querySelectorAll('[data-filter]').forEach(btn => {
@@ -381,7 +393,10 @@ document.querySelectorAll('[data-filter]').forEach(btn => {
 
     let visible = 0;
     document.querySelectorAll('.tl-item').forEach(el => {
-      const match = f === 'all' || el.dataset.sub === f;
+      let match = f === 'all' || el.dataset.sub === f;
+      if (!match && el.dataset.tags) {
+        match = el.dataset.tags.split(',').includes(f);
+      }
       el.classList.toggle('hidden', !match);
       if (match) visible++;
     });
@@ -405,13 +420,17 @@ wrapper.addEventListener('mousemove', e => {
 
 // ── Tooltip ──
 const tip = document.getElementById('tooltip');
-const subLabel = { 'as':'A · Single structure','ae':'A · Ensemble','B':'B · Sequence-based','C':'C · IDR-specific' };
-const subColor = { 'as':'var(--cat-as)','ae':'var(--cat-ae)','B':'var(--cat-b)','C':'var(--cat-c)' };
 function showTooltip(t, el, e) {
+  const tags = (t.tags || []).map(tg =>
+    `<span class="tt-sub" style="background:${subColor[tg]||'#999'}">${subLabel[tg]||tg}</span>`
+  ).join(' ');
   tip.innerHTML = `
     <div class="tt-name">${t.name}</div>
     <div class="tt-field"><strong>Journal:</strong> ${t.journal} (${t.year})</div>
-    <div class="tt-field"><span class="tt-sub" style="background:${subColor[t.sub]||'#999'}">${subLabel[t.sub]||t.sub}</span></div>`;
+    <div class="tt-field">
+      <span class="tt-sub" style="background:${subColor[t.sub]||'#999'}">${subLabel[t.sub]||t.sub}</span>
+      ${tags ? ' ' + tags : ''}
+    </div>`;
   tip.classList.add('show');
   positionTip(e);
 }
