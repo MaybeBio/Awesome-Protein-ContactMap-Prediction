@@ -6,7 +6,8 @@
 <title>Protein Contact-Map Prediction Tools — Timeline</title>
 <style>
   :root {
-    --cat-a: #4a90d9;
+    --cat-as: #3a7bd5;
+    --cat-ae: #7bafd4;
     --cat-b: #e67e22;
     --cat-c: #2ecc71;
     --bg: #f8f9fa;
@@ -67,14 +68,20 @@
     width: 10px; height: 10px;
     border-radius: 50%;
   }
-  .filter-btn.active-a { border-color: var(--cat-a); background: rgba(74,144,217,.12); }
-  .filter-btn.active-b { border-color: var(--cat-b); background: rgba(230,126,34,.12); }
-  .filter-btn.active-c { border-color: var(--cat-c); background: rgba(46,204,113,.12); }
-  .filter-btn.active-all { border-color: #333; background: #e8e8e8; }
+  .filter-btn.active-all   { border-color: #333; background: #e8e8e8; }
+  .filter-btn.active-as    { border-color: var(--cat-as); background: rgba(58,123,213,.12); }
+  .filter-btn.active-ae    { border-color: var(--cat-ae); background: rgba(123,175,212,.12); }
+  .filter-btn.active-b     { border-color: var(--cat-b);  background: rgba(230,126,34,.12); }
+  .filter-btn.active-c     { border-color: var(--cat-c);  background: rgba(46,204,113,.12); }
   .filter-btn .count {
     font-weight: 400;
     opacity: .5;
     font-size: .75rem;
+  }
+  .filter-bar .sep {
+    width: 1px;
+    background: var(--border);
+    align-self: stretch;
   }
 
   /* ── Timeline container ── */
@@ -92,7 +99,7 @@
 
   .tl {
     position: relative;
-    min-width: 3600px; /* wide enough for ~40 tools */
+    min-width: 3600px;
     padding: 0 60px;
     user-select: none;
   }
@@ -111,7 +118,7 @@
   .tl-track-progress {
     position: absolute;
     top: 0; left: 0; bottom: 0;
-    background: linear-gradient(90deg, var(--cat-a), var(--cat-b), var(--cat-c));
+    background: linear-gradient(90deg, var(--cat-as), var(--cat-ae), var(--cat-b), var(--cat-c));
     border-radius: 2px;
     transition: width .35s ease;
   }
@@ -211,9 +218,13 @@
   .tl-item.above .connector { bottom: -66px; height: 66px; }
   .tl-item.below .connector { top: -66px; height: 66px; }
 
-  /* ── Category A ── */
-  .cat-a .tl-card { border-left-color: var(--cat-a); }
-  .cat-a .year-badge { background: var(--cat-a); }
+  /* ── A · single_structure ── */
+  .cat-as .tl-card { border-left-color: var(--cat-as); }
+  .cat-as .year-badge { background: var(--cat-as); }
+
+  /* ── A · idr_ensemble ── */
+  .cat-ae .tl-card { border-left-color: var(--cat-ae); }
+  .cat-ae .year-badge { background: var(--cat-ae); }
 
   /* ── Category B ── */
   .cat-b .tl-card { border-left-color: var(--cat-b); }
@@ -247,6 +258,15 @@
     margin-top: .1rem;
   }
   .tl-tooltip .tt-field strong { color: var(--text-light); }
+  .tl-tooltip .tt-sub {
+    display: inline-block;
+    font-size: .65rem;
+    font-weight: 600;
+    padding: .1rem .45rem;
+    border-radius: 4px;
+    color: #fff;
+    margin-top: .2rem;
+  }
 
   /* ── Empty state ── */
   .empty-state {
@@ -278,11 +298,20 @@
   <button class="filter-btn active-all" data-filter="all" id="btnAll">
     <span class="dot" style="background:#555;"></span> All <span class="count" id="countAll"></span>
   </button>
-  <button class="filter-btn" data-filter="A">
-    <span class="dot" style="background:var(--cat-a);"></span> A · Structure-based <span class="count" id="countA"></span>
+
+  <div class="sep"></div>
+
+  <button class="filter-btn" data-filter="as">
+    <span class="dot" style="background:var(--cat-as);"></span> A · single-structure <span class="count" id="countAs"></span>
   </button>
+  <button class="filter-btn" data-filter="ae">
+    <span class="dot" style="background:var(--cat-ae);"></span> A · ensemble <span class="count" id="countAe"></span>
+  </button>
+
+  <div class="sep"></div>
+
   <button class="filter-btn" data-filter="B">
-    <span class="dot" style="background:var(--cat-b);"></span> B · Sequence-based <span class="count" id="countB"></span>
+    <span class="dot" style="background:var(--cat-b);"></span> B · sequence-based <span class="count" id="countB"></span>
   </button>
   <button class="filter-btn" data-filter="C">
     <span class="dot" style="background:var(--cat-c);"></span> C · IDR-specific <span class="count" id="countC"></span>
@@ -309,62 +338,62 @@
 <script>
 // ── DATA ────────────────────────────────────────────────────────
 const tools = [
-  // ═══ A · Structure-based : Single structure prediction ═══
-  { id:'AF2',         name:'AlphaFold2',          cat:'A', sub:'single_structure', journal:'Nature',             year:2021, paper:'https://www.nature.com/articles/s41586-021-03819-2', code:'https://github.com/google-deepmind/alphafold' },
-  { id:'AF3',         name:'AlphaFold3',          cat:'A', sub:'single_structure', journal:'Nature',             year:2024, paper:'https://www.nature.com/articles/s41586-024-07487-w', code:'https://github.com/google-deepmind/alphafold3' },
-  { id:'AF-Multimer', name:'AlphaFold-Multimer',  cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2021.10.04.463034v2', code:'https://github.com/jcheongs/alphafold-multimer' },
-  { id:'ColabFold',   name:'ColabFold',           cat:'A', sub:'single_structure', journal:'Nature Methods',     year:2022, paper:'https://www.nature.com/articles/s41592-022-01488-1', code:'https://github.com/sokrypton/colabfold' },
-  { id:'ESMFold',     name:'ESMFold',             cat:'A', sub:'single_structure', journal:'Science',            year:2023, paper:'https://www.science.org/doi/10.1126/science.ade2574', code:'https://github.com/facebookresearch/esm' },
-  { id:'ESMFold2',    name:'ESMFold2',            cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.06.03.729735v1', code:'https://github.com/Biohub/esm#esmfold2' },
-  { id:'RoseTTAFold',  name:'RoseTTAFold',         cat:'A', sub:'single_structure', journal:'Science',            year:2021, paper:'https://www.science.org/doi/10.1126/science.abj8754', code:'https://github.com/RosettaCommons/RoseTTAFold' },
-  { id:'RF2',          name:'RoseTTAFold2',        cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2023.05.24.542179v1', code:'https://github.com/uw-ipd/RoseTTAFold2' },
-  { id:'RF2NA',        name:'RoseTTAFold2NA',      cat:'A', sub:'single_structure', journal:'Nature Methods',     year:2023, paper:'https://www.nature.com/articles/s41592-023-02086-5', code:'https://github.com/uw-ipd/RoseTTAFold2NA' },
-  { id:'RF3',          name:'RoseTTAFold3',        cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.08.14.670328v2', code:'https://github.com/RosettaCommons/foundry' },
-  { id:'OpenFold',     name:'OpenFold',            cat:'A', sub:'single_structure', journal:'Nature Methods',     year:2024, paper:'https://www.nature.com/articles/s41592-024-02272-z', code:'https://github.com/aqlaboratory/openfold' },
-  { id:'UniFold',      name:'Uni-Fold',            cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2022.08.04.502811v3', code:'https://github.com/dptech-corp/Uni-Fold' },
-  { id:'OmegaFold',    name:'OmegaFold',           cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2022.07.21.500999v1', code:'https://github.com/HeliXonProtein/OmegaFold' },
-  { id:'EquiFold',     name:'EquiFold',            cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2', code:'https://github.com/Genentech/equifold' },
-  { id:'RF-AA',        name:'RoseTTAFold All-Atom',cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2', code:'https://github.com/baker-laboratory/RoseTTAFold-All-Atom' },
-  { id:'Boltz',        name:'Boltz family',        cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2024.11.19.624167v4', code:'https://github.com/jwohlwend/boltz' },
-  { id:'Chai1',        name:'Chai-1',              cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2024, paper:'https://www.biorxiv.org/content/10.1101/2024.10.10.615955v2', code:'https://github.com/chaidiscovery/chai-lab' },
-  { id:'Chai2',        name:'Chai-2',              cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.07.05.663018v1', code:'N/A' },
-  { id:'HelixFold',    name:'HelixFold',           cat:'A', sub:'single_structure', journal:'arXiv',              year:2022, paper:'https://arxiv.org/abs/2207.05477', code:'https://github.com/PaddlePaddle/PaddleHelix' },
-  { id:'HelixFold-S',  name:'HelixFold-Single',    cat:'A', sub:'single_structure', journal:'arXiv',              year:2023, paper:'https://arxiv.org/abs/2207.13921', code:'https://github.com/PaddlePaddle/PaddleHelix' },
-  { id:'HelixFold-M',  name:'HelixFold-Multimer',  cat:'A', sub:'single_structure', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2404.10260', code:'N/A' },
-  { id:'HelixFold3',   name:'HelixFold3',          cat:'A', sub:'single_structure', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2408.16975', code:'https://github.com/PaddlePaddle/PaddleHelix' },
-  { id:'ProtenixMini', name:'Protenix-Mini',       cat:'A', sub:'single_structure', journal:'arXiv',              year:2025, paper:'https://arxiv.org/abs/2507.11839', code:'https://github.com/bytedance/Protenix' },
-  { id:'Protenix',     name:'Protenix',            cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.01.08.631967v1', code:'https://github.com/bytedance/Protenix' },
-  { id:'Protenix-v1',  name:'Protenix-v1',         cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.02.05.703733v1', code:'https://github.com/bytedance/Protenix' },
-  { id:'Protenix-v2',  name:'Protenix-v2',         cat:'A', sub:'single_structure', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.04.10.717613v1', code:'https://github.com/bytedance/Protenix' },
+  // ═══ A · Structure-based : Single structure prediction (sub=as) ═══
+  { id:'AF2',         name:'AlphaFold2',          sub:'as', journal:'Nature',             year:2021, paper:'https://www.nature.com/articles/s41586-021-03819-2', code:'https://github.com/google-deepmind/alphafold' },
+  { id:'AF3',         name:'AlphaFold3',          sub:'as', journal:'Nature',             year:2024, paper:'https://www.nature.com/articles/s41586-024-07487-w', code:'https://github.com/google-deepmind/alphafold3' },
+  { id:'AF-Multimer', name:'AlphaFold-Multimer',  sub:'as', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2021.10.04.463034v2', code:'https://github.com/jcheongs/alphafold-multimer' },
+  { id:'ColabFold',   name:'ColabFold',           sub:'as', journal:'Nature Methods',     year:2022, paper:'https://www.nature.com/articles/s41592-022-01488-1', code:'https://github.com/sokrypton/colabfold' },
+  { id:'ESMFold',     name:'ESMFold',             sub:'as', journal:'Science',            year:2023, paper:'https://www.science.org/doi/10.1126/science.ade2574', code:'https://github.com/facebookresearch/esm' },
+  { id:'ESMFold2',    name:'ESMFold2',            sub:'as', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.06.03.729735v1', code:'https://github.com/Biohub/esm#esmfold2' },
+  { id:'RoseTTAFold',  name:'RoseTTAFold',         sub:'as', journal:'Science',            year:2021, paper:'https://www.science.org/doi/10.1126/science.abj8754', code:'https://github.com/RosettaCommons/RoseTTAFold' },
+  { id:'RF2',          name:'RoseTTAFold2',        sub:'as', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2023.05.24.542179v1', code:'https://github.com/uw-ipd/RoseTTAFold2' },
+  { id:'RF2NA',        name:'RoseTTAFold2NA',      sub:'as', journal:'Nature Methods',     year:2023, paper:'https://www.nature.com/articles/s41592-023-02086-5', code:'https://github.com/uw-ipd/RoseTTAFold2NA' },
+  { id:'RF3',          name:'RoseTTAFold3',        sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.08.14.670328v2', code:'https://github.com/RosettaCommons/foundry' },
+  { id:'OpenFold',     name:'OpenFold',            sub:'as', journal:'Nature Methods',     year:2024, paper:'https://www.nature.com/articles/s41592-024-02272-z', code:'https://github.com/aqlaboratory/openfold' },
+  { id:'UniFold',      name:'Uni-Fold',            sub:'as', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2022.08.04.502811v3', code:'https://github.com/dptech-corp/Uni-Fold' },
+  { id:'OmegaFold',    name:'OmegaFold',           sub:'as', journal:'bioRxiv',            year:2022, paper:'https://www.biorxiv.org/content/10.1101/2022.07.21.500999v1', code:'https://github.com/HeliXonProtein/OmegaFold' },
+  { id:'EquiFold',     name:'EquiFold',            sub:'as', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2', code:'https://github.com/Genentech/equifold' },
+  { id:'RF-AA',        name:'RoseTTAFold All-Atom',sub:'as', journal:'bioRxiv',            year:2023, paper:'https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2', code:'https://github.com/baker-laboratory/RoseTTAFold-All-Atom' },
+  { id:'Boltz',        name:'Boltz family',        sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2024.11.19.624167v4', code:'https://github.com/jwohlwend/boltz' },
+  { id:'Chai1',        name:'Chai-1',              sub:'as', journal:'bioRxiv',            year:2024, paper:'https://www.biorxiv.org/content/10.1101/2024.10.10.615955v2', code:'https://github.com/chaidiscovery/chai-lab' },
+  { id:'Chai2',        name:'Chai-2',              sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.07.05.663018v1', code:'N/A' },
+  { id:'HelixFold',    name:'HelixFold',           sub:'as', journal:'arXiv',              year:2022, paper:'https://arxiv.org/abs/2207.05477', code:'https://github.com/PaddlePaddle/PaddleHelix' },
+  { id:'HelixFold-S',  name:'HelixFold-Single',    sub:'as', journal:'arXiv',              year:2023, paper:'https://arxiv.org/abs/2207.13921', code:'https://github.com/PaddlePaddle/PaddleHelix' },
+  { id:'HelixFold-M',  name:'HelixFold-Multimer',  sub:'as', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2404.10260', code:'N/A' },
+  { id:'HelixFold3',   name:'HelixFold3',          sub:'as', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2408.16975', code:'https://github.com/PaddlePaddle/PaddleHelix' },
+  { id:'ProtenixMini', name:'Protenix-Mini',       sub:'as', journal:'arXiv',              year:2025, paper:'https://arxiv.org/abs/2507.11839', code:'https://github.com/bytedance/Protenix' },
+  { id:'Protenix',     name:'Protenix',            sub:'as', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.01.08.631967v1', code:'https://github.com/bytedance/Protenix' },
+  { id:'Protenix-v1',  name:'Protenix-v1',         sub:'as', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.02.05.703733v1', code:'https://github.com/bytedance/Protenix' },
+  { id:'Protenix-v2',  name:'Protenix-v2',         sub:'as', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.04.10.717613v1', code:'https://github.com/bytedance/Protenix' },
 
-  // ═══ A · Structure-based : Conformational ensemble generation ═══
-  { id:'AlphaFlow',    name:'AlphaFlow/ESMFlow',    cat:'A', sub:'idr_ensemble',    journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2402.04845', code:'https://github.com/bjing2016/alphaflow' },
-  { id:'BioEmu',       name:'BioEmu',              cat:'A', sub:'idr_ensemble',    journal:'Science',            year:2025, paper:'https://www.science.org/doi/10.1126/science.adv9817', code:'https://github.com/microsoft/bioemu' },
-  { id:'PhantoIDP',    name:'Phanto-IDP',          cat:'A', sub:'idr_ensemble',    journal:'Briefings in Bioinformatics', year:2024, paper:'https://academic.oup.com/bib/article/25/1/bbad429/7453435', code:'https://github.com/Junjie-Zhu/Phanto-IDP' },
-  { id:'IDPFold',      name:'IDPFold',             cat:'A', sub:'idr_ensemble',    journal:'Advanced Science',   year:2025, paper:'https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202511636', code:'https://github.com/Junjie-Zhu/IDPFold' },
-  { id:'IDPFold2',     name:'IDPFold2',            cat:'A', sub:'idr_ensemble',    journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.01.14.699584v1', code:'https://github.com/Junjie-Zhu/IDPFold2' },
-  { id:'STARLING',     name:'STARLING',            cat:'A', sub:'idr_ensemble',    journal:'Nature',             year:2026, paper:'https://www.nature.com/articles/s41586-026-10141-2', code:'https://github.com/idptools/starling' },
-  { id:'IDP-LZerD',    name:'IDP-LZerD',           cat:'A', sub:'idr_ensemble',    journal:'PLOS Computational Biology', year:2017, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005485', code:'https://github.com/kiharalab/idp_lzerd' },
-  { id:'IDPForge',     name:'IDPForge',            cat:'A', sub:'idr_ensemble',    journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.03.25.714313v2', code:'https://github.com/THGLab/IDPForge' },
-  { id:'AlphaFlex',    name:'AlphaFlex (AFX-IDPForge)', cat:'A', sub:'idr_ensemble', journal:'bioRxiv',          year:2026, paper:'https://www.biorxiv.org/content/10.1101/2025.11.24.690279v2', code:'https://github.com/THGLab/IDPForge' },
-  { id:'IdpSAM',       name:'IdpSAM',              cat:'A', sub:'idr_ensemble',    journal:'PLOS Computational Biology', year:2024, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1012144', code:'https://github.com/giacomo-janson/idpsam' },
-  { id:'IDP-o',        name:'IDP-o',               cat:'A', sub:'idr_ensemble',    journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3', code:'https://github.com/PeptoneLtd/IDP-o' },
-  { id:'PepTron',      name:'PepTron',             cat:'A', sub:'idr_ensemble',    journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3', code:'https://github.com/PeptoneLtd/PepTron' },
+  // ═══ A · Structure-based : Conformational ensemble generation (sub=ae) ═══
+  { id:'AlphaFlow',    name:'AlphaFlow/ESMFlow',    sub:'ae', journal:'arXiv',              year:2024, paper:'https://arxiv.org/abs/2402.04845', code:'https://github.com/bjing2016/alphaflow' },
+  { id:'BioEmu',       name:'BioEmu',              sub:'ae', journal:'Science',            year:2025, paper:'https://www.science.org/doi/10.1126/science.adv9817', code:'https://github.com/microsoft/bioemu' },
+  { id:'PhantoIDP',    name:'Phanto-IDP',          sub:'ae', journal:'Briefings in Bioinformatics', year:2024, paper:'https://academic.oup.com/bib/article/25/1/bbad429/7453435', code:'https://github.com/Junjie-Zhu/Phanto-IDP' },
+  { id:'IDPFold',      name:'IDPFold',             sub:'ae', journal:'Advanced Science',   year:2025, paper:'https://advanced.onlinelibrary.wiley.com/doi/10.1002/advs.202511636', code:'https://github.com/Junjie-Zhu/IDPFold' },
+  { id:'IDPFold2',     name:'IDPFold2',            sub:'ae', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.01.14.699584v1', code:'https://github.com/Junjie-Zhu/IDPFold2' },
+  { id:'STARLING',     name:'STARLING',            sub:'ae', journal:'Nature',             year:2026, paper:'https://www.nature.com/articles/s41586-026-10141-2', code:'https://github.com/idptools/starling' },
+  { id:'IDP-LZerD',    name:'IDP-LZerD',           sub:'ae', journal:'PLOS Computational Biology', year:2017, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005485', code:'https://github.com/kiharalab/idp_lzerd' },
+  { id:'IDPForge',     name:'IDPForge',            sub:'ae', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.64898/2026.03.25.714313v2', code:'https://github.com/THGLab/IDPForge' },
+  { id:'AlphaFlex',    name:'AlphaFlex (AFX-IDPForge)', sub:'ae', journal:'bioRxiv',       year:2026, paper:'https://www.biorxiv.org/content/10.1101/2025.11.24.690279v2', code:'https://github.com/THGLab/IDPForge' },
+  { id:'IdpSAM',       name:'IdpSAM',              sub:'ae', journal:'PLOS Computational Biology', year:2024, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1012144', code:'https://github.com/giacomo-janson/idpsam' },
+  { id:'IDP-o',        name:'IDP-o',               sub:'ae', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3', code:'https://github.com/PeptoneLtd/IDP-o' },
+  { id:'PepTron',      name:'PepTron',             sub:'ae', journal:'bioRxiv',            year:2025, paper:'https://www.biorxiv.org/content/10.1101/2025.10.18.680935v3', code:'https://github.com/PeptoneLtd/PepTron' },
 
   // ═══ B · Sequence-based ═══
-  { id:'FINCHES',      name:'FINCHES',             cat:'B', sub:'sequence',        journal:'Science',            year:2025, paper:'https://www.science.org/doi/10.1126/science.adq8381', code:'https://github.com/idptools/finches' },
-  { id:'Disobind',     name:'Disobind',            cat:'B', sub:'sequence',        journal:'Cell Systems',       year:2026, paper:'https://www.cell.com/cell-systems/abstract/S2405-4712(25)00319-9', code:'https://github.com/isblab/disobind' },
-  { id:'DeepInteract', name:'DeepInteract',        cat:'B', sub:'sequence',        journal:'arXiv',              year:2022, paper:'https://arxiv.org/abs/2110.02423', code:'https://github.com/BioinfoMachineLearning/DeepInteract' },
-  { id:'GLINTER',      name:'GLINTER',             cat:'B', sub:'sequence',        journal:'Bioinformatics',     year:2021, paper:'https://academic.oup.com/bioinformatics/article/38/4/947/6424887', code:'https://github.com/zw2x/glinter' },
-  { id:'ComplexContact',name:'ComplexContact',     cat:'B', sub:'sequence',        journal:'Nucleic Acids Research', year:2018, paper:'https://academic.oup.com/nar/article/46/W1/W432/5001161', code:'N/A' },
-  { id:'DRN1D2D',      name:'DRN-1D2D_Inter',      cat:'B', sub:'sequence',        journal:'Briefings in Bioinformatics', year:2023, paper:'https://academic.oup.com/bib/article/24/2/bbad039/7033302', code:'https://github.com/ChengfeiYan/DRN-1D2D_Inter' },
-  { id:'PLMGraph',     name:'PLMGraph-Inter',      cat:'B', sub:'sequence',        journal:'eLife',              year:2024, paper:'https://elifesciences.org/reviewed-preprints/92184', code:'https://github.com/ChengfeiYan/PLMGraph-Inter' },
-  { id:'DeepHomo',     name:'DeepHomo',            cat:'B', sub:'sequence',        journal:'Briefings in Bioinformatics', year:2021, paper:'https://academic.oup.com/bib/article/22/5/bbab038/6159364', code:'N/A' },
-  { id:'DeepHomo2',    name:'DeepHomo2/DeepHomoSeq',cat:'B', sub:'sequence',       journal:'Briefings in Bioinformatics', year:2022, paper:'https://academic.oup.com/bib/article/24/1/bbac499/6849483', code:'N/A' },
-  { id:'CDPred',       name:'CDPred',              cat:'B', sub:'sequence',        journal:'Nature Communications', year:2022, paper:'https://www.nature.com/articles/s41467-022-34600-2', code:'https://github.com/BioinfoMachineLearning/CDPred' },
-  { id:'RaptorX',      name:'RaptorX-Contact',     cat:'B', sub:'sequence',        journal:'PROTEINS / PNAS',    year:2017, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005324', code:'https://github.com/j3xugit/RaptorX-Contact' },
-  { id:'ESMDynamic',   name:'ESMDynamic',          cat:'B', sub:'sequence',        journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.1101/2025.08.20.671365v2', code:'https://github.com/ShuklaGroup/esmdynamic' },
-  { id:'bAIes',        name:'bAIes',               cat:'B', sub:'sequence',        journal:'Nature Communications', year:2026, paper:'https://www.nature.com/articles/s41467-026-69172-y', code:'https://github.com/COSBlab/bAIes-IDP' },
+  { id:'FINCHES',      name:'FINCHES',             sub:'B', journal:'Science',            year:2025, paper:'https://www.science.org/doi/10.1126/science.adq8381', code:'https://github.com/idptools/finches' },
+  { id:'Disobind',     name:'Disobind',            sub:'B', journal:'Cell Systems',       year:2026, paper:'https://www.cell.com/cell-systems/abstract/S2405-4712(25)00319-9', code:'https://github.com/isblab/disobind' },
+  { id:'DeepInteract', name:'DeepInteract',        sub:'B', journal:'arXiv',              year:2022, paper:'https://arxiv.org/abs/2110.02423', code:'https://github.com/BioinfoMachineLearning/DeepInteract' },
+  { id:'GLINTER',      name:'GLINTER',             sub:'B', journal:'Bioinformatics',     year:2021, paper:'https://academic.oup.com/bioinformatics/article/38/4/947/6424887', code:'https://github.com/zw2x/glinter' },
+  { id:'ComplexContact',name:'ComplexContact',     sub:'B', journal:'Nucleic Acids Research', year:2018, paper:'https://academic.oup.com/nar/article/46/W1/W432/5001161', code:'N/A' },
+  { id:'DRN1D2D',      name:'DRN-1D2D_Inter',      sub:'B', journal:'Briefings in Bioinformatics', year:2023, paper:'https://academic.oup.com/bib/article/24/2/bbad039/7033302', code:'https://github.com/ChengfeiYan/DRN-1D2D_Inter' },
+  { id:'PLMGraph',     name:'PLMGraph-Inter',      sub:'B', journal:'eLife',              year:2024, paper:'https://elifesciences.org/reviewed-preprints/92184', code:'https://github.com/ChengfeiYan/PLMGraph-Inter' },
+  { id:'DeepHomo',     name:'DeepHomo',            sub:'B', journal:'Briefings in Bioinformatics', year:2021, paper:'https://academic.oup.com/bib/article/22/5/bbab038/6159364', code:'N/A' },
+  { id:'DeepHomo2',    name:'DeepHomo2/DeepHomoSeq',sub:'B', journal:'Briefings in Bioinformatics', year:2022, paper:'https://academic.oup.com/bib/article/24/1/bbac499/6849483', code:'N/A' },
+  { id:'CDPred',       name:'CDPred',              sub:'B', journal:'Nature Communications', year:2022, paper:'https://www.nature.com/articles/s41467-022-34600-2', code:'https://github.com/BioinfoMachineLearning/CDPred' },
+  { id:'RaptorX',      name:'RaptorX-Contact',     sub:'B', journal:'PROTEINS / PNAS',    year:2017, paper:'https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1005324', code:'https://github.com/j3xugit/RaptorX-Contact' },
+  { id:'ESMDynamic',   name:'ESMDynamic',          sub:'B', journal:'bioRxiv',            year:2026, paper:'https://www.biorxiv.org/content/10.1101/2025.08.20.671365v2', code:'https://github.com/ShuklaGroup/esmdynamic' },
+  { id:'bAIes',        name:'bAIes',               sub:'B', journal:'Nature Communications', year:2026, paper:'https://www.nature.com/articles/s41467-026-69172-y', code:'https://github.com/COSBlab/bAIes-IDP' },
 
   // ═══ C · IDR-specific ═══
   // (currently empty placeholder in README)
@@ -393,14 +422,29 @@ function xPos(year) {
   return ((year - yearMin) / yearSpan) * ((yearSpan) * PX_PER_YEAR) + 60;
 }
 
+// ── Sub display names ──
+const subLabel = {
+  'as': 'A · Single structure',
+  'ae': 'A · Conformational ensemble',
+  'B':  'B · Sequence-based',
+  'C':  'C · IDR-specific'
+};
+const subColor = {
+  'as': 'var(--cat-as)',
+  'ae': 'var(--cat-ae)',
+  'B':  'var(--cat-b)',
+  'C':  'var(--cat-c)'
+};
+
 // ── Render items ──
 let above = true;
-const catCounts = { A:0, B:0, C:0 };
+const catCounts = { as:0, ae:0, B:0, C:0 };
 
 tools.forEach((t, i) => {
   const el = document.createElement('div');
-  el.className = `tl-item cat-${t.cat.toLowerCase()} ${above ? 'above' : 'below'}`;
-  el.dataset.cat = t.cat;
+  const cls = (t.sub === 'as' || t.sub === 'ae') ? 'cat-' + t.sub : 'cat-' + t.sub.toLowerCase();
+  el.className = `tl-item ${cls} ${above ? 'above' : 'below'}`;
+  el.dataset.sub = t.sub;
   el.style.left = xPos(t.year) + 'px';
   // stagger items in the same year slightly
   const sameYear = tools.filter(x => x.year === t.year);
@@ -424,29 +468,28 @@ tools.forEach((t, i) => {
 
   document.getElementById('tlItems').appendChild(el);
   above = !above;
-  catCounts[t.cat] = (catCounts[t.cat] || 0) + 1;
+  catCounts[t.sub] = (catCounts[t.sub] || 0) + 1;
 });
 
 // ── Counts ──
 document.getElementById('countAll').textContent = tools.length;
-document.getElementById('countA').textContent = tools.filter(t => t.cat === 'A').length;
-document.getElementById('countB').textContent = tools.filter(t => t.cat === 'B').length;
-document.getElementById('countC').textContent = tools.filter(t => t.cat === 'C').length;
+document.getElementById('countAs').textContent = tools.filter(t => t.sub === 'as').length;
+document.getElementById('countAe').textContent = tools.filter(t => t.sub === 'ae').length;
+document.getElementById('countB').textContent = tools.filter(t => t.sub === 'B').length;
+document.getElementById('countC').textContent = tools.filter(t => t.sub === 'C').length;
 
 // ── Filtering ──
 const filterBtns = document.querySelectorAll('[data-filter]');
-let activeFilter = 'all';
 filterBtns.forEach(btn => {
   btn.addEventListener('click', () => {
     const f = btn.dataset.filter;
-    activeFilter = f;
     filterBtns.forEach(b => b.className = 'filter-btn');
     if (f === 'all') btn.classList.add('active-all');
     else btn.classList.add('active-' + f.toLowerCase());
 
     let visibleCount = 0;
     document.querySelectorAll('.tl-item').forEach(el => {
-      const match = f === 'all' || el.dataset.cat === f;
+      const match = f === 'all' || el.dataset.sub === f;
       el.classList.toggle('hidden', !match);
       if (match) visibleCount++;
     });
@@ -473,10 +516,14 @@ wrapper.addEventListener('mousemove', e => {
 // ── Tooltip ──
 const tip = document.getElementById('tooltip');
 function showTooltip(t, el, e) {
+  const sl = subLabel[t.sub] || t.sub;
+  const sc = subColor[t.sub] || '#999';
   tip.innerHTML = `
     <div class="tt-name">${t.name}</div>
     <div class="tt-field"><strong>Journal:</strong> ${t.journal} (${t.year})</div>
-    <div class="tt-field"><strong>Category:</strong> ${t.cat} · ${t.sub.replace(/_/g, ' ')}</div>
+    <div class="tt-field">
+      <span class="tt-sub" style="background:${sc}">${sl}</span>
+    </div>
     ${t.paper ? `<div class="tt-field"><strong>Paper:</strong> <a href="${t.paper}" target="_blank">${t.paper.replace(/^https?:\/\//,'').slice(0,45)}…</a></div>` : ''}
     ${t.code && t.code !== 'N/A' ? `<div class="tt-field"><strong>Code:</strong> <a href="${t.code}" target="_blank">repo</a></div>` : ''}
   `;
