@@ -2,7 +2,8 @@
 
 [![Awesome](https://awesome.re/badge.svg)](https://awesome.re)
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
-[![PR's Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)](http://makeapullrequest.com) 
+[![PR's Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat)](http://makeapullrequest.com)
+[![Timeline](https://img.shields.io/badge/📊-Timeline-blueviolet?style=flat)](timeline/)
 
 
 
@@ -36,6 +37,7 @@ A curated collection of computational tools for `intermolecular interaction pred
     - [Conformational ensemble generation](#2--idr-ensemble-generation)
   - [B. Sequence-based](#b-sequence-based-contact-map-prediction)
   - [C. IDR-specific](#c-idr--fuzzy-binding-specific)
+- [Timeline](timeline/)
 - [Datasets](#datasets)
 - [Bench](#bench)
 - [Contributing](#contributing)
@@ -877,7 +879,7 @@ as for `docs/<Tool name>/` file folder for each tool:
 
 Each category contains `<!-- PLACEHOLDER -->`-marked tool placeholders, used to flag "known but not yet filled" entries and "empty niches to be added".
 
-- [ ] Add TIMELINE graph for each category so we can see the trend
+- [ ] Add TIMELINE graph for each category so we can see the trend ✔
 - [ ] Update the wiki in docs/ (NOW include deepwiki/zread/google code wiki/readmex), and manually refresh it in sync with the original repository commit date, and remember to check and correct the code fromatting in the code chunk of the wiki page
 - [ ] extract the model architecture for those tools tagged `Approach: DL`, e.g., attention, GNN, flow-matching 
 - [ ] extract DATASET part in these models README
