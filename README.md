@@ -62,6 +62,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Code:** https://github.com/google-deepmind/alphafold
 - **Docs:** [Read more →](docs/AlphaFold2/) *to be written*
 - **Approach:** DL
+- **Beyond static:** distogram (🌟)
 </details>
 
 --- 
@@ -74,6 +75,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Code:** https://github.com/google-deepmind/alphafold3
 - **Web server:** https://alphafoldserver.com/
 - **Approach:** DL
+- **Beyond static:** distogram (🌟)
 </details>
 
 --- 
@@ -695,6 +697,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **Docs:** [Read more →](docs/ESMDynamic/) *to be written*
 - **Code:** https://github.com/ShuklaGroup/esmdynamic
 - **Approach:** DL
+- **Beyond static:** dynamic maps, occupancy, and kinetics (🌟)
 </details>
 
 ---
