@@ -221,7 +221,7 @@ A curated collection of computational tools for `intermolecular interaction pred
 <details>
 <summary>RoseTTAFold All-Atom</summary>
 
-- **Paper:** [EquiFold: Protein Structure Prediction with a Novel Coarse-Grained Structure Representation](https://www.biorxiv.org/content/10.1101/2022.10.07.511322v2) (bioRxiv, 2023)
+- **Paper:** [Generalized biomolecular modeling and design with RoseTTAFold All-Atom](https://www.science.org/doi/10.1126/science.adl2528) (Science, 2024)
 - **Docs:** [Read more →](docs/RoseTTAFold-All-Atom/) *to be written*
 - **Code:** https://github.com/baker-laboratory/RoseTTAFold-All-Atom
 - **Approach:** DL
