@@ -408,14 +408,14 @@ document.querySelectorAll('[data-filter]').forEach(btn => {
 let isDown = false, startX, scrollLeft;
 const wrapper = document.getElementById('tlWrapper');
 wrapper.addEventListener('mousedown', e => {
-  isDown = true; startX = e.pageX - wrapper.offsetLeft; scrollLeft = wrapper.scrollLeft;
+  isDown = true;
 });
 wrapper.addEventListener('mouseleave', () => { isDown = false; });
 wrapper.addEventListener('mouseup',   () => { isDown = false; });
 wrapper.addEventListener('mousemove', e => {
   if (!isDown) return;
   e.preventDefault();
-  wrapper.scrollLeft = scrollLeft - (e.pageX - wrapper.offsetLeft - startX);
+  wrapper.scrollLeft -= e.movementX;
 });
 
 // ── Tooltip ──
