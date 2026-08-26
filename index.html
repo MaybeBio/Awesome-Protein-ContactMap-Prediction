@@ -405,11 +405,9 @@ document.querySelectorAll('[data-filter]').forEach(btn => {
 });
 
 // ── Drag to scroll ──
-let isDown = false, startX, scrollLeft;
+let isDown = false;
 const wrapper = document.getElementById('tlWrapper');
-wrapper.addEventListener('mousedown', e => {
-  isDown = true;
-});
+wrapper.addEventListener('mousedown', () => { isDown = true; });
 wrapper.addEventListener('mouseleave', () => { isDown = false; });
 wrapper.addEventListener('mouseup',   () => { isDown = false; });
 wrapper.addEventListener('mousemove', e => {
