@@ -798,6 +798,20 @@ A curated collection of computational tools for `intermolecular interaction pred
 
 </details>
 
+--- 
+
+<details>
+<summary>SidechainNet</summary>
+
+- Description: SidechainNet is a protein structure prediction dataset that directly extends ProteinNet by Mohammed AlQuraishi.Specifically, SidechainNet adds measurements for protein angles and coordinates that describe the complete, all-atom protein structure (backbone and sidechain, excluding hydrogens) instead of the protein backbone alone.
+  
+  Details seen https://github.com/jonathanking/sidechainnet#summary-of-sidechainnet-data. 
+
+- Paper: [SidechainNet: An all-atom protein structure dataset for machine learning](https://onlinelibrary.wiley.com/doi/10.1002/prot.26169) (PROTEINS: Structure, Function, and Bioinformatics, 2021)
+- Url: https://github.com/jonathanking/sidechainnet
+- API: https://github.com/jonathanking/sidechainnet#installation
+
+</details>
 
 ---
 
