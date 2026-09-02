@@ -526,6 +526,19 @@ A curated collection of computational tools for `intermolecular interaction pred
 - **For IDR**
 </details>
 
+--- 
+
+<details>
+<summary>idpGAN</summary>
+
+- **Paper:** [Direct generation of protein conformational ensembles via machine learning](https://www.nature.com/articles/s41467-023-36443-x) (Nature Communications, 2023)
+- **Docs:** [Read more →](docs/idpGAN/) *to be written*
+- **Code:** https://github.com/feiglab/idpgan
+- **Approach:** DL
+- **For IDR**
+</details>
+
+
 ---
 
 <!-- More idr ensemble placeholders can be added here -->
