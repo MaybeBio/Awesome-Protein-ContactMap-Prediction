@@ -1,0 +1,38 @@
+# feiglab/idpgan
+
+Source: https://zread.ai/feiglab/idpgan
+
+## 入门
+
+- [入门/概述](1-overview.md)
+- [入门/快速开始](2-quick-start.md)
+- [入门/示例 Notebook 实战](3-example-notebook-walkthrough.md)
+
+## 深入探究
+
+- [深入探究/架构概述](4-architecture-overview.md)
+- [深入探究/生成器推理流水线](17-generator-inference-pipeline.md)
+### 神经网络模型
+
+- [深入探究/神经网络模型/Transformer 生成网络](5-transformer-generator-network.md)
+- [深入探究/神经网络模型/基于 2D 嵌入的自定义注意力](6-custom-attention-with-2d-embeddings.md)
+- [深入探究/神经网络模型/镜像图像选择器网络](7-mirror-image-selector-network.md)
+
+### 数据与坐标
+
+- [深入探究/数据与坐标/FASTA 解析与 PDB 输出](8-fasta-parsing-and-pdb-output.md)
+- [深入探究/数据与坐标/二面角计算](9-dihedral-angle-computation.md)
+- [深入探究/数据与坐标/氨基酸特征编码](10-amino-acid-feature-encoding.md)
+
+### 评估与可视化
+
+- [深入探究/评估与可视化/距离与接触图度量](11-distance-and-contact-map-metrics.md)
+- [深入探究/评估与可视化/KL 散度评分](12-kl-divergence-scoring.md)
+- [深入探究/评估与可视化/集合可视化工具](13-ensemble-visualization-utilities.md)
+
+### 预训练模型与数据
+
+- [深入探究/预训练模型与数据/CG 模型生成器权重](14-cg-model-generator-weights.md)
+- [深入探究/预训练模型与数据/ABSINTH 模型变体](15-absinth-model-variant.md)
+- [深入探究/预训练模型与数据/训练与测试数据集](16-training-and-test-datasets.md)
+

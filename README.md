@@ -545,8 +545,6 @@ A curated collection of computational tools for `intermolecular interaction pred
 <!-- PLACEHOLDER: diffusion-based IDR conformation generator -->
 <!-- PLACEHOLDER: enhanced-sampling MD post-processing ensemble tool -->
 
----
-
 
 ### B. Sequence-based contact-map like prediction
 
